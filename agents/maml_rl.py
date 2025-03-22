@@ -69,19 +69,66 @@ class MAMLAgent:
             loss.append(-log_prob * G)
         return torch.stack(loss).sum()
 
-    def inner_update(self, env):
-        trajectory = self.collect_trajectory(env)
-        loss = self.compute_loss(trajectory, self.policy)
+    def inner_update(self, env, log=False):
+        """
+        Performs an inner loop adaptation step for MAML.
+        Args:
+            env (gym.Env): Environment to collect data from.
+            log (bool): Whether to print debug logs.
+        Returns:
+            adapted_policy (nn.Module): The policy network after one inner update.
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+        # Ensure policy is on the correct device
+        policy = self.policy.to(device)
 
-        grads = torch.autograd.grad(loss, self.policy.parameters(), create_graph=True)
-        adapted_policy = PolicyNetwork(self.state_size, self.action_size)
+        # Collect trajectory data from the environment
+        trajectories = self.collect_trajectory(env, policy)
 
-        # Apply gradient step manually
-        for (name, param), grad in zip(self.policy.named_parameters(), grads):
+        # Compute the inner loop loss on the collected trajectory
+        loss = self.compute_loss(trajectories)
+
+        # Compute gradients w.r.t. policy parameters
+        grads = torch.autograd.grad(
+            outputs=loss,
+            inputs=policy.parameters(),
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True  # Safe for some layers (e.g., Dropout)
+        )
+
+        # Clone the current policy for adaptation
+        adapted_policy = self.clone_policy(policy)
+
+        # Prepare the adapted parameters (manual SGD step)
+        adapted_params = {}
+
+        for (name, param), grad in zip(policy.named_parameters(), grads):
+            if grad is None:
+                if log:
+                    print(f"[WARNING] No grad for {name}, skipping...")
+                adapted_params[name] = param.detach().clone()
+                continue
+
+            # Gradient descent step: theta' = theta - alpha * grad
             adapted_param = param - self.inner_lr * grad
-            getattr(adapted_policy, name.replace('.', '_')).data = adapted_param.data.clone()
+            adapted_params[name] = adapted_param.detach().clone()  # Detach for safety
 
-        return adapted_policy
+            if log:
+                print(f"[Inner Update] Param: {name}, Grad Norm: {grad.norm():.4f}")
+
+        # Load the adapted parameters into the cloned policy
+        adapted_state_dict = adapted_policy.state_dict()
+        for name in adapted_state_dict.keys():
+            adapted_state_dict[name] = adapted_params[name]
+
+        adapted_policy.load_state_dict(adapted_state_dict)
+
+        if log:
+            print("[Inner Update] Completed parameter adaptation.")
+
+        return adapted_policy.to(device)
 
     def meta_update(self, tasks, inner_steps=1):
         meta_loss = 0.0
