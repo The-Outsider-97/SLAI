@@ -1,7 +1,9 @@
+import torch
+import logging
+import torch.optim as optim
 from tasks.task_sampler import TaskSampler
 from agents.multitask_rl import MultiTaskPolicy
-import torch
-import torch.optim as optim
+
 
 def main():
     sampler = TaskSampler(['CartPole-v1', 'MountainCar-v0', 'Acrobot-v1'])
