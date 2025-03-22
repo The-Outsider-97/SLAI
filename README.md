@@ -1,11 +1,23 @@
-# Self-Improving AI
+# SLAI - Self-Learning Autonomous Intelligence
 
-An open-source experiment in building an AI that evolves its own models.
+An open-source AGI prototype that evolves, learns, and rewrites itself.
+SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Self-Improvement** into an autonomous research agent.
 
-## What it does
-- Evolves simple neural networks.
-- Evaluates performance.
-- Iterates improvements over generations.
+---
+
+## 🚀 What It Does
+✅ Evolves deep neural networks (AutoML / NAS)  
+✅ Reinforcement learning agents (DQN, PPO)  
+✅ Meta-learning agents (MAML, Reptile) for few-shot task adaptation  
+✅ Recursive self-improvement: code generation, evaluation, and rewriting  
+✅ Multi-task RL framework  
+✅ Sandbox execution for safety  
+
+---
+
+## 📦 Project Structure
+
+
 
 ## How to run
 1. Clone this repo.
