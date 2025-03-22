@@ -60,10 +60,25 @@ def train_multitask_policy(config=None):
     # ===============================
     # Initialize MultiTask Policy & Optimizer
     # ===============================
-    multitask_policy = MultiTaskPolicy(state_size, action_size, config['task_embedding_size'])
+    multitask_policy = MultiTaskPolicy(
+        state_size=state_size,
+        action_size=action_size,
+        task_embedding_size=config['task_embedding_size'],
+        num_tasks=config['num_tasks'],
+        hidden_size=config['hidden_size']
+    )
+
     optimizer = optim.Adam(multitask_policy.parameters(), lr=config['lr'])
 
-    logger.info("Initialized MultiTaskPolicy and Optimizer.")
+    logger.info(
+        f"Initialized MultiTaskPolicy with:\n"
+        f"  - State Size: {state_size}\n"
+        f"  - Action Size: {action_size}\n"
+        f"  - Task Embedding Size: {config['task_embedding_size']}\n"
+        f"  - Num Tasks: {config['num_tasks']}\n"
+        f"  - Hidden Size: {config['hidden_size']}\n"
+        f"Initialized Optimizer with Learning Rate: {config['lr']}"
+    )
 
     # ===============================
     # Training Loop
@@ -72,7 +87,13 @@ def train_multitask_policy(config=None):
         epoch_rewards = []
 
         for task_id, (env, params) in enumerate(envs):
-            state, _ = env.reset()
+            result = env.reset()
+
+            if isinstance(result, tuple):
+                state, _ = result
+            else:
+                state = result
+
             total_reward = 0
             log_probs = []
             rewards = []
