@@ -20,6 +20,7 @@ class PolicyNetwork(nn.Module):
 
 class MAMLAgent:
     def __init__(self, state_size, action_size, hidden_size=64, meta_lr=0.001, inner_lr=0.01, gamma=0.99):
+
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
@@ -27,6 +28,13 @@ class MAMLAgent:
         self.policy = PolicyNetwork(state_size, action_size, hidden_size)
         self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=meta_lr)
         self.inner_lr = inner_lr
+
+        pass
+
+    def clone_policy(self, policy):
+        import copy
+        cloned_policy = copy.deepcopy(policy)
+        return cloned_policy
 
     def get_action(self, state, policy=None):
         if policy is None:
@@ -87,7 +95,7 @@ class MAMLAgent:
         trajectories = self.collect_trajectory(env, policy)
 
         # Compute the inner loop loss on the collected trajectory
-        loss = self.compute_loss(trajectories)
+        loss = self.compute_loss(trajectories, policy)
 
         # Compute gradients w.r.t. policy parameters
         grads = torch.autograd.grad(
