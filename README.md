@@ -9,14 +9,28 @@ An open-source experiment in building an AI that evolves its own models.
 
 ## How to run
 1. Clone this repo.
-   bash
-   - git clone https://github.com/The-Outsider-97/SLAI.git
-   - cd SLAI
+   ```console
+   git clone https://github.com/The-Outsider-97/SLAI.git
+   cd SLAI
+   ```
+2. Set Up a Virtual Environment (Recommended):
+   ```console
+   python -m venv venv
+   source venv/bin/activate        # On Windows: venv\Scripts\activate
+   ```
 3. Install requirements:
-   - pip install torch
+   ```console
+   pip install torch
+   pip install -r requirements.txt
+   ```
 4. Run the main loop:
-   - python main.py
-
+   ```console
+   python main.py
+   ```
+5. Run the Tests (Optional but Recommended):
+   ```console
+   pytest tests/
+   ```
 
 ## Roadmap
 - [x] Basic evolutionary agent
