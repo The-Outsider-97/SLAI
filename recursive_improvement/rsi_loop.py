@@ -60,8 +60,23 @@ def recursive_improvement_loop(task_description: str, iterations: int = 5):
         # Step 6: If all tests pass, save, deploy, or evolve!
         logger.info(f"Iteration {iteration} successful. Code is ready for deployment or evolution.")
         
-        # You can commit to Git, hot-swap modules, or evolve agents here
-        _deploy_code(code)
+        from recursive_improvement.deployment.git.git_handler import commit_and_push, tag_release
+
+        def _deploy_code(code: str):
+            """
+            Saves and deploys the successful code via Git.
+            """
+            logger.info("Deploying code to Git...")
+
+            # Example path in repo where the improved module lives
+            file_path = "agents/evolved_agent.py"  # Or wherever you want to save it
+
+            commit_message = "RSI Auto-Generated Agent Improvement"
+            commit_and_push(code_string=code, file_path=file_path, commit_message=commit_message)
+
+            # Optional: Create a tag for versioning
+            tag_release("Stable RSI-generated agent after evaluation.")
+
         
         logger.info("Deployment complete. Loop terminated successfully.")
         break  # Exit after a successful improvement cycle
