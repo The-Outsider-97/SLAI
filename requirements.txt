@@ -1,1 +1,14 @@
+torch>=2.0.0
+numpy>=1.23.0
+pyyaml>=6.0
+matplotlib>=3.7.0
 
+# For evolutionary algorithms (optional now, but useful soon)
+deap>=1.3.3
+
+# For hyperparameter optimization (future scaling)
+optuna>=3.1.0
+ray[tune]>=2.2.0
+
+# For testing
+pytest>=7.3.0
