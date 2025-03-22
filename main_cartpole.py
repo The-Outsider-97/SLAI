@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+import logging
 from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 import gymnasium as gym
