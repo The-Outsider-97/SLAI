@@ -2,9 +2,14 @@ import gymnasium as gym
 import numpy as np
 import torch
 import logging
+import matplotlib.pyplot as plt
 from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
+
+plt.plot(rewards)
+plt.title('Reward Trend')
+plt.savefig('logs/reward_trend.png')
 
 state_dim = 3
 action_dim = 2
