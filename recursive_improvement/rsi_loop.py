@@ -8,6 +8,17 @@ from recursive_improvement.evaluators.behavioral_tests import behavioral_test
 from recursive_improvement.evaluators.reward_function import calculate_reward
 from monitoring.dashboard import push_rsi_update
 from deployment.git.rollback_handler import rollback_to_previous_release
+from deployment.git.branch_manager import create_branch, merge_branches, delete_branch, auto_name_branch
+
+# Create RSI iteration branch
+branch = auto_name_branch(task_desc="agent_evolution", iteration=5)
+create_branch(branch)
+
+# Merge back to main after success
+merge_branches(source_branch=branch, target_branch="main", squash=True)
+
+# Clean up
+delete_branch(branch, remote=True)
 
 try:
     # Assume RSI iteration logic...
