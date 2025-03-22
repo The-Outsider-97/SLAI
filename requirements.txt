@@ -12,3 +12,8 @@ ray[tune]>=2.2.0
 
 # For testing
 pytest>=7.3.0
+
+# for torch
+torch
+torchvision
+torchaudio
