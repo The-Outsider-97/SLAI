@@ -43,8 +43,20 @@ def main():
         output_size=output_size
     )
 
-    for generation in range(5):
-        logger.info(f"Starting Generation {generation + 1}")
+agent.initialize_population()
+
+for generation in range(10):
+    logger.info(f"Starting Generation {generation + 1}")
+
+    agent.evolve_population(evaluator, train_loader, val_loader)
+
+    # Get the best model in the current population
+    best_model = agent.population[0]['model']
+    best_performance = agent.population[0]['performance']
+
+    logger.info(f"Generation {generation + 1} - Best Accuracy: {best_performance:.2f}%")
+
+    torch.save(best_model.state_dict(), f'logs/best_model_gen_{generation + 1}.pth')
 
         try:
             model = agent.build_model()
