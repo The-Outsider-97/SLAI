@@ -32,6 +32,7 @@ def main():
         'batch_size': 64,
         'learning_rate': 0.001,
         'memory_size': 10000
+        'hidden_size': 128
     }
 
     agent = DQNAgent(state_size, action_size, config)
