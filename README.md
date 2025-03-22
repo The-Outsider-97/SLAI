@@ -43,6 +43,7 @@ Note: If you see an error about execution policy:
    .\venv\Scripts\Activate.ps1
    ```
 3. Install requirements:
+
    ```console
    pip install torch
    pip install -r requirements.txt
@@ -51,21 +52,25 @@ Note: If you see an error about execution policy:
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
 4. Run a basic reinforcement learning task (CartPole with DQN):
+
    ```console
    python main_cartpole.py
    ```
 
 5. Run Evolutionary Hyperparameter Optimization (CartPole + Evolution):
+
    ```console
    python main_cartpole_evolve.py
    ```
 
 6. Run multi-task learning agent:
+
    ```console
    python main_multitask.py
    ```
 
 7. Run Meta-Learning (MAML):):
+
    ```console
    python main_maml.py
    ```
@@ -73,22 +78,26 @@ Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: ht
 8. Run Meta-Learning (MAML):):
 Docker is required for sandboxing.
 Start Docker daemon first.
+
    ```console
    python main_rsi.py
    ```
 
    If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
    CPU-Only Version (lighter):
+
    ```console
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
    ```
 
    Confirm Torch Installed:
+
    ```console
    pip list
    ```
    
 6. Run the Tests (Optional but Recommended):
+
    ```console
    pytest tests/
    ```
