@@ -22,17 +22,22 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
    git clone https://github.com/The-Outsider-97/SLAI.git
    cd SLAI
    ```
-2a. Set Up a Virtual Environment (Recommended): **For Linux**
+
+2. Set Up a Virtual Environment (Recommended):
+
+On **Linux/MacOS**:
    ```console
    python -m venv venv
    source venv/bin/activate        # On Windows: venv\Scripts\activate
    ```
-2b. Set Up a Virtual Environment (Recommended): **For Windows**
+
+On **Windows (PowerShell)**:
    ```console
    python -m venv venv
    .\venv\Scripts\Activate.ps1
    ```
-   Note: If you see an error about execution policy:
+
+Note: If you see an error about execution policy:
    ```console
    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
    .\venv\Scripts\Activate.ps1
@@ -43,9 +48,33 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
    pip install -r requirements.txt
    pip install pyyaml
    ```
-4. Run the main loop:
+Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
+
+4. Run a basic reinforcement learning task (CartPole with DQN):
    ```console
-   python main.py
+   python main_cartpole.py
+   ```
+
+5. Run Evolutionary Hyperparameter Optimization (CartPole + Evolution):
+   ```console
+   python main_cartpole_evolve.py
+   ```
+
+6. Run multi-task learning agent:
+   ```console
+   python main_multitask.py
+   ```
+
+7. Run Meta-Learning (MAML):):
+   ```console
+   python main_maml.py
+   ```
+
+8. Run Meta-Learning (MAML):):
+Docker is required for sandboxing.
+Start Docker daemon first.
+   ```console
+   python main_rsi.py
    ```
 
    If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
@@ -66,9 +95,16 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 
 ## Roadmap
 - [x] Basic evolutionary agent
-- [ ] Add reinforcement learning agents
-- [ ] Implement meta-learning strategy
-- [ ] Build interactive dashboard for monitoring
+- [x] Multi-Task RL with shared policies
+- [x] Meta-Learning (MAML / Reptile)
+- [ ] Recursive Self-Improvement (Codegen + Evaluation Loop)
+- [ ] Safe AI & Alignment Checks
+- [ ] Collaborative Agents & Task Routing
+- [ ] Automated R&D Loop
 
 ## License
 This project is licensed under the MIT License.
+
+## License
+Built by The-Outsider-97
+With contributions from the SLAI Open AGI Initiative
