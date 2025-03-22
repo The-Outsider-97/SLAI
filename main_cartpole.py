@@ -6,19 +6,23 @@ from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
 
-env = gym.make('CartPole-v1')
-state_size = env.observation_space.shape[0]
-action_size = env.action_space.n
+# env = gym.make('CartPole-v1')
+# state_size = env.observation_space.shape[0]
+# action_size = env.action_space.n
 
-trainer = EvolutionaryTrainer(env, population_size=10, generations=20)
-best_agent = trainer.evolve(state_size, action_size)
+# trainer = EvolutionaryTrainer(env, population_size=10, generations=20)
+# best_agent = trainer.evolve(state_size, action_size)
 
-logger = setup_logger('SLAI-CartPole', level=torch.logging.DEBUG)
+logger = setup_logger('SLAI-CartPole', level=logging.DEBUG)
 
 def main():
     env = gym.make('CartPole-v1')
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
+
+    # Evolutionary trainer (optional pre-evolution before RL training)
+    trainer = EvolutionaryTrainer(env, population_size=10, generations=20)
+    best_agent = trainer.evolve(state_size, action_size)
 
     config = {
         'gamma': 0.99,
