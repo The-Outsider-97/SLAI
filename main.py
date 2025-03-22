@@ -25,7 +25,7 @@ def main():
     input_size = config['agent']['input_size']
     output_size = config['agent']['output_size']
 
-    agent = EvolutionAgent(input_size=input_size, output_size=output_size)
+    agent = EvolutionAgent(input_size=input_size, output_size=output_size, config=config['agent'])
     evaluator = PerformanceEvaluator(threshold=config['evaluator']['threshold'])
 
     best_performance = 0
@@ -43,45 +43,51 @@ def main():
         output_size=output_size
     )
 
-agent.initialize_population()
+    # Initialize and evolve population
+    agent.initialize_population()
 
-for generation in range(10):
-    logger.info(f"Starting Generation {generation + 1}")
-
-    agent.evolve_population(evaluator, train_loader, val_loader)
-
-    # Get the best model in the current population
-    best_model = agent.population[0]['model']
-    best_performance = agent.population[0]['performance']
-
-    logger.info(f"Generation {generation + 1} - Best Accuracy: {best_performance:.2f}%")
-
-    torch.save(best_model.state_dict(), f'logs/best_model_gen_{generation + 1}.pth')
+    for generation in range(10):
+        logger.info(f"Starting Evolutionary Generation {generation + 1}")
 
         try:
-            model = agent.build_model()
-            logger.debug(f"Model architecture: {model}")
+            # Evolve population automatically
+            agent.evolve_population(evaluator, train_loader, val_loader)
 
-            agent.train_model(model, train_loader, val_loader)
-            logger.info("Model training complete.")
+            # Get best evolved model
+            best_model = agent.population[0]['model']
+            best_performance = agent.population[0]['performance']
 
-            performance = agent.evaluate_model(model, val_loader)
-            logger.info(f"Model accuracy: {performance:.2f}%")
+            logger.info(f"Evolved Best Model - Gen {generation + 1}: {best_performance:.2f}% accuracy")
 
-            if evaluator.is_better(performance, best_performance):
-                logger.info(f"New best model found! Accuracy: {performance:.2f}%")
-                best_performance = performance
-                best_model = model
-                torch.save(model.state_dict(), f'logs/best_model_gen_{generation + 1}.pth')
-                logger.info(f"Saved best model from Generation {generation + 1}")
-            else:
-                logger.info(f"Model not better than best ({best_performance:.2f}%).")
+            # Save best evolved model
+            torch.save(best_model.state_dict(), f'logs/best_model_evolved_gen_{generation + 1}.pth')
 
         except Exception as e:
-            logger.error(f"An error occurred during Generation {generation + 1}: {str(e)}", exc_info=True)
+            logger.error(f"Evolution failed in Generation {generation + 1}: {str(e)}", exc_info=True)
+
+    # OPTIONAL: Run a separate manual experiment (manual build/train/eval)
+    logger.info("Running manual experiment on custom model...")
+
+    try:
+        manual_model = agent.build_model(hidden_size=64)
+        logger.debug(f"Manual model architecture: {manual_model}")
+
+        agent.train_model({'model': manual_model, 'learning_rate': 0.001}, train_loader, val_loader)
+        manual_performance = agent.evaluate_model({'model': manual_model}, val_loader)
+
+        logger.info(f"Manual model accuracy: {manual_performance:.2f}%")
+
+        if evaluator.is_better(manual_performance, best_performance):
+            logger.info(f"Manual model outperformed evolved models! Accuracy: {manual_performance:.2f}%")
+            best_model = manual_model
+            best_performance = manual_performance
+            torch.save(manual_model.state_dict(), 'logs/best_manual_model.pth')
+
+    except Exception as e:
+        logger.error(f"Manual experiment failed: {str(e)}", exc_info=True)
 
     logger.info("Training completed.")
-    logger.info(f"Best model achieved {best_performance:.2f}% accuracy.")
+    logger.info(f"Best overall model achieved {best_performance:.2f}% accuracy.")
 
 if __name__ == "__main__":
     main()
