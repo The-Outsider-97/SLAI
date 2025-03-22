@@ -5,8 +5,9 @@ import shutil
 import time
 import logging
 import tempfile
-
+from recursive_improvement.sandbox.runner import run_code_and_tests
 from utils.logger import setup_logger
+from recursive_improvement.codegen.codegen import generate_code
 
 logger = setup_logger('SLAI-RSI', level=logging.DEBUG)
 
@@ -23,20 +24,9 @@ RSI_CONFIG = {
 
 # ===============================
 # Generate New Code Function
-# (Placeholder for codegen model)
 # ===============================
 def generate_new_code(existing_code):
-    """
-    Dummy code generator. Replace this with a language model call in RSI phase 2.
-    """
-    logger.info("Generating new code from existing agent...")
-    
-    # Example mutation: change learning rate if found
-    new_code = existing_code.replace('learning_rate = 0.001', 'learning_rate = 0.0005')
-    
-    # You can extend this by adding layers, activations, etc.
-    
-    return new_code
+    return generate_code(existing_code)
 
 # ===============================
 # Validate Python Code Function
@@ -53,32 +43,13 @@ def validate_code(code_string):
 # ===============================
 # Evaluate New Code Function
 # ===============================
-def evaluate_new_code():
-    """
-    Runs the evaluation script for the agent and parses performance.
-    """
-    logger.info("Evaluating the new code...")
-
-    try:
-        result = subprocess.run(
-            [sys.executable, RSI_CONFIG['evaluation_script']],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        logger.info(f"Evaluation Script Output:\n{result.stdout}")
-
-        # Parse the performance from the output
-        for line in result.stdout.splitlines():
-            if "Average Reward:" in line:
-                reward_str = line.split(":")[-1].strip()
-                return float(reward_str)
-
-    except subprocess.SubprocessError as e:
-        logger.error(f"Evaluation failed: {e}")
+def evaluate_new_code(code):
+    passed, output = run_code_and_tests(code)
+    if not passed:
+        logger.warning("Tests failed during evaluation.")
         return None
-
-    return None
+    # Parse reward from output or use your custom reward function
+    return calculate_reward(output)
 
 # ===============================
 # Backup and Overwrite Function
