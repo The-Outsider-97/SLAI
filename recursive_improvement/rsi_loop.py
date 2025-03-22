@@ -10,6 +10,32 @@ from monitoring.dashboard import push_rsi_update
 from deployment.git.rollback_handler import rollback_to_previous_release
 from deployment.git.branch_manager import create_branch, merge_branches, delete_branch, auto_name_branch
 from deployment.git.ci_cd_trigger import trigger_github_actions
+from deployment.deployment_logger import log_event
+
+# Successful deployment
+log_event(
+    event_type="deploy",
+    user="rsi_process",
+    branch="main",
+    version="v1.3.0",
+    success=True,
+    details={
+        "risk_level": "LOW",
+        "reward_score": 82.5
+    }
+)
+
+# Rollback example
+log_event(
+    event_type="rollback",
+    user="rsi_process",
+    branch="main",
+    version="v1.3.0",
+    success=True,
+    details={
+        "rollback_target": "v1.2.3"
+    }
+)
 
 # After successful RSI iteration and deployment
 trigger_github_actions(branch="main")
