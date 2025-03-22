@@ -3,6 +3,7 @@
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
 import torch
+import logging
 from torch.utils.data import DataLoader, TensorDataset
 import yaml
 from utils.logger import setup_logger
