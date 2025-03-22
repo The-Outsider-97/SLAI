@@ -75,11 +75,15 @@ class TaskSampler:
             env_obj = env.unwrapped  # Newer gymnasium
 
         # Apply parameters (this depends on environment's internal attributes)
-        env_obj.gravity = task_params['gravity']
-        env_obj.length = task_params['length']
-        env_obj.masscart = task_params['masscart']
-        env_obj.masspole = task_params['masspole']
-        env_obj.force_mag = task_params['force_mag']
+        try:
+            env_obj.gravity = task_params['gravity']
+            env_obj.length = task_params['length']
+            env_obj.masscart = task_params['masscart']
+            env_obj.masspole = task_params['masspole']
+            env_obj.force_mag = task_params['force_mag']
+        except AttributeError as e:
+            logger.error(f"Failed to apply task params: {task_params}. Error: {e}")
+            raise
 
         logger.debug(f"Sampled task with params: {task_params}")
 
