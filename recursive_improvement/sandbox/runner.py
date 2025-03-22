@@ -3,70 +3,87 @@ import tempfile
 import subprocess
 import logging
 import time
+import shutil
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-def run_code_and_tests(code: str, tests: str, timeout: int = 10):
+DOCKER_IMAGE = "python:3.11-slim"
+
+def run_code_and_tests_docker(code: str, tests: str, timeout: int = 30):
     """
-    Executes the generated code and runs unit tests in an isolated temp directory.
+    Runs generated code and unit tests inside a Docker container for sandboxing.
 
     Parameters:
-    - code (str): The generated Python code.
-    - tests (str): The generated PyTest test cases for the code.
-    - timeout (int): Time in seconds to allow for each subprocess to run.
+    - code (str): The generated code.
+    - tests (str): The unit tests.
+    - timeout (int): Time limit for execution (seconds).
 
     Returns:
-    - (bool, str): Tuple indicating if tests passed and the output logs.
+    - (bool, str): Tuple with success flag and output logs.
     """
 
-    logger.info("Starting sandboxed execution of code and tests...")
+    logger.info("Starting Docker sandbox execution...")
 
+    # Temp directory for code + tests
     with tempfile.TemporaryDirectory() as tmpdirname:
-        logger.debug(f"Created temporary directory: {tmpdirname}")
+        logger.debug(f"Created temp dir: {tmpdirname}")
 
-        # Paths for code and tests
-        code_file_path = os.path.join(tmpdirname, "generated_module.py")
-        test_file_path = os.path.join(tmpdirname, "test_generated_module.py")
+        code_file = os.path.join(tmpdirname, "generated_module.py")
+        test_file = os.path.join(tmpdirname, "test_generated_module.py")
 
-        # Write the generated code
-        with open(code_file_path, "w", encoding="utf-8") as code_file:
-            code_file.write(code)
-        logger.info(f"Saved generated code to {code_file_path}")
+        # Write code + tests
+        with open(code_file, "w", encoding="utf-8") as cf:
+            cf.write(code)
 
-        # Write the generated tests
-        with open(test_file_path, "w", encoding="utf-8") as test_file:
-            test_file.write(tests)
-        logger.info(f"Saved generated unit tests to {test_file_path}")
+        with open(test_file, "w", encoding="utf-8") as tf:
+            tf.write(tests)
+
+        logger.info(f"Files written to {tmpdirname}")
+
+        container_name = f"sandbox_{int(time.time())}"
 
         try:
-            # Run pytest on the test file
-            logger.info("Running PyTest on generated code...")
-            start_time = time.time()
-
-            result = subprocess.run(
-                ["pytest", "-q", test_file_path, "--disable-warnings", "--maxfail=3"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=tmpdirname,
-                timeout=timeout
+            # Spin up a Docker container
+            logger.info(f"Starting Docker container: {container_name}")
+            subprocess.run([
+                "docker", "run", "--name", container_name,
+                "-v", f"{tmpdirname}:/sandbox",
+                "-w", "/sandbox",
+                "--rm", DOCKER_IMAGE,
+                "bash", "-c",
+                "pip install pytest >/dev/null 2>&1 && pytest -q test_generated_module.py --disable-warnings --maxfail=3"
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout
             )
 
-            end_time = time.time()
-            duration = round(end_time - start_time, 2)
+            result = subprocess.run([
+                "docker", "logs", container_name
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout
+            )
 
-            output = result.stdout.decode("utf-8") + result.stderr.decode("utf-8")
-            logger.debug(f"PyTest output:\n{output}")
-            logger.info(f"Test run completed in {duration} seconds with return code {result.returncode}")
+            output = result.stdout.decode() + result.stderr.decode()
+            logger.info(f"Container logs:\n{output}")
 
-            # Check if tests passed
-            success = result.returncode == 0
+            # Exit code 0 = tests passed
+            success = ("FAILED" not in output)
+
             return success, output
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"Test execution exceeded timeout of {timeout} seconds.")
+            logger.warning(f"Docker sandbox timed out after {timeout} seconds.")
             return False, f"Timeout after {timeout} seconds."
 
         except Exception as e:
-            logger.error(f"Error running code and tests: {e}")
+            logger.error(f"Docker sandbox failed: {e}")
             return False, str(e)
+
+        finally:
+            # Clean up just in case container lingers
+            subprocess.run(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("Docker container cleaned up.")
