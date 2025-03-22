@@ -13,12 +13,12 @@ An open-source experiment in building an AI that evolves its own models.
    git clone https://github.com/The-Outsider-97/SLAI.git
    cd SLAI
    ```
-2. Set Up a Virtual Environment (Recommended): **For Linux**
+2a. Set Up a Virtual Environment (Recommended): **For Linux**
    ```console
    python -m venv venv
    source venv/bin/activate        # On Windows: venv\Scripts\activate
    ```
-2. Set Up a Virtual Environment (Recommended): **For Windows**
+2b. Set Up a Virtual Environment (Recommended): **For Windows**
    ```console
    python -m venv venv
    .\venv\Scripts\Activate.ps1
@@ -37,7 +37,19 @@ An open-source experiment in building an AI that evolves its own models.
    ```console
    python main.py
    ```
-5. Run the Tests (Optional but Recommended):
+
+   If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
+   CPU-Only Version (lighter):
+   ```console
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+   ```
+
+   Confirm Torch Installed:
+   ```console
+   pip list
+   ```
+   
+6. Run the Tests (Optional but Recommended):
    ```console
    pytest tests/
    ```
