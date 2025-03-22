@@ -34,7 +34,7 @@ class EvolutionaryTrainer:
             state, _ = self.env.reset()
             episode_reward = 0
             for _ in range(500): 
-                action = agent.act(state)
+                action = agent.select_action(state, explore=False)
                 next_state, reward, done, truncated, _ = self.env.step(action)
                 state = next_state
                 episode_reward += reward
@@ -73,7 +73,7 @@ class EvolutionaryTrainer:
             new_population = parents.copy()
             while len(new_population) < self.population_size:
                 parent = random.choice(parents)
-                mutated_config = self.mutate(parent.__dict__)
+                mutated_config = self.mutate(parent.config)
                 new_population.append(DQNAgent(state_size, action_size, mutated_config))
 
             self.population = new_population
