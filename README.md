@@ -17,7 +17,7 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 
 ## 📦 Project Structure
 
-
+SLAI/ ├── agents/ # RL agents, meta-learners, codegen models ├── tasks/ # Multi-task samplers, meta-world tasks ├── utils/ # Logger, replay buffer, evaluators ├── logs/ # Performance logs & checkpoints ├── main_cartpole.py # Run a single-task RL experiment (DQN) ├── main_cartpole_evolve.py # Evolutionary hyperparameter optimization for DQN ├── main_multitask.py # Multi-task RL agent training ├── main_maml.py # MAML meta-learning across tasks ├── main_rsi.py # Recursive Self-Improvement framework ├── requirements.txt └── README.md
 
 ## How to run
 1. Clone this repo.
