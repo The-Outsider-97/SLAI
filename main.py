@@ -1,9 +1,10 @@
 import os
 import sys
 import logging
-from utils.logger import setup_logger
 import yaml
 import torch
+import subprocess
+from utils.logger import setup_logger
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
 from torch.utils.data import DataLoader, TensorDataset
@@ -90,7 +91,17 @@ def evolutionary_agent_run():
 def run_script(script_name):
     try:
         logger.info(f"Running script: {script_name}")
-        os.system(f"{sys.executable} {script_name}")
+
+        # Get the path to this script's directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(base_dir, script_name)
+
+        if not os.path.exists(script_path):
+            logger.error(f"Script not found: {script_path}")
+            return
+
+        subprocess.run([sys.executable, script_path])
+
     except Exception as e:
         logger.error(f"Failed to run {script_name}: {str(e)}")
 
