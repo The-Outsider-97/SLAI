@@ -7,6 +7,19 @@ from recursive_improvement.evaluators.static_analysis import static_analysis_ban
 from recursive_improvement.evaluators.behavioral_tests import behavioral_test
 from recursive_improvement.evaluators.reward_function import calculate_reward
 from monitoring.dashboard import push_rsi_update
+from deployment.git.rollback_handler import rollback_to_previous_release
+
+try:
+    # Assume RSI iteration logic...
+    success = recursive_improvement_loop(task_description, iterations=5)
+
+    if not success:
+        logger.warning("RSI loop failed! Initiating rollback...")
+        rollback_to_previous_release()
+
+except Exception as e:
+    logger.error(f"Unexpected failure in RSI loop: {e}")
+    rollback_to_previous_release()
 
 # After each iteration success:
 push_rsi_update(
