@@ -6,15 +6,6 @@ import numpy as np
 import logging
 from utils.data_loader import DataLoader
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import random
-import numpy as np
-import logging
-
-from utils.data_loader import DataLoader
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -132,6 +123,17 @@ class DQNAgent:
         action = q_values.argmax().item()
         logger.debug(f"Greedy action {action} selected.")
         return action
+
+    def act(self, state):
+        """
+        Alias for select_action without exploration.
+        Used in evaluation (EvolutionaryTrainer) and main_cartpole.py.
+        """
+        return self.select_action(state, explore=False)
+
+    def act(self, state):
+        """Alias for select_action without exploration (for evaluation purposes)."""
+        return self.select_action(state, explore=False)
 
     def store_transition(self, state, action, reward, next_state, done):
         self.memory.push(state, action, reward, next_state, done)
