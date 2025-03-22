@@ -3,6 +3,9 @@ import os
 import time
 import logging
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Initialize logging
 logger = logging.getLogger(__name__)
