@@ -11,6 +11,18 @@ from deployment.git.rollback_handler import rollback_to_previous_release
 from deployment.git.branch_manager import create_branch, merge_branches, delete_branch, auto_name_branch
 from deployment.git.ci_cd_trigger import trigger_github_actions
 from deployment.deployment_logger import log_event
+from deployment.deployment_history import log_to_history, get_history
+
+log_to_history(
+    event_type="merge",
+    user="rsi_process",
+    branch="rsi/agent_v3/iter-10",
+    success=True,
+    details={"conflicts": 0}
+)
+
+history = get_history()
+print(json.dumps(history, indent=2))
 
 # Successful deployment
 log_event(
