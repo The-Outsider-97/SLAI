@@ -48,6 +48,8 @@ Note: If you see an error about execution policy:
    pip install torch
    pip install -r requirements.txt
    pip install pyyaml
+   pip install gymnasium[box2d]
+   pip install numpy
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
