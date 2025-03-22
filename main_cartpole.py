@@ -2,16 +2,22 @@ import gymnasium as gym
 import numpy as np
 import torch
 import logging
+import matplotlib.pyplot as plt
 from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
 
-# env = gym.make('CartPole-v1')
-# state_size = env.observation_space.shape[0]
-# action_size = env.action_space.n
+plt.plot(rewards)
+plt.title('Reward Trend')
+plt.savefig('logs/reward_trend.png')
 
-# trainer = EvolutionaryTrainer(env, population_size=10, generations=20)
-# best_agent = trainer.evolve(state_size, action_size)
+state_dim = 3
+action_dim = 2
+
+agent = DQNAgent(state_dim=state_dim, action_dim=action_dim)
+
+# Training from dataset
+agent.train_with_dataset('datasets/sample_replay.json', batch_size=64, epochs=20)
 
 logger = setup_logger('SLAI-CartPole', level=logging.DEBUG)
 
@@ -31,7 +37,7 @@ def main():
         'epsilon_decay': 0.995,
         'batch_size': 64,
         'learning_rate': 0.001,
-        'memory_size': 10000
+        'memory_size': 10000,
         'hidden_size': 128
     }
 

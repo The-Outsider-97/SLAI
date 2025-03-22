@@ -52,7 +52,6 @@ Note: If you see an error about execution policy:
    pip install numpy
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
-
 4. Run a basic reinforcement learning task (CartPole with DQN):
 
    ```console
@@ -85,6 +84,13 @@ Start Docker daemon first.
    python main_rsi.py
    ```
 
+## Continuous Integration
+- GitHub Actions workflow runs on each push/PR.
+- To trigger manually:
+  ```bash
+  gh workflow run test.yml
+   ```
+
    If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
    CPU-Only Version (lighter):
 
@@ -108,7 +114,7 @@ Start Docker daemon first.
 - [x] Basic evolutionary agent
 - [x] Multi-Task RL with shared policies
 - [x] Meta-Learning (MAML / Reptile)
-- [ ] Recursive Self-Improvement (Codegen + Evaluation Loop)
+- [x] Recursive Self-Improvement (Codegen + Evaluation Loop)
 - [ ] Safe AI & Alignment Checks
 - [ ] Collaborative Agents & Task Routing
 - [ ] Automated R&D Loop

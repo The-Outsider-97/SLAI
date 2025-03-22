@@ -26,3 +26,6 @@ docker>=6.1.3
 # Testing & Dev Tools
 pytest>=7.3.0
 jupyterlab>=4.0.5  # Optional for experiment tracking & visualization
+
+pytest
+pytest-cov
