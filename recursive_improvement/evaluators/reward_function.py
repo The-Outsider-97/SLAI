@@ -3,6 +3,13 @@ import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+RISK_REWARD_MAPPING = {
+    "LOW": 25,
+    "MEDIUM": 10,
+    "HIGH": -10,
+    "CRITICAL": -50
+}
+
 def calculate_reward(tests_passed: bool,
                      static_analysis_result: str,
                      behavioral_test_passed: bool = True,
@@ -33,11 +40,10 @@ def calculate_reward(tests_passed: bool,
         logger.debug("Tests failed: no reward added")
 
     # Static Analysis Reward
-    if "HIGH" not in static_analysis_result:
-        reward += 25
-        logger.debug("No HIGH issues in static analysis: +25 reward")
-    else:
-        logger.debug("HIGH issues found: no reward added")
+    risk_level = static_analysis_report.get("risk_level", "CRITICAL").upper()
+    static_reward = RISK_REWARD_MAPPING.get(risk_level, -100)
+    reward += static_reward
+    logger.debug(f"Static analysis risk level '{risk_level}': {static_reward} reward")
 
     # Behavioral Test Reward
     if behavioral_test_passed:
