@@ -89,7 +89,7 @@ Start Docker daemon first.
 - To trigger manually:
   ```bash
   gh workflow run test.yml
-
+   ```
 
    If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
    CPU-Only Version (lighter):
