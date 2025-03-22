@@ -52,13 +52,6 @@ Note: If you see an error about execution policy:
    pip install numpy
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
-
-## Continuous Integration
-- GitHub Actions workflow runs on each push/PR.
-- To trigger manually:
-  ```bash
-  gh workflow run test.yml
-
 4. Run a basic reinforcement learning task (CartPole with DQN):
 
    ```console
@@ -90,6 +83,13 @@ Start Docker daemon first.
    ```console
    python main_rsi.py
    ```
+
+## Continuous Integration
+- GitHub Actions workflow runs on each push/PR.
+- To trigger manually:
+  ```bash
+  gh workflow run test.yml
+
 
    If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
    CPU-Only Version (lighter):
