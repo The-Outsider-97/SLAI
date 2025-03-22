@@ -7,17 +7,24 @@ from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
 
-plt.plot(rewards)
-plt.title('Reward Trend')
-plt.savefig('logs/reward_trend.png')
-
-state_dim = 3
+state_dim = 4
 action_dim = 2
 
-agent = DQNAgent(state_dim=state_dim, action_dim=action_dim)
+config = {
+    'gamma': 0.99,
+    'epsilon': 1.0,
+    'epsilon_min': 0.05,
+    'epsilon_decay': 0.990,
+    'batch_size': 128,
+    'learning_rate': 0.002,
+    'memory_size': 10000,
+    'hidden_size': 128
+}
+
+agent = DQNAgent(state_size=state_dim, action_size=action_dim, config=config)
 
 # Training from dataset
-agent.train_with_dataset('datasets/sample_replay.json', batch_size=64, epochs=20)
+agent.pretrain_from_dataset('datasets/sample_replay.json', epochs=20)
 
 logger = setup_logger('SLAI-CartPole', level=logging.DEBUG)
 
@@ -26,7 +33,6 @@ def main():
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
 
-    # Evolutionary trainer (optional pre-evolution before RL training)
     trainer = EvolutionaryTrainer(env, population_size=10, generations=20)
     best_agent = trainer.evolve(state_size, action_size)
 
@@ -34,16 +40,18 @@ def main():
         'gamma': 0.99,
         'epsilon': 1.0,
         'epsilon_min': 0.01,
-        'epsilon_decay': 0.995,
-        'batch_size': 64,
-        'learning_rate': 0.001,
+        'epsilon_decay': 0.990,
+        'batch_size': 128,
+        'learning_rate': 0.002,
         'memory_size': 10000,
         'hidden_size': 128
     }
 
     agent = DQNAgent(state_size, action_size, config)
     episodes = 500
-    target_update_frequency = 10
+    target_update_frequency = 100
+
+    rewards = []  # <---- Add this to track episode rewards
 
     for e in range(episodes):
         state, _ = env.reset()
@@ -53,20 +61,32 @@ def main():
             action = agent.act(state)
             next_state, reward, done, truncated, _ = env.step(action)
 
-            agent.memorize(state, action, reward, next_state, done)
+            agent.store_transition(state, action, reward, next_state, done)
             state = next_state
             total_reward += reward
 
-            agent.replay()
+            # Warm-up condition BEFORE calling train_step()
+            if len(agent.memory) >= agent.batch_size:
+                    agent.train_step()
 
             if done or truncated:
                 logger.info(f"Episode {e+1}/{episodes} - Score: {total_reward}, Epsilon: {agent.epsilon:.2f}")
                 break
 
+        rewards.append(total_reward)  # <---- Store episode reward here
+
         if e % target_update_frequency == 0:
             agent.update_target_network()
 
     env.close()
+
+    # Plot rewards after training
+    plt.plot(rewards)
+    plt.title('Reward Trend')
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.savefig('logs/reward_trend.png')
+    plt.show()  # Optional, if you want to display it directly
 
 if __name__ == "__main__":
     main()
