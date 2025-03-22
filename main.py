@@ -4,6 +4,10 @@ from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+import yaml
+with open('config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+
 
 def generate_dummy_data(num_samples=500, input_size=10, output_size=2):
     X = torch.randn(num_samples, input_size)
