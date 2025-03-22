@@ -5,6 +5,7 @@ from recursive_improvement.unit_tests.test_generator import generate_unit_tests
 from recursive_improvement.sandbox.runner import run_code_and_tests
 from recursive_improvement.evaluators.static_analysis import static_analysis_bandit
 from recursive_improvement.evaluators.behavioral_tests import behavioral_test
+from recursive_improvement.evaluators.reward_function import calculate_reward
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -56,7 +57,16 @@ def recursive_improvement_loop(task_description: str, iterations: int = 5):
         if not behavior_passed:
             logger.warning("Behavioral tests failed. Skipping deployment.")
             continue
+            
+        reward = calculate_reward(
+            tests_passed=tests_passed,
+            static_analysis_result=static_analysis_results,
+            behavioral_test_passed=behavior_passed,
+            execution_time=5.8  # example from sandbox runner duration
+        )
 
+        logger.info(f"Reward for this iteration: {reward}")
+        
         # Step 6: If all tests pass, save, deploy, or evolve!
         logger.info(f"Iteration {iteration} successful. Code is ready for deployment or evolution.")
         
