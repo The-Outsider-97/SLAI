@@ -1,6 +1,7 @@
+import torch
+import logging
 from tasks.task_sampler.py import TaskSampler
 from agents.maml_rl import MAMLAgent
-import torch
 
 def main():
     sampler = TaskSampler(['CartPole-v1', 'MountainCar-v0', 'Acrobot-v1'])
