@@ -46,24 +46,28 @@ def recursive_improvement_loop(task_description: str, iterations: int = 5):
             continue
 
         # Step 4: Static Analysis for Security and Code Quality
-        static_analysis_results = static_analysis_bandit(code)
-        if "HIGH" in static_analysis_results:
-            logger.warning("High severity issues found in static analysis, skipping deployment.")
-            logger.debug(f"Static Analysis Details: {static_analysis_results}")
+        static_analysis_report = static_analysis_bandit(code)
+        risk_level = static_analysis_report.get("risk_level", "CRITICAL")
+
+        if risk_level in ["HIGH", "CRITICAL"]:
+            logger.warning(f"Static analysis returned risk level '{risk_level}'. Skipping deployment.")
+            logger.debug(f"Full Static Analysis Report: {static_analysis_report}")
             continue
 
-        # Step 5: Behavioral Testing (Optional but recommended)
-        behavior_passed = behavioral_test(code)
-        if not behavior_passed:
-            logger.warning("Behavioral tests failed. Skipping deployment.")
-            continue
-            
+        # Reward calculation (uses granular risk level)          
         reward = calculate_reward(
             tests_passed=tests_passed,
             static_analysis_result=static_analysis_results,
             behavioral_test_passed=behavior_passed,
             execution_time=5.8  # example from sandbox runner duration
         )
+
+        # Step 5: Behavioral Testing (Optional but recommended)
+        behavior_passed = behavioral_test(code)
+        if not behavior_passed:
+            logger.warning("Behavioral tests failed. Skipping deployment.")
+            continue
+
 
         logger.info(f"Reward for this iteration: {reward}")
         
