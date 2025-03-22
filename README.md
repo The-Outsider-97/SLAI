@@ -32,6 +32,7 @@ An open-source experiment in building an AI that evolves its own models.
    ```console
    pip install torch
    pip install -r requirements.txt
+   pip install pyyaml
    ```
 4. Run the main loop:
    ```console
