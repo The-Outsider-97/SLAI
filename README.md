@@ -5,13 +5,13 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 
 ---
 
-## 🚀 What It Does
-✅ Evolves deep neural networks (AutoML / NAS)  
-✅ Reinforcement learning agents (DQN, PPO)  
-✅ Meta-learning agents (MAML, Reptile) for few-shot task adaptation  
-✅ Recursive self-improvement: code generation, evaluation, and rewriting  
-✅ Multi-task RL framework  
-✅ Sandbox execution for safety  
+## What It Does
+- Evolves deep neural networks (AutoML / NAS)  
+- Reinforcement learning agents (DQN, PPO)  
+- Meta-learning agents (MAML, Reptile) for few-shot task adaptation  
+- Recursive self-improvement: code generation, evaluation, and rewriting  
+- Multi-task RL framework  
+- Sandbox execution for safety  
 
 ---
 
