@@ -9,11 +9,11 @@ An open-source experiment in building an AI that evolves its own models.
 
 ## How to run
 1. Clone this repo.
-   git clone 
+   - git clone 
 2. Install requirements:
-   pip install torch
+   - pip install torch
 3. Run the main loop:
-   python main.py
+   - python main.py
 
 
 ## Roadmap
