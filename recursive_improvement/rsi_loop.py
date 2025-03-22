@@ -6,6 +6,18 @@ from recursive_improvement.sandbox.runner import run_code_and_tests
 from recursive_improvement.evaluators.static_analysis import static_analysis_bandit
 from recursive_improvement.evaluators.behavioral_tests import behavioral_test
 from recursive_improvement.evaluators.reward_function import calculate_reward
+from monitoring.dashboard import push_rsi_update
+
+# After each iteration success:
+push_rsi_update(
+    iteration=iteration,
+    reward=reward,
+    risk_level=risk_level,
+    details={
+        "static_analysis": static_analysis_report,
+        "behavioral_passed": behavior_passed
+    }
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
