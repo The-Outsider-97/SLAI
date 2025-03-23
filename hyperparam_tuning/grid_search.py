@@ -1,8 +1,11 @@
 import logging
 import json
-import itertools
 import torch
 import numpy as np
+import itertools
+from skopt import gp_minimize
+from skopt.space import Real, Integer, Categorical
+from skopt.utils import use_named_args
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
