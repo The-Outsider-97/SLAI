@@ -1,4 +1,3 @@
-import openai
 import os
 import time
 import logging
@@ -7,17 +6,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from openai import OpenAI
+
+client = OpenAI(
+  api_key="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"
+)
+
+completion = client.chat.completions.create(
+  model="gpt-4o-mini",
+  store=True,
+  messages=[
+    {"role": "user", "content": "write a haiku about ai"}
+  ]
+)
+
+print(completion.choices[0].message);
+
 # Initialize logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-# You can set the API key via environment variables or directly
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Fallback if the environment variable isn't set (not recommended for production)
-if not openai.api_key:
-    raise ValueError("OpenAI API key is not set. Please set OPENAI_API_KEY in your environment variables.")
-
 
 def generate_code(task_description: str, language: str = "Python", max_tokens: int = 800, temperature: float = 0.2) -> Optional[str]:
     """
@@ -53,8 +60,8 @@ def generate_code(task_description: str, language: str = "Python", max_tokens: i
     delay = 2  # seconds between retries
     for attempt in range(retries):
         try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4-1106-preview",  # Use your target model
+            response = client.chat.completions.create(
+                model="gpt-4o",  # Use gpt-4o or your preferred model
                 messages=[
                     {"role": "system", "content": "You are a senior software engineer."},
                     {"role": "user", "content": prompt}
@@ -62,8 +69,7 @@ def generate_code(task_description: str, language: str = "Python", max_tokens: i
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-
-            code_output = response['choices'][0]['message']['content']
+            code_output = response.choices[0].message.content
             logger.info("Code generation successful.")
             logger.debug(f"Generated Code: {code_output}")
 
