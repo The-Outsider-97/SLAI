@@ -29,3 +29,9 @@ jupyterlab>=4.0.5  # Optional for experiment tracking & visualization
 
 pytest
 pytest-cov
+pyyaml
+gymnasium
+numpy
+matplotlib
+python-dotenv
+openai
