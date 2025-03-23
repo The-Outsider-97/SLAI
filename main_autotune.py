@@ -10,6 +10,8 @@ from evaluators.behavioral_tests import BehavioralTests
 from evaluators.reward_function import RewardFunction
 from evaluators.static_analysis import StaticAnalysis
 from deployment.rollback_handler import RollbackHandler
+from hyperparam_tuning.bayesian_search import BayesianSearch
+from hyperparam_tuning.grid_search import GridSearch
 from hyperparam_tuning.tuner import HyperParamTuner
 from logs_parser import LogsParser
 
@@ -65,6 +67,12 @@ class AutoTuneOrchestrator:
                 'critical_issues': True
             }
         )
+        self.bayesian_optimizer = BayesianSearch(
+            config_file='hyperparam_tuning/example_config.json',
+            evaluation_function=self.rl_agent_evaluation,
+            n_calls=10,
+            n_random_starts=2
+        )
 
         self._init_behavioral_tests()
 
@@ -119,7 +127,12 @@ class AutoTuneOrchestrator:
             reward = self.reward_function.compute_reward(state, action, outcome)
             logger.info(f"Reward Function Computed Reward: {reward}")
 
-            # STEP 6: Decide on Retraining or Rollback
+            # STEP 6: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
+            logger.info("🔎 Running Bayesian Hyperparameter Search...")
+            best_params = self.bayesian_optimizer.run_search()
+            logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
+            
+            # STEP 7: Decide on Retraining or Rollback
             action_taken = self.decision_policy(report)
 
             if not action_taken:
@@ -149,6 +162,21 @@ class AutoTuneOrchestrator:
             return "Goodbye!"
         else:
             return "I don't understand."
+
+    def rl_agent_evaluation(self, params):
+        """
+        Dummy evaluation function that simulates RL agent performance
+        (used by Bayesian optimizer).
+        """
+        learning_rate = params['learning_rate']
+        num_layers = params['num_layers']
+        activation_function = params['activation']
+
+        logger.info(f"Evaluating RL agent with: lr={learning_rate}, layers={num_layers}, activation={activation_function}")
+
+        # Dummy score based on distance from ideal params
+        score = -((learning_rate - 0.01) ** 2 + (num_layers - 3) ** 2)
+        return score
 
     def decision_policy(self, report=None):
         """
