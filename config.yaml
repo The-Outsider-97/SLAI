@@ -1,15 +1,89 @@
-# config.yaml
+# ===========================
+# Model Metadata
+# ===========================
+model:
+  name: SLAI-Agent-v1.4.1
+  version: 1.4.1
+  run_id: run_{{timestamp}}
 
-agent:
-  input_size: 10
-  output_size: 2
-  hidden_sizes: [16, 32, 64, 128]
-  learning_rate: 0.001
-  epochs: 5
-  batch_size: 16
+# ===========================
+# Directories
+# ===========================
+directories:
+  logs_dir: logs/
+  plots_dir: plots/
+  datasets_dir: datasets/
+  models_dir: models/
 
-evaluator:
-  threshold: 70.0
+# ===========================
+# Hyperparameter Settings
+# (Used by tuner_cli.py or main_autotune.py)
+# ===========================
+hyperparameters:
+  learning_rate:
+    min: 0.0001
+    max: 0.1
+    prior: log-uniform
+    steps: 10
+  num_layers:
+    min: 1
+    max: 10
+    step: 1
+  batch_size:
+    min: 16
+    max: 256
+    step: 16
+  optimizer:
+    choices: ["adam", "sgd", "rmsprop"]
+  activation:
+    choices: ["relu", "tanh", "sigmoid"]
+  dropout_rate:
+    min: 0.0
+    max: 0.5
+    steps: 6
+  gamma:
+    min: 0.8
+    max: 0.999
+    steps: 5
 
-training:
-  num_samples: 500
+# ===========================
+# Tuning Strategies
+# ===========================
+tuning:
+  strategy: bayesian  # Options: bayesian, grid
+  n_calls: 20
+  n_random_starts: 5
+  config_file_bayesian: hyperparam_tuning/example_config.json
+  config_file_grid: hyperparam_tuning/example_grid_config.json
+
+# ===========================
+# Alignment and Fairness Thresholds
+# ===========================
+alignment_thresholds:
+  bias_threshold: 0.1
+  reward_threshold: 70.0
+  statistical_parity: 0.1
+  equal_opportunity: 0.1
+  predictive_parity: 0.1
+  individual_fairness: 0.1
+
+# ===========================
+# Rollback and Retrain Policies
+# ===========================
+rollback:
+  enabled: true
+  backup_dir: models/backups/
+
+retrain:
+  enabled: true
+  trigger_on_violation: true
+
+# ===========================
+# Logging Configurations
+# ===========================
+logging:
+  log_file: logs/run.log
+  level: INFO
+  rotate: true
+  max_size_mb: 10
+  backup_count: 5
