@@ -15,10 +15,30 @@ from hyperparam_tuning.bayesian_search import BayesianSearch
 from hyperparam_tuning.grid_search import GridSearch
 from hyperparam_tuning.tuner import HyperParamTuner
 from logs_parser import LogsParser
+from logging.handlers import RotatingFileHandler
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backupCount=5)
+
+# Ensure logs directory exists
+os.makedirs('logs', exist_ok=True)
+
+# Create logger
 logger = logging.getLogger('AutoTuneOrchestrator')
+logger.setLevel(logging.INFO)
+
+# Console handler (stdout)
+console_handler = logging.StreamHandler()
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+
+# File handler (run.log)
+file_handler = logging.FileHandler('logs/run.log', mode='a')
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+
+# Add both handlers
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 class AutoTuneOrchestrator:
     """
