@@ -45,6 +45,21 @@ class RollbackHandler:
         self.git_reset_to_commit(prev_commit_hash)
         self.git_delete_tag(latest_tag)
 
+    def trigger_action(self, reason):
+        print(f"Initiating action due to: {reason}")
+
+        if self.rollback_handler:
+            print("Rolling back model artifacts...")
+            self.rollback_handler.rollback_model()
+
+        if self.git_rollback_handler:
+            print("Rolling back code repository...")
+            self.git_rollback_handler.git_rollback_to_previous_release()
+
+        if self.hyperparam_tuner:
+            print("Triggering hyperparameter tuning and retraining...")
+            self.hyperparam_tuner.run_tuning_pipeline()
+
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Rollback failed: {e}")
