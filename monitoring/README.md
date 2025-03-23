@@ -13,8 +13,8 @@ This module monitors system performance, model drift, health status, and sends a
 ## Setup
 1. Install dependencies:
    ```console
-  pip install psutil loguru scipy
-  ```
+   pip install psutil loguru scipy
+   ```
 
 2. Configure alert emails in `alert_manager.py`.
 3. Run each component as needed or integrate into the main SLAI loop.
