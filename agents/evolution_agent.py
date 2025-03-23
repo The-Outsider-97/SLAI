@@ -16,12 +16,25 @@ class EvolutionAgent(BaseAgent):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
+        self.config = config or {}
+
         self.hidden_sizes = config.get('hidden_sizes', [16, 32, 64, 128])
         self.learning_rate = config.get('learning_rate', 0.001)
-
         self.population = []  # list of models
         self.population_size = config.get('population_size', 5)
         self.elite_fraction = config.get('elite_fraction', 0.4)
+
+        if self.learning_rate <= 0:
+            raise ValueError(f"Learning rate must be positive, got {self.learning_rate}")
+
+        if self.population_size <= 0:
+            raise ValueError(f"Population size must be positive, got {self.population_size}")
+
+        if not isinstance(self.hidden_sizes, list) or not all(isinstance(x, int) and x > 0 for x in self.hidden_sizes):
+            raise ValueError(f"hidden_sizes must be a list of positive integers, got {self.hidden_sizes}")
+
+        if not (0 < self.elite_fraction <= 1):
+            raise ValueError(f"elite_fraction must be between 0 and 1, got {self.elite_fraction}")
 
     def build_model(self, hidden_size=None):
         if not hidden_size:
