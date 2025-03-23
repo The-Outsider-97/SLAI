@@ -40,7 +40,7 @@ def commit_and_push(code_string: str, file_path: str, commit_message: str = "Aut
     except subprocess.CalledProcessError as e:
         logger.error(f"Git operation failed: {e}")
 
-def tag_release(tag_message: str):
+def tag_release(version_tag: str, tag_message: str):
     """
     Creates a git tag and pushes it to the remote.
     
