@@ -74,6 +74,11 @@ class AutoTuneOrchestrator:
             n_random_starts=2
         )
 
+        self.grid_optimizer = GridSearch(
+            config_file='hyperparam_tuning/example_grid_config.json',
+            evaluation_function=self.rl_agent_evaluation
+        )
+
         self._init_behavioral_tests()
 
     def _init_behavioral_tests(self):
@@ -127,12 +132,17 @@ class AutoTuneOrchestrator:
             reward = self.reward_function.compute_reward(state, action, outcome)
             logger.info(f"Reward Function Computed Reward: {reward}")
 
-            # STEP 6: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
+            # STEP 6: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
-            best_params = self.bayesian_optimizer.run_search()
+            best_params = self.run_hyperparam_optimization()
             logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
             
-            # STEP 7: Decide on Retraining or Rollback
+            # STEP 7: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
+            logger.info("🔎 Running Grid Hyperparameter Search...")
+            best_params = self.run_hyperparam_optimization()
+            logger.info(f"Best hyperparameters from GridSearch: {best_grid_params}")
+            
+            # STEP 8: Decide on Retraining or Rollback
             action_taken = self.decision_policy(report)
 
             if not action_taken:
