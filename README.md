@@ -48,6 +48,7 @@ Note: If you see an error about execution policy:
    pip install torch
    pip install -r requirements.txt
    pip install shutil
+   pip install itertools
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
