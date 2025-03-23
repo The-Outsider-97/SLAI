@@ -5,11 +5,14 @@ import shutil
 import time
 import logging
 import tempfile
-from recursive_improvement.sandbox.runner import run_code_and_tests
+# import textwrap
+from recursive_improvement.sandbox.runner import run_code_and_tests_docker
 from utils.logger import setup_logger
 from recursive_improvement.codegen.codegen import generate_code
 
 logger = setup_logger('SLAI-RSI', level=logging.DEBUG)
+
+# generated_code = textwrap.dedent(generate_code)
 
 # ===============================
 # RSI CONFIGURATION
@@ -44,12 +47,29 @@ def validate_code(code_string):
 # Evaluate New Code Function
 # ===============================
 def evaluate_new_code(code):
-    passed, output = run_code_and_tests(code)
+    """
+    Evaluates the generated code by running it inside Docker.
+    """
+    logger.info("Evaluating newly generated code...")
+
+    try:
+        passed, output = run_code_and_tests_docker(code, RSI_CONFIG['evaluation_script'])
+    except Exception as e:
+        logger.error(f"Error while running code and tests: {e}")
+        return None
+
     if not passed:
         logger.warning("Tests failed during evaluation.")
         return None
-    # Parse reward from output or use your custom reward function
-    return calculate_reward(output)
+
+    try:
+        reward = calculate_reward(output)
+        logger.info(f"Evaluation complete. Reward score: {reward}")
+        return reward
+    except Exception as e:
+        logger.error(f"Error calculating reward: {e}")
+        return None
+
 
 # ===============================
 # Backup and Overwrite Function
@@ -76,51 +96,67 @@ def backup_and_overwrite(new_code, iteration):
 def recursive_self_improvement():
     logger.info("Starting Recursive Self-Improvement (RSI)...")
 
-    # Load the current agent code
+    # Load the current agent code from file
     with open(RSI_CONFIG['target_file'], 'r') as f:
         current_code = f.read()
 
-    best_performance = evaluate_new_code()
+    # First performance evaluation of current code
+    best_performance = evaluate_new_code(current_code)
     logger.info(f"Initial Performance: {best_performance}")
 
     for iteration in range(1, RSI_CONFIG['max_iterations'] + 1):
         logger.info(f"====== RSI Iteration {iteration} ======")
 
-        # Generate new candidate code
-        new_code = generate_new_code(current_code)
+        # Generate new candidate code (attempt to improve)
+        generated_code = generate_new_code(current_code)
 
-        # Validate new code syntax
-        if not validate_code(new_code):
+        if not generated_code:
+            logger.warning("Code generation failed. Skipping iteration.")
+            continue
+
+        # Validate the syntax of the generated code before proceeding
+        if not validate_code(generated_code):
             logger.warning("Code rejected due to validation failure. Skipping iteration.")
             continue
 
-        # Backup current file and overwrite
-        backup_and_overwrite(new_code, iteration)
+        # Backup current working code and overwrite with generated code
+        backup_and_overwrite(generated_code, iteration)
 
-        # Evaluate new agent performance
-        new_performance = evaluate_new_code()
+        # Evaluate the newly generated code
+        new_performance = evaluate_new_code(generated_code)
 
         if new_performance is None:
             logger.warning("Evaluation returned None. Rolling back to last working version.")
+            
+            # Rollback to the latest backup
+            rollback_to_latest_backup()
             continue
 
-        # Check if performance improves
+        # Check if the new code has improved performance
         if new_performance > best_performance + RSI_CONFIG['performance_threshold']:
             logger.info(f"New code improved! Reward: {new_performance} > Previous: {best_performance}")
+            
             best_performance = new_performance
-            current_code = new_code  # Promote the new code
+            current_code = generated_code  # Promote the new code to be the current one
         else:
             logger.warning(f"No improvement. Rolling back. Reward: {new_performance}")
             
-            # Rollback to backup (restore previous code)
-            backup_path = sorted(os.listdir(RSI_CONFIG['backup_folder']))[-1]
-            rollback_file = os.path.join(RSI_CONFIG['backup_folder'], backup_path)
-
-            shutil.copy(rollback_file, RSI_CONFIG['target_file'])
-            logger.info(f"Rolled back to {rollback_file}")
+            # Rollback to the latest backup
+            rollback_to_latest_backup()
 
     logger.info("RSI Process Completed.")
 
+def rollback_to_latest_backup():
+    backup_files = sorted(os.listdir(RSI_CONFIG['backup_folder']))
+    if not backup_files:
+        logger.error("No backups found! Cannot rollback.")
+        return
+
+    latest_backup = backup_files[-1]
+    rollback_file = os.path.join(RSI_CONFIG['backup_folder'], latest_backup)
+
+    shutil.copy(rollback_file, RSI_CONFIG['target_file'])
+    logger.info(f"Rolled back to {rollback_file}")
 
 # ===============================
 # Main Function Entry Point
