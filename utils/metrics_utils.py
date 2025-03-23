@@ -153,23 +153,55 @@ def summarize_violations(*violation_messages: Tuple[bool, str]) -> Dict[str, Any
     logger.info(f"Summary: {summary}")
     return summary
 
-# ============================================
-# Example Usage (optional)
-# ============================================
-
+# ==========================================
+# Actual Usage in Main AutoTune Pipeline
+# ==========================================
 if __name__ == "__main__":
-    # Example learning curve plot
-    example_rewards = [50, 60, 65, 70, 80, 85, 90]
-    plot_learning_curve(example_rewards, title="Example Learning Curve", save_path="plots/learning_curve.png")
+    import json
+    from utils.metrics_utils_extension import (
+        plot_learning_curve,
+        plot_bias_metrics,
+        time_series_analysis
+    )
 
-    # Example bias metrics plot
-    plot_bias_metrics(0.14, 0.13, 0.04, save_path="plots/bias_metrics.png")
+    # Simulated parsed_metrics.json loading (after logs_parser.parse_logs() execution)
+    with open("logs/parsed_metrics.json", "r") as f:
+        parsed_metrics = json.load(f)
 
-    # Example time series analysis
-    metrics = [
-        {"timestamp": "2024-03-24T10:00:00", "best_reward": 60},
-        {"timestamp": "2024-03-25T10:00:00", "best_reward": 70},
-        {"timestamp": "2024-03-26T10:00:00", "best_reward": 80}
-    ]
-    summary = time_series_analysis(metrics, "best_reward")
-    print("Time-Series Analysis Summary:", summary)
+    # === Plot Learning Curve ===
+    learning_curve_data = parsed_metrics.get("performance", {}).get("learning_curve", [])
+    if learning_curve_data:
+        plot_learning_curve(
+            rewards=learning_curve_data,
+            title=f"Learning Curve - Model {parsed_metrics.get('model_version', 'N/A')}",
+            save_path=f"plots/{parsed_metrics.get('run_id', 'run')}_learning_curve.png"
+        )
+
+    # === Plot Bias Metrics ===
+    parity_diff = parsed_metrics.get("statistical_parity", {}).get("parity_difference", 0.0)
+    tpr_diff = parsed_metrics.get("equal_opportunity", {}).get("tpr_difference", 0.0)
+    ppv_diff = parsed_metrics.get("predictive_parity", {}).get("ppv_difference", 0.0)
+
+    plot_bias_metrics(
+        parity_diff=parity_diff,
+        tpr_diff=tpr_diff,
+        ppv_diff=ppv_diff,
+        save_path=f"plots/{parsed_metrics.get('run_id', 'run')}_bias_metrics.png"
+    )
+
+    # === Time-Series Analysis Across Multiple Runs ===
+    import glob
+
+    all_metrics = []
+    for file_path in glob.glob("logs/history/parsed_metrics_run_*.json"):
+        with open(file_path, "r") as f:
+            all_metrics.append(json.load(f))
+
+    if all_metrics:
+        trend_summary = time_series_analysis(
+            metrics=all_metrics,
+            metric_key="performance.best_reward"
+        )
+        print("\nTime-Series Trend Summary:", trend_summary)
+
+    print("✅ Metrics visualization and time-series analysis complete.")
