@@ -3,6 +3,7 @@ import logging
 import json
 import os
 import torch
+import subprocess
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
@@ -132,17 +133,21 @@ class AutoTuneOrchestrator:
             reward = self.reward_function.compute_reward(state, action, outcome)
             logger.info(f"Reward Function Computed Reward: {reward}")
 
-            # STEP 6: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
+            # STEP 6: Hyperparameter Optimization
+            logger.info("🔎 Triggering Hyperparameter Tuning from CLI...")
+            self.run_external_tuner(strategy='bayesian')
+
+            # STEP 7: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
             best_params = self.run_hyperparam_optimization()
             logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
             
-            # STEP 7: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
+            # STEP 8: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Grid Hyperparameter Search...")
             best_params = self.run_hyperparam_optimization()
             logger.info(f"Best hyperparameters from GridSearch: {best_grid_params}")
             
-            # STEP 8: Decide on Retraining or Rollback
+            # STEP 9: Decide on Retraining or Rollback
             action_taken = self.decision_policy(report)
 
             if not action_taken:
