@@ -4,9 +4,12 @@ import json
 import os
 import torch
 from alignment_checks.bias_detection import BiasDetection
+from alignment_checks.ethical_constraints import EthicalConstraints
+from alignment_checks.fairness_evaluator import FairnessEvaluator
+from evaluators.behavioral_tests import BehavioralTests
 from deployment.rollback_handler import RollbackHandler
 from deployment.git_rollback_handler import rollback_to_previous_release
-from hyperparam_tuning.tuner import HyperParamTuner  # placeholder for tuner implementation
+from hyperparam_tuning.tuner import HyperParamTuner
 from logs_parser import LogsParser
 
 # Setup logging
@@ -15,14 +18,13 @@ logger = logging.getLogger('AutoTuneOrchestrator')
 
 class AutoTuneOrchestrator:
     """
-    Main orchestrator for training, monitoring, tuning, and rollback.
+    Main orchestrator for training, monitoring, behavioral testing, and automated corrective actions.
     """
 
     def __init__(self):
-        # Configs (usually loaded from YAML or JSON)
+        # Configs
         self.bias_threshold = 0.1
         self.reward_threshold = 70.0
-        self.evaluation_interval = 1  # Check every run
         self.max_retries = 3
 
         # Components
@@ -35,10 +37,30 @@ class AutoTuneOrchestrator:
             rollback_handler=self.rollback_handler,
             hyperparam_tuner=self.hyperparam_tuner
         )
+        self.behavioral_tests = BehavioralTests(
+            rollback_handler=self.rollback_handler,
+            hyperparam_tuner=self.hyperparam_tuner
+        )
+        self._init_behavioral_tests()
+
+    def _init_behavioral_tests(self):
+        """
+        Define behavioral test cases for the agent.
+        """
+        # Validation functions
+        def validate_greet(response):
+            return response == "Hello!"
+
+        def validate_farewell(response):
+            return response == "Goodbye!"
+
+        # Add tests
+        self.behavioral_tests.add_test_case("greet", "Agent should greet politely", validate_greet)
+        self.behavioral_tests.add_test_case("farewell", "Agent should say goodbye", validate_farewell)
 
     def run_training_pipeline(self):
         """
-        Runs the entire training, evaluation, and corrective action cycle.
+        Runs the entire training, evaluation, behavioral testing, and corrective action loop.
         """
         logger.info(" Starting AutoTune Training Pipeline")
 
@@ -46,43 +68,52 @@ class AutoTuneOrchestrator:
         while retry_count < self.max_retries:
             logger.info(f" Training Run {retry_count + 1} / {self.max_retries}")
 
-            # STEP 1: Train your AI agent (replace with actual train script)
+            # STEP 1: Train the AI agent
             self.train_agent()
 
             # STEP 2: Parse Logs & Evaluate Metrics
             report = self.logs_parser.parse_logs()
 
-            # STEP 3: Decide on Retraining or Rollback
+            # STEP 3: Behavioral Tests
+            logger.info("Running Behavioral Tests...")
+            self.behavioral_tests.run_tests(self.simulated_agent_function)
+
+            # STEP 4: Decide on Retraining or Rollback
             action_taken = self.decision_policy(report)
 
-            # STEP 4: Exit or Retry
             if not action_taken:
                 logger.info(" Model passed all checks. Ending pipeline.")
                 break
-            else:
-                retry_count += 1
+            retry_count += 1
 
         if retry_count >= self.max_retries:
             logger.warning("⚠ Max retries reached. Manual intervention recommended.")
 
     def train_agent(self):
         """
-        Placeholder for your training logic.
-        Could call another Python module or subprocess.
+        Placeholder for your actual agent training logic.
         """
         logger.info(" Training AI Agent...")
         time.sleep(2)  # Simulate training time
         logger.info(" Training complete. Logs and metrics generated.")
 
+    def simulated_agent_function(self, input_data):
+        """
+        Placeholder for the agent's response to test inputs (used in behavioral tests).
+        """
+        if input_data == "greet":
+            return "Hello!"
+        elif input_data == "farewell":
+            return "Goodbye!"
+        else:
+            return "I don't understand."
+
     def decision_policy(self, report=None):
         """
-        Decide whether to rollback, retrain or continue.
+        Decide whether to rollback, retrain, or proceed based on metrics and behavioral test results.
         """
-        # STEP 1: Evaluate performance and alignment issues
         logger.info(" Evaluating performance and alignment metrics...")
 
-        # In real implementation, 'report' would be loaded directly from logs_parser
-        # Example: check last parsed log manually or summarize
         try:
             with open('logs/parsed_metrics.json', 'r') as f:
                 report = json.load(f)
@@ -94,13 +125,12 @@ class AutoTuneOrchestrator:
         tpr_diff = abs(report.get('equal_opportunity', {}).get('tpr_difference', 0.0))
         reward_score = report.get('performance', {}).get('best_reward', 0.0)
 
-        # STEP 2: If issues exist, take corrective action
         corrective_action = False
 
         if parity_diff > self.bias_threshold or tpr_diff > self.bias_threshold:
             logger.warning(f"⚠ Bias thresholds breached: ParityDiff={parity_diff}, TPRDiff={tpr_diff}")
-            self.rollback_handler.rollback_model()  # Filesystem rollback
-            rollback_to_previous_release()         # Git rollback
+            self.rollback_handler.rollback_model()
+            rollback_to_previous_release()
             corrective_action = True
 
         if reward_score < self.reward_threshold:
