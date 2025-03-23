@@ -1,43 +1,43 @@
 import argparse
 import logging
 from hyperparam_tuning.tuner import HyperParamTuner
+from agent.rl_agent import RLAgent
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Real evaluation function example (plug in your own model logic here)
+# Real RL agent evaluation function
 def rl_agent_evaluation(params):
     """
-    Realistic evaluation function for an RL agent.
-    Adjust this function to fit your actual model and data pipeline.
+    Evaluation function for the RL agent.
+    Hyperparameters are passed from the tuner (Grid/Bayesian).
 
     Args:
-        params (dict): Hyperparameters to evaluate.
+        params (dict): Dictionary of hyperparameters to apply to the agent.
 
     Returns:
-        float: Performance score (higher is better).
+        float: Average reward across evaluation episodes.
     """
-    learning_rate = params['learning_rate']
-    num_layers = params['num_layers']
-    activation_function = params['activation']
+    learning_rate = params.get('learning_rate', 0.01)
+    num_layers = params.get('num_layers', 2)
+    activation_function = params.get('activation', 'relu')
 
-    logger.info(f"Evaluating with learning_rate={learning_rate}, num_layers={num_layers}, activation={activation_function}")
+    logger.info("Initializing RLAgent with hyperparameters: %s", params)
 
-    # === Replace this with your model training + evaluation pipeline ===
-    # Example pseudo-logic:
-    # agent = RLAgent(learning_rate, num_layers, activation_function)
-    # agent.train(episodes=100)
-    # reward = agent.evaluate()
-    # ================================================================
+    agent = RLAgent(
+        learning_rate=learning_rate,
+        num_layers=num_layers,
+        activation_function=activation_function
+    )
 
-    # Dummy reward simulation for demo purposes
-    reward = -((learning_rate - 0.01) ** 2 + (num_layers - 3) ** 2)
-    logger.info(f"Achieved reward: {reward}")
+    agent.train(episodes=100)
+    avg_reward = agent.evaluate(eval_episodes=10)
 
-    return reward
+    logger.info("Evaluation complete. Average reward: %.4f", avg_reward)
+    return avg_reward
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Hyperparameter Tuning")
+    parser = argparse.ArgumentParser(description="Run Hyperparameter Tuning with RLAgent")
 
     parser.add_argument(
         '--config',
@@ -51,37 +51,41 @@ if __name__ == "__main__":
         type=str,
         default='bayesian',
         choices=['bayesian', 'grid'],
-        help='Tuning strategy to use: bayesian or grid.'
+        help='Choose optimization strategy: bayesian or grid.'
     )
 
     parser.add_argument(
         '--n_calls',
         type=int,
         default=20,
-        help='Number of calls for Bayesian optimization (ignored in grid).'  
+        help='(Bayesian only) Number of optimization calls.'
     )
 
     parser.add_argument(
         '--n_random_starts',
         type=int,
         default=5,
-        help='Number of random starts for Bayesian optimization (ignored in grid).'
+        help='(Bayesian only) Number of random initial evaluations.'
     )
 
     args = parser.parse_args()
 
-    logger.info("Starting HyperParamTuner CLI...")
-    logger.info(f"Configuration file: {args.config}")
-    logger.info(f"Strategy: {args.strategy}")
+    logger.info("Starting HyperParamTuner CLI with strategy: %s", args.strategy)
 
+    # Initialize tuner
     tuner = HyperParamTuner(
         config_path=args.config,
-        evaluation_function=rl_agent_evaluation,  # Replace with your own model eval function!
+        evaluation_function=rl_agent_evaluation,
         strategy=args.strategy,
         n_calls=args.n_calls,
         n_random_starts=args.n_random_starts
     )
 
+    # Run tuning pipeline
     best_params = tuner.run_tuning_pipeline()
-    print("\nBest hyperparameters found:")
+
+    logger.info("Hyperparameter tuning complete. Best parameters:")
+    logger.info(best_params)
+
+    print("\n Best hyperparameters found:")
     print(best_params)
