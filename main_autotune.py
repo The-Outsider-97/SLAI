@@ -4,6 +4,7 @@ import json
 import os
 import torch
 import subprocess
+import yaml
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
@@ -18,6 +19,9 @@ from logs_parser import LogsParser
 from logging.handlers import RotatingFileHandler
 
 file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backupCount=5)
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
 
 # Ensure logs directory exists
 os.makedirs('logs', exist_ok=True)
