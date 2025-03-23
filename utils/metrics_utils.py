@@ -158,20 +158,18 @@ def summarize_violations(*violation_messages: Tuple[bool, str]) -> Dict[str, Any
 # ============================================
 
 if __name__ == "__main__":
-    # Example checks
-    parity_violation = check_statistical_parity(parity_difference=0.15, threshold=0.1)
-    tpr_violation = check_equal_opportunity(tpr_difference=0.12, threshold=0.1)
-    ppv_violation = check_predictive_parity(ppv_difference=0.08, threshold=0.1)
-    indiv_fair_violation = check_individual_fairness(unfairness_rate=0.09, threshold=0.1)
-    perf_violation = evaluate_performance({"best_reward": 60.0}, reward_threshold=70.0)
+    # Example learning curve plot
+    example_rewards = [50, 60, 65, 70, 80, 85, 90]
+    plot_learning_curve(example_rewards, title="Example Learning Curve", save_path="plots/learning_curve.png")
 
-    # Summarize all violations
-    summary = summarize_violations(
-        parity_violation,
-        tpr_violation,
-        ppv_violation,
-        indiv_fair_violation,
-        perf_violation
-    )
+    # Example bias metrics plot
+    plot_bias_metrics(0.14, 0.13, 0.04, save_path="plots/bias_metrics.png")
 
-    print(summary)
+    # Example time series analysis
+    metrics = [
+        {"timestamp": "2024-03-24T10:00:00", "best_reward": 60},
+        {"timestamp": "2024-03-25T10:00:00", "best_reward": 70},
+        {"timestamp": "2024-03-26T10:00:00", "best_reward": 80}
+    ]
+    summary = time_series_analysis(metrics, "best_reward")
+    print("Time-Series Analysis Summary:", summary)
