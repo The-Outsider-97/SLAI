@@ -8,6 +8,7 @@ from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
 from evaluators.behavioral_tests import BehavioralTests
 from evaluators.reward_function import RewardFunction
+from evaluators.static_analysis import StaticAnalysis
 from deployment.rollback_handler import RollbackHandler
 from hyperparam_tuning.tuner import HyperParamTuner
 from logs_parser import LogsParser
@@ -19,7 +20,7 @@ logger = logging.getLogger('AutoTuneOrchestrator')
 class AutoTuneOrchestrator:
     """
     Orchestrator for training, evaluation, behavioral testing, reward-based evaluation,
-    and automated corrective actions including rollback and retrain.
+    static code analysis, and automated corrective actions including rollback and retrain.
     """
 
     def __init__(self):
@@ -55,6 +56,16 @@ class AutoTuneOrchestrator:
             }
         )
 
+        self.static_analyzer = StaticAnalysis(
+            codebase_path='src/',
+            rollback_handler=self.rollback_handler,
+            hyperparam_tuner=self.hyperparam_tuner,
+            thresholds={
+                'max_warnings': 5,
+                'critical_issues': True
+            }
+        )
+
         self._init_behavioral_tests()
 
     def _init_behavioral_tests(self):
@@ -72,7 +83,8 @@ class AutoTuneOrchestrator:
 
     def run_training_pipeline(self):
         """
-        Full training pipeline with evaluation, reward monitoring, and corrective actions.
+        Full training pipeline with evaluation, reward monitoring, static code analysis,
+        and corrective actions.
         """
         logger.info(" Starting AutoTune Training Pipeline")
 
@@ -80,18 +92,22 @@ class AutoTuneOrchestrator:
         while retry_count < self.max_retries:
             logger.info(f" Training Run {retry_count + 1} / {self.max_retries}")
 
-            # STEP 1: Train the AI agent
+            # STEP 1: Run Static Code Analysis before training
+            logger.info("🛠️ Running Static Code Analysis...")
+            self.static_analyzer.run_static_analysis()
+
+            # STEP 2: Train the AI agent
             self.train_agent()
 
-            # STEP 2: Parse Logs & Evaluate Metrics
+            # STEP 3: Parse Logs & Evaluate Metrics
             report = self.logs_parser.parse_logs()
 
-            # STEP 3: Behavioral Tests
-            logger.info("Running Behavioral Tests...")
+            # STEP 4: Behavioral Tests
+            logger.info(" Running Behavioral Tests...")
             self.behavioral_tests.run_tests(self.simulated_agent_function)
 
-            # STEP 4: Evaluate Reward Function
-            logger.info("Evaluating Reward Function...")
+            # STEP 5: Evaluate Reward Function
+            logger.info(" Evaluating Reward Function...")
             state = {'user': 'UserABC'}
             action = 'recommend_product'
             outcome = {
@@ -103,7 +119,7 @@ class AutoTuneOrchestrator:
             reward = self.reward_function.compute_reward(state, action, outcome)
             logger.info(f"Reward Function Computed Reward: {reward}")
 
-            # STEP 5: Decide on Retraining or Rollback
+            # STEP 6: Decide on Retraining or Rollback
             action_taken = self.decision_policy(report)
 
             if not action_taken:
@@ -120,7 +136,7 @@ class AutoTuneOrchestrator:
         Placeholder for the actual agent training logic.
         """
         logger.info(" Training AI Agent...")
-        time.sleep(2)  # Simulate training time
+        time.sleep(2)
         logger.info(" Training complete. Logs and metrics generated.")
 
     def simulated_agent_function(self, input_data):
@@ -144,7 +160,7 @@ class AutoTuneOrchestrator:
             with open('logs/parsed_metrics.json', 'r') as f:
                 report = json.load(f)
         except Exception as e:
-            logger.error(f"❌ Failed to load parsed metrics report: {e}")
+            logger.error(f" Failed to load parsed metrics report: {e}")
             return False
 
         parity_diff = abs(report.get('statistical_parity', {}).get('parity_difference', 0.0))
