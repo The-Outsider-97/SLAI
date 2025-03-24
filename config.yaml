@@ -12,6 +12,16 @@ run:
   output_dir: "logs/"
   plots_dir: "plots/"
 
+agent:
+  input_size: 10
+  output_size: 2
+
+training:
+  num_samples: 500
+
+evaluator:
+  threshold: 0.9
+
 # ==========================
 # Hyperparameters Definition
 # ==========================
