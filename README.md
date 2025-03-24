@@ -116,7 +116,7 @@ Start Docker daemon first.
 - [x] Multi-Task RL with shared policies
 - [x] Meta-Learning (MAML / Reptile)
 - [x] Recursive Self-Improvement (Codegen + Evaluation Loop)
-- [ ] Safe AI & Alignment Checks
+- [x] Safe AI & Alignment Checks
 - [ ] Collaborative Agents & Task Routing
 - [ ] Automated R&D Loop
 
