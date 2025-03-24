@@ -156,3 +156,12 @@ class MAMLAgent:
         self.meta_optimizer.step()
 
         return meta_loss.item()
+
+    def execute(self, task_data):
+        tasks = task_data.get("tasks", [])
+        loss = self.meta_update(tasks)
+        return {
+            "status": "success",
+            "agent": "MAMLAgent",
+            "meta_loss": loss
+        }
