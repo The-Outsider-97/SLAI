@@ -18,6 +18,22 @@ from agents.rl_agent import RLAgent
 from agents.rsi_agent import RSI_Agent
 from agents.safe_ai_agent import SafeAI_Agent
 
+self.shared_memory.set("safe_ai_recommendation", ...)
+
+# 1. Run safety agent
+task_data = {
+    "policy_risk_score": 0.27,
+    "task_type": "reinforcement_learning"
+}
+safe_result = collab_mgr.run_task("safety", task_data)
+
+# 2. Train SafeAI Agent from historical data
+safe_ai_agent.train()
+
+# 3. Evaluate performance after training
+summary = safe_ai_agent.evaluate()
+print(summary)
+
 def initialize_shared_memory():
     """
     Initialize shared memory with global variables that can be accessed by all agents.
