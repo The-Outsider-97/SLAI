@@ -142,3 +142,6 @@ monitoring:
     alert_thresholds:
       performance_drop: 0.1
       bias_increase: 0.05
+
+paths:
+  data_source: "datasets/sample_dataset.csv"
