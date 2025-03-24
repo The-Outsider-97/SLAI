@@ -5,6 +5,7 @@ import subprocess
 from modules.data_handler import DataHandler
 from modules.compliance_auditor import ComplianceAuditor
 from modules.monitoring import Monitoring
+from modules.security_manager import SecurityManager
 from collaborative.shared_memory import SharedMemory
 from agents.safe_ai_agent import SafeAI_Agent
 
@@ -78,7 +79,31 @@ def main():
         "policy_risk_score": 0.27,
         "task_type": "reinforcement_learning"
     })
+    
+    policy = {
+        "safe_ai": {
+            "can_access_data": False,
+            "can_modify_model": False,
+            "can_export": False
+        },
+        "model_trainer": {
+            "can_access_data": True,
+            "can_modify_model": True,
+            "can_export": True
+        }
+    }
 
+    sec_mgr = SecurityManager(shared_memory=shared_memory, policy_config=policy)
+
+    # Example security checks
+    if not sec_mgr.is_action_allowed("safe_ai", "can_export"):
+        print("[SECURITY] SafeAI not allowed to export data.")
+
+    if sec_mgr.is_action_allowed("model_trainer", "can_access_data"):
+        print("[SECURITY] ModelTrainer authorized to access training data.")
+
+    sec_mgr.print_report()
+    
     print("\n[✓] SafeAI Risk Assessment:")
     print(result)
 
