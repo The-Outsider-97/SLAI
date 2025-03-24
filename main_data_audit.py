@@ -4,15 +4,49 @@ import torch
 import subprocess
 from modules.data_handler import DataHandler
 from modules.compliance_auditor import ComplianceAuditor
+from modules.monitoring import Monitoring
 from collaborative.shared_memory import SharedMemory
 from agents.safe_ai_agent import SafeAI_Agent
+
+
+
+# Log training metrics
+monitor.record("model_trainer", {
+    "accuracy": 0.82,
+    "f1_score": 0.79
+})
+
+# Log safety audit
+monitor.record("safe_ai", {
+    "risk_score": 0.31
+})
+
+# Print last 5 metrics
+monitor.print_summary()
 
 def main():
     print("\n=== SLAI Data Preflight Audit ===")
 
     # Shared memory for audit traceability
-    shared_memory = SharedMemory()
+    monitor = Monitoring(
+        shared_memory=SharedMemory(),
+        alert_config={"accuracy": 0.75, "risk_score": 0.25}
+    )
 
+    # Log training metrics
+    monitor.record("model_trainer", {
+        "accuracy": 0.82,
+        "f1_score": 0.79
+    })
+
+    # Log safety audit
+    monitor.record("safe_ai", {
+        "risk_score": 0.31
+    })
+
+    # Print last 5 metrics
+    monitor.print_summary()
+    
     # === 1. Run Compliance Audit ===
     auditor = ComplianceAuditor(config_path="config.yaml", logs_path="logs/", output_dir="audits/")
     auditor.run_audit()
