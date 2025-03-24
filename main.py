@@ -153,19 +153,20 @@ def run_script(script_name):
 def print_menu():
     print("""
     ==============================
-      SLAI Main Launcher Menu
+      SLAI-v.1.5 Main Launcher Menu
     ==============================
 
     Select a module to run:
 
     1 - Evolutionary Agent (Current main.py logic)
-    2 - Basic RL Agent (CartPole DQN)           --> main_cartpole.py
-    3 - Evolutionary DQN Agent                  --> main_cartpole_evolve.py
-    4 - Multi-Task RL Agent                     --> main_multitask.py
-    5 - Meta-Learning Agent (MAML)              --> main_maml.py
-    6 - Recursive Self-Improvement (RSI)        --> main_rsi.py
-    7 - RL Agent                                --> main_autotune.py
-    8 - Safe AI Agent                           --> main_safe_ai.py
+    2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py
+    3 - Evolutionary DQN Agent                              --> main_cartpole_evolve.py
+    4 - Multi-Task RL Agent                                 --> main_multitask.py
+    5 - Meta-Learning Agent (MAML)                          --> main_maml.py
+    6 - Recursive Self-Improvement (RSI)                    --> main_rsi.py
+    7 - RL Agent                                            --> main_autotune.py
+    8 - Safe AI Agent                                       --> main_safe_ai.py
+    9 - Collaborative Agents (Task Routing, Shared Memory)  --> collaborative.main_collaborative.py
 
     0 - Exit
     """)
@@ -179,7 +180,7 @@ def main():
     while True:
         print_menu()
 
-        choice = input("Enter choice (0-8): ").strip()
+        choice = input("Enter choice (0-9): ").strip()
 
         if choice == "1":
             evolutionary_agent_run()
@@ -205,12 +206,15 @@ def main():
         elif choice == "8":
             run_script("main_safe_ai.py")
 
+        elif choice == "9":
+            run_script("main_collaborative.py")
+
         elif choice == "0":
             logger.info("Exiting SLAI launcher. Goodbye!")
             sys.exit(0)
 
         else:
-            logger.warning("Invalid choice. Please enter a number between 0-8.")
+            logger.warning("Invalid choice. Please enter a number between 0-9.")
 
 # ============================
 # ENTRY POINT
