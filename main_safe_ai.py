@@ -37,7 +37,7 @@ def main():
 
     try:
         # Step 1: Data Handling & Fairness Check
-        logger.info("📥 Loading and preprocessing data...")
+        logger.info("Loading and preprocessing data...")
         raw_data = data_handler.load_data(config['paths']['data_source'])
 
         if config['fairness'].get('enforce_fairness', False):
@@ -51,7 +51,7 @@ def main():
 
         # Step 3: Security Hardening
         if config['security'].get('encrypt_models', False):
-            logger.info(" Applying model security...")
+            logger.info("Applying model security...")
             security_manager.secure_model(model)
 
         if config['security'].get('enable_threat_detection', False):
@@ -64,7 +64,7 @@ def main():
 
         # Step 5: Monitoring
         if config['monitoring'].get('enable_monitoring', False):
-            logger.info(" Starting monitoring...")
+            logger.info("Starting monitoring...")
             monitoring.start(model, data_handler)
 
         logger.info(" Safe AI Pipeline completed successfully!")
@@ -76,7 +76,9 @@ def main():
             rollback_handler.rollback_model()
 
     finally:
-        logger.info(" Pipeline finished.")
+        logger.info("Pipeline finished.")
 
 if __name__ == "__main__":
     main()
+
+print("Safe AI Pipeline completed successfully!")
