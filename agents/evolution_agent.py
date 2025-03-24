@@ -141,3 +141,22 @@ class EvolutionAgent(BaseAgent):
 
         accuracy = 100 * correct / total
         return accuracy
+
+    def execute(self, task_data):
+        """
+        Simulate evolutionary optimization cycle.
+        """
+        # Mocked loaders
+        train_loader = task_data.get("train_loader", [])
+        val_loader = task_data.get("val_loader", [])
+    
+        self.initialize_population()
+        self.evolve_population(evaluator=self, train_loader=train_loader, val_loader=val_loader)
+    
+        best_model = self.population[0]
+        return {
+            "status": "success",
+            "agent": "EvolutionAgent",
+            "best_hidden_size": best_model['hidden_size'],
+            "performance": best_model['performance']
+        }
