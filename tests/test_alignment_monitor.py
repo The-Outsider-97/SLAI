@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np
 import torch
 import logging
+import os
+import sys
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
-from alignment_monitor import AlignmentMonitor
+from alignment_checks.alignment_monitor import AlignmentMonitor
 
 class TestAlignmentMonitor(unittest.TestCase):
 
