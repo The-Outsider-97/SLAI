@@ -93,5 +93,42 @@ logging:
   log_file: "logs/run.log"
   level: INFO
   rotate: true
-  max_size_mb: 10
-  backup_count: 5
+  max_size_mb: 50
+  backup_count: 10
+
+# ==========================
+# Security Settings
+# ==========================
+
+security:
+  encrypt_models: true
+  enable_threat_detection: true
+  adversarial_training: false
+  backup_on_threat: true
+
+# ==========================
+# Compliance & Ethics
+# ==========================
+compliance:
+  regulations:
+    - GDPR
+    - CCPA
+  enable_audit: true
+  anonymize_data: true
+  consent_management: true
+
+# ==========================
+# Monitoring & Drift
+# ==========================
+monitoring:
+  enable_monitoring: true
+  drift_detection:
+    enabled: true
+    threshold: 0.05
+  performance_monitoring:
+    interval_seconds: 300  # 5 minutes
+  alerting:
+    enable_alerts: true
+    alert_thresholds:
+      performance_drop: 0.1
+      bias_increase: 0.05
