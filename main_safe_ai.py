@@ -8,7 +8,7 @@ from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
 from modules.monitoring import Monitoring
 from modules.compliance_auditor import ComplianceAuditor
-from deployment.rollback_handler import RollbackHandler
+from deployment.git.rollback_handler import RollbackHandler
 
 config_file = "config.yaml"
 with open(config_file, 'r') as f:
