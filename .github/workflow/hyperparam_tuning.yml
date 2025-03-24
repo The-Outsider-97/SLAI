@@ -1,0 +1,39 @@
+name: Hyperparameter Tuning
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  hyperparameter-tuning:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Hyperparameter Tuning (Bayesian)
+        run: |
+          python tuner_cli_rewrite.py \
+            --config hyperparam_tuning/example_config.json \
+            --strategy bayesian \
+            --n_calls 15 \
+            --n_random_starts 5
+
+      - name: Run Hyperparameter Tuning (Grid)
+        run: |
+          python tuner_cli_rewrite.py \
+            --config hyperparam_tuning/example_grid_config.json \
+            --strategy grid

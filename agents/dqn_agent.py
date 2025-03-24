@@ -6,15 +6,6 @@ import numpy as np
 import logging
 from utils.data_loader import FlexibleDataLoader as DataLoader
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import random
-import numpy as np
-import logging
-
-from utils.data_loader import DataLoader
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 

@@ -1,15 +1,97 @@
-# config.yaml
+# ==============================================
+# Unified Hyperparameter Tuning Configuration
+# Supports both Grid Search and Bayesian Search
+# ==============================================
 
-agent:
-  input_size: 10
-  output_size: 2
-  hidden_sizes: [16, 32, 64, 128]
-  learning_rate: 0.001
-  epochs: 5
-  batch_size: 16
+model:
+  name: SLAI-Agent
+  version: v1.4.1
 
-evaluator:
-  threshold: 70.0
+run:
+  id_prefix: "run"
+  output_dir: "logs/"
+  plots_dir: "plots/"
 
-training:
-  num_samples: 500
+# ==========================
+# Hyperparameters Definition
+# ==========================
+
+hyperparameters:
+  learning_rate:
+    type: float
+    min: 0.0001
+    max: 0.1
+    prior: log-uniform   # used for Bayesian
+    steps: 5             # used for Grid
+  num_layers:
+    type: int
+    min: 1
+    max: 10
+    step: 1
+  batch_size:
+    type: int
+    min: 16
+    max: 256
+    step: 16
+  optimizer:
+    type: categorical
+    choices:
+      - adam
+      - sgd
+      - rmsprop
+  activation:
+    type: categorical
+    choices:
+      - relu
+      - tanh
+      - sigmoid
+  dropout_rate:
+    type: float
+    min: 0.0
+    max: 0.5
+    steps: 6
+  gamma:
+    type: float
+    min: 0.8
+    max: 0.999
+    steps: 5
+
+# ==========================
+# Tuning Strategy Settings
+# ==========================
+
+tuning:
+  strategy: bayesian         # options: bayesian, grid
+  n_calls: 20                # used for Bayesian
+  n_random_starts: 5         # used for Bayesian
+
+configs:
+  bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
+  grid_config: "hyperparam_tuning/example_grid_config.json"
+
+# ==========================
+# Thresholds and Alignment
+# ==========================
+
+alignment_thresholds:
+  bias_threshold: 0.1
+  reward_threshold: 70.0
+  statistical_parity: 0.1
+  equal_opportunity: 0.1
+  predictive_parity: 0.1
+  individual_fairness: 0.1
+
+rollback:
+  enabled: true
+  backup_dir: "models/backups/"
+
+retrain:
+  enabled: true
+  trigger_on_violation: true
+
+logging:
+  log_file: "logs/run.log"
+  level: INFO
+  rotate: true
+  max_size_mb: 10
+  backup_count: 5
