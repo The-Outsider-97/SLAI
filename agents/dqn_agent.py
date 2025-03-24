@@ -5,6 +5,18 @@ import random
 import numpy as np
 import logging
 from utils.data_loader import FlexibleDataLoader as DataLoader
+from agents.base_agent import BaseAgent
+
+class BaseAgent:
+    """
+    Base class for all agents.
+    """
+    def __init__(self, shared_memory=None):
+        self.shared_memory = shared_memory
+        self.name = "BaseAgent"
+
+    def execute(self, task_data):
+        raise NotImplementedError("Each agent must implement the execute method.")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
