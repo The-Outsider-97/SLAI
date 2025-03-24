@@ -1,7 +1,7 @@
-
 import os
 import sys
 import yaml
+import torch
 import logging
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
