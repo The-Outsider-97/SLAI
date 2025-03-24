@@ -1,0 +1,57 @@
+name: SLAI v1.4.1 CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-test-tune:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: |
+          pytest tests/ --maxfail=1 --disable-warnings -q
+
+      - name: Lint Code with Flake8
+        run: |
+          pip install flake8
+          flake8 . --max-line-length=120
+
+      - name: Convert YAML to JSON Configs
+        run: |
+          python hyperparam_tuning/yaml_to_json_converter.py
+
+      - name: Run Hyperparameter Tuning (Bayesian)
+        run: |
+          python tuner_cli_rewrite.py --config hyperparam_tuning/example_bayesian_config.json --strategy bayesian --n_calls 10 --n_random_starts 2
+
+      - name: Run Hyperparameter Tuning (Grid)
+        run: |
+          python tuner_cli_rewrite.py --config hyperparam_tuning/example_grid_config.json --strategy grid
+
+      - name: Archive Logs and Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: slaiv141-logs
+          path: |
+            logs/
+            plots/
