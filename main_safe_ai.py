@@ -9,6 +9,8 @@ from modules.security_manager import SecurityManager
 from modules.monitoring import Monitoring
 from modules.compliance_auditor import ComplianceAuditor
 from deployment.git.rollback_handler import RollbackHandler
+from agent.safe_ai_agent import SafeAI_Agent
+from collaborative.shared_memory import SharedMemory
 
 config_file = "config.yaml"
 with open(config_file, 'r') as f:
