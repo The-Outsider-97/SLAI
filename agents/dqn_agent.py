@@ -270,3 +270,15 @@ class DQNAgent:
 
             avg_loss = total_loss / batches
             logger.info(f"Epoch [{epoch + 1}/{epochs}] - Avg Loss: {avg_loss:.4f}")
+
+    def execute(self, task_data):
+        """
+        Simulate decision making and training.
+        """
+        state = task_data.get("state", [0.0] * self.state_size)
+        action = self.act(state)
+        return {
+            "status": "success",
+            "agent": "DQNAgent",
+            "action": action
+        }
