@@ -39,67 +39,124 @@ def initialize_shared_memory():
 
 def register_agents(collab_mgr, shared_memory):
     """
-    Register all agents to the Collaboration Manager.
+    Register all SLAI agents into the collaborative system.
+    Includes real parameters and placeholder configs.
     """
     print("\n=== Registering Agents ===")
 
-    # 1. Evolutionary Agent
+    # === 1. Evolutionary Agent ===
+    evolutionary_agent = EvolutionAgent(
+        input_size=10,
+        output_size=2,
+        config={
+            "hidden_sizes": [32, 64, 128],
+            "learning_rate": 0.001,
+            "population_size": 5,
+            "elite_fraction": 0.4
+        }
+    )
     collab_mgr.register_agent(
         agent_name="evolutionary",
-        agent_class=EvolutionaryAgent(shared_memory),
+        agent_class=evolutionary_agent,
         capabilities=["optimize", "evolve"]
     )
 
-    # 2. Basic RL Agent (CartPole DQN)
+    # === 2. DQN Agent ===
+    dqn_agent = DQNAgent(
+        state_size=4,
+        action_size=2,
+        config={
+            "gamma": 0.99,
+            "epsilon": 1.0,
+            "epsilon_min": 0.01,
+            "epsilon_decay": 0.995,
+            "learning_rate": 1e-3,
+            "hidden_size": 128,
+            "batch_size": 64,
+            "memory_capacity": 10000
+        }
+    )
     collab_mgr.register_agent(
         agent_name="dqn",
-        agent_class=DQNAgent(shared_memory),
+        agent_class=dqn_agent,
         capabilities=["reinforcement_learning", "decision_making"]
     )
 
-    # 3. Evolutionary DQN Agent
+    # === 3. Evolutionary DQN Agent ===
+    from gym.envs.classic_control import CartPoleEnv
+    env = CartPoleEnv()
+
+    evolutionary_dqn_agent = EvolutionaryDQNAgent(
+        env=env,
+        state_size=4,
+        action_size=2
+    )
     collab_mgr.register_agent(
         agent_name="evolutionary_dqn",
-        agent_class=EvolutionaryDQNAgent(shared_memory),
+        agent_class=evolutionary_dqn_agent,
         capabilities=["evolve", "reinforcement_learning"]
     )
 
-    # 4. Multi-Task RL Agent
+    # === 4. Multi-Task RL Agent ===
+    multitask_rl_agent = MultiTaskRLAgent(
+        state_size=4,
+        action_size=2,
+        num_tasks=10
+    )
     collab_mgr.register_agent(
         agent_name="multitask_rl",
-        agent_class=MultiTaskRLAgent(shared_memory),
+        agent_class=multitask_rl_agent,
         capabilities=["multi_task_learning", "adaptation"]
     )
 
-    # 5. Meta-Learning Agent (MAML)
+    # === 5. MAML Agent ===
+    maml_agent = MAMLAgent(
+        state_size=4,
+        action_size=2,
+        hidden_size=64,
+        meta_lr=0.001,
+        inner_lr=0.01,
+        gamma=0.99
+    )
     collab_mgr.register_agent(
         agent_name="maml",
-        agent_class=MAMLAgent(shared_memory),
+        agent_class=maml_agent,
         capabilities=["meta_learning", "fast_adaptation"]
     )
 
-    # 6. Recursive Self-Improvement Agent (RSI)
+    # === 6. Recursive Self-Improvement (RSI) Agent ===
+    from agents.rsi_agent import RSI_Agent  # You’ll need to implement or wrap this
+    rsi_agent = RSI_Agent(shared_memory)
     collab_mgr.register_agent(
         agent_name="rsi",
-        agent_class=RSI_Agent(shared_memory),
+        agent_class=rsi_agent,
         capabilities=["self_improvement", "autotune"]
     )
 
-    # 7. RL Agent (Auto-Tuning)
+    # === 7. RL Agent ===
+    rl_agent = RLAgent(
+        learning_rate=0.01,
+        num_layers=2,
+        activation_function="relu"
+    )
     collab_mgr.register_agent(
         agent_name="rl_agent",
-        agent_class=RLAgent(shared_memory),
+        agent_class=rl_agent,
         capabilities=["autotune", "reinforcement_learning"]
     )
 
-    # 8. Safe AI Agent
+    # === 8. Safe AI Agent ===
+    from agents.safe_ai_agent import SafeAI_Agent  # Also needs implementation
+    safe_ai_agent = SafeAI_Agent(shared_memory)
     collab_mgr.register_agent(
         agent_name="safe_ai",
-        agent_class=SafeAI_Agent(shared_memory),
+        agent_class=safe_ai_agent,
         capabilities=["safety", "risk_management"]
     )
 
-    print(f"\nTotal registered agents: {len(collab_mgr.list_agents())}\n")
+    print(f"\nTotal registered agents: {len(collab_mgr.list_agents())}")
+    for name in collab_mgr.list_agents():
+        print(f" - {name}")
 
 
 def execute_collaborative_tasks(collab_mgr):
