@@ -9,21 +9,6 @@ from collaborative.shared_memory import SharedMemory
 from agents.safe_ai_agent import SafeAI_Agent
 
 
-
-# Log training metrics
-monitor.record("model_trainer", {
-    "accuracy": 0.82,
-    "f1_score": 0.79
-})
-
-# Log safety audit
-monitor.record("safe_ai", {
-    "risk_score": 0.31
-})
-
-# Print last 5 metrics
-monitor.print_summary()
-
 def main():
     print("\n=== SLAI Data Preflight Audit ===")
 
@@ -103,6 +88,18 @@ def main():
 
     print("\n[✓] SafeAI Evaluation:")
     print(eval_summary)
+
+    # === 7. Monitoring: log performance & safety audit ===
+    monitor.record("model_trainer", {
+        "accuracy": eval_summary.get("accuracy", 0.0),
+        "f1_score": eval_summary.get("f1_score", 0.0)
+    })
+
+    monitor.record("safe_ai", {
+        "risk_score": result.get("risk_score", 0.0)
+    })
+
+    monitor.print_summary()
 
     print("\n=== SLAI Data Audit Complete ===\n")
 
