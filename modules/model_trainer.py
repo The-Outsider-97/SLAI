@@ -7,9 +7,19 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
 from sklearn.model_selection import train_test_split
+from modules.deployment.model_registry import register_model
 
 logger = logging.getLogger('SafeAI.ModelTrainer')
 logger.setLevel(logging.INFO)
+
+register_model(
+    model_name=f"{model_type}_v1",
+    path=model_path,
+    metadata={
+        "accuracy": metrics["accuracy"],
+        "type": model_type
+    }
+)
 
 class ModelTrainer:
     def __init__(self, shared_memory=None, output_dir="models/"):
