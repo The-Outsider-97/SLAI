@@ -23,6 +23,23 @@ file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backup
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
+# Strategy selection for hyperparam tuning
+strategy = unified_config["tuning"]["strategy"]
+
+if strategy == "grid":
+    config_file = unified_config["configs"]["grid_config"]
+else:
+    config_file = unified_config["configs"]["bayesian_config"]
+
+# Pass to HyperParamTuner
+tuner = HyperParamTuner(
+    config_path=config_file,
+    evaluation_function=self.rl_agent_evaluation,
+    strategy=strategy,
+    n_calls=unified_config["tuning"]["n_calls"],
+    n_random_starts=unified_config["tuning"]["n_random_starts"]
+)
+
 # Ensure logs directory exists
 os.makedirs('logs', exist_ok=True)
 
