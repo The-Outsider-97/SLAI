@@ -76,11 +76,13 @@ class DQNAgent:
     Supports pretraining with datasets and online learning.
     """
 
-    def __init__(self, state_size, action_size, config: dict):
+    def __init__(self, state_size, action_size, shared_memory=None, config: dict):
         self.state_size = state_size
         self.action_size = action_size
         self.config = config
-
+        self.name = "DQNAgent"
+        self.shared_memory = shared_memory
+        
         # Hyperparameters
         self.gamma = config.get('gamma', 0.99)
         self.epsilon = config.get('epsilon', 1.0)
@@ -108,6 +110,26 @@ class DQNAgent:
 
         # Step counter for periodic updates
         self.training_steps = 0
+
+    def execute(self, task_data):
+        """
+        Execute decision making or RL task.
+        Reads from shared memory and optionally writes.
+        """
+        print(f"[{self.name}] Executing task with data: {task_data}")
+
+        global_best = self.shared_memory.get("global_best_score") if self.shared_memory else None
+
+        # Simulated decision making
+        action = "move_left" if global_best and global_best > 0.6 else "move_right"
+
+        print(f"[{self.name}] Decision based on global_best_score={global_best}: {action}")
+
+        return {
+            "status": "success",
+            "agent": self.name,
+            "action": action
+        }
 
     def update_target_network(self, hard_update=False):
         """Soft or hard update for target network weights."""
