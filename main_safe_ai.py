@@ -27,13 +27,13 @@ with open(config_file, 'r') as f:
 
 # Configure logging
 os.makedirs(config['run']['output_dir'], exist_ok=True)
-logging.basicConfig(
-    filename=config['logging']['log_file'],
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=getattr(logging, config['logging']['level'].upper(), logging.INFO)
-)
-logger = logging.getLogger('SafeAI')
+#logging.basicConfig(
+#    filename=config['logging']['log_file'],
+#    filemode='a',
+#    format='%(asctime)s - %(levelname)s - %(message)s',
+#    level=getattr(logging, config['logging']['level'].upper(), logging.INFO)
+#)
+#logger = logging.getLogger('SafeAI')
 
 def main():
     logger.info(" Starting Safe AI Pipeline...")
