@@ -40,6 +40,17 @@ stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(stream_handler)
 
+# Also write to a fixed shared log (NOT logs/logger)
+general_log_path = "logs/app.log"
+safe_file_handler = logging.FileHandler(general_log_path, mode='a', encoding='utf-8')
+safe_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(safe_file_handler)
+
+# Also log to console
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(stream_handler)
+
 # Public interface
 def get_logger():
     return logger
