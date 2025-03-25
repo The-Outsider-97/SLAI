@@ -66,8 +66,14 @@ class AutoTuneOrchestrator:
         self.max_retries = 3
 
         # Core Handlers
-        self.rollback_handler = RollbackHandler(models_dir='models/', backup_dir='models/backups/')
-        self.hyperparam_tuner = HyperParamTuner(config_path='hyperparam_tuning/hyperparam_config.json')
+        self.rollback_handler = RollbackHandler(
+            models_dir='models/',
+            backup_dir='models/backups/'
+        )        
+        self.hyperparam_tuner = HyperParamTuner(
+            config_path='hyperparam_tuning/hyperparam_config.json',
+            evaluation_function=self.rl_agent_evaluation
+        )
 
         # Components
         self.logs_parser = LogsParser(
@@ -172,12 +178,12 @@ class AutoTuneOrchestrator:
 
             # STEP 7: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
-            best_params = self.run_hyperparam_optimization()
+            best_params = self.bayesian_optimizer.run()
             logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
             
             # STEP 8: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Grid Hyperparameter Search...")
-            best_params = self.run_hyperparam_optimization()
+            best_grid_params = self.grid_optimizer.run()
             logger.info(f"Best hyperparameters from GridSearch: {best_grid_params}")
             
             # STEP 9: Decide on Retraining or Rollback
