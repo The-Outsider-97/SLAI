@@ -65,7 +65,12 @@ class SLAIInterface:
 
     
     def _insert_initial_text(self):
-        self._append_terminal(\"\"\"\n==============================\n    SLAI Main Launcher Menu\n==============================\n
+        self._append_terminal("""
+        ==============================
+            SLAI Main Launcher Menu
+        ==============================
+        """)
+
 Select a module to run:
 
 1 - Evolutionary Agent (Current main.py logic)
