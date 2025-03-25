@@ -9,6 +9,9 @@ from logger import get_logger
 
 logger = get_logger()
 
+logger.info("Model loaded")
+logger.error(f"Failed to predict: {e}")
+
 app = Flask(__name__)
 
 # Load default model at startup or on demand
