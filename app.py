@@ -23,28 +23,6 @@ root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.addHandler(handler)
 
-# Configure global logger
-logger = logging.getLogger("SLAI")
-logger.setLevel(logging.INFO)
-
-# Attach queue handler
-queue_handler = QueueLogHandler(log_queue)
-queue_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(queue_handler)
-
-# Optional: also log to file or console
-file_handler = logging.FileHandler("logs/slai.log")
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(stream_handler)
-
-# Utility access
-get_logger = lambda: logger
-get_log_queue = lambda: log_queue
-
 app = Flask(
     __name__,
     template_folder='frontend/templates',
