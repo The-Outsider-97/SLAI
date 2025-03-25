@@ -5,6 +5,7 @@ import torch
 import logging
 import threading
 import subprocess
+from logger import get_logger
 from utils.logger import setup_logger
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
