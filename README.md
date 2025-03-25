@@ -50,6 +50,7 @@ Note: If you see an error about execution policy:
    pip install argparse
    pip install seaborn
    pip install scikit-optimize
+   pip install unittest
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
