@@ -268,4 +268,13 @@ class AutoTuneOrchestrator:
 
 if __name__ == "__main__":
     orchestrator = AutoTuneOrchestrator()
+
+    tuner = HyperParamTuner(
+        config_path=config_file,
+        evaluation_function=orchestrator.rl_agent_evaluation,
+        strategy=strategy,
+        n_calls=config["tuning"]["n_calls"],
+        n_random_starts=config["tuning"]["n_random_starts"]
+    )
+
     orchestrator.run_training_pipeline()
