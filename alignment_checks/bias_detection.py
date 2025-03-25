@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from logs.logging import get_logger, get_log_queue
 from itertools import product
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 from sklearn.calibration import calibration_curve
