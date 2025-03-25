@@ -32,15 +32,6 @@ if strategy == "grid":
 else:
     config_file = unified_config["configs"]["bayesian_config"]
 
-# Pass to HyperParamTuner
-tuner = HyperParamTuner(
-    config_path=config_file,
-    evaluation_function=self.rl_agent_evaluation,
-    strategy=strategy,
-    n_calls=unified_config["tuning"]["n_calls"],
-    n_random_starts=unified_config["tuning"]["n_random_starts"]
-)
-
 # Ensure logs directory exists
 os.makedirs('logs', exist_ok=True)
 
