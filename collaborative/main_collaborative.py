@@ -1,8 +1,11 @@
-import os
 import sys
 import logging
 import torch
 import time
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from collaboration_manager import CollaborationManager
 from shared_memory import SharedMemory
 
