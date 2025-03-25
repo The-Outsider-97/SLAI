@@ -1,10 +1,13 @@
 import torch
 import logging
 import time
+import tempfile
+import sys
+import os
+from logger import get_logger
 from tasks.task_sampler import TaskSampler
 from agents.maml_rl import MAMLAgent
 from utils.logger import setup_logger
-import tempfile
 
 def self_modify_and_restart(new_code):
     # Save a backup
