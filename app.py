@@ -44,6 +44,7 @@ def stream_metrics():
 
 @app.route('/logs')
 def stream_logs():
+    log_queue = get_log_queue()
     logs = []
     while not log_queue.empty():
         logs.append(log_queue.get())
