@@ -111,8 +111,20 @@ class BayesianSearch:
             'best_score': score
         }
 
+        # Safely cast non-serializable types (like np.int64)
+        def cast_json_compat(obj):
+            if isinstance(obj, dict):
+                return {k: cast_json_compat(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [cast_json_compat(i) for i in obj]
+            elif hasattr(obj, "item"):  # handles numpy scalar types
+                return obj.item()
+            return obj
+
+        output = cast_json_compat(output)
+
         filename = os.path.splitext(os.path.basename(self.config_file))[0]
-	output_file = os.path.join("logs", f"{filename}_best.json")
+        output_file = os.path.join("logs", f"{filename}_best.json")
 
         with open(output_file, 'w') as f:
             json.dump(output, f, indent=4)
