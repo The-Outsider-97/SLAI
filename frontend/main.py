@@ -71,7 +71,6 @@ class SLAIInterface:
         ==============================
 
             Select a module to run:
-        """)
 
 1 - Evolutionary Agent (Current main.py logic)
 2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py
@@ -84,7 +83,7 @@ class SLAIInterface:
 9 - Collaborative Agents (Task Routing, Shared Memory)  --> collaborative.main_collaborative.py
 
 0 - Exit
-        \"\"\")
+""")
 
     def _append_terminal(self, text):
         self.terminal.configure(state=\"normal\")
