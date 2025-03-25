@@ -4,7 +4,7 @@ import time
 import gymnasium as gym
 import torch
 import logging
-from logger import get_logger
+from logs.logger import get_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
 from utils.logger import setup_logger
 
