@@ -21,12 +21,6 @@ from agents.rl_agent import RLAgent
 from agents.rsi_agent import RSI_Agent
 from agents.safe_ai_agent import SafeAI_Agent
 
-shared_memory.set("safe_ai_recommendation", {
-    "risk_threshold": 0.2,
-    "last_violation": None,
-    "actions_taken": []
-})
-
 # 1. Run safety agent
 task_data = {
     "policy_risk_score": 0.27,
@@ -235,6 +229,27 @@ def main():
 
     # Step 1: Initialize shared memory
     shared_memory = initialize_shared_memory()
+
+    #Safe AI pre-population
+    shared_memory.set("safe_ai_recommendation", {
+        "risk_threshold": 0.2,  # max acceptable risk level
+        "parity_diff_threshold": 0.1,  # fairness threshold
+        "tpr_diff_threshold": 0.1,  # true positive rate threshold
+        "last_violation": {
+            "metric": None,
+            "value": None,
+            "timestamp": None
+        },
+        "violation_history": [],  # track all violations
+        "actions_taken": [],  # ['rollback', 'hyperparam_tune', 'agent_switch']
+        "recommended_action": None,  # current system suggestion
+        "evaluated_agents": {},  # agent_id: {"score": float, "bias": float}
+        "performance_metrics": {
+            "last_reward": None,
+            "fairness_score": None
+        },
+        "safe_config_backup": None  # pointer to last known safe config
+    })
 
     # Step 2: Initialize collaboration manager
     collab_mgr = CollaborationManager()
