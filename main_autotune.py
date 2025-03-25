@@ -40,12 +40,12 @@ logger = logging.getLogger('AutoTuneOrchestrator')
 logger.setLevel(logging.INFO)
 
 # Console handler (stdout)
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(stream=sys.stdout)
 console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(console_formatter)
 
 # File handler (run.log)
-file_handler = logging.FileHandler('logs/run.log', mode='a')
+file_handler = logging.FileHandler('logs/run.log', mode='a', encoding='utf-8')
 file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(file_formatter)
 
