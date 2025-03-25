@@ -35,6 +35,35 @@ class SLAIInterface:
         self._insert_initial_text()
         self._update_loop()
 
+        # Stop Button
+        self.stop_btn = tk.Button(root, text="Stop Agent", bg="#660000", fg="white",
+                                  command=self._handle_stop)
+        self.stop_btn.place(x=10, y=10)
+
+        #Save Button
+        self.save_btn = tk.Button(root, text="Save Logs", command=self._save_logs_to_file)
+        self.save_btn.place(x=120, y=10)
+
+        self.save_metrics_btn = tk.Button(root, text="Save Metrics", command=self._save_metrics_to_file)
+        self.save_metrics_btn.place(x=220, y=10)
+
+    def _handle_stop(self):
+        self.log_queue.put("⛔ [USER] Stop requested.")
+        self.shared_memory.set("stop", True)  # if shared_memory is passed in
+
+    def _save_logs_to_file(self, filename="logs/ui_run_log.txt"):
+        with open(filename, "w") as f:
+            text = self.terminal.get("1.0", "end-1c")
+            f.write(text)
+        self.log_queue.put(f"[✓] Logs saved to {filename}")
+
+    def _save_metrics_to_file(self, filename="logs/ui_metrics.json"):
+        import json
+        with open(filename, "w") as f:
+            json.dump(self.latest_metrics, f, indent=2)
+        self.log_queue.put(f"[✓] Metrics saved to {filename}")
+
+    
     def _insert_initial_text(self):
         self._append_terminal(\"\"\"\n==============================\n    SLAI Main Launcher Menu\n==============================\n
 Select a module to run:
