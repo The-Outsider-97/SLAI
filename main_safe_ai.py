@@ -89,6 +89,23 @@ def main():
 
         logger.info(" Safe AI Pipeline completed successfully!")
 
+        tuner = HyperparamTuner(
+            agent_class=SafeAI_Agent,
+            search_space={
+                "risk_threshold": [0.3, 0.2, 0.1],
+                "compliance_weight": [0.5, 1.0]  # Optional if your agent supports it
+            },
+            base_task={
+                "policy_risk_score": 0.27,
+                "task_type": "reinforcement_learning"
+            },
+            shared_memory=shared_memory,
+            max_trials=6
+        )
+
+        best_result = tuner.run_grid_search()
+        logger.info(f"Best Tuning Result: {best_result}")
+    
     except Exception as e:
         logger.error(f" Pipeline error: {e}", exc_info=True)
         if config['rollback'].get('enabled', False):
