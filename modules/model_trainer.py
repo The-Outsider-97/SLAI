@@ -12,15 +12,6 @@ from modules.deployment.model_registry import register_model
 logger = logging.getLogger('SafeAI.ModelTrainer')
 logger.setLevel(logging.INFO)
 
-register_model(
-    model_name=f"{model_type}_v1",
-    path=model_path,
-    metadata={
-        "accuracy": metrics["accuracy"],
-        "type": model_type
-    }
-)
-
 class ModelTrainer:
     def __init__(self, shared_memory=None, output_dir="models/"):
         self.shared_memory = shared_memory
@@ -59,6 +50,19 @@ class ModelTrainer:
             model_path = os.path.join(self.output_dir, f"{model_type}_model.pkl")
             joblib.dump(model, model_path)
             logger.info(f"Model saved to: {model_path}")
+
+            # Register model (moved here from global scope)
+            try:
+                register_model(
+                    model_name=f"{model_type}_v1",
+                    path=model_path,
+                    metadata={
+                        "accuracy": metrics["accuracy"],
+                        "type": model_type
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Model registration failed: {e}")
 
             # Share results
             if self.shared_memory:
