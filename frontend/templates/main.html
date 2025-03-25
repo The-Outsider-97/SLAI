@@ -10,7 +10,16 @@
 
 </head>
 <body>
+  
+  <!-- Top bar: logo + window buttons -->
+  <div class="d-flex justify-content-between align-items-center px-3 py-2">
+    {% include 'components/logo.html' %}
+    {% include 'components/window_controls.html' %}
+  </div>
 
+  <!-- Buttons -->
+  {% include 'components/buttons.html' %}
+  
   <div class="container-fluid p-0 d-flex flex-row">
     
     <!-- Left Terminal Panel -->
@@ -42,6 +51,7 @@
 
     <!-- Right Visual Output Panel -->
     <div id="results-panel" class="col-6">
+      {% include 'components/metrics_box.html' %}
       <div id="results-title">[Results Visualized]</div>
     </div>
 
