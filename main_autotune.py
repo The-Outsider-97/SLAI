@@ -64,7 +64,7 @@ class AutoTuneOrchestrator:
         # Configs
         self.bias_threshold = 0.1
         self.reward_threshold = 70.0
-        self.max_retries = 3
+        self.max_retries = 5
 
         # Core Handlers
         self.rollback_handler = RollbackHandler(
