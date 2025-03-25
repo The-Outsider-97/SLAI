@@ -2,6 +2,7 @@ import os
 import sys
 import torch
 import subprocess
+from logger import get_logger
 from modules.data_handler import DataHandler
 from modules.compliance_auditor import ComplianceAuditor
 from modules.monitoring import Monitoring
