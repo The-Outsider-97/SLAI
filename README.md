@@ -117,8 +117,8 @@ Start Docker daemon first.
 - [x] Meta-Learning (MAML / Reptile)
 - [x] Recursive Self-Improvement (Codegen + Evaluation Loop)
 - [x] Safe AI & Alignment Checks
-- [ ] Collaborative Agents & Task Routing
-- [ ] Automated R&D Loop
+- [x] Collaborative Agents & Task Routing
+- [x] Automated R&D Loop
 
 ___
 ---
