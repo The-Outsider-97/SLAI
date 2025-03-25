@@ -72,6 +72,21 @@ def main():
             logger.info("Starting monitoring...")
             monitoring.start(model, data_handler)
 
+        # Step 6: Evaluation (SafeAI Agent)
+        logger.info("Evaluating SafeAI agent...")
+        evaluator = Evaluator(shared_memory=SharedMemory())
+
+        eval_result = evaluator.evaluate_agent(
+            agent=SafeAI_Agent(shared_memory=SharedMemory()),
+            task_data={
+                "policy_risk_score": 0.32,
+                "task_type": "meta_learning"
+            },
+            metadata={"experiment": "baseline_risk_check"}
+        )
+
+        logger.info(f"SafeAI Evaluation Result: {eval_result}")
+
         logger.info(" Safe AI Pipeline completed successfully!")
 
     except Exception as e:
