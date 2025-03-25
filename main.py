@@ -9,7 +9,7 @@ import subprocess
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from logger import logger
+from logs.logger import get_logger
 from utils.logger import setup_logger
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
