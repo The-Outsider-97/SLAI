@@ -1,28 +1,28 @@
+from shared_memory import SharedMemory
+
 class AgentRegistry:
     """
-    Registry system to track and manage agents and their supported capabilities.
-    Each agent is associated with a set of task types it can handle.
+    Centralized registry for agents and their capabilities.
+    Also integrates with SharedMemory for distributed coordination.
     """
 
-    def __init__(self):
-        # Internal storage for registered agents
-        # Format: {agent_name: {"class": agent_class, "capabilities": [task_type1, task_type2, ...]}}
+    def __init__(self, shared_memory: SharedMemory = None):
+        """
+        Args:
+            shared_memory (SharedMemory): Optional shared memory instance.
+        """
         self._agents = {}
+        self.shared_memory = shared_memory or SharedMemory()
 
     def register(self, name, agent_class, capabilities):
         """
-        Register a new agent.
+        Register a new agent and update shared memory.
 
         Args:
-            name (str): Unique identifier for the agent.
-            agent_class (object): Class or instance of the agent with an `execute()` method.
-            capabilities (list[str]): Task types the agent can perform.
-
-        Raises:
-            ValueError: If the agent name is already registered or input is invalid.
+            name (str): Unique agent identifier.
+            agent_class (object): Agent instance or class with an `execute()` method.
+            capabilities (list[str]): Task types this agent can perform.
         """
-        if not isinstance(name, str) or not name:
-            raise ValueError("Agent name must be a non-empty string.")
         if name in self._agents:
             raise ValueError(f"Agent '{name}' is already registered.")
         if not hasattr(agent_class, "execute") or not callable(agent_class.execute):
@@ -35,60 +35,78 @@ class AgentRegistry:
             "capabilities": capabilities
         }
 
-    def get_agent_for_task(self, task_type):
+        # Store in shared memory for system-wide awareness
+        self.shared_memory.set(f"agent:{name}", {
+            "status": "active",
+            "capabilities": capabilities
+        })
+
+    def unregister(self, name):
         """
-        Retrieve the first agent capable of handling the given task type.
+        Remove an agent from the registry and shared memory.
 
         Args:
-            task_type (str): Type of task to match.
+            name (str): Agent name.
+        """
+        if name not in self._agents:
+            raise KeyError(f"Agent '{name}' is not registered.")
+
+        del self._agents[name]
+        self.shared_memory.delete(f"agent:{name}")
+
+    def update_status(self, name, status: str):
+        """
+        Update the status of an agent in shared memory.
+
+        Args:
+            name (str): Agent identifier.
+            status (str): Status to broadcast (e.g., 'busy', 'idle', 'offline').
+        """
+        if name not in self._agents:
+            raise KeyError(f"Agent '{name}' not registered.")
+
+        agent_key = f"agent:{name}"
+        record = self.shared_memory.get(agent_key) or {}
+        record["status"] = status
+        self.shared_memory.set(agent_key, record)
+
+    def get_status(self, name):
+        """
+        Get the current shared memory status of an agent.
+
+        Args:
+            name (str): Agent name.
 
         Returns:
-            tuple[str, object]: Agent name and instance.
+            str: Status string (e.g., 'active', 'busy', etc.)
+        """
+        return self.shared_memory.get(f"agent:{name}").get("status", "unknown")
 
-        Raises:
-            LookupError: If no suitable agent is found.
+    def get_agent_for_task(self, task_type):
+        """
+        Find a suitable agent for the given task type.
+
+        Returns:
+            tuple[str, object]: (Agent name, class)
         """
         for name, info in self._agents.items():
             if task_type in info["capabilities"]:
                 return name, info["class"]
-        raise LookupError(f"No agent found capable of handling task type: '{task_type}'")
+        raise LookupError(f"No agent found for task type '{task_type}'")
 
     def list_agents(self):
         """
-        Return a dictionary of all registered agents and their capabilities.
+        Return a list of all registered agents with capabilities.
 
         Returns:
-            dict[str, list[str]]: Mapping of agent names to their capability lists.
+            dict[str, list[str]]
         """
         return {name: info["capabilities"] for name, info in self._agents.items()}
 
     def get_agent_class(self, name):
         """
-        Get the agent class/instance for a given name.
-
-        Args:
-            name (str): Agent identifier.
-
-        Returns:
-            object: Registered agent instance or class.
-
-        Raises:
-            KeyError: If the agent name is not registered.
-        """
-        if name not in self._agents:
-            raise KeyError(f"Agent '{name}' is not registered.")
-        return self._agents[name]["class"]
-
-    def unregister(self, name):
-        """
-        Remove an agent from the registry.
-
-        Args:
-            name (str): Agent identifier.
-
-        Raises:
-            KeyError: If the agent is not found.
+        Get agent class instance by name.
         """
         if name not in self._agents:
             raise KeyError(f"Agent '{name}' not found.")
-        del self._agents[name]
+        return self._agents[name]["class"]
