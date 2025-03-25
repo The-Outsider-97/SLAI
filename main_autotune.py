@@ -178,7 +178,7 @@ class AutoTuneOrchestrator:
 
             # STEP 7: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
-            best_params = self.bayesian_optimizer.run()
+            best_params, best_score = self.bayesian_optimizer.run_search()
             logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
             
             # STEP 8: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
