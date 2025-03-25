@@ -39,34 +39,14 @@
 
   <!-- Buttons -->
   {% include 'components/buttons.html' %}
-  
+  <div id="log-loading" class="text-light small px-3 py-2">Loading logs...</div>
+
   <div class="container-fluid p-0 d-flex flex-row">
-    
     <!-- Left Terminal Panel -->
     <div id="terminal-panel" class="col-6">
-      <div class="log-line">==============================</div>
-      <div class="log-line">    SLAI Main Launcher Menu</div>
-      <div class="log-line">==============================</div>
-      <br />
-      <div class="log-line">Select a module to run:</div><br />
-
-      <div class="log-line">1 - Evolutionary Agent (Current main.py logic)</div>
-      <div class="log-line">2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py</div>
-      <div class="log-line">3 - Evolutionary DQN Agent                              --> main_cartpole_evolve.py</div>
-      <div class="log-line">4 - Multi-Task RL Agent                                 --> main_multitask.py</div>
-      <div class="log-line">5 - Meta-Learning Agent (MAML)                          --> main_maml.py</div>
-      <div class="log-line">6 - Recursive Self-Improvement (RSI)                    --> main_rsi.py</div>
-      <div class="log-line">7 - RL Agent                                            --> main_autotune.py</div>
-      <div class="log-line">8 - Safe AI Agent                                       --> main_safe_ai.py</div>
-      <div class="log-line">9 - Collaborative Agents (Task Routing, Shared Memory)  --> collaborative.main_collaborative.py</div><br />
-      <div class="log-line">0 - Exit</div><br />
-
-      <!-- Simulated live log output -->
-      <div class="log-line">2025-03-24 20:02:19,311 INFO  Evolved Best Model   Gen 6: 52.80% accuracy</div>
-      <div class="log-line">2025-03-24 20:02:19,312 INFO  Starting Evolutionary Generation 7</div>
-      <div class="log-line">2025-03-24 20:02:19,666 INFO  Evolved Best Model   Gen 7: 52.60% accuracy</div>
-      <div class="log-line">2025-03-24 20:02:20,942 INFO  Training completed.</div>
-      <div class="log-line">2025-03-24 20:02:20,944 INFO  Best overall model achieved 54.20% accuracy</div>
+      <div id="log-output">
+        <div class="log-line">Initial Logs...</div>
+      </div>
     </div>
 
     <!-- Right Visual Output Panel -->
@@ -77,28 +57,52 @@
 
   </div>
 <script>
+  // Fetch logs and scroll to bottom
   async function fetchLogs() {
     const res = await fetch("/logs");
     const logs = await res.json();
-    const terminal = document.getElementById("terminal-panel");
+    const terminal = document.getElementById("log-output");
+
     terminal.innerHTML = logs.map(l => `<div class="log-line">${l}</div>`).join("");
+
+    // Auto-scroll to bottom
+    terminal.scrollTop = terminal.scrollHeight;
   }
-  setInterval(fetchLogs, 2000); // update every 2s
-</script>
-<script>
+
+  //Fetch metrics and update values
+  async function fetchMetrics() {
+    const res = await fetch("/metrics");
+    const metrics = await res.json();
+
+    document.getElementById("acc-value").textContent = (metrics.accuracy * 100).toFixed(2) + '%';
+    document.getElementById("risk-value").textContent = metrics.risk_score.toFixed(2);
+    document.getElementById("reward-value").textContent = metrics.reward.toFixed(2);
+  }
+
+  // Launch selected agent
   function launchAgent(filename) {
-    alert(`Launching ${filename}...`);
-    // Here you could POST to Flask or open a subprocess via endpoint
+    fetch("/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: filename })
+    })
+    .then(res => res.json())
+    .then(data => alert(`✅ ${data.file} launched!`));
   }
-</script>
-<script>
+
+  // Window controls
   function minimize() {
     alert("Minimize not supported in browser. In app mode, this would minimize.");
   }
 
   function closeApp() {
-    window.close(); // may not work in browser tab
+    window.close();
   }
+
+  // Re-fetch every 2 seconds
+  setInterval(fetchLogs, 2000);
+  setInterval(fetchMetrics, 2000);
 </script>
+
 </body>
 </html>
