@@ -94,13 +94,11 @@ class BayesianSearch:
             random_state=42
         )
 
-        best_params = {dim.name: val for dim, val in zip(self.dimensions, result.x)}
-        best_score = -result.fun
-        logger.info("Best parameters found: %s", best_params)
-        logger.info("Best score achieved: %.4f", best_score)
+        best_params = dict(zip([dim.name for dim in self.dimensions], result.x))
+        best_score = -result.fun  # Convert back to positive score
+        all_results = result
 
-        self._save_best_params(best_params, best_score)
-        return best_params
+        return best_params, best_score, all_results
 
     def _save_best_params(self, params, score):
         """
