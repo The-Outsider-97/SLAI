@@ -10,7 +10,7 @@ from collaboration_manager import CollaborationManager
 from shared_memory import SharedMemory
 
 # Import all agents (aligned with your folder and launcher menu)
-from agents.evolution_agent import EvolutionaryAgent
+from agents.evolution_agent import EvolutionAgent
 from agents.dqn_agent import DQNAgent
 from agents.evolutionary_dqn import EvolutionaryDQNAgent
 from agents.multitask_rl import MultiTaskRLAgent
