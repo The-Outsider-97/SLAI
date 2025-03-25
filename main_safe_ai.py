@@ -95,6 +95,32 @@ def main():
             logger.info(" Rolling back...")
             rollback_handler.rollback_model()
 
+        logger.info("Running multiple SafeAI experiments...")
+
+        manager = ExperimentManager(shared_memory=shared_memory)
+
+        results = manager.run_experiments(
+            agent_configs=[
+                {
+                    "agent_class": SafeAI_Agent,
+                    "init_args": {"shared_memory": shared_memory, "risk_threshold": 0.2},
+                    "name": "safe_v1"
+                },
+                {
+                    "agent_class": SafeAI_Agent,
+                    "init_args": {"shared_memory": shared_memory, "risk_threshold": 0.1},
+                    "name": "safe_strict"
+                }
+            ],
+            task_data={
+                "policy_risk_score": 0.27,
+                "task_type": "reinforcement_learning"
+            }
+        )
+
+        top = manager.summarize_results(sort_key="risk_score", minimize=True)[0]
+        logger.info(f"🏆 Best Agent: {top['agent']} with score {top['result']['risk_score']}")
+    
     finally:
         logger.info("Pipeline finished.")
 
