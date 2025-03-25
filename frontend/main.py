@@ -86,10 +86,10 @@ class SLAIInterface:
 """)
 
     def _append_terminal(self, text):
-        self.terminal.configure(state=\"normal\")
-        self.terminal.insert(\"end\", text + \"\\n\")
-        self.terminal.see(\"end\")
-        self.terminal.configure(state=\"disabled\")
+        self.terminal.configure(state="normal")
+        self.terminal.insert("end", text + "\n")
+        self.terminal.see("end")
+        self.terminal.configure(state="disabled")
 
     def _update_loop(self):
         try:
@@ -99,7 +99,7 @@ class SLAIInterface:
 
             while not self.metric_queue.empty():
                 metrics = self.metric_queue.get_nowait()
-                formatted = \"\\n\".join(f\"{k}: {v:.2f}\" for k, v in metrics.items())
+                formatted = "\n".join(f"{k}: {v:.2f}" for k, v in metrics.items())
                 self.metrics_label.config(text=formatted)
 
         except queue.Empty:
