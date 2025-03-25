@@ -66,11 +66,11 @@ class SLAIInterface:
     
     def _insert_initial_text(self):
         self._append_terminal("""
-        ==============================
-            SLAI Main Launcher Menu
-        ==============================
+==============================
+    SLAI Main Launcher Menu
+==============================
 
-            Select a module to run:
+    Select a module to run:
 
 1 - Evolutionary Agent (Current main.py logic)
 2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py
