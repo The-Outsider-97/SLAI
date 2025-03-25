@@ -1,3 +1,4 @@
+fixed_main_py = """
 import os
 import sys
 import yaml
@@ -7,28 +8,11 @@ import logging
 import threading
 import subprocess
 
-# Add parent directory to sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
+from torch.utils.data import DataLoader, TensorDataset
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
-from torch.utils.data import DataLoader, TensorDataset
 from frontend.main import launch_ui
 from pathlib import Path
-
-# Rewrite the main.py script with improvements and error handling
-main_py_path = Path("/mnt/data/fixed_main.py")
-
-fixed_main_py = """
-import os
-import sys
-import yaml
-import torch
-import logging
-import queue
-import subprocess
-
-from torch.utils.data import DataLoader, TensorDataset
 
 # Add parent directory to sys.path for relative imports to work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
