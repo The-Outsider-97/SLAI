@@ -191,7 +191,7 @@ def main():
         elif choice == "8":
             run_script("main_safe_ai.py")
         elif choice == "9":
-            run_script("main_collaborative.py")
+            run_script("collaborative/main_collaborative.py")
         elif choice == "0":
             logger.info("Exiting SLAI launcher. Goodbye!")
             sys.exit(0)
