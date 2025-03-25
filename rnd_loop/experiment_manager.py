@@ -71,11 +71,4 @@ class ExperimentManager:
         metrics = top["result"]
         register_model(model_name, path="models/best_model_placeholder.pkl", metadata=metrics)
 
-        return {
-            "risk_score": 0.21,
-            "is_safe": True,
-            "metrics": {
-                "risk_score": 0.21,
-                "compliance": 0.95
-            }
-        }
+        return sorted_results
