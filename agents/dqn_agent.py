@@ -76,7 +76,7 @@ class DQNAgent:
     Supports pretraining with datasets and online learning.
     """
 
-    def __init__(self, state_size, action_size, shared_memory=None, config: dict):
+    def __init__(self, state_size, action_size, config: dict, shared_memory=None):
         self.state_size = state_size
         self.action_size = action_size
         self.config = config
