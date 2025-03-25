@@ -25,13 +25,13 @@ with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 # Strategy selection for hyperparam tuning
-strategy = unified_config["tuning"]["strategy"]
+strategy = config["tuning"]["strategy"]
 
 if strategy == "grid":
-    config_file = unified_config["configs"]["grid_config"]
+    config_file = config["configs"]["grid_config"]
 else:
-    config_file = unified_config["configs"]["bayesian_config"]
-
+    config_file = config["configs"]["bayesian_config"]
+    
 # Ensure logs directory exists
 os.makedirs('logs', exist_ok=True)
 
