@@ -14,7 +14,10 @@ from evaluators.performance_evaluator import PerformanceEvaluator
 from torch.utils.data import DataLoader, TensorDataset
 from frontend.main import launch_ui
 
-launch_ui()
+log_queue = queue.Queue()
+metric_queue = queue.Queue()
+
+launch_ui(log_queue, metric_queue)
 
 # ============================
 # SETUP LOGGER FIRST
