@@ -179,11 +179,11 @@ class AutoTuneOrchestrator:
             # STEP 7: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
             best_params, best_score, _ = self.bayesian_optimizer.run_search()
-            logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}")
+            logger.info(f"Best hyperparameters from Bayesian optimization: {best_params}") 
             
             # STEP 8: Run Bayesian Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Grid Hyperparameter Search...")
-            best_grid_params = self.grid_optimizer.run()
+            best_grid_params = self.grid_optimizer.run_search()
             logger.info(f"Best hyperparameters from GridSearch: {best_grid_params}")
             
             # STEP 9: Decide on Retraining or Rollback
