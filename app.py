@@ -2,6 +2,15 @@ from flask import Flask, render_template
 from flask import jsonify
 import time
 
+@app.route('/metrics')
+def stream_metrics():
+    dummy_metrics = {
+        "accuracy": 0.542,
+        "risk_score": 0.27,
+        "reward": 129.6
+    }
+    return jsonify(dummy_metrics)
+
 @app.route('/logs')
 def stream_logs():
     # Replace this with reading from a file or a logging queue
