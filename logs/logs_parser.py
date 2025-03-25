@@ -171,7 +171,7 @@ if __name__ == "__main__":
     # Example usage of LogsParser with rollback handler
     parser = LogsParser(
         log_dir='logs/',
-        bias_threshold=0.1,
+        bias_threshold=0.2,
         reward_threshold=70.0,
         hyperparam_tuner=DummyTuner(),
         rollback_handler=rollback_handler
