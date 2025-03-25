@@ -31,7 +31,7 @@ if strategy == "grid":
     config_file = config["configs"]["grid_config"]
 else:
     config_file = config["configs"]["bayesian_config"]
-    
+
 # Ensure logs directory exists
 os.makedirs('logs', exist_ok=True)
 
@@ -108,7 +108,7 @@ class AutoTuneOrchestrator:
             }
         )
         self.bayesian_optimizer = BayesianSearch(
-            config_file='hyperparam_tuning/example_config.json',
+            config_file=config["configs"]["bayesian_config"],
             evaluation_function=self.rl_agent_evaluation,
             n_calls=10,
             n_random_starts=2
