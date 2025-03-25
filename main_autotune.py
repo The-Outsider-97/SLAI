@@ -6,6 +6,7 @@ import subprocess
 import json
 import yaml
 from logs.logger import get_logger
+from logs.logs_parser import LogsParser
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
@@ -16,7 +17,6 @@ from deployment.git.rollback_handler import RollbackHandler
 from hyperparam_tuning.bayesian_search import BayesianSearch
 from hyperparam_tuning.grid_search import GridSearch
 from hyperparam_tuning.tuner import HyperParamTuner
-from logs_parser import LogsParser
 from logging.handlers import RotatingFileHandler
 
 file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backupCount=5)
