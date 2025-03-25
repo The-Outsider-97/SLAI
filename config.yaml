@@ -27,44 +27,45 @@ evaluator:
 # ==========================
 
 hyperparameters:
-  learning_rate:
+  - name: learning_rate
     type: float
     min: 0.0001
     max: 0.1
-    prior: log-uniform   # used for Bayesian
-    steps: 5             # used for Grid
-  num_layers:
+    prior: log-uniform
+    steps: 5
+
+  - name: num_layers
     type: int
     min: 1
     max: 10
     step: 1
-  batch_size:
+
+  - name: batch_size
     type: int
     min: 16
     max: 256
     step: 16
-  optimizer:
+
+  - name: optimizer
     type: categorical
-    choices:
-      - adam
-      - sgd
-      - rmsprop
-  activation:
+    choices: [adam, sgd, rmsprop]
+
+  - name: activation
     type: categorical
-    choices:
-      - relu
-      - tanh
-      - sigmoid
-  dropout_rate:
+    choices: [relu, tanh, sigmoid]
+
+  - name: dropout_rate
     type: float
     min: 0.0
     max: 0.5
     steps: 6
-  gamma:
+
+  - name: gamma
     type: float
     min: 0.8
     max: 0.999
     steps: 5
+
 
 # ==========================
 # Tuning Strategy Settings
