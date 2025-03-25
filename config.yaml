@@ -101,7 +101,7 @@ retrain:
   trigger_on_violation: true
 
 logging:
-  log_file: "logs/run.log"
+  log_file: "logs/app.log"
   level: INFO
   rotate: true
   max_size_mb: 50
