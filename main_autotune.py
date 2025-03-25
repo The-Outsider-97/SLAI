@@ -71,7 +71,7 @@ class AutoTuneOrchestrator:
             backup_dir='models/backups/'
         )        
         self.hyperparam_tuner = HyperParamTuner(
-            config_path='hyperparam_tuning/hyperparam_config.json',
+            config_path='config.yaml',
             evaluation_function=self.rl_agent_evaluation
         )
 
