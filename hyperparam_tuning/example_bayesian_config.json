@@ -11,13 +11,15 @@
       "name": "num_layers",
       "type": "int",
       "min": 1,
-      "max": 10
+      "max": 10,
+      "step": 1
     },
     {
       "name": "batch_size",
       "type": "int",
       "min": 16,
-      "max": 256
+      "max": 256,
+      "step": 16
     },
     {
       "name": "optimizer",
@@ -33,13 +35,15 @@
       "name": "dropout_rate",
       "type": "float",
       "min": 0.0,
-      "max": 0.5
+      "max": 0.5,
+      "steps": 6
     },
     {
       "name": "gamma",
       "type": "float",
       "min": 0.8,
-      "max": 0.999
+      "max": 0.999,
+      "steps": 5
     }
   ]
 }
