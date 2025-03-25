@@ -1,8 +1,6 @@
 from registry import AgentRegistry
 from task_router import TaskRouter
 
-self.router = TaskRouter(self.registry, shared_memory=self.shared_memory)
-
 class CollaborationManager:
     """
     Central manager that registers agents and coordinates collaborative task execution
