@@ -1,6 +1,5 @@
-from collaborative.registry import AgentRegistry
-from collaborative.task_router import TaskRouter
-from collaborative.task_router import TaskRouter
+from registry import AgentRegistry
+from task_router import TaskRouter
 
 self.router = TaskRouter(self.registry, shared_memory=self.shared_memory)
 
