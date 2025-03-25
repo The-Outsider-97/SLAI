@@ -4,6 +4,7 @@ import yaml
 import json
 import time
 import torch
+import shutil
 import logging
 import subprocess
 from logs.logger import get_logger
@@ -19,6 +20,8 @@ from hyperparam_tuning.bayesian_search import BayesianSearch
 from hyperparam_tuning.grid_search import GridSearch
 from hyperparam_tuning.tuner import HyperParamTuner
 from logging.handlers import RotatingFileHandler
+
+os.makedirs("models/", exist_ok=True)
 
 file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backupCount=5)
 
@@ -69,7 +72,7 @@ class AutoTuneOrchestrator:
         # Core Handlers
         self.rollback_handler = RollbackHandler(
             models_dir='models/',
-            backup_dir='models/backups/'
+            backup_dir='backups/'
         )        
         self.hyperparam_tuner = HyperParamTuner(
             config_path='config.yaml',
