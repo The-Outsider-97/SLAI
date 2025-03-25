@@ -6,6 +6,7 @@ import intertools
 import random
 import queue
 import json
+from datetime import datetime
 
 # Shared logging queue instance
 log_queue = queue.Queue()
@@ -28,11 +29,14 @@ queue_handler = QueueLogHandler(log_queue)
 queue_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(queue_handler)
 
-# Optional: also log to file or console
-file_handler = logging.FileHandler("logs/slai.log")
+# Optional: log to file per agent/session
+session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+os.makedirs("logs/sessions", exist_ok=True)
+file_handler = logging.FileHandler(f"logs/sessions/session_{session_id}.log")
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
+# Optional: also log to file or console
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(stream_handler)
