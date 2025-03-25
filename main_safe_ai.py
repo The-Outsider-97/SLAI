@@ -4,6 +4,7 @@ import yaml
 import torch
 import logging
 
+from logger import get_logger
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
@@ -15,6 +16,10 @@ from rnd_loop.hyperparam_tuner import HyperparamTuner
 from deployment.git.rollback_handler import RollbackHandler
 from agent.safe_ai_agent import SafeAI_Agent
 from collaborative.shared_memory import SharedMemory
+
+logger = get_logger()
+logger.info("Training started")
+logger.warning("Risk score too high")
 
 config_file = "config.yaml"
 with open(config_file, 'r') as f:
