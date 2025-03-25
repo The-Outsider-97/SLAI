@@ -3,8 +3,8 @@ import sys
 import logging
 import torch
 import time
-from collaborative.collaboration_manager import CollaborationManager
-from collaborative.shared_memory import SharedMemory
+from collaboration_manager import CollaborationManager
+from shared_memory import SharedMemory
 
 # Import all agents (aligned with your folder and launcher menu)
 from agents.evolution_agent import EvolutionaryAgent
