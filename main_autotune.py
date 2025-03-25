@@ -175,7 +175,6 @@ class AutoTuneOrchestrator:
 
             # STEP 6: Hyperparameter Optimization
             logger.info("🔎 Triggering Hyperparameter Tuning from CLI...")
-            self.run_external_tuner(strategy='bayesian')
 
             # STEP 7: Run Grid Hyperparameter Optimization (after agent evaluation cycle)
             logger.info("🔎 Running Bayesian Hyperparameter Search...")
