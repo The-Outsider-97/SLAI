@@ -14,39 +14,61 @@ from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
 from torch.utils.data import DataLoader, TensorDataset
 from frontend.main import launch_ui
+from pathlib import Path
 
-log_queue = queue.Queue()
+# Rewrite the main.py script with improvements and error handling
+main_py_path = Path("/mnt/data/fixed_main.py")
+
+fixed_main_py = """
+import os
+import sys
+import yaml
+import torch
+import logging
+import queue
+import subprocess
+
+from torch.utils.data import DataLoader, TensorDataset
+
+# Add parent directory to sys.path for relative imports to work
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# ========== INIT LOGGING SYSTEM ==========
+try:
+    from logger import get_logger, get_log_queue
+    from utils.logger import setup_logger
+except ImportError as e:
+    print(f"Logging module import failed: {e}")
+    sys.exit(1)
+
+logger = setup_logger('SLAI', level=logging.DEBUG)
+log_queue = get_log_queue()
 metric_queue = queue.Queue()
 
-launch_ui(log_queue, metric_queue)
+# ========== FRONTEND UI LAUNCH ==========
+try:
+    from frontend.main import launch_ui
+    threading.Thread(target=launch_ui, args=(log_queue, metric_queue), daemon=True).start()
+except ImportError as e:
+    logger.warning(f"UI launch skipped due to missing module: {e}")
 
-# ============================
-# SETUP LOGGER FIRST
-# ============================
-logger = setup_logger('SLAI', level=logging.DEBUG)
-
-# ============================
-# LOAD CONFIGURATION
-# ============================
+# ========== CONFIG LOAD ==========
 try:
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 except FileNotFoundError:
-    logger.error("config.yaml not found. Make sure the file exists in the working directory.")
+    logger.error("config.yaml not found.")
     sys.exit(1)
 except yaml.YAMLError as e:
     logger.error(f"Error parsing config.yaml: {e}")
     sys.exit(1)
 
-# ============================
-# VALIDATE CONFIG STRUCTURE
-# ============================
+# ========== CONFIG VALIDATION ==========
 required_keys = [
     ('agent', ['input_size', 'output_size']),
     ('training', ['num_samples']),
     ('evaluator', ['threshold'])
 ]
-
 for section, keys in required_keys:
     if section not in config:
         logger.error(f"Missing section '{section}' in config.yaml.")
@@ -56,179 +78,131 @@ for section, keys in required_keys:
             logger.error(f"Missing key '{key}' in section '{section}' of config.yaml.")
             sys.exit(1)
 
-# ============================
-# DEVICE CONFIGURATION
-# ============================
+# ========== TORCH DEVICE ==========
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Device in use: {device}")
 
-# ============================
-# DATA GENERATION FUNCTION
-# ============================
+# ========== DATA LOADER ==========
 def generate_dummy_data(num_samples=500, input_size=10, output_size=2):
     X = torch.randn(num_samples, input_size, device=device)
     y = torch.randint(0, output_size, (num_samples,), device=device)
-    dataset = TensorDataset(X, y)
-    return DataLoader(dataset, batch_size=16)
+    return DataLoader(TensorDataset(X, y), batch_size=16)
 
-# ============================
-# EVOLUTIONARY AGENT RUNNER
-# ============================
+# ========== EVOLUTIONARY AGENT ==========
 def evolutionary_agent_run():
+    from agents.evolution_agent import EvolutionAgent
+    from evaluators.performance_evaluator import PerformanceEvaluator
+
     os.makedirs('logs', exist_ok=True)
-    logger.info("Starting SLAI Evolutionary Agent...")
+    logger.info("Running Evolutionary Agent...")
 
-    input_size = config['agent']['input_size']
-    output_size = config['agent']['output_size']
-
-    agent = EvolutionAgent(input_size=input_size, output_size=output_size, config=config['agent'])
+    agent = EvolutionAgent(
+        input_size=config['agent']['input_size'],
+        output_size=config['agent']['output_size'],
+        config=config['agent']
+    )
     evaluator = PerformanceEvaluator(threshold=config['evaluator']['threshold'])
 
-    best_performance = 0
-    best_model = None
-
-    logger.info("Generating training and validation data.")
     train_loader = generate_dummy_data(
-        num_samples=config['training']['num_samples'],
-        input_size=input_size,
-        output_size=output_size
+        config['training']['num_samples'],
+        config['agent']['input_size'],
+        config['agent']['output_size']
     )
     val_loader = generate_dummy_data(
-        num_samples=config['training']['num_samples'],
-        input_size=input_size,
-        output_size=output_size
+        config['training']['num_samples'],
+        config['agent']['input_size'],
+        config['agent']['output_size']
     )
 
     agent.initialize_population()
+    best_performance = 0
+    best_model = None
 
-    for generation in range(10):
-        logger.info(f"Starting Evolutionary Generation {generation + 1}")
-
+    for gen in range(10):
+        logger.info(f"Generation {gen + 1}")
         try:
             agent.evolve_population(evaluator, train_loader, val_loader)
-
             best_model = agent.population[0]['model']
             best_performance = agent.population[0]['performance']
-
-            logger.info(f"Evolved Best Model - Gen {generation + 1}: {best_performance:.2f}% accuracy")
-            torch.save(best_model.state_dict(), f'logs/best_model_evolved_gen_{generation + 1}.pth')
-
+            torch.save(best_model.state_dict(), f'logs/best_model_gen_{gen+1}.pth')
+            logger.info(f"Gen {gen + 1} - Best Performance: {best_performance:.2f}%")
         except Exception as e:
-            logger.error(f"Evolution failed in Generation {generation + 1}: {e}", exc_info=True)
-
-    logger.info("Running manual experiment on custom model...")
+            logger.error(f"Error in generation {gen+1}: {e}", exc_info=True)
 
     try:
         manual_model = agent.build_model(hidden_size=64).to(device)
-        logger.debug(f"Manual model architecture: {manual_model}")
-
         agent.train_model({'model': manual_model, 'learning_rate': 0.001}, train_loader, val_loader)
         manual_performance = agent.evaluate_model({'model': manual_model}, val_loader)
 
-        logger.info(f"Manual model accuracy: {manual_performance:.2f}%")
-
         if evaluator.is_better(manual_performance, best_performance):
-            logger.info(f"Manual model outperformed evolved models! Accuracy: {manual_performance:.2f}%")
-            best_model = manual_model
-            best_performance = manual_performance
+            logger.info(f"Manual model outperformed evolved models with {manual_performance:.2f}% accuracy")
             torch.save(manual_model.state_dict(), 'logs/best_manual_model.pth')
-
     except Exception as e:
-        logger.error(f"Manual experiment failed: {e}", exc_info=True)
+        logger.error("Manual model experiment failed", exc_info=True)
 
-    logger.info("Training completed.")
-    logger.info(f"Best overall model achieved {best_performance:.2f}% accuracy.")
+    logger.info("Training complete.")
 
-# ============================
-# SCRIPT RUNNER
-# ============================
+# ========== SCRIPT LAUNCHER ==========
 def run_script(script_name):
     try:
-        logger.info(f"Running script: {script_name}")
-
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(base_dir, script_name)
-
-        if not os.path.exists(script_path):
-            logger.error(f"Script not found: {script_path}")
+        path = os.path.join(os.path.dirname(__file__), script_name)
+        if not os.path.isfile(path):
+            logger.error(f"Script not found: {script_name}")
             return
-
-        subprocess.run([sys.executable, script_path])
-
+        subprocess.run([sys.executable, path])
     except Exception as e:
-        logger.error(f"Failed to run {script_name}: {e}", exc_info=True)
+        logger.error(f"Failed to run script {script_name}: {e}", exc_info=True)
 
-# ============================
-# MENU DISPLAY FUNCTION
-# ============================
+# ========== MENU ==========
 def print_menu():
-    print("""
+    print(\"""
     ==============================
       SLAI-v.1.5 Main Launcher Menu
     ==============================
 
     Select a module to run:
 
-    1 - Evolutionary Agent (Current main.py logic)
-    2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py
-    3 - Evolutionary DQN Agent                              --> main_cartpole_evolve.py
-    4 - Multi-Task RL Agent                                 --> main_multitask.py
-    5 - Meta-Learning Agent (MAML)                          --> main_maml.py
-    6 - Recursive Self-Improvement (RSI)                    --> main_rsi.py
-    7 - RL Agent                                            --> main_autotune.py
-    8 - Safe AI Agent                                       --> main_safe_ai.py
-    9 - Collaborative Agents (Task Routing, Shared Memory)  --> collaborative.main_collaborative.py
-
+    1 - Evolutionary Agent
+    2 - Basic RL Agent                   --> main_cartpole.py
+    3 - Evolutionary DQN Agent          --> main_cartpole_evolve.py
+    4 - Multi-Task RL Agent             --> main_multitask.py
+    5 - Meta-Learning Agent (MAML)      --> main_maml.py
+    6 - Recursive Self-Improvement      --> main_rsi.py
+    7 - RL Agent                         --> main_autotune.py
+    8 - Safe AI Agent                    --> main_safe_ai.py
+    9 - Collaborative Agents            --> main_collaborative.py
     0 - Exit
-    """)
+    \""")
 
-# ============================
-# MAIN FUNCTION
-# ============================
+# ========== MAIN ==========
 def main():
-    logger.info("Welcome to SLAI - Self-Learning Autonomous Intelligence")
-
+    logger.info("Welcome to SLAI Framework")
     while True:
         print_menu()
-
         choice = input("Enter choice (0-9): ").strip()
-
         if choice == "1":
             evolutionary_agent_run()
-
-        elif choice == "2":
-            run_script("main_cartpole.py")
-
-        elif choice == "3":
-            run_script("main_cartpole_evolve.py")
-
-        elif choice == "4":
-            run_script("main_multitask.py")
-
-        elif choice == "5":
-            run_script("main_maml.py")
-
-        elif choice == "6":
-            run_script("main_rsi.py")
-
-        elif choice == "7":
-            run_script("main_autotune.py")
-
-        elif choice == "8":
-            run_script("main_safe_ai.py")
-
-        elif choice == "9":
-            run_script("main_collaborative.py")
-
+        elif choice in map(str, range(2, 10)):
+            scripts = {
+                "2": "main_cartpole.py",
+                "3": "main_cartpole_evolve.py",
+                "4": "main_multitask.py",
+                "5": "main_maml.py",
+                "6": "main_rsi.py",
+                "7": "main_autotune.py",
+                "8": "main_safe_ai.py",
+                "9": "main_collaborative.py"
+            }
+            run_script(scripts[choice])
         elif choice == "0":
-            logger.info("Exiting SLAI launcher. Goodbye!")
-            sys.exit(0)
-
+            logger.info("Exiting SLAI launcher.")
+            break
         else:
             logger.warning("Invalid choice. Please enter a number between 0-9.")
 
-# ============================
-# ENTRY POINT
-# ============================
 if __name__ == "__main__":
     main()
+"""
+
+main_py_path.write_text(fixed_main_py)
+main_py_path
