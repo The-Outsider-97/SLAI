@@ -111,7 +111,9 @@ class BayesianSearch:
             'best_score': score
         }
 
-        output_file = self.config_file.replace('.json', '_best.json')
+        filename = os.path.splitext(os.path.basename(self.config_file))[0]
+	output_file = os.path.join("logs", f"{filename}_best.json")
+
         with open(output_file, 'w') as f:
             json.dump(output, f, indent=4)
 
