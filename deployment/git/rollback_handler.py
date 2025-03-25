@@ -26,14 +26,24 @@ class RollbackHandler:
                 logger.error(f"Backup directory does not exist: {self.backup_dir}")
                 return
 
-            # Delete current models directory if it exists
+            # Safely delete everything in models/ EXCEPT backups/
             if os.path.exists(self.models_dir):
-                shutil.rmtree(self.models_dir)
-                logger.info(f"Deleted current models directory: {self.models_dir}")
+                for item in os.listdir(self.models_dir):
+                    item_path = os.path.join(self.models_dir, item)
+                    if item != 'backups':
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
 
             # Restore backup to models directory
-            shutil.copytree(self.backup_dir, self.models_dir)
-            logger.info(f"Restored models from backup to {self.models_dir}")
+            for item in os.listdir(self.backup_dir):
+                s = os.path.join(self.backup_dir, item)
+                d = os.path.join(self.models_dir, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d)
+                else:
+                    shutil.copy2(s, d)
 
         except Exception as e:
             logger.error(f"Model rollback failed: {e}")
