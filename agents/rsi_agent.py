@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from collections import deque
 
-from shared_memory import SharedMemoryManager
+from collaborative.shared_memory import SharedMemory
 
 
 class RSI_Agent:
