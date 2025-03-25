@@ -222,9 +222,6 @@ def display_shared_memory(shared_memory):
 
 
 def main():
-    """
-    Main entry point for the collaborative agents system.
-    """
     print("\n================ SLAI-v1.5 =================")
     print(" Collaborative Agents & Task Routing System")
     print("===========================================\n")
@@ -235,17 +232,25 @@ def main():
     # Step 2: Initialize collaboration manager
     collab_mgr = CollaborationManager()
 
-    # Step 3: Register all agents from SLAI menu
+    # Step 3: Register all agents
     register_agents(collab_mgr, shared_memory)
 
-    # Step 4: Execute tasks collaboratively
+    # Step 4: Demonstrate shared memory agent status tracking
+    from registry import AgentRegistry
+    class DemoAgent:
+        def execute(self, data): return f"DemoAgent executed {data}"
+    registry = AgentRegistry(shared_memory=shared_memory)
+    registry.register("demo_agent", DemoAgent(), ["routing", "diagnostics"])
+    registry.update_status("demo_agent", "busy")
+    print(f"[SharedMemory] demo_agent status: {registry.get_status('demo_agent')}")
+
+    # Step 5: Execute collaborative tasks
     execute_collaborative_tasks(collab_mgr)
 
-    # Step 5: Inspect shared memory after execution
+    # Step 6: Inspect shared memory
     display_shared_memory(shared_memory)
 
     print("\n=============== System Complete ===============\n")
-
 
 if __name__ == "__main__":
     main()
