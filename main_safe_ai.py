@@ -14,7 +14,7 @@ from rnd_loop.evaluator import Evaluator
 from rnd_loop.experiment_manager import ExperimentManager
 from rnd_loop.hyperparam_tuner import HyperparamTuner
 from deployment.git.rollback_handler import RollbackHandler
-from agent.safe_ai_agent import SafeAI_Agent
+from agents.safe_ai_agent import SafeAI_Agent
 from collaborative.shared_memory import SharedMemory
 
 logger = get_logger()
