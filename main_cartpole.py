@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import logging
 import matplotlib.pyplot as plt
-from logger import get_logger
+from logs.logger import get_logger
 from agents.dqn_agent import DQNAgent
 from utils.logger import setup_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
