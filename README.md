@@ -120,6 +120,79 @@ Start Docker daemon first.
 - [ ] Collaborative Agents & Task Routing
 - [ ] Automated R&D Loop
 
+___
+---
+
+## SLAI v1.5 — Modular, Collaborative, and Visual
+
+**Release Date:** March 2025  
+**Branch:** `SLAI-v.1.5`
+
+### 🔍 Goals
+
+- Build a fully modular system to support:
+  - Collaborative agent architecture with task routing
+  - Automated research and development loop
+  - Frontend interface for real-time monitoring and agent control
+
+---
+
+### ✅ Key Features
+
+#### 1. Collaborative Agents & Task Routing
+- Dynamic agent registry with capability tagging
+- TaskRouter with fallback handling and success-based ranking
+- Shared memory architecture for knowledge transfer
+- Agent interface standardization (`execute(task_data)`)
+
+#### 2. Automated R&D Loop
+- Modular pipeline for hyperparameter tuning, experiment management, and evaluation
+- Grid search with integrated evaluator and model registry
+- Centralized metrics logging (F1, accuracy, risk score, etc.)
+- Top agent auto-registration after tuning
+
+#### 3. Frontend Visualization
+- Flask-based frontend replicating terminal-style UI
+- Real-time log streaming via `/logs`
+- Live metric updates via `/metrics`
+- Agent dropdown launcher with backend subprocess support
+- Modular components (`window_controls`, `metrics_box`, `buttons`)
+
+---
+
+### 📦 Backend Modules
+
+| Folder            | Description                                         |
+|------------------|-----------------------------------------------------|
+| `agents/`         | All agent classes (DQN, MAML, RSI, SafeAI, etc.)   |
+| `collaborative/`  | Registry, task router, shared memory               |
+| `rnd_loop/`       | Evaluator, experiment manager, hyperparam tuner    |
+| `modules/`        | Monitoring, logging, compliance, training, security |
+| `deployment/`     | Model registry, inference API, batch processing    |
+| `frontend/`       | Templates, styles, and visual interface components |
+
+---
+
+### 🧠 Intelligence Infrastructure
+
+- Real-time `logger.py` with queue integration
+- Monitoring logs pushed to frontend terminal
+- Shared memory supports inter-agent communication
+- Evaluation results feed back into tuning and registry
+
+---
+
+### 🧪 How to Run
+
+```bash
+# Launch the web frontend
+python app.py
+
+# Launch an agent manually
+python main_safe_ai.py
+```
+
+
 ## License
 This project is licensed under the MIT License.
 
