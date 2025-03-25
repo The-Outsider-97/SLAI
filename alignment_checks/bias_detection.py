@@ -1,9 +1,23 @@
+import logging
+import torch
+import sys
+import os
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, precision_score, recall_score
-from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 import seaborn as sns
+from logs.logging import get_logger, get_log_queue
+from itertools import product
+from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.calibration import calibration_curve
+
+# === Logger Setup ===
+from logs.logger import get_logger, get_log_queue
+from utils.logger import setup_logger
+logger = setup_logger("SLAI", level=logging.DEBUG)
+
+log_queue = get_log_queue()
+metric_queue = queue.Queue()
 
 # ============================================
 # Main Interface
@@ -25,10 +39,10 @@ class BiasDetection:
         self.privileged_groups = privileged_groups
         self.unprivileged_groups = unprivileged_groups
 
-# ============================================
-# Check if your dataset is imbalanced across sensitive attributes
-# ============================================
-  def check_data_balance(self, data: pd.DataFrame):
+    # ============================================
+    # Check if your dataset is imbalanced across sensitive attributes
+    # ============================================
+    def check_data_balance(self, data: pd.DataFrame):
         """
         Analyze the distribution of sensitive attributes in the dataset.
         """
@@ -42,16 +56,17 @@ class BiasDetection:
             plt.ylabel('Proportion')
             plt.show()
 
-# ============================================
-# Probability of positive outcomes shouldn't depend on sensitive attributes
-# ============================================
-def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
+    # ============================================
+    # Probability of positive outcomes shouldn't depend on sensitive attributes
+    # ============================================
+    def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
         """
         Check for statistical parity across all intersectional groups.
         """
         df = data.copy()
         df['predictions'] = predictions
         print("\nStatistical Parity for Intersectional Groups:")
+
         for group_combination in self._get_intersectional_groups():
             group_df = self._filter_group(df, group_combination)
             if len(group_df) == 0:
@@ -59,9 +74,9 @@ def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
             pos_rate = group_df['predictions'].mean()
             print(f"Group {group_combination}: Positive prediction rate = {pos_rate:.3f}")
 
-# ============================================
-# True positive rates should be equal for all groups
-# ============================================
+    # ============================================
+    # True positive rates should be equal for all groups
+    # ============================================
     def check_equal_opportunity(self, data: pd.DataFrame, predictions: np.ndarray, labels: np.ndarray):
         """
         Check for equal opportunity (TPR parity) across intersectional groups.
@@ -80,9 +95,9 @@ def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
             tpr = tp / pos if pos > 0 else 0.0
             print(f"Group {group_combination}: TPR = {tpr:.3f}")
 
-# ============================================
-# Check if probabilities are calibrated for different groups
-# ============================================
+    # ============================================
+    # Check if probabilities are calibrated for different groups
+    # ============================================
     def check_calibration(self, data: pd.DataFrame, probabilities: np.ndarray):
         """
         Calibration curve check for intersectional groups.
@@ -96,7 +111,7 @@ def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
             if len(group_df) == 0:
                 continue
             prob_true, prob_pred = calibration_curve(group_df['labels'], group_df['probabilities'], n_bins=10)
-            label = f"{'-'.join([f'{k}:{v}' for k,v in group_combination.items()])}"
+            label = f"{'-'.join([f'{k}:{v}' for k, v in group_combination.items()])}"
             plt.plot(prob_pred, prob_true, marker='o', label=label)
 
         plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
@@ -107,26 +122,36 @@ def check_statistical_parity(self, data: pd.DataFrame, predictions: np.ndarray):
         plt.show()
 
     def _get_intersectional_groups(self):
-        from itertools import product
+        """
+        Generate all combinations of privileged and unprivileged groups.
+        """
         keys = self.sensitive_attrs
         values = [self.privileged_groups[attr] + self.unprivileged_groups[attr] for attr in keys]
         for combination in product(*values):
             yield dict(zip(keys, combination))
 
-    def _filter_group(self, df, group_combination):
+    def _filter_group(self, df: pd.DataFrame, group_combination: dict):
+        """
+        Filter dataframe for rows matching the group combination.
+        """
         mask = pd.Series([True] * len(df))
         for attr, value in group_combination.items():
             mask &= (df[attr] == value)
         return df[mask]
 
-# ============================================
-# Combine everything into a comprehensive report
-# ============================================
+    # ============================================
+    # Combine everything into a comprehensive report
+    # ============================================
     def run_bias_report(self, data: pd.DataFrame, predictions: np.ndarray, probabilities: np.ndarray, labels: np.ndarray):
+        """
+        Run all bias checks and print a comprehensive report.
+        """
         print("\n========= Running Intersectional Bias Report =========\n")
         self.check_data_balance(data)
         self.check_statistical_parity(data, predictions)
         self.check_equal_opportunity(data, predictions, labels)
+
         if probabilities is not None:
             self.check_calibration(data, probabilities)
+
         print("\n========= End of Bias Report =========\n")
