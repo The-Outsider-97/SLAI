@@ -1,4 +1,6 @@
 import logging
+import os
+import sys
 import json
 import torch
 import numpy as np
@@ -171,6 +173,11 @@ if __name__ == "__main__":
                 "type": "int",
                 "min": 16,
                 "max": 256
+            },
+            {
+                "name": "activation",
+                "type": "categorical",
+                "choices": ["relu", "tanh", "sigmoid"]
             },
             {
                 "name": "optimizer",
