@@ -3,7 +3,7 @@ import random
 import torch
 import sys
 import os
-from collaborative.registry import AgentRegistry
+from registry import AgentRegistry
 
 logger = logging.getLogger("SLAI.TaskRouter")
 logger.setLevel(logging.INFO)
