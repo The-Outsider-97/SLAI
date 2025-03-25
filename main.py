@@ -1,13 +1,16 @@
 import os
 import sys
-import logging
-import subprocess
 import yaml
 import torch
+import logging
+import threading
+import subprocess
 from utils.logger import setup_logger
 from agents.evolution_agent import EvolutionAgent
 from evaluators.performance_evaluator import PerformanceEvaluator
 from torch.utils.data import DataLoader, TensorDataset
+from frontend.main import launch_ui
+launch_ui()
 
 # ============================
 # SETUP LOGGER FIRST
