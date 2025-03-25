@@ -3,6 +3,7 @@ import sys
 import yaml
 import torch
 import logging
+
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
@@ -33,10 +34,11 @@ def main():
     logger.info(" Starting Safe AI Pipeline...")
 
     # Initialize Components
-    data_handler = DataHandler()
-    model_trainer = ModelTrainer()
-    security_manager = SecurityManager()
-    monitoring = Monitoring()
+    shared_memory = SharedMemory()
+    data_handler = DataHandler(shared_memory=shared_memory)
+    model_trainer = ModelTrainer(shared_memory=shared_memory)
+    security_manager = SecurityManager(shared_memory=shared_memory)
+    monitoring = Monitoring(shared_memory=shared_memory)
     compliance_auditor = ComplianceAuditor()
     rollback_handler = RollbackHandler(models_dir=config['run']['output_dir'], backup_dir=config['rollback']['backup_dir'])
 
@@ -50,50 +52,12 @@ def main():
 
         clean_data = data_handler.preprocess_data(raw_data)
 
-        # Step 2: Model Training
-        logger.info(" Training model...")
-        model = model_trainer.train_model(clean_data)
-
-        # Step 3: Security Hardening
-        if config['security'].get('encrypt_models', False):
-            logger.info("Applying model security...")
-            security_manager.secure_model(model)
-
-        if config['security'].get('enable_threat_detection', False):
-            security_manager.check_for_threats()
-
-        # Step 4: Compliance Audit
-        if config['compliance'].get('enable_audit', False):
-            logger.info("⚖ Running compliance audit...")
-            compliance_auditor.run_audit()
-
-        # Step 5: Monitoring
-        if config['monitoring'].get('enable_monitoring', False):
-            logger.info("Starting monitoring...")
-            monitoring.start(model, data_handler)
-
-        # Step 6: Evaluation (SafeAI Agent)
-        logger.info("Evaluating SafeAI agent...")
-        evaluator = Evaluator(shared_memory=SharedMemory())
-
-        eval_result = evaluator.evaluate_agent(
-            agent=SafeAI_Agent(shared_memory=SharedMemory()),
-            task_data={
-                "policy_risk_score": 0.32,
-                "task_type": "meta_learning"
-            },
-            metadata={"experiment": "baseline_risk_check"}
-        )
-
-        logger.info(f"SafeAI Evaluation Result: {eval_result}")
-
-        logger.info(" Safe AI Pipeline completed successfully!")
-
+        # Step 2: Hyperparameter Tuning
         tuner = HyperparamTuner(
             agent_class=SafeAI_Agent,
             search_space={
                 "risk_threshold": [0.3, 0.2, 0.1],
-                "compliance_weight": [0.5, 1.0]  # Optional if your agent supports it
+                "compliance_weight": [0.5, 1.0]  # Optional if supported
             },
             base_task={
                 "policy_risk_score": 0.27,
@@ -102,20 +66,12 @@ def main():
             shared_memory=shared_memory,
             max_trials=6
         )
+        best_tune = tuner.run_grid_search()
+        logger.info(f"Best Tuning Result: {best_tune}")
 
-        best_result = tuner.run_grid_search()
-        logger.info(f"Best Tuning Result: {best_result}")
-    
-    except Exception as e:
-        logger.error(f" Pipeline error: {e}", exc_info=True)
-        if config['rollback'].get('enabled', False):
-            logger.info(" Rolling back...")
-            rollback_handler.rollback_model()
-
+        # Step 3: Experiment Management
         logger.info("Running multiple SafeAI experiments...")
-
         manager = ExperimentManager(shared_memory=shared_memory)
-
         results = manager.run_experiments(
             agent_configs=[
                 {
@@ -134,10 +90,52 @@ def main():
                 "task_type": "reinforcement_learning"
             }
         )
-
         top = manager.summarize_results(sort_key="risk_score", minimize=True)[0]
-        logger.info(f"🏆 Best Agent: {top['agent']} with score {top['result']['risk_score']}")
-    
+        logger.info(f"\U0001F3C6 Best Agent: {top['agent']} with score {top['result']['risk_score']}")
+
+        # Step 4: Model Training
+        logger.info("Training model...")
+        model = model_trainer.train_model(clean_data)
+
+        # Step 5: Security Hardening
+        if config['security'].get('encrypt_models', False):
+            logger.info("Applying model security...")
+            security_manager.secure_model(model)
+
+        if config['security'].get('enable_threat_detection', False):
+            security_manager.check_for_threats()
+
+        # Step 6: Compliance Audit
+        if config['compliance'].get('enable_audit', False):
+            logger.info("⚖ Running compliance audit...")
+            compliance_auditor.run_audit()
+
+        # Step 7: Monitoring
+        if config['monitoring'].get('enable_monitoring', False):
+            logger.info("Starting monitoring...")
+            monitoring.start(model, data_handler)
+
+        # Step 8: Evaluation
+        logger.info("Evaluating SafeAI agent...")
+        evaluator = Evaluator(shared_memory=shared_memory, monitoring=monitoring)
+        eval_result = evaluator.evaluate_agent(
+            agent=SafeAI_Agent(shared_memory=shared_memory),
+            task_data={
+                "policy_risk_score": 0.32,
+                "task_type": "meta_learning"
+            },
+            metadata={"experiment": "baseline_risk_check"}
+        )
+        logger.info(f"SafeAI Evaluation Result: {eval_result}")
+
+        logger.info(" Safe AI Pipeline completed successfully!")
+
+    except Exception as e:
+        logger.error(f" Pipeline error: {e}", exc_info=True)
+        if config['rollback'].get('enabled', False):
+            logger.info(" Rolling back...")
+            rollback_handler.rollback_model()
+
     finally:
         logger.info("Pipeline finished.")
 
