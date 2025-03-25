@@ -6,7 +6,7 @@ import time
 import logging
 import tempfile
 # import textwrap
-from logger import get_logger
+from logs.logger import get_logger
 from recursive_improvement.sandbox.runner import run_code_and_tests_docker
 from utils.logger import setup_logger
 from recursive_improvement.codegen.codegen import generate_code
