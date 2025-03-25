@@ -162,3 +162,12 @@ if __name__ == "__main__":
     agent.train(episodes=50)
     avg_reward = agent.evaluate(eval_episodes=5)
     print("\nAverage reward after evaluation:", avg_reward)
+
+def execute(self, task_data):
+    train_mode = task_data.get("train_mode", False)
+    if train_mode:
+        self.train(episodes=10)
+        return {"status": "trained", "agent": "RLAgent"}
+    else:
+        avg_reward = self.evaluate()
+        return {"status": "evaluated", "avg_reward": avg_reward}

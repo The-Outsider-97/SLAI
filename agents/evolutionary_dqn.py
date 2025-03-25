@@ -83,3 +83,17 @@ class EvolutionaryTrainer:
             print(f"Best agent score: {best_score}")
 
         return best_agent
+
+class EvolutionaryDQNAgent:
+    def __init__(self, env, state_size, action_size):
+        self.trainer = EvolutionaryTrainer(env)
+        self.state_size = state_size
+        self.action_size = action_size
+
+    def execute(self, task_data):
+        agent = self.trainer.evolve(state_size=self.state_size, action_size=self.action_size)
+        return {
+            "status": "success",
+            "agent": "EvolutionaryDQNAgent",
+            "best_agent_config": agent.config
+        }

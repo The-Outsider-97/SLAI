@@ -1,12 +1,13 @@
+import time
+import sys
 import torch
 import logging
 import torch.optim as optim
 import torch.nn.functional as F
+from logger import get_logger
 from tasks.task_sampler import TaskSampler
 from agents.multitask_rl import MultiTaskPolicy
 from utils.logger import setup_logger
-import time
-
 # ===============================
 # Initialize Logger
 # ===============================

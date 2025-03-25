@@ -120,6 +120,169 @@ Start Docker daemon first.
 - [ ] Collaborative Agents & Task Routing
 - [ ] Automated R&D Loop
 
+___
+---
+
+## SLAI v1.5 — Modular, Collaborative, and Visual
+
+**Release Date:** March 2025  
+**Branch:** `SLAI-v.1.5`
+
+### 🔍 Goals
+
+- Build a fully modular system to support:
+  - Collaborative agent architecture with task routing
+  - Automated research and development loop
+  - Frontend interface for real-time monitoring and agent control
+
+---
+
+### ✅ Key Features
+
+#### 1. Collaborative Agents & Task Routing
+- Dynamic agent registry with capability tagging
+- TaskRouter with fallback handling and success-based ranking
+- Shared memory architecture for knowledge transfer
+- Agent interface standardization (`execute(task_data)`)
+
+#### 2. Automated R&D Loop
+- Modular pipeline for hyperparameter tuning, experiment management, and evaluation
+- Grid search with integrated evaluator and model registry
+- Centralized metrics logging (F1, accuracy, risk score, etc.)
+- Top agent auto-registration after tuning
+
+#### 3. Frontend Visualization
+- Flask-based frontend replicating terminal-style UI
+- Real-time log streaming via `/logs`
+- Live metric updates via `/metrics`
+- Agent dropdown launcher with backend subprocess support
+- Modular components (`window_controls`, `metrics_box`, `buttons`)
+
+---
+
+### 📦 Backend Modules
+
+| Folder            | Description                                         |
+|------------------|-----------------------------------------------------|
+| `agents/`         | All agent classes (DQN, MAML, RSI, SafeAI, etc.)   |
+| `collaborative/`  | Registry, task router, shared memory               |
+| `rnd_loop/`       | Evaluator, experiment manager, hyperparam tuner    |
+| `modules/`        | Monitoring, logging, compliance, training, security |
+| `deployment/`     | Model registry, inference API, batch processing    |
+| `frontend/`       | Templates, styles, and visual interface components |
+
+---
+
+### 🧠 Intelligence Infrastructure
+
+- Real-time `logger.py` with queue integration
+- Monitoring logs pushed to frontend terminal
+- Shared memory supports inter-agent communication
+- Evaluation results feed back into tuning and registry
+
+---
+
+### 🧪 How to Run
+
+```bash
+# Launch the web frontend
+python app.py
+
+# Launch an agent manually
+python main_safe_ai.py
+```
+
+___
+---
+
+# SLAI v1.6 Roadmap
+
+**Milestone Focus:**  
+Moving from modular execution to autonomous collaboration and introspection.
+
+---
+
+## 🎯 Objectives
+
+1. Enable agents to:
+   - Analyze their own performance
+   - Propose changes to hyperparameters or policies
+
+2. Build a persistent experiment memory:
+   - Evaluation history
+   - Configs, scores, and logs over time
+
+3. Expand frontend to support:
+   - Live experiment management
+   - Leaderboards and real-time comparisons
+   - Security/compliance logs display
+
+---
+
+## ✅ Checklist: Agent & System Intelligence
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Agent self-analysis | Each agent can evaluate and log its own weaknesses | ☐ |
+| Shared scoring memory | All evaluation results pushed to a central ranking list | ☐ |
+| Recursive retraining | Underperforming agents can request tuning | ☐ |
+| Agent voting mechanism | Agents can vote on proposed actions (task democracy) | ☐ |
+
+---
+
+## ✅ Checklist: Frontend Enhancements
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Leaderboard panel | Real-time sortable agent leaderboard | ☐ |
+| Agent introspection viewer | Show logs, tuning, and outcomes per agent | ☐ |
+| Security & compliance logs view | Render violations and audit reports | ☐ |
+| Terminal/metric toggle | Switch between live logs and metrics in UI | ☐ |
+
+---
+
+## ✅ Checklist: Experiment Persistence
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Evaluation history storage | Save each run with config, agent, metrics | ☐ |
+| Historical graphs | Plot accuracy/reward/risk score over time | ☐ |
+| Per-agent config/version history | Track changes per agent class | ☐ |
+| Save/Restore experiment sessions | Export session as JSON or re-load it later | ☐ |
+
+---
+
+## 🧪 Proposed New Modules
+
+| Module | Purpose |
+|--------|---------|
+| `agent_introspector.py` | Let agents self-reflect on failure conditions |
+| `scoreboard.py` | Central registry of all agent scores |
+| `session_manager.py` | Save, restore, and replay sessions |
+
+---
+
+## 🚀 Timeline Suggestion
+
+| Week | Goals |
+|------|-------|
+| Week 1 | Build `scoreboard` + enable live leaderboard UI |
+| Week 2 | Add introspection hooks to top 3 agents |
+| Week 3 | Enable persistent evaluation logging (DB or JSONL) |
+| Week 4 | UI upgrade: views for logs, scores, history, toggles |
+
+---
+
+## 📝 Notes
+
+- All new modules should integrate with:
+  - `shared_memory`
+  - `logger.py`
+  - `evaluator.py`
+- Focus on reusable interfaces so agents can plug in different types of self-analysis logic
+- Prioritize UI clarity: avoid clutter, maintain 2-panel simplicity
+
+---
 ## License
 This project is licensed under the MIT License.
 

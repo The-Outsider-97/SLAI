@@ -1,10 +1,12 @@
+import os
+import sys
+import time
 import gymnasium as gym
 import torch
 import logging
+from logger import get_logger
 from agents.evolutionary_dqn import EvolutionaryTrainer
 from utils.logger import setup_logger
-import os
-import time
 
 # ===============================
 # Initialize Logger

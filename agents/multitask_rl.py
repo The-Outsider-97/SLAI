@@ -91,3 +91,21 @@ class MultiTaskPolicy(nn.Module):
         action_probs = F.softmax(logits, dim=-1)
 
         return action_probs
+
+class MultiTaskRLAgent:
+    def __init__(self, state_size, action_size, num_tasks=10):
+        self.policy = MultiTaskPolicy(state_size, action_size, num_tasks=num_tasks)
+
+    def execute(self, task_data):
+        state = torch.FloatTensor(task_data.get("state", [0.0] * self.policy.state_size))
+        task_id = torch.tensor(task_data.get("task_id", 0))
+
+        with torch.no_grad():
+            action_probs = self.policy(state, task_id)
+            action = torch.argmax(action_probs).item()
+
+        return {
+            "status": "success",
+            "agent": "MultiTaskRLAgent",
+            "action": action
+        }
