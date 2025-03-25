@@ -12,7 +12,7 @@ from alignment_checks.fairness_evaluator import FairnessEvaluator
 from evaluators.behavioral_tests import BehavioralTests
 from evaluators.reward_function import RewardFunction
 from evaluators.static_analysis import StaticAnalysis
-from deployment.rollback_handler import RollbackHandler
+from deployment.git.rollback_handler import RollbackHandler
 from hyperparam_tuning.bayesian_search import BayesianSearch
 from hyperparam_tuning.grid_search import GridSearch
 from hyperparam_tuning.tuner import HyperParamTuner
