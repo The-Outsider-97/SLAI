@@ -21,7 +21,11 @@ from agents.rl_agent import RLAgent
 from agents.rsi_agent import RSI_Agent
 from agents.safe_ai_agent import SafeAI_Agent
 
-self.shared_memory.set("safe_ai_recommendation", ...)
+shared_memory.set("safe_ai_recommendation", {
+    "risk_threshold": 0.2,
+    "last_violation": None,
+    "actions_taken": []
+})
 
 # 1. Run safety agent
 task_data = {
