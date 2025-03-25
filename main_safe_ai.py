@@ -4,7 +4,7 @@ import yaml
 import torch
 import logging
 
-from logger import get_logger
+from logs.logger import get_logger
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
