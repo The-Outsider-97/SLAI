@@ -19,10 +19,16 @@
 <div class="p-3">
   <label class="text-light">Select Agent:</label>
   <select class="form-select form-select-sm w-50" onchange="launchAgent(this.value)">
-    <option selected disabled>Choose Agent</option>
-    <option value="main.py">Evolutionary Agent</option>
-    <option value="main_cartpole.py">Basic RL Agent</option>
-    <option value="main_safe_ai.py">Safe AI Agent</option>
+    <option selected disabled>-----</option>
+    <option value="main.py">1. Evolutionary Agent</option>
+    <option value="main_cartpole.py">2. Basic RL Agent</option>
+    <option value="main_cartpole_evolve.py">3. Evolutionary DQN Agent</option>
+    <option value="main_multitask.py">4. Multi-Task RL Agent</option>
+    <option value="main_maml.py">5. Meta-Learning Agent (MAML)</option>
+    <option value="main_rsi.py">6. Recursive Self-Improvement (RSI) </option>
+    <option value="main_autotune.py">7. RL Agent </option>
+    <option value="main_safe_ai.py">8. Safe AI Agent</option>
+    <option value="main_collaborative.py">9. Collaborative Agents</option>
   </select>
 </div>
   <!-- Top bar: logo + window buttons -->
