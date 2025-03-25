@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import json
+import yaml
 import torch
 import numpy as np
 import itertools
@@ -22,7 +23,7 @@ class BayesianSearch:
         Initializes the BayesianSearch instance.
 
         Args:
-            config_file (str): Path to the hyperparameter config JSON.
+            config_file (str): 'config.yaml'.
             evaluation_function (callable): Function to evaluate model performance with given hyperparameters.
             n_calls (int): Total number of optimization calls.
             n_random_starts (int): Number of initial random search steps.
@@ -42,7 +43,7 @@ class BayesianSearch:
         """
         logger.info("Loading hyperparameter search space from: %s", self.config_file)
         with open(self.config_file, 'r') as f:
-            config = json.load(f)
+            config =yaml.safe_load(f)
 
         space = []
         dimensions = []
