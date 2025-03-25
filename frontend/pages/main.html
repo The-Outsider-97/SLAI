@@ -1,1 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SLAI Launcher</title>
+  
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="../styles/style.css">
 
+</head>
+<body>
+
+  <div class="container-fluid p-0 d-flex flex-row">
+    
+    <!-- Left Terminal Panel -->
+    <div id="terminal-panel" class="col-6">
+      <div class="log-line">==============================</div>
+      <div class="log-line">    SLAI Main Launcher Menu</div>
+      <div class="log-line">==============================</div>
+      <br />
+      <div class="log-line">Select a module to run:</div><br />
+
+      <div class="log-line">1 - Evolutionary Agent (Current main.py logic)</div>
+      <div class="log-line">2 - Basic RL Agent (CartPole DQN)                       --> main_cartpole.py</div>
+      <div class="log-line">3 - Evolutionary DQN Agent                              --> main_cartpole_evolve.py</div>
+      <div class="log-line">4 - Multi-Task RL Agent                                 --> main_multitask.py</div>
+      <div class="log-line">5 - Meta-Learning Agent (MAML)                          --> main_maml.py</div>
+      <div class="log-line">6 - Recursive Self-Improvement (RSI)                    --> main_rsi.py</div>
+      <div class="log-line">7 - RL Agent                                            --> main_autotune.py</div>
+      <div class="log-line">8 - Safe AI Agent                                       --> main_safe_ai.py</div>
+      <div class="log-line">9 - Collaborative Agents (Task Routing, Shared Memory)  --> collaborative.main_collaborative.py</div><br />
+      <div class="log-line">0 - Exit</div><br />
+
+      <!-- Simulated live log output -->
+      <div class="log-line">2025-03-24 20:02:19,311 INFO  Evolved Best Model   Gen 6: 52.80% accuracy</div>
+      <div class="log-line">2025-03-24 20:02:19,312 INFO  Starting Evolutionary Generation 7</div>
+      <div class="log-line">2025-03-24 20:02:19,666 INFO  Evolved Best Model   Gen 7: 52.60% accuracy</div>
+      <div class="log-line">2025-03-24 20:02:20,942 INFO  Training completed.</div>
+      <div class="log-line">2025-03-24 20:02:20,944 INFO  Best overall model achieved 54.20% accuracy</div>
+    </div>
+
+    <!-- Right Visual Output Panel -->
+    <div id="results-panel" class="col-6">
+      <div id="results-title">[Results Visualized]</div>
+    </div>
+
+  </div>
+
+</body>
+</html>
