@@ -5,12 +5,10 @@ import sys
 import torch
 import numpy as np
 from collections import deque
-
 from collaborative.shared_memory import SharedMemory
 
-
 class RSI_Agent:
-    def __init__(self, state_size, action_size, shared_memory: SharedMemoryManager, config: dict = None):
+    def __init__(self, state_size, action_size, shared_memory: SharedMemory, config: dict = None):
         self.state_size = state_size
         self.action_size = action_size
         self.memory = deque(maxlen=2000)
