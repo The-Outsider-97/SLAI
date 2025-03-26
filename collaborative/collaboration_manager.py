@@ -31,16 +31,12 @@ class CollaborationManager:
 
     def run_task(self, task_type, task_data):
         """
-        Route a task to the most suitable agent and return the result.
-
-        Args:
-            task_type (str): Type/category of task.
-            task_data (dict): Payload needed for the task.
-
-        Returns:
-            Any: Result returned by the selected agent.
+        Route the task to the best-fit agent based on capabilities and context.
         """
-        return self.router.route(task_type, task_data)
+        agent = self.router.route(task_type, task_data)
+        agent_instance = self.registry.get_agent_class(agent)  # <-- FIX: Get actual object
+        return agent_instance.execute(task_data)
+
 
     def list_agents(self):
         """
