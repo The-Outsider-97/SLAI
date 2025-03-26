@@ -22,11 +22,14 @@ from agents.rsi_agent import RSI_Agent
 from agents.safe_ai_agent import SafeAI_Agent
 
 # 1. Run safety agent
-task_data = {
-    "policy_risk_score": 0.27,
-    "task_type": "reinforcement_learning"
-}
-safe_result = collab_mgr.run_task("safety", task_data)
+def run_safety_protocol(collab_mgr):
+    print("\n=== Safety Protocol Check ===")
+    task_data = {
+        "policy_risk_score": 0.27,
+        "task_type": "reinforcement_learning"
+    }
+    safe_result = collab_mgr.run_task("safety", task_data)
+    print("SafeAI Task Output:", safe_result)
 
 # 2. Train SafeAI Agent from historical data
 safe_ai_agent.train()
@@ -256,6 +259,9 @@ def main():
 
     # Step 3: Register all agents
     register_agents(collab_mgr, shared_memory)
+
+    # Step 3.5: Run safety protocol task explicitly
+    run_safety_protocol(collab_mgr)
 
     # Step 4: Demonstrate shared memory agent status tracking
     from registry import AgentRegistry
