@@ -6,7 +6,7 @@ import queue
 import logging
 import threading
 import subprocess
-
+from PyQt5.QtWidgets import QApplication
 from torch.utils.data import DataLoader, TensorDataset
 
 # Add parent directory to sys.path
@@ -21,7 +21,6 @@ log_queue = get_log_queue()
 metric_queue = queue.Queue()
 
 # === UI Setup ===
-from frontend.main import launch_ui
 from frontend.startup_screen import StartupScreen
 from frontend.main_window import MainWindow
 threading.Thread(target=launch_ui, args=(log_queue, metric_queue), daemon=True).start()
@@ -202,4 +201,5 @@ def main():
 
 # === Entry Point ===
 if __name__ == "__main__":
+    threading.Thread(target=launch_ui, daemon=True).start()
     main()
