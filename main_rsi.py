@@ -9,9 +9,10 @@ import tempfile
 from logs.logger import get_logger
 from recursive_improvement.sandbox.runner import run_code_and_tests_docker
 from utils.logger import setup_logger
+from agents.rsi_agent import RSI_Agent
 from recursive_improvement.codegen.codegen import generate_code
 
-logger = setup_logger('SLAI-RSI', level=logging.DEBUG)
+logger = setup_logger("RSIAgent", level=logging.INFO)
 
 # generated_code = textwrap.dedent(generate_code)
 
