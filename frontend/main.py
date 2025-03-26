@@ -7,20 +7,23 @@ from tkinter import font
 from main import SLAIInterface
 from PyQt5.QtWidgets import QApplication
 from startup_screen import StartupScreen
+from main_window import MainWindow
 
 log_queue = queue.Queue()
 metric_queue = queue.Queue()
 
 def launch_main_ui():
-    app.quit()  # Stop the PyQt event loop
-    root = tk.Tk()
-    interface = SLAIInterface(root, log_queue, metric_queue)
-    root.mainloop()
+    # Close splash and launch main window
+    main_win = MainWindow(log_queue=log_queue, metric_queue=metric_queue)
+    main_win.show()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # Show the animated splash screen
     splash = StartupScreen(on_finish_callback=launch_main_ui)
     splash.show()
+
     sys.exit(app.exec_())
 
 class SLAIInterface:
