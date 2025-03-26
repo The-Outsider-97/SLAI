@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import os, sys
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import shuffle
 
@@ -71,17 +72,6 @@ class DataHandler:
             return pd.DataFrame(scaled, columns=numeric_features.columns), labels
         except Exception as e:
             logger.error(f"Preprocessing failed: {e}")
-            raise
-
-    def export_data(self, df, labels, output_path="data/processed_dataset.csv"):
-        logger.info(f"Exporting processed dataset to {output_path}")
-        try:
-            df = df.copy()
-            df["label"] = labels
-            df.to_csv(output_path, index=False)
-            logger.info("Dataset exported successfully.")
-        except Exception as e:
-            logger.error(f"Failed to export data: {e}")
             raise
 
     def validate_schema(self, data, required_columns):
