@@ -85,6 +85,12 @@ class AgentRegistry:
     def get_agents_by_task(self, task_type):
         """
         Return all agents that support a given task_type.
+
+        Args:
+            task_type (str): Task label to match against agent capabilities.
+
+        Returns:
+            dict[str, dict]: Dictionary of agent names and metadata that support the task_type.
         """
         return {
             name: agent for name, agent in self._agents.items()
@@ -103,6 +109,12 @@ class AgentRegistry:
     def get_agent_class(self, name):
         """
         Get agent class instance by name.
+
+        Args:
+            name (str): Agent name.
+
+        Returns:
+            object: Registered agent class instance.
         """
         if name not in self._agents:
             raise KeyError(f"Agent '{name}' not found.")
