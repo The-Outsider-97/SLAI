@@ -22,6 +22,8 @@ metric_queue = queue.Queue()
 
 # === UI Setup ===
 from frontend.main import launch_ui
+from frontend.startup_screen import StartupScreen
+from frontend.main_window import MainWindow
 threading.Thread(target=launch_ui, args=(log_queue, metric_queue), daemon=True).start()
 
 # === Config Loader ===
