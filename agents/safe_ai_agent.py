@@ -26,7 +26,7 @@ class SafeAI_Agent:
         """
         Execute the RSI task using given data. Required for collaboration system.
         """
-        print("[RSI_Agent] Executing task:", task_data)
+        print("[SafeAI_Agent] Executing task:", task_data)
 
         # Run training with dynamic self-tuning
         self.train()
@@ -35,7 +35,7 @@ class SafeAI_Agent:
         evaluation = self.evaluate()
 
         # Optionally write to shared memory
-        self.shared_memory.set("rsi_agent_last_eval", evaluation)
+        self.shared_memory.set("safe_ai_agent_last_eval", evaluation)
 
         return evaluation
         
