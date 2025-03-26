@@ -210,9 +210,4 @@ def main():
 
 # === Entry Point ===
 if __name__ == "__main__":
-    # Launch CLI in background
-    cli_thread = threading.Thread(target=main, daemon=True)
-    cli_thread.start()
-
-    # Launch PyQt UI (must be in main thread!)
     launch_ui()
