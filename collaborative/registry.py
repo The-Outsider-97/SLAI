@@ -82,17 +82,14 @@ class AgentRegistry:
         """
         return self.shared_memory.get(f"agent:{name}").get("status", "unknown")
 
-    def get_agent_for_task(self, task_type):
+    def get_agents_by_task(self, task_type):
         """
-        Find a suitable agent for the given task type.
-
-        Returns:
-            tuple[str, object]: (Agent name, class)
+        Return all agents that support a given task_type.
         """
-        for name, info in self._agents.items():
-            if task_type in info["capabilities"]:
-                return name, info["class"]
-        raise LookupError(f"No agent found for task type '{task_type}'")
+        return {
+            name: agent for name, agent in self._agents.items()
+            if task_type in self._capabilities.get(name, [])
+        }
 
     def list_agents(self):
         """
