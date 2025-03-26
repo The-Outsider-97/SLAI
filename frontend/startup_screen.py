@@ -18,7 +18,7 @@ class StartupScreen(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
 
         # Load GIF animation
-        self.movie = QMovie("assets/startup/png")
+        self.movie = QMovie("assets/startup.png")
         self.label.setMovie(self.movie)
         self.movie.start()
 
