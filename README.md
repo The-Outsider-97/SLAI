@@ -1,4 +1,4 @@
-frontend/assets/startup.png
+![Startup](http://url/frontend/assets/startup.png)
 ---
 # SLAI - Self-Learning Autonomous Intelligence
 
