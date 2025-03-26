@@ -1,8 +1,8 @@
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
 from torch.utils.data import DataLoader, TensorDataset
 
-import os
-import sys
+import os, sys
 import yaml
 import torch
 import queue
@@ -26,17 +26,19 @@ from frontend.startup_screen import StartupScreen
 from frontend.main_window import MainWindow
 
 def launch_ui():
-    qt_app = QApplication(sys.argv)
+    app = QApplication(sys.argv)
 
-    def launch_main_window():
-        # Keep a persistent reference to prevent garbage collection
-        qt_app.main_win = MainWindow(log_queue=log_queue, metric_queue=metric_queue)
-        qt_app.main_win.show()
+    def show_main_window():
+        app.main_window = MainWindow(log_queue=log_queue, metric_queue=metric_queue)
+        app.main_window.show()
 
-    splash = StartupScreen(on_finish_callback=launch_main_window)
-    splash.show()
+    app.splash_screen = StartupScreen(on_ready_to_proceed=show_main_window)
+    app.splash_screen.show()
 
-    qt_app.exec_()
+    # Simulate preload (adjust as needed)
+    QTimer.singleShot(2000, app.splash_screen.notify_launcher_ready)
+
+    sys.exit(app.exec_())
 
 # === Entry Point ===
 if __name__ == "__main__":
