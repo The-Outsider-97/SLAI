@@ -1,3 +1,5 @@
+import os, sys
+import yaml
 import gymnasium as gym
 import numpy as np
 import torch
@@ -86,7 +88,8 @@ def main():
     plt.title('Reward Trend')
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
-    plt.savefig('logs/reward_trend.png')
+    os.makedirs('outputs', exist_ok=True)
+    plt.savefig('outputs/reward_trend.png')
     plt.show()  # Optional, if you want to display it directly
 
 if __name__ == "__main__":
