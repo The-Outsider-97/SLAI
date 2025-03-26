@@ -5,6 +5,7 @@ import torch
 import logging
 
 from logs.logger import get_logger
+from utils.logger import setup_logger
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
@@ -17,23 +18,30 @@ from deployment.git.rollback_handler import RollbackHandler
 from agents.safe_ai_agent import SafeAI_Agent
 from collaborative.shared_memory import SharedMemory
 
+logger = setup_logger("SafeAIAgent", level=logging.INFO)
+
 logger = get_logger()
 logger.info("Training started")
 logger.warning("Risk score too high")
 
-config_file = "config.yaml"
-with open(config_file, 'r') as f:
-    config = yaml.safe_load(f)
+try:
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    logger.error(f"Failed to load config.yaml: {e}")
+    sys.exit(1)
+
+logger.info("Initializing Safe AI Agent...")
+
+try:
+    agent = SafeAIAgent(config=config)
+    agent.run()
+    logger.info("Safe AI Agent execution completed.")
+except Exception as e:
+    logger.error(f"Safe AI agent encountered an error: {e}", exc_info=True)
 
 # Configure logging
 os.makedirs(config['run']['output_dir'], exist_ok=True)
-#logging.basicConfig(
-#    filename=config['logging']['log_file'],
-#    filemode='a',
-#    format='%(asctime)s - %(levelname)s - %(message)s',
-#    level=getattr(logging, config['logging']['level'].upper(), logging.INFO)
-#)
-#logger = logging.getLogger('SafeAI')
 
 def main():
     logger.info(" Starting Safe AI Pipeline...")
