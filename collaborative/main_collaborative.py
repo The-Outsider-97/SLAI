@@ -32,7 +32,7 @@ def run_safety_protocol(collab_mgr):
     print("SafeAI Task Output:", safe_result)
 
 # 2. Train SafeAI Agent from historical data
-safe_ai_agent.train()
+SafeAI_Agent.train()
 
 # 3. Evaluate performance after training
 summary = safe_ai_agent.evaluate()
