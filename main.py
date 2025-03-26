@@ -24,6 +24,16 @@ metric_queue = queue.Queue()
 from frontend.startup_screen import StartupScreen
 from frontend.main_window import MainWindow
 
+def launch_ui():
+    def launch_main_window():
+        main_win = MainWindow(log_queue=log_queue, metric_queue=metric_queue)
+        main_win.show()
+
+    qt_app = QApplication(sys.argv)
+    splash = StartupScreen(on_finish_callback=launch_main_window)
+    splash.show()
+    qt_app.exec_()
+
 # === Config Loader ===
 try:
     with open('config.yaml', 'r') as file:
