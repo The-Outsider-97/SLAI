@@ -88,8 +88,8 @@ class AgentRegistry:
         """
         return {
             name: agent for name, agent in self._agents.items()
-            if task_type in self._capabilities.get(name, [])
-        }
+            if task_type in agent.get("capabilities", [])
+        }
 
     def list_agents(self):
         """
