@@ -35,6 +35,23 @@ class RLAgent:
 
         self.policy = self._build_policy()
 
+    def execute(self, task_data):
+        """
+        Execute the RSI task using given data. Required for collaboration system.
+        """
+        print("[RSI_Agent] Executing task:", task_data)
+
+        # Run training with dynamic self-tuning
+        self.train()
+
+        # Collect metrics
+        evaluation = self.evaluate()
+
+        # Optionally write to shared memory
+        self.shared_memory.set("rsi_agent_last_eval", evaluation)
+
+        return evaluation
+        
     def _build_policy(self):
         """
         Constructs a simple policy model.
