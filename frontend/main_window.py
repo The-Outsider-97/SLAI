@@ -3,6 +3,43 @@ from PyQt5.QtGui import QFont, QPixmap
 from PyQt5.QtCore import Qt, QTimer
 import os
 import json
+import subprocess
+import threading
+
+def launch_module(self):
+    module_map = {
+        "EvolutionaryAgent": "main.py",
+        "BasicRLAgent": "main_cartpole.py",
+        "EvolutionaryDQNAgent": "main_cartpole_evolve.py",
+        "MultiTaskAgent": "main_multitask.py",
+        "MetaLearning": "main_maml.py",
+        "RSI": "main_rsi.py",
+        "RL": "main_autotune.py",
+        "SafeAI": "main_safe_ai.py",
+        "Collaborative": "collaborative/main_collaborative.py"
+    }
+
+    module_key = self.module_select.currentText()
+    script_path = module_map.get(module_key)
+
+    if not script_path or not os.path.exists(script_path):
+        self.log_panel.append(f"[ERROR] Cannot find script for module: {module_key}")
+        return
+
+    def run_agent():
+        self.log_panel.append(f"[✓] Launching {script_path}...\n")
+        process = subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+        for line in process.stdout:
+            self.log_panel.append(line.strip())
+        process.wait()
+        self.log_panel.append(f"\n[✓] Execution finished.\n")
+
+    threading.Thread(target=run_agent, daemon=True).start()
 
 class MainWindow(QWidget):
     def __init__(self, log_queue=None, metric_queue=None):
