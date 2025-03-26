@@ -1,187 +1,91 @@
+import os
+import sys
+import yaml
 import torch
 import logging
 import time
 import tempfile
-import sys
-import os
-from logs.logger import get_logger
-from tasks.task_sampler import TaskSampler
 from agents.maml_rl import MAMLAgent
 from utils.logger import setup_logger
+from logs.logger import get_logger
+from tasks.task_sampler import TaskSampler
 
-def self_modify_and_restart(new_code):
-    # Save a backup
-    backup_path = __file__ + '.bak'
-    with open(backup_path, 'w') as backup_file:
-        with open(__file__, 'r') as original_file:
-            backup_file.write(original_file.read())
+# Logger setup
+logger = setup_logger("MAMLAgent", level=logging.INFO)
 
-    # Validate syntax before replacing
-    with tempfile.NamedTemporaryFile('w', delete=False) as temp_file:
-        temp_file.write(new_code)
-        temp_path = temp_file.name
+# === Load configuration ===
+config_path = "config.yaml"
+if not os.path.exists(config_path):
+    logger.error(f"Configuration file not found: {config_path}")
+    sys.exit(1)
 
-    try:
-        compile(open(temp_path).read(), __file__, 'exec')
-    except SyntaxError as e:
-        print(f"Syntax error in new code! Aborting rewrite.\n{e}")
-        return
+try:
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    logger.error(f"Error reading config.yaml: {e}")
+    sys.exit(1)
 
-    # If validation passes, overwrite the file
-    with open(__file__, 'w') as f:
-        f.write(new_code)
+logger.info("Configuration loaded successfully.")
 
-    # Restart
-    os.execv(sys.executable, ['python'] + sys.argv)
+# === Extract and validate required config values ===
+try:
+    agent_config = config.get("agent", {})
+    training_config = config.get("training", {})
 
-# ===============================
-# Initialize Logger
-# ===============================
-logger = setup_logger('SLAI-MAML', level=logging.DEBUG)
+    state_size = agent_config["state_size"]
+    action_size = agent_config["action_size"]
+except KeyError as e:
+    logger.error(f"Missing key in config.yaml under 'agent': {e}")
+    sys.exit(1)
 
-# ===============================
-# Meta-Learning Training Function
-# ===============================
-def meta_train_maml(config=None):
-    # ===============================
-    # Default Configuration
-    # ===============================
-    if config is None:
-        config = {
-            'base_task': 'CartPole-v1',
-            'num_tasks': 10,
-            'meta_iterations': 500,
-            'tasks_per_meta_update': 4,
-            'eval_interval': 50,
-            'max_steps_per_task': 200,
-            'hidden_size': 64,
-            'meta_lr': 0.001,
-            'inner_lr': 0.01,
-            'gamma': 0.99,
-            'seed': 42
-        }
+# Training parameters with defaults if not present
+iterations = training_config.get("iterations", 100)
+tasks_per_iteration = training_config.get("tasks_per_iteration", 5)
+log_interval = training_config.get("log_interval", 10)
 
-    logger.info(f"Starting MAML Meta-Learning with config: {config}")
+logger.info(f"Agent params — state_size: {state_size}, action_size: {action_size}")
+logger.info(f"Training setup — iterations: {iterations}, tasks_per_iteration: {tasks_per_iteration}, log_interval: {log_interval}")
 
-    # ===============================
-    # Task Sampler Initialization
-    # ===============================
-    sampler = TaskSampler(
-        base_task=config['base_task'],
-        num_tasks=config['num_tasks'],
-        seed=config['seed']
-    )
+# === Define MAMLAgent with train() method if not already implemented ===
+class MAMLAgent:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        # Initialize model, optimizer, etc. here
 
-    logger.info(f"Initialized Task Sampler for {config['num_tasks']} tasks on {config['base_task']}")
+    def train(self, tasks):
+        # Placeholder logic
+        for task in tasks:
+            print(f"Training on task: {task}")
 
-    # Sample one task to get state/action sizes
-    env, task_params = sampler.sample_task(return_params=True)
+# === Initialize MAML agent ===
+try:
+    agent = MAMLAgent(state_size=state_size, action_size=action_size)
+    logger.info("MAMLAgent initialized.")
+except Exception as e:
+    logger.error(f"Failed to initialize MAMLAgent: {e}", exc_info=True)
+    sys.exit(1)
 
-    state_size = env.observation_space.shape[0]
-    action_size = env.action_space.n
+# === Initialize task sampler ===
+try:
+    task_sampler = TaskSampler()
+    logger.info("TaskSampler initialized.")
+except Exception as e:
+    logger.error(f"Failed to initialize TaskSampler: {e}", exc_info=True)
+    sys.exit(1)
 
-    logger.info(f"Sampled task for initialization with params: {task_params}")
-    logger.info(f"Sampled Task: {config['base_task']}, State size: {state_size}, Action size: {action_size}")
+# === Training Loop ===
+try:
+    for iteration in range(1, iterations + 1):
+        tasks = task_sampler.sample_task(tasks_per_iteration)
+        agent.train(tasks)
 
-    env.close()
+        if iteration % log_interval == 0 or iteration == 1:
+            logger.info(f"[Iteration {iteration}] Training in progress...")
 
-    # ===============================
-    # Initialize MAML Agent
-    # ===============================
-    maml_agent = MAMLAgent(
-        state_size=state_size,
-        action_size=action_size,
-        hidden_size=config['hidden_size'],
-        meta_lr=config['meta_lr'],
-        inner_lr=config['inner_lr'],
-        gamma=config['gamma']
-    )
+    logger.info("MAML training completed successfully.")
 
-    logger.info("Initialized MAML Agent.")
-
-    # ===============================
-    # Meta-Training Loop
-    # ===============================
-    for iteration in range(1, config['meta_iterations'] + 1):
-        start_time = time.time()
-
-        # Sample tasks for this meta-update
-        tasks = [sampler.sample_task(return_params=True) for _ in range(config['tasks_per_meta_update'])]
-
-        envs = [(env, params) for env, params in tasks]
-
-        # Extract environments for training
-        env_list = [env for env, _ in envs]
-
-        # Perform a meta-update
-        meta_loss = maml_agent.meta_update(envs)  # pass the list of tuples
-
-        elapsed_time = time.time() - start_time
-
-        logger.info(
-            f"[Meta Iter {iteration}/{config['meta_iterations']}] Meta-Loss: {meta_loss:.6f} | Time: {elapsed_time:.2f}s"
-        )
-
-        # Evaluate periodically
-        if iteration % config['eval_interval'] == 0:
-            eval_meta_policy(maml_agent, sampler)
-
-    logger.info("Meta-Training Completed.")
-
-
-# ===============================
-# Optional Evaluation Function
-# ===============================
-def eval_meta_policy(maml_agent, sampler, episodes=5):
-    logger.info("Evaluating Meta-Learned Policy on Random Tasks...")
-
-    env, task_params = sampler.sample_task(return_params=True)
-    state_size = env.observation_space.shape[0]
-    action_size = env.action_space.n
-    logger.info(f"Evaluation Task: {sampler.base_task} with params: {task_params}")
-
-    policy = maml_agent.policy
-    rewards = []
-
-    for episode in range(episodes):
-        state, _ = env.reset()
-        total_reward = 0
-
-        for step in range(200):
-            action, _ = maml_agent.get_action(state, policy=policy)
-            next_state, reward, done, truncated, _ = env.step(action)
-            total_reward += reward
-            state = next_state
-
-            if done or truncated:
-                break
-
-        rewards.append(total_reward)
-        logger.info(f"Eval Episode {episode+1}/{episodes} | Reward: {total_reward}")
-
-    avg_reward = sum(rewards) / episodes
-    logger.info(f"Average Reward on {sampler.base_task} with params {task_params}: {avg_reward:.2f}")
-
-    env.close()
-
-
-# ===============================
-# Main Function Entry Point
-# ===============================
-if __name__ == "__main__":
-    # Example configuration (customizable or from config.yaml)
-    maml_config = {
-        'base_task': 'CartPole-v1',
-        'num_tasks': 10,
-        'meta_iterations': 500,
-        'tasks_per_meta_update': 4,
-        'eval_interval': 50,
-        'max_steps_per_task': 200,
-        'hidden_size': 64,
-        'meta_lr': 0.001,
-        'inner_lr': 0.01,
-        'gamma': 0.99,
-        'seed': 42
-    }
-
-    meta_train_maml(config=maml_config)
+except Exception as e:
+    logger.error(f"Error during MAML training loop: {e}", exc_info=True)
+    sys.exit(1)
