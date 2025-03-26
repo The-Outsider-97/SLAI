@@ -1,3 +1,5 @@
+frontend/assets/startup.png
+---
 # SLAI - Self-Learning Autonomous Intelligence
 
 An open-source AGI prototype that evolves, learns, and rewrites itself.
