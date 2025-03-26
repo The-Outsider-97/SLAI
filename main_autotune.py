@@ -7,8 +7,10 @@ import torch
 import shutil
 import logging
 import subprocess
+from agents.rl_agent import RLAgent
 from logs.logger import get_logger
 from logs.logs_parser import LogsParser
+from utils.logger import setup_logger
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
 from alignment_checks.fairness_evaluator import FairnessEvaluator
@@ -25,8 +27,16 @@ os.makedirs("models/", exist_ok=True)
 
 file_handler = RotatingFileHandler('logs/run.log', maxBytes=10*1024*1024, backupCount=5)
 
-with open("config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+logger = setup_logger("RLAgent", level=logging.INFO)
+
+try:
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    logger.error(f"Failed to load config.yaml: {e}")
+    sys.exit(1)
+
+logger.info("Launching Recursive Learning Agent...")
 
 # Strategy selection for hyperparam tuning
 strategy = config["tuning"]["strategy"]
