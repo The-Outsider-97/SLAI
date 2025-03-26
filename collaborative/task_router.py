@@ -13,6 +13,15 @@ class TaskRouter:
         self.registry = registry
         self.shared_memory = shared_memory or {}
 
+    def get_agents_by_task(self, task_type):
+        """
+        Return all agents that support a given task_type.
+        """
+        return {
+            name: agent for name, agent in self._agents.items()
+            if task_type in self._capabilities.get(name, [])
+        }
+    
     def route(self, task_type, task_data):
         eligible_agents = self.registry.get_agents_by_task(task_type)
 
