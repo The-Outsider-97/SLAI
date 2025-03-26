@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QComboBox
 from PyQt5.QtGui import QFont, QPixmap
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 import os
 import sys
 import json
@@ -9,27 +9,27 @@ import subprocess
 
 def launch_module(self):
     module_map = {
-        "1 - Evolutionary Agent (Current main.py logic)": "main.py",
-        "2 - Basic RL Agent (CartPole DQN)": "main_cartpole.py",
-        "3 - Evolutionary DQN Agent": "main_cartpole_evolve.py",
-        "4 - Multi-Task RL Agent": "main_multitask.py",
-        "5 - Meta-Learning Agent (MAML)": "main_maml.py",
-        "6 - Recursive Self-Improvement (RSI)": "main_rsi.py",
-        "7 - RL Agent": "main_autotune.py",
-        "8 - Safe AI Agent": "main_safe_ai.py",
-        "9 - Collaborative Agents (Task Routing, Shared Memory)": "collaborative/main_collaborative.py"
+        "EvolutionaryAgent": "main.py",
+        "BasicRLAgent": "main_cartpole.py",
+        "EvolutionaryDQNAgent": "main_cartpole_evolve.py",
+        "MultiTaskAgent": "main_multitask.py",
+        "MetaLearning": "main_maml.py",
+        "RSI": "main_rsi.py",
+        "RL": "main_autotune.py",
+        "SafeAI": "main_safe_ai.py",
+        "Collaborative": "collaborative/main_collaborative.py"
     }
 
     module_key = self.module_select.currentText()
     script_path = module_map.get(module_key)
 
     if not script_path or not os.path.exists(script_path):
-        self.log_panel.append(f"[ERROR] Cannot find script for module: {module_key}")
+        self.log_signal.emit(f"[ERROR] Cannot find script for module: {module_key}")
         self.log_panel.moveCursor(self.log_panel.textCursor().End)
         return
 
     def run_agent():
-        self.log_panel.append(f"[✓] Launching {script_path}...\n")
+        self.log_signal.emit(f"[✓] Launching {script_path}...\n")
         self.log_panel.moveCursor(self.log_panel.textCursor().End)
         process = subprocess.Popen(
             [sys.executable, script_path],
@@ -38,15 +38,17 @@ def launch_module(self):
             universal_newlines=True
         )
         for line in process.stdout:
-            self.log_panel.append(line.strip())
+            self.log_signal.emit(line.strip())
             self.log_panel.moveCursor(self.log_panel.textCursor().End)
         process.wait()
-        self.log_panel.append(f"\n[✓] Execution finished.\n")
+        self.log_signal.emit(f"\n[✓] Execution finished.\n")
         self.log_panel.moveCursor(self.log_panel.textCursor().End)
 
     threading.Thread(target=run_agent, daemon=True).start()
 
 class MainWindow(QWidget):
+    log_signal = pyqtSignal(str)
+
     def __init__(self, log_queue=None, metric_queue=None):
         super().__init__()
 
@@ -55,17 +57,22 @@ class MainWindow(QWidget):
         self.latest_metrics = {}
 
         self.setWindowTitle("SLAI Launcher")
-        self.setStyleSheet("background-color: #101010; color: white;")
+        self.setStyleSheet("background-color: #0e0e0e; color: #eaedec;")
         self.setGeometry(200, 100, 1280, 720)
 
         self.initUI()
+        self.log_signal.connect(self.safe_append_log)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_loop)
         self.update_timer.start(500)
 
+    def safe_append_log(self, line):
+        self.log_signal.emit(line)
+        self.log_panel.moveCursor(self.log_panel.textCursor().End)
+
     def initUI(self):
-        header_font = QFont("Times New Roman", 15, QFont.Bold)
-        text_font = QFont("Times New Roman", 12)
+        header_font = QFont("Times New Roman", 14, QFont.Bold)
+        text_font = QFont("Times New Roman", 10)
 
         # === Top Controls ===
         self.module_select = QComboBox()
@@ -75,11 +82,11 @@ class MainWindow(QWidget):
         ])
 
         self.launch_btn = QPushButton("Launch")
-        self.launch_btn.setStyleSheet("background-color: #1e90ff; color: white; padding: 5px;")
+        self.launch_btn.setStyleSheet("background-color: #b99b00; color: #eaedec; padding: 5px;")
         self.launch_btn.clicked.connect(lambda: launch_module(self))
 
         self.stop_btn = QPushButton("Stop Agent")
-        self.stop_btn.setStyleSheet("background-color: #660000; color: white; padding: 5px;")
+        self.stop_btn.setStyleSheet("background-color: #431600; color: #eaedec; padding: 5px;")
 
         self.save_logs_btn = QPushButton("Save Logs")
         self.save_metrics_btn = QPushButton("Save Metrics")
@@ -142,7 +149,7 @@ class MainWindow(QWidget):
             while not self.log_queue.empty():
                 try:
                     line = self.log_queue.get_nowait()
-                    self.log_panel.append(line)
+                    self.log_signal.emit(line)
                     self.log_panel.moveCursor(self.log_panel.textCursor().End)
                 except Exception:
                     pass
