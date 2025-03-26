@@ -5,6 +5,20 @@ import queue
 import logging
 import tkinter as tk
 from tkinter import font
+from PyQt5.QtWidgets import QApplication
+from startup_screen import StartupScreen
+from main_window import MainWindow
+
+def launch_main_ui():
+    main_win = MainWindow()
+    main_win.show()
+    app.exec_()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    splash = StartupScreen(on_finish_callback=launch_main_ui)
+    splash.show()
+    sys.exit(app.exec_())
 
 class SLAIInterface:
     def __init__(self, root, log_queue, metric_queue):
@@ -48,7 +62,7 @@ class SLAIInterface:
         self.save_metrics_btn.place(x=220, y=10)
 
     def _handle_stop(self):
-        self.log_queue.put("⛔ [USER] Stop requested.")
+        self.log_queue.put("[USER] Stop requested.")
         self.shared_memory.set("stop", True)  # if shared_memory is passed in
 
     def _save_logs_to_file(self, filename="logs/ui_run_log.txt"):
