@@ -21,6 +21,23 @@ class RSI_Agent:
         self.shared_memory = shared_memory
         self.config = config or {}
         self.model_id = "RSI_Agent"
+        
+    def execute(self, task_data):
+        """
+        Execute the RSI task using given data. Required for collaboration system.
+        """
+        print("[RSI_Agent] Executing task:", task_data)
+
+        # Run training with dynamic self-tuning
+        self.train()
+
+        # Collect metrics
+        evaluation = self.evaluate()
+
+        # Optionally write to shared memory
+        self.shared_memory.set("rsi_agent_last_eval", evaluation)
+
+        return evaluation
 
     def act(self, state):
         # Simulate RSI rule-based action
