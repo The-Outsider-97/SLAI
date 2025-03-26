@@ -52,7 +52,14 @@ stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(m
 logger.addHandler(stream_handler)
 
 # Public interface
-def get_logger():
+def get_logger(name, level=logging.INFO):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    logger.setLevel(level)
     return logger
 
 def get_log_queue():
