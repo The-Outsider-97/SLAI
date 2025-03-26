@@ -1,18 +1,21 @@
 import os
-import sys
 import torch
-import queue
 import logging
+import sys, queue
 import tkinter as tk
 from tkinter import font
+from main import SLAIInterface
 from PyQt5.QtWidgets import QApplication
 from startup_screen import StartupScreen
-from main_window import MainWindow
+
+log_queue = queue.Queue()
+metric_queue = queue.Queue()
 
 def launch_main_ui():
-    main_win = MainWindow()
-    main_win.show()
-    app.exec_()
+    app.quit()  # Stop the PyQt event loop
+    root = tk.Tk()
+    interface = SLAIInterface(root, log_queue, metric_queue)
+    root.mainloop()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
