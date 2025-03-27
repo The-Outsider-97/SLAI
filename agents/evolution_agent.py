@@ -35,23 +35,6 @@ class EvolutionAgent(BaseAgent):
         if not (0 < self.elite_fraction <= 1):
             raise ValueError(f"elite_fraction must be between 0 and 1, got {self.elite_fraction}")
 
-    def execute(self, task_data):
-        """
-        Execute the Evolution task using given data. Required for collaboration system.
-        """
-        print("[Evolution_Agent] Executing task:", task_data)
-
-        # Run training with dynamic self-tuning
-        self.train()
-
-        # Collect metrics
-        evaluation = self.evaluate()
-
-        # Optionally write to shared memory
-        self.shared_memory.set("evolution_agent_last_eval", evaluation)
-
-        return evaluation
-        
     def build_model(self, hidden_size=None):
         if not hidden_size:
             hidden_size = random.choice(self.hidden_sizes)
@@ -162,6 +145,24 @@ class EvolutionAgent(BaseAgent):
 
         accuracy = 100 * correct / total
         return accuracy
+
+    def select_action(self, state):
+        """
+        Required by BaseAgent — Not used by EvolutionAgent.
+        Returning None or random action as a placeholder.
+        """
+        return None
+
+    def train(self):
+        """
+        Required by BaseAgent.
+        Executes the evolutionary training loop.
+        """
+        train_loader = self.config.get("train_loader", [])
+        val_loader = self.config.get("val_loader", [])
+
+        self.initialize_population()
+        self.evolve_population(evaluator=self, train_loader=train_loader, val_loader=val_loader)
 
     def execute(self, task_data):
         """
