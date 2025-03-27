@@ -1,5 +1,3 @@
-# agents/base_agent.py
-
 from abc import ABC, abstractmethod
 
 class BaseAgent(ABC):
@@ -18,10 +16,13 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def train_model(self, model, train_loader, val_loader):
-        """
-        Train the model on given data.
-        """
+    def select_action(self, state):
+        """Selects an action based on the given state."""
+        pass
+
+    @abstractmethod
+    def train(self, *args, **kwargs):
+        """Trains the agent."""
         pass
 
     @abstractmethod
