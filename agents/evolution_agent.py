@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch
 import copy
 import random
-from base_agent import BaseAgent
+from agents.base_agent import BaseAgent
 
 class EvolutionAgent(BaseAgent):
     """
