@@ -1,3 +1,5 @@
+import os, sys
+import logging
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,7 +22,16 @@ class PolicyNetwork(nn.Module):
 
 class MAMLAgent:
     def __init__(self, state_size, action_size, hidden_size=64, meta_lr=0.001, inner_lr=0.01, gamma=0.99):
-
+        """
+        Initialize the MAML Agent.
+        Args:
+            state_size (int): Size of input state.
+            action_size (int): Size of output action.
+            hidden_size (int): Size of hidden layers.
+            meta_lr (float): Learning rate for meta optimizer.
+            inner_lr (float): Learning rate for inner loop.
+            gamma (float): Discount factor.
+        """
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
@@ -29,14 +40,14 @@ class MAMLAgent:
         self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=meta_lr)
         self.inner_lr = inner_lr
 
-        pass
-
     def clone_policy(self, policy):
+        """Deep copy a policy network."""
         import copy
         cloned_policy = copy.deepcopy(policy)
         return cloned_policy
 
     def get_action(self, state, policy=None):
+        """Select an action from the policy's action distribution."""
         if policy is None:
             policy = self.policy
         state = torch.FloatTensor(state).unsqueeze(0)
@@ -46,6 +57,7 @@ class MAMLAgent:
         return action.item(), dist.log_prob(action)
 
     def collect_trajectory(self, env, policy=None, max_steps=200):
+        """Collect a single trajectory (episode) of interaction with the environment."""
         trajectory = []
         state, _ = env.reset()
         for _ in range(max_steps):
@@ -60,6 +72,7 @@ class MAMLAgent:
         return trajectory
 
     def compute_loss(self, trajectory, policy):
+        """Compute policy gradient loss using REINFORCE."""
         rewards = [t.reward for t in trajectory]
         discounted_rewards = []
         G = 0
@@ -87,29 +100,21 @@ class MAMLAgent:
             adapted_policy (nn.Module): The policy network after one inner update.
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-        # Ensure policy is on the correct device
         policy = self.policy.to(device)
 
-        # Collect trajectory data from the environment
         trajectories = self.collect_trajectory(env, policy)
-
-        # Compute the inner loop loss on the collected trajectory
         loss = self.compute_loss(trajectories, policy)
 
-        # Compute gradients w.r.t. policy parameters
+        # Compute gradients
         grads = torch.autograd.grad(
             outputs=loss,
             inputs=policy.parameters(),
             create_graph=True,
             retain_graph=True,
-            allow_unused=True  # Safe for some layers (e.g., Dropout)
+            allow_unused=True
         )
 
-        # Clone the current policy for adaptation
         adapted_policy = self.clone_policy(policy)
-
-        # Prepare the adapted parameters (manual SGD step)
         adapted_params = {}
 
         for (name, param), grad in zip(policy.named_parameters(), grads):
@@ -119,14 +124,12 @@ class MAMLAgent:
                 adapted_params[name] = param.detach().clone()
                 continue
 
-            # Gradient descent step: theta' = theta - alpha * grad
             adapted_param = param - self.inner_lr * grad
-            adapted_params[name] = adapted_param.detach().clone()  # Detach for safety
+            adapted_params[name] = adapted_param.detach().clone()
 
             if log:
                 print(f"[Inner Update] Param: {name}, Grad Norm: {grad.norm():.4f}")
 
-        # Load the adapted parameters into the cloned policy
         adapted_state_dict = adapted_policy.state_dict()
         for name in adapted_state_dict.keys():
             adapted_state_dict[name] = adapted_params[name]
@@ -139,13 +142,18 @@ class MAMLAgent:
         return adapted_policy.to(device)
 
     def meta_update(self, tasks, inner_steps=1):
+        """
+        Perform the meta update across a set of tasks.
+        Args:
+            tasks (list): List of (env, config) tuples.
+            inner_steps (int): Number of inner loop updates per task.
+        Returns:
+            float: Average meta loss over all tasks.
+        """
         meta_loss = 0.0
 
         for env, _ in tasks:
-            # Inner loop: adapt policy to the task
             adapted_policy = self.inner_update(env)
-
-            # Collect trajectory with adapted policy
             trajectory = self.collect_trajectory(env, policy=adapted_policy)
             task_loss = self.compute_loss(trajectory, adapted_policy)
             meta_loss += task_loss
@@ -153,11 +161,15 @@ class MAMLAgent:
         meta_loss /= len(tasks)
         self.meta_optimizer.zero_grad()
         meta_loss.backward()
-        self.meta_optimizer.step()
 
+        # Apply gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+
+        self.meta_optimizer.step()
         return meta_loss.item()
 
     def execute(self, task_data):
+        """Interface method for task execution."""
         tasks = task_data.get("tasks", [])
         loss = self.meta_update(tasks)
         return {
