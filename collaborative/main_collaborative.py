@@ -1,9 +1,9 @@
-import sys
+import os, sys
 import logging
 import torch
 import time
-import os
 import yaml
+import argparse
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -11,19 +11,13 @@ from collaboration_manager import CollaborationManager
 from shared_memory import SharedMemory
 from registry import AgentRegistry
 from utils.logger import setup_logger
-
-# Import all agents
-from collaborative_agent import CollaborativeAgent
-from agents.evolution_agent import EvolutionAgent
-from agents.dqn_agent import DQNAgent
-from agents.evolutionary_dqn import EvolutionaryDQNAgent
-from agents.multitask_rl import MultiTaskRLAgent
-from agents.maml_rl import MAMLAgent
-from agents.rl_agent import RLAgent
-from agents.rsi_agent import RSI_Agent
-from agents.safe_ai_agent import SafeAI_Agent
+from utils.agent_factory import create_agent
+from utils.config_loader import load_config
+from evaluators.report import PerformanceEvaluator
 
 logger = setup_logger("CollaborativeAgent", level=logging.INFO)
+
+evaluator = PerformanceEvaluator(threshold=75.0)
 
 try:
     config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.yaml"))
@@ -58,54 +52,53 @@ def initialize_shared_memory():
 def register_agents(collab_mgr, shared_memory):
     print("\n=== Registering Agents ===")
 
-    evolutionary_agent = EvolutionAgent(input_size=10, output_size=2, config={
-        "hidden_sizes": [32, 64, 128],
-        "learning_rate": 0.001,
-        "population_size": 5,
-        "elite_fraction": 0.4
-    })
-    collab_mgr.register_agent("evolutionary", evolutionary_agent, ["optimize", "evolve"])
+    agent_configs = {
+        "evolution": {
+            "input_size": 10, "output_size": 2,
+            "hidden_sizes": [32, 64, 128],
+            "learning_rate": 0.001,
+            "population_size": 5,
+            "elite_fraction": 0.4
+        },
+        "dqn": {
+            "state_size": 4, "action_size": 2,
+            "gamma": 0.99, "epsilon": 1.0, "epsilon_min": 0.01,
+            "epsilon_decay": 0.995, "learning_rate": 1e-3,
+            "hidden_size": 128, "batch_size": 64,
+            "memory_capacity": 10000
+        },
+        "evolutionary_dqn": {"env": "CartPole-v1", "state_size": 4, "action_size": 2},
+        "multitask": {"state_size": 4, "action_size": 2, "num_tasks": 10},
+        "maml": {"state_size": 4, "action_size": 2, "hidden_size": 64, "meta_lr": 0.001, "inner_lr": 0.01, "gamma": 0.99},
+        "rsi": {"state_size": 4, "action_size": 2, "shared_memory": shared_memory},
+        "rl_agent": {"learning_rate": 0.01, "num_layers": 2, "activation_function": "relu"},
+        "safe_ai": {"shared_memory": shared_memory}
+    }
 
-    dqn_agent = DQNAgent(state_size=4, action_size=2, config={
-        "gamma": 0.99,
-        "epsilon": 1.0,
-        "epsilon_min": 0.01,
-        "epsilon_decay": 0.995,
-        "learning_rate": 1e-3,
-        "hidden_size": 128,
-        "batch_size": 64,
-        "memory_capacity": 10000
-    })
-    collab_mgr.register_agent("dqn", dqn_agent, ["reinforcement_learning", "decision_making"])
+    task_mapping = {
+        "evolution": ["optimize", "evolve"],
+        "dqn": ["reinforcement_learning", "decision_making"],
+        "evolutionary_dqn": ["evolve", "reinforcement_learning"],
+        "multitask": ["multi_task_learning", "adaptation"],
+        "maml": ["meta_learning", "fast_adaptation"],
+        "rsi": ["self_improvement", "autotune"],
+        "rl_agent": ["autotune", "reinforcement_learning"],
+        "safe_ai": ["safety", "risk_management"]
+    }
 
-    from gym.envs.classic_control import CartPoleEnv
-    env = CartPoleEnv()
-    evolutionary_dqn_agent = EvolutionaryDQNAgent(env=env, state_size=4, action_size=2)
-    collab_mgr.register_agent("evolutionary_dqn", evolutionary_dqn_agent, ["evolve", "reinforcement_learning"])
-
-    multitask_rl_agent = MultiTaskRLAgent(state_size=4, action_size=2, num_tasks=10)
-    collab_mgr.register_agent("multitask_rl", multitask_rl_agent, ["multi_task_learning", "adaptation"])
-
-    maml_agent = MAMLAgent(state_size=4, action_size=2, hidden_size=64, meta_lr=0.001, inner_lr=0.01, gamma=0.99)
-    collab_mgr.register_agent("maml", maml_agent, ["meta_learning", "fast_adaptation"])
-
-    rsi_agent = RSI_Agent(state_size=4, action_size=2, shared_memory=shared_memory)
-    collab_mgr.register_agent("rsi", rsi_agent, ["self_improvement", "autotune"])
-
-    rl_agent = RLAgent(learning_rate=0.01, num_layers=2, activation_function="relu")
-    collab_mgr.register_agent("rl_agent", rl_agent, ["autotune", "reinforcement_learning"])
-
-    safe_ai_agent = SafeAI_Agent(shared_memory=shared_memory)
-    collab_mgr.register_agent("safe_ai", safe_ai_agent, ["safety", "risk_management"])
+    for agent_name, tasks in task_mapping.items():
+        agent = create_agent(agent_name, agent_configs[agent_name])
+        collab_mgr.register_agent(agent_name, agent, tasks)
 
     print(f"\nTotal registered agents: {len(collab_mgr.list_agents())}")
     for name in collab_mgr.list_agents():
         print(f" - {name}")
 
-    return safe_ai_agent
+    return collab_mgr.registry.get_agent_class("safe_ai")
 
 def execute_collaborative_tasks(agent):
     print("\n=== Executing Collaborative Tasks ===")
+    reward_trace = []
     task_queue = [
         {"type": "optimize", "data": {"dataset": "CartPole-v1", "current_score": 0.50}},
         {"type": "reinforcement_learning", "data": {"state": "start", "episode": 1}},
@@ -122,9 +115,13 @@ def execute_collaborative_tasks(agent):
         try:
             result = agent.execute(task['type'], task['data'])
             print(f"Result: {result}")
+            if "performance" in result:
+                reward_trace.append(result["performance"])
         except Exception as e:
             print(f"Task {task['type']} failed: {str(e)}")
         time.sleep(1)
+
+    evaluator.plot_rewards(reward_trace)
 
 def display_shared_memory(shared_memory):
     print("\n=== Final Shared Memory ===")
@@ -146,7 +143,7 @@ def main():
 
     register_agents(collab_mgr, shared_memory)
 
-    collab_agent = CollaborativeAgent(shared_memory, task_router)
+    collab_agent = create_agent("collaborative", {"shared_memory": shared_memory, "task_router": task_router})
     logger.info("CollaborativeAgent initialized.")
 
     run_safety_protocol(collab_agent)
