@@ -17,6 +17,23 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 - Sandbox execution for safety  
 
 ---
+## 💻 MINIMUM SYSTEM REQUIREMENTS
+## Hardware:
+- CPU: Quad-core or higher
+
+- RAM: 16 GB minimum (32 GB recommended for multitask agents)
+
+- GPU: NVIDIA GPU with CUDA 11+ (Recommended for training)
+
+## Software:
+- Python 3.9+
+
+- PyTorch 2.0+
+
+- Required pip packages (already in requirements.txt)
+
+- Optional: PM2 (for deployment), graphviz for architecture visualization
+---
 
 # How to run
 
