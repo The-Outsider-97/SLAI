@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QComboBox, QFrame, QSizePolicy
-from PyQt5.QtGui import QFont, QPixmap, QImage
+from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 import os
 import sys
@@ -21,6 +21,7 @@ class MainWindow(QWidget):
         self.last_image_timestamp = None
 
         self.setWindowTitle("SLAI Launcher")
+        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "assets", "logo.ico")))
         self.setStyleSheet("background-color: #0e0e0e; color: #eaedec;")
         self.setGeometry(200, 100, 1280, 720)
 
@@ -37,6 +38,50 @@ class MainWindow(QWidget):
     def initUI(self):
         header_font = QFont("Times New Roman", 14, QFont.Bold)
         text_font = QFont("Times New Roman", 10)
+
+        logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.ico")
+        logo = QLabel()
+        logo.setPixmap(QPixmap(logo_path).scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        title_label = QLabel()
+        self.typing_texts = ["SLAI", "Self-Learning Autonomous Intelligence"]
+        self.typing_index = 0
+        self.char_index = 0
+        self.display_text = ""
+        self.is_pausing = False
+        self.pause_counter = 0
+
+        def update_typing():
+            if self.is_pausing:
+                self.pause_counter += 100
+                if self.pause_counter >= 5000:  # 5 seconds pause
+                    self.is_pausing = False
+                    self.typing_index = (self.typing_index + 1) % len(self.typing_texts)
+                    self.char_index = 0
+                    self.display_text = ""
+                return
+
+            full_text = self.typing_texts[self.typing_index]
+            if self.char_index < len(full_text):
+                self.display_text += full_text[self.char_index]
+                title_label.setText(self.display_text)
+                self.char_index += 1
+            else:
+                self.is_pausing = True
+                self.pause_counter = 0
+
+        self.typing_timer = QTimer()
+        self.typing_timer.timeout.connect(update_typing)
+        self.typing_timer.start(100)
+
+        title_label.setFont(QFont("Times New Roman", 14, QFont.Bold))
+        title_label.setStyleSheet("color: #eaedec;")
+
+
+        title_layout = QHBoxLayout()
+        title_layout.addWidget(logo)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
 
         self.module_select = QComboBox()
         self.module_select.addItems([
@@ -87,6 +132,7 @@ class MainWindow(QWidget):
         output_layout.addLayout(right_panel, 1)
 
         main_layout = QVBoxLayout()
+        main_layout.addLayout(title_layout)
         main_layout.addLayout(top_layout)
         main_layout.addLayout(output_layout)
         self.setLayout(main_layout)
@@ -156,7 +202,6 @@ class MainWindow(QWidget):
         else:
             gpu_info = "GPU: N/A"
 
-        # Use ._asdict() to safely access keys and handle missing fields
         ram_stats = ram._asdict()
         cached_mb = ram_stats.get('cached', 0) // (1024 ** 2)
 
