@@ -1,11 +1,12 @@
 ![Startup](frontend/assets/startup.png)
 ---
-# SLAI - Self-Learning Autonomous Intelligence
 
 An open-source AGI prototype that evolves, learns, and rewrites itself.
 SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Self-Improvement** into an autonomous research agent.
 
 ---
+
+![Flow Diagram](frontend/assets/flow_diagram.png)
 
 ## What It Does
 - Evolves deep neural networks (AutoML / NAS)  
