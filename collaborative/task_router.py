@@ -42,7 +42,7 @@ class TaskRouter:
                 return result
 
             except Exception as e:
-                logger.warning(f"Agent '{agent_name}' failed: {e}")
+                logger.exception(f"Agent '{agent_name}' failed during task '{task_type}' execution.")
                 self._record_failure(agent_name)
 
         # If all fail
