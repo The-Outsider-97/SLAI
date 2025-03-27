@@ -7,6 +7,16 @@ import ast
 
 from datetime import datetime
 
+def get_logger(name):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        fh = logging.FileHandler('logs/run.log')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    return logger
+
 def setup_logger(name, log_dir='logs', level=logging.INFO):
     # Ensure log directory exists
     if not os.path.exists(log_dir):
