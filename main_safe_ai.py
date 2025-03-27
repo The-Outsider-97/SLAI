@@ -5,7 +5,7 @@ import torch
 import logging
 
 from logs.logger import get_logger
-from utils.logger import setup_logger
+from utils.logger import setup_logger, cleanup_logger
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
@@ -20,7 +20,6 @@ from collaborative.shared_memory import SharedMemory
 
 logger = setup_logger("SafeAIAgent", level=logging.INFO)
 
-logger = get_logger()
 logger.info("Training started")
 logger.warning("Risk score too high")
 
@@ -34,7 +33,7 @@ except Exception as e:
 logger.info("Initializing Safe AI Agent...")
 
 try:
-    agent = SafeAIAgent(config=config)
+    agent = SafeAI_Agent(config=config)
     agent.run()
     logger.info("Safe AI Agent execution completed.")
 except Exception as e:
