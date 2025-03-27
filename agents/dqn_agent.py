@@ -1,9 +1,14 @@
+import os, sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
 import numpy as np
 import logging
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from utils.replay_buffer import DistributedReplayBuffer
 from utils.data_loader import FlexibleDataLoader as DataLoader
 from agents.base_agent import BaseAgent
 
