@@ -9,7 +9,7 @@ import random
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pathlib import Path
-from collaborative/shared_memory import SharedMemory  # <-- SLAI shared memory module
+from collaborative.shared_memory import SharedMemory 
 
 class Rewriter:
     def __init__(self, agent_path, config_path=None, trigger_mode="reward", reward_threshold=0.1, time_interval=300):
