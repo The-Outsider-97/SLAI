@@ -1,9 +1,13 @@
 import logging
 import random
-import os
-import sys
+import os, sys
+import yaml
 import torch
 import numpy as np
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from evaluators.report import PerformanceEvaluator
 
 class SafeAI_Agent:
     """
@@ -21,24 +25,50 @@ class SafeAI_Agent:
         # Risk model: (task_type, risk_score) pairs
         self.training_data = []  # stores past risk data for training
         self.risk_table = {}     # learned safety thresholds per task type
+        self.evaluator = PerformanceEvaluator(threshold=risk_threshold * 100)
 
     def execute(self, task_data):
         """
-        Execute the RSI task using given data. Required for collaboration system.
+        Evaluate risk and propose adjustments.
         """
-        print("[SafeAI_Agent] Executing task:", task_data)
+        policy_score = task_data.get("policy_risk_score", None)
+        task_type = task_data.get("task_type", "general")
 
-        # Run training with dynamic self-tuning
-        self.train()
+        if policy_score is None:
+            return {
+                "status": "failed",
+                "error": "Missing 'policy_risk_score' in task_data"
+            }
 
-        # Collect metrics
-        evaluation = self.evaluate()
+        safe = self.assess_risk(policy_score, task_type)
+        correction = self.suggest_correction(policy_score, task_type)
 
-        # Optionally write to shared memory
-        self.shared_memory.set("safe_ai_agent_last_eval", evaluation)
+        # Evaluate performance
+        percent_score = round((1.0 - policy_score) * 100, 2)  # Lower risk = better
+        meets_threshold = self.evaluator.meets_threshold(percent_score)
 
-        return evaluation
-        
+        if self.shared_memory:
+            self.shared_memory.set("last_policy_risk", policy_score)
+            self.shared_memory.set("safe_ai_recommendation", correction or "no_action")
+            self.shared_memory.set("safe_ai_score_percent", percent_score)
+            self.shared_memory.set("safe_ai_meets_threshold", meets_threshold)
+
+        # Store training data
+        self.training_data.append((task_type, policy_score))
+
+        result = {
+            "status": "assessed",
+            "agent": self.name,
+            "risk_score": policy_score,
+            "percent_score": percent_score,
+            "meets_threshold": meets_threshold,
+            "is_safe": safe,
+            "recommendation": correction
+        }
+
+        self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
+        return result
+
     def assess_risk(self, policy_score, task_type="general"):
         """
         Assess if the policy risk is within learned or default thresholds.
@@ -57,41 +87,6 @@ class SafeAI_Agent:
             }
             return correction
         return None
-
-    def execute(self, task_data):
-        """
-        Evaluate risk and propose adjustments.
-        """
-        policy_score = task_data.get("policy_risk_score", None)
-        task_type = task_data.get("task_type", "general")
-
-        if policy_score is None:
-            return {
-                "status": "failed",
-                "error": "Missing 'policy_risk_score' in task_data"
-            }
-
-        safe = self.assess_risk(policy_score, task_type)
-        correction = self.suggest_correction(policy_score, task_type)
-
-        # Update shared memory with results
-        if self.shared_memory:
-            self.shared_memory.set("last_policy_risk", policy_score)
-            self.shared_memory.set("safe_ai_recommendation", correction or "no_action")
-
-        # Store training data
-        self.training_data.append((task_type, policy_score))
-
-        result = {
-            "status": "assessed",
-            "agent": self.name,
-            "risk_score": policy_score,
-            "is_safe": safe,
-            "recommendation": correction
-        }
-
-        self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
-        return result
 
     def train(self, epochs=5):
         """
