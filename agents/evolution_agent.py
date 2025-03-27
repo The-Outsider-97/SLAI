@@ -1,11 +1,10 @@
-# agents/evolution_agent.py
-
+import os, sys
 import torch.nn as nn
 import torch.optim as optim
 import torch
-from agents.base_agent import BaseAgent
-import random
 import copy
+import random
+from base_agent import BaseAgent
 
 class EvolutionAgent(BaseAgent):
     """
@@ -120,6 +119,11 @@ class EvolutionAgent(BaseAgent):
             new_population.append(child)
 
         self.population = new_population
+
+        best_perf = self.population[0]['performance']
+        if not hasattr(self, 'fitness_history'):
+            self.fitness_history = []
+        self.fitness_history.append(best_perf)
 
     def train_model(self, individual, train_loader, val_loader):
         """
