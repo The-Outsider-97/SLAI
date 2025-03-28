@@ -5,3 +5,6 @@ maml:
   meta_lr: 0.001
   inner_lr: 0.01
   gamma: 0.99
+  envs:
+    - CartPole-v1
+    - MountainCar-v0
