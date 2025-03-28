@@ -76,6 +76,8 @@ Note: If you see an error about execution policy:
    pip install gputil
    pip install psutil
    pip install PyQt5
+   pip install dotenv
+   pap install matplotlib
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
