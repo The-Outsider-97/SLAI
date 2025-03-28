@@ -68,7 +68,7 @@ Note: If you see an error about execution policy:
    pip install torch
    pip install -r requirements.txt
    pip install argparse
-   pip install numpy==1.23.5
+   pip install tensorflow
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
