@@ -1,16 +1,17 @@
-import os
-import sys
+import os, sys
 import subprocess
 import shutil
 import time
 import logging
 import tempfile
-
+import argparse
+from utils.agent_factory import create_agent
+from collaborative.shared_memory import SharedMemory
+from evaluators.report import PerformanceEvaluator
 from logs.logger import get_logger
 from recursive_improvement.rewriter import Rewriter
 from recursive_improvement.sandbox.runner import run_code_and_tests_docker
 from utils.logger import setup_logger
-from agents.rsi_agent import RSI_Agent
 from recursive_improvement.codegen.codegen import generate_code
 
 logger = get_logger("RSIAgent")
@@ -25,6 +26,26 @@ RSI_CONFIG = {
     'max_iterations': 10,
     'performance_threshold': 0.01
 }
+
+def main():
+    parser = argparse.ArgumentParser(description="Run RSI Agent")
+    parser.add_argument("--episodes", type=int, default=5, help="Number of training episodes")
+    args = parser.parse_args()
+
+    print("\n===== Running RSI Agent =====")
+    shared_memory = SharedMemory()
+    agent = create_agent("rsi", config={"state_size": 4, "action_size": 2, "shared_memory": shared_memory})
+
+    for ep in range(args.episodes):
+        print(f"\n--- Episode {ep + 1} ---")
+        result = agent.execute(task_data={"system_health": 90})
+        print("RSI Output:", result)
+
+    evaluator = PerformanceEvaluator()
+    eval_result = agent.evaluate()
+    print("\nEvaluation Summary:")
+    print(eval_result)
+    evaluator.plot_rewards(agent.reward_history, title="RSI Agent Performance")
 
 # ===============================
 # AST-BASED SMART CODE REWRITER
