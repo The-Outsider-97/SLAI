@@ -8,8 +8,8 @@ import shutil
 import logging
 import subprocess
 from agents.rl_agent import RLAgent
-from logs.logger import get_logger
 from logs.logs_parser import LogsParser
+from utils.agent_factory import create_agent
 from utils.logger import setup_logger
 from alignment_checks.bias_detection import BiasDetection
 from alignment_checks.ethical_constraints import EthicalConstraints
@@ -66,6 +66,30 @@ file_handler.setFormatter(file_formatter)
 # Add both handlers
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+def main():
+    logger.info("[AutoTune] Starting agent configuration...")
+
+    config = {
+        "learning_rate": 0.01,
+        "num_layers": 2,
+        "activation_function": "relu"
+    }
+
+    agent = create_agent(agent_name="rl_agent", config=config)
+    logger.info("[AutoTune] Agent initialized.")
+
+    task_data = {
+        "hyperparameters": {
+            "lr": 0.005,
+            "batch_size": 64,
+            "gamma": 0.99
+        }
+    }
+
+    logger.info("[AutoTune] Executing agent task...")
+    result = agent.execute(task_data)
+    logger.info(f"[AutoTune] Execution result: {result}")
 
 class AutoTuneOrchestrator:
     """
