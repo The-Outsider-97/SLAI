@@ -1,91 +1,79 @@
 import os
 import sys
 import yaml
+import time
 import torch
 import logging
-import time
-import tempfile
-from agents.maml_rl import MAMLAgent
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from utils.agent_factory import create_agent
+from utils.config_loader import load_config
 from utils.logger import setup_logger
-from logs.logger import get_logger
-from tasks.task_sampler import TaskSampler
+from evaluators.report import PerformanceEvaluator
+from frontend.main_window import update_visual_output_panel, update_text_output_panel
 
-# Logger setup
-logger = setup_logger("MAMLAgent", level=logging.INFO)
+# Setup logger
+logger = setup_logger("MAMLAgent")
+evaluator = PerformanceEvaluator(threshold=75.0)
 
-# === Load configuration ===
-config_path = "config.yaml"
-if not os.path.exists(config_path):
-    logger.error(f"Configuration file not found: {config_path}")
-    sys.exit(1)
 
-try:
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-except Exception as e:
-    logger.error(f"Error reading config.yaml: {e}")
-    sys.exit(1)
+def load_agent_config():
+    """Load MAML-specific configuration from YAML."""
+    config_path = os.path.join("configs", "agents_config.yaml")
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        maml_config = config.get("maml", {})
+        logger.info("[Config] Loaded MAML config successfully.")
+        return maml_config
+    except Exception as e:
+        logger.error(f"[Config] Failed to load MAML config: {e}")
+        sys.exit(1)
 
-logger.info("Configuration loaded successfully.")
 
-# === Extract and validate required config values ===
-try:
-    agent_config = config.get("agent", {})
-    training_config = config.get("training", {})
+def train_and_evaluate(agent):
+    """
+    Train the MAML agent and evaluate after training.
+    Visual output is routed to the frontend panel.
+    """
+    logger.info("[Training] Starting MAML training...")
+    agent.train()
 
-    state_size = agent_config["state_size"]
-    action_size = agent_config["action_size"]
-except KeyError as e:
-    logger.error(f"Missing key in config.yaml under 'agent': {e}")
-    sys.exit(1)
+    logger.info("[Evaluation] Running post-training evaluation...")
+    results = agent.evaluate()
+    score = results.get("average_reward", 0)
 
-# Training parameters with defaults if not present
-iterations = training_config.get("iterations", 100)
-tasks_per_iteration = training_config.get("tasks_per_iteration", 5)
-log_interval = training_config.get("log_interval", 10)
+    # Evaluate threshold status
+    meets = evaluator.meets_threshold(score)
+    logger.info(f"[Performance] Average reward: {score} | Meets threshold: {meets}")
 
-logger.info(f"Agent params — state_size: {state_size}, action_size: {action_size}")
-logger.info(f"Training setup — iterations: {iterations}, tasks_per_iteration: {tasks_per_iteration}, log_interval: {log_interval}")
+    summary = f"Agent: MAML\nAverage Reward: {score}\nMeets Threshold: {meets}"
 
-# === Define MAMLAgent with train() method if not already implemented ===
-class MAMLAgent:
-    def __init__(self, state_size, action_size):
-        self.state_size = state_size
-        self.action_size = action_size
-        # Initialize model, optimizer, etc. here
+    # Save visual artifacts
+    evaluator.plot_rewards(results.get("reward_trace", []), title="MAML Reward Curve")
 
-    def train(self, tasks):
-        # Placeholder logic
-        for task in tasks:
-            print(f"Training on task: {task}")
+    # Frontend updates
+    update_text_output_panel(summary)
+    update_visual_output_panel(["logs/reward_trend.png", "outputs/reward_trend.png"])
 
-# === Initialize MAML agent ===
-try:
-    agent = MAMLAgent(state_size=state_size, action_size=action_size)
-    logger.info("MAMLAgent initialized.")
-except Exception as e:
-    logger.error(f"Failed to initialize MAMLAgent: {e}", exc_info=True)
-    sys.exit(1)
+    return results
 
-# === Initialize task sampler ===
-try:
-    task_sampler = TaskSampler()
-    logger.info("TaskSampler initialized.")
-except Exception as e:
-    logger.error(f"Failed to initialize TaskSampler: {e}", exc_info=True)
-    sys.exit(1)
 
-# === Training Loop ===
-try:
-    for iteration in range(1, iterations + 1):
-        tasks = task_sampler.sample_task(tasks_per_iteration)
-        agent.train(tasks)
+def main():
+    logger.info("=== MAML Agent Execution Start ===")
 
-        if iteration % log_interval == 0 or iteration == 1:
-            logger.info(f"[Iteration {iteration}] Training in progress...")
+    maml_config = load_agent_config()
+    agent = create_agent("maml", config=maml_config)
 
-    logger.info("MAML training completed successfully.")
+    if not torch.cuda.is_available():
+        logger.warning("[Warning] CUDA not available. Running on CPU.")
 
-except Exception as e:
-    logger.error(f"Error during MAML training loop: {e}", exc_info=True)
-    sys.exit(1)
+    final_results = train_and_evaluate(agent)
+
+    logger.info("=== MAML Agent Execution Complete ===")
+    return final_results
+
+
+if __name__ == "__main__":
+    main()
