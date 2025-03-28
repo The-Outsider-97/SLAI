@@ -247,3 +247,35 @@ class MainWindow(QWidget):
             self.log_signal.emit(f"[✓] Execution finished.")
 
         threading.Thread(target=run_agent, daemon=True).start()
+
+# ========== External Panel Update Hooks ==========
+def update_visual_output_panel(image_paths):
+    """
+    Allows external agents to update the right visual panel with reward plots, etc.
+    """
+    if not image_paths:
+        return
+    for path in image_paths:
+        if os.path.exists(path):
+            try:
+                with open("logs/ui_display.txt", "w") as f:
+                    f.write(path)
+            except Exception as e:
+                print(f"[ERROR] Failed to update visual output: {e}")
+            break  # Only show one image (first found)
+
+def update_text_output_panel(summary):
+    """
+    Allows external agents to update the left log panel with performance summaries.
+    """
+    try:
+        with open("logs/ui_text.txt", "w") as f:
+            f.write(summary)
+    except Exception as e:
+        print(f"[ERROR] Failed to update text output: {e}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
