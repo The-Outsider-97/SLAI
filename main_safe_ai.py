@@ -15,7 +15,7 @@ from rnd_loop.evaluator import Evaluator
 from rnd_loop.experiment_manager import ExperimentManager
 from rnd_loop.hyperparam_tuner import HyperparamTuner
 from deployment.git.rollback_handler import RollbackHandler
-from agents.safe_ai_agent import SafeAI_Agent
+from utils.agent_factory import create_agent
 from collaborative.shared_memory import SharedMemory
 
 logger = setup_logger("SafeAIAgent", level=logging.INFO)
@@ -33,7 +33,7 @@ except Exception as e:
 logger.info("Initializing Safe AI Agent...")
 
 try:
-    agent = SafeAI_Agent(config=config)
+    agent = create_agent(agent_name="safe_ai", shared_memory=shared_memory, config={"risk_threshold": 0.2})
     agent.run()
     logger.info("Safe AI Agent execution completed.")
 except Exception as e:
