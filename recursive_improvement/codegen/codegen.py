@@ -8,7 +8,7 @@ import subprocess
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from recursive_improvement.rewriter import Rewriter
+from rewriter import Rewriter
 from typing import Optional
 from dotenv import load_dotenv
 from string import Template
@@ -23,21 +23,44 @@ except ImportError:
 
 TEMPLATES = {
     "agent": Template("""
+import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+
 class ${AgentName}:
     def __init__(self, state_size, action_size):
         self.state_size = state_size
         self.action_size = action_size
         self.learning_rate = ${learning_rate}
         self.epsilon = ${epsilon}
+        self.gamma = 0.95
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+
+        self.model = Sequential()
+        self.model.add(Dense(24, input_dim=self.state_size, activation='relu'))
+        self.model.add(Dense(24, activation='relu'))
+        self.model.add(Dense(self.action_size, activation='linear'))
+        self.model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
 
     def act(self, state):
-        # TODO: Add decision logic
-        pass
+        if np.random.rand() <= self.epsilon:
+            return np.random.randint(self.action_size)
+        q_values = self.model.predict(np.array([state]), verbose=0)
+        return np.argmax(q_values[0])
 
     def train(self, experience):
-        # TODO: Implement training step
-        pass
-    """),
+        state, action, reward, next_state, done = experience
+        target = reward
+        if not done:
+            target += self.gamma * np.amax(self.model.predict(np.array([next_state]), verbose=0)[0])
+        target_f = self.model.predict(np.array([state]), verbose=0)
+        target_f[0][action] = target
+        self.model.fit(np.array([state]), target_f, epochs=1, verbose=0)
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+"""),
 
     "evaluator": Template("""
 class ${EvaluatorName}:
@@ -48,7 +71,7 @@ class ${EvaluatorName}:
         result = agent.act(environment.reset())
         self.history.append(result)
         return result
-    """),
+"""),
 
     "runner": Template("""
 if __name__ == "__main__":
@@ -56,13 +79,12 @@ if __name__ == "__main__":
 
     agent = ${AgentName}(state_size=${state_size}, action_size=${action_size})
     print("Initialized agent with state size ${state_size} and action size ${action_size}")
-    """)
+""")
 }
 
 def generate_code(template_type: str, context: dict) -> str:
     if template_type not in TEMPLATES:
         raise ValueError(f"Unknown template_type: {template_type}")
-
     template = TEMPLATES[template_type]
     try:
         return template.substitute(context)
@@ -73,7 +95,6 @@ def save_code_to_file(code_str: str, filepath: str):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, 'w') as f:
         f.write(code_str)
-
     SharedMemory().set(f"codegen_{os.path.basename(filepath)}", {
         "path": filepath,
         "template": "generated",
@@ -85,6 +106,7 @@ def load_vars_from_file(path: str) -> dict:
         with open(path) as f:
             return json.load(f)
     elif path.endswith(".yaml") or path.endswith(".yml"):
+        import yaml
         with open(path) as f:
             return yaml.safe_load(f)
     else:
@@ -138,32 +160,3 @@ if __name__ == "__main__":
     if args.auto_eval and args.template == "runner":
         print("\n> Launching generated runner...")
         subprocess.run(["python", args.output])
-
-if __name__ == "__main__" and not sys.argv[1:]:
-    print("\n>>> Generating example agent, evaluator and runner")
-
-    a_code = generate_code("agent", {
-        "AgentName": "MyAgent",
-        "learning_rate": 0.001,
-        "epsilon": 1.0
-    })
-    save_code_to_file(a_code, "generated/MyAgent.py")
-
-    e_code = generate_code("evaluator", {
-        "EvaluatorName": "SimpleEvaluator"
-    })
-    save_code_to_file(e_code, "generated/SimpleEvaluator.py")
-
-    r_code = generate_code("runner", {
-        "AgentName": "MyAgent",
-        "agent_module": "MyAgent",
-        "state_size": 4,
-        "action_size": 2
-    })
-    save_code_to_file(r_code, "generated/run_agent.py")
-
-    print("\n>>> Summary of generated files:")
-    for f in ["MyAgent.py", "SimpleEvaluator.py", "run_agent.py"]:
-        print(f"- generated/{f} {'(exists)' if os.path.exists('generated/' + f) else '(missing)'}")
-
-    print("\n>>> Done generating example components.")
