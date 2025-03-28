@@ -19,16 +19,20 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 ---
 ## 💻 MINIMUM SYSTEM REQUIREMENTS
 ## Hardware:
-- CPU: Quad-core or higher
 
-- RAM: 16 GB minimum (32 GB recommended for multitask agents)
-
-- GPU: NVIDIA GPU with CUDA 11+ (Recommended for training)
+| Component | Minimum        | Recommended                         |
+|-----------|----------------|-------------------------------------|
+| CPU       | 4-core         | 8-core (Intel i7/AMD Ryzen)         |
+| RAM       | 16 GB          | 32 GB                              |
+| GPU       | GTX 1060 (6GB) | RTX 3060+ or A100 (for large tasks) |
+| Storage   | 4 GB           | 10+ GB (model backups, logs)        |
 
 ## Software:
-- Python 3.9+
+- OS: Ubuntu 20.04+, macOS 12+, Windows 10+
 
-- PyTorch 2.0+
+- Python: 3.9+
+
+- PyTorch: 2.0+
 
 - Required pip packages (already in requirements.txt)
 
