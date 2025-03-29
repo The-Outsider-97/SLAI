@@ -5,8 +5,9 @@ import time
 import yaml
 import json
 import pickle
+import queue
 import numpy as np
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Any, Optional, Tuple
 from multiprocessing import Pool, cpu_count
 from datetime import datetime
@@ -17,7 +18,7 @@ from collections import defaultdict
 try:
     import faiss
 except ImportError:
-    logger.error("FAISS not installed. Please install with: pip install faiss-cpu")
+    logging.error("FAISS not installed. Please install with: pip install faiss-cpu")
     sys.exit(1)
 
 # Set up logging
@@ -34,12 +35,25 @@ class Task:
     data: Dict[str, Any]
     priority: float = 0.5
     status: str = "pending"
-    created_at: float = time.time()
-    dependencies: List[str] = None
-    assigned_agent: str = None
+    created_at: float = field(default_factory=time.time)
+    dependencies: List[str] = field(default_factory=list)
+    assigned_agent: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
+
+    def __reduce__(self):
+        """Ensure proper pickling of Task objects"""
+        return (self.__class__, (
+            self.id,
+            self.type,
+            self.data,
+            self.priority,
+            self.status,
+            self.created_at,
+            self.dependencies,
+            self.assigned_agent
+        ))
 
 class VectorDB:
     def __init__(self, dim: int = 128):
@@ -112,36 +126,29 @@ class SharedMemory:
         return self.vector_db.search(query_vector, k)
     
     def save(self):
-        # Save memory state
         with open(f"{self.persist_path}.state", "wb") as f:
             pickle.dump({
                 "memory": self.memory,
                 "task_history": self.task_history
             }, f)
-        
-        # Save vector DB
         self.vector_db.save(self.persist_path)
     
     def load(self):
         try:
-            # Load memory state
             with open(f"{self.persist_path}.state", "rb") as f:
                 data = pickle.load(f)
                 self.memory = data["memory"]
                 self.task_history = data["task_history"]
-            
-            # Load vector DB
             self.vector_db.load(self.persist_path)
             logger.info("Loaded previous state from disk")
         except (FileNotFoundError, EOFError):
             logger.info("No previous state found, starting fresh")
 
 class RLTaskRouter:
-    """Reinforcement Learning based Task Router"""
     def __init__(self, shared_memory: SharedMemory):
         self.shared_memory = shared_memory
         self.task_queue = []
-        self.agent_q_values = defaultdict(dict)  # agent -> task_type -> Q-value
+        self.agent_q_values = defaultdict(dict)
         self.learning_rate = 0.1
         self.discount_factor = 0.9
         self.exploration_rate = 0.2
@@ -151,27 +158,21 @@ class RLTaskRouter:
         self._reprioritize()
     
     def _reprioritize(self):
-        # Sort by priority and creation time
         self.task_queue.sort(key=lambda x: (-x.priority, x.created_at))
     
-    def get_next_task(self) -> Optional[Task]:
-        if not self.task_queue:
-            return None
-        return self.task_queue[0]
+    def pop_next_task(self) -> Optional[Task]:
+        return self.task_queue.pop(0) if self.task_queue else None
     
     def select_agent(self, task_type: str, available_agents: List[str]) -> Optional[str]:
-        # Exploration: choose random agent
         if np.random.random() < self.exploration_rate:
             return np.random.choice(available_agents) if available_agents else None
         
-        # Exploitation: choose agent with highest Q-value for this task type
         best_agent, best_q = None, -float('inf')
         for agent in available_agents:
-            q = self.agent_q_values[agent].get(task_type, 1.0)  # Default to 1.0
+            q = self.agent_q_values[agent].get(task_type, 1.0)
             if q > best_q:
                 best_q = q
                 best_agent = agent
-        
         return best_agent
     
     def update_q_values(self, agent: str, task_type: str, reward: float, next_state_value: float):
@@ -181,28 +182,24 @@ class RLTaskRouter:
     
     def create_child_tasks(self, parent_task: Task, results: Dict[str, Any]) -> List[Task]:
         new_tasks = []
-        
         if "requires_optimization" in results:
             new_tasks.append(Task(
                 id=f"optimize_{parent_task.id}",
                 type="optimize",
                 data={"parameters": results["requires_optimization"]},
                 dependencies=[parent_task.id],
-                priority=parent_task.priority * 0.9  # Slightly lower priority
+                priority=parent_task.priority * 0.9
             ))
-        
         if "safety_concerns" in results:
             new_tasks.append(Task(
                 id=f"safety_check_{parent_task.id}",
                 type="safety",
                 data={"risk_factors": results["safety_concerns"]},
                 dependencies=[parent_task.id],
-                priority=1.0  # Safety tasks get highest priority
+                priority=1.0
             ))
-        
         for task in new_tasks:
             self.add_task(task)
-        
         return new_tasks
 
 class PerformanceMetrics:
@@ -216,7 +213,6 @@ class PerformanceMetrics:
             "priority_efficiency": defaultdict(float)
         }
         
-        # Calculate basic metrics
         agent_task_counts = defaultdict(int)
         agent_success_counts = defaultdict(int)
         total_time = 0
@@ -231,58 +227,46 @@ class PerformanceMetrics:
                 metrics["success_rate"][task.type] += 1
                 total_time += time.time() - task.created_at
         
-        # Calculate derived metrics
         for task_type in metrics["throughput"]:
             if metrics["throughput"][task_type] > 0:
-                metrics["success_rate"][task_type] /= metrics["throughput"][task_type]
-                metrics["priority_efficiency"][task_type] = (
-                    metrics["success_rate"][task_type] * np.mean(metrics["task_times"][task_type])
+                metrics["success_rate"][task_type] /= metrics["throughput"][task.type]
+                metrics["priority_efficiency"][task.type] = (
+                    metrics["success_rate"][task.type] * np.mean(metrics["task_times"][task.type]))
         
         for agent in agent_performance:
-            total_tasks = agent_task_counts.get(agent, 1)
             metrics["agent_utilization"][agent] = agent_task_counts.get(agent, 0) / max(1, len(task_history))
         
         metrics["average_task_time"] = total_time / max(1, len(task_history))
-        
         return metrics
     
     @staticmethod
     def visualize_metrics(metrics: Dict[str, Any], save_path: str = None):
         plt.figure(figsize=(15, 10))
         
-        # Throughput by task type
         plt.subplot(2, 2, 1)
         task_types = list(metrics["throughput"].keys())
-        counts = [metrics["throughput"][t] for t in task_types]
-        plt.bar(task_types, counts)
+        plt.bar(task_types, [metrics["throughput"][t] for t in task_types])
         plt.title("Task Throughput by Type")
         plt.xticks(rotation=45)
         
-        # Success rate by task type
         plt.subplot(2, 2, 2)
-        success_rates = [metrics["success_rate"][t] for t in task_types]
-        plt.bar(task_types, success_rates)
+        plt.bar(task_types, [metrics["success_rate"][t] for t in task_types])
         plt.title("Success Rate by Task Type")
         plt.ylim(0, 1)
         plt.xticks(rotation=45)
         
-        # Agent utilization
         plt.subplot(2, 2, 3)
         agents = list(metrics["agent_utilization"].keys())
-        utilizations = [metrics["agent_utilization"][a] for a in agents]
-        plt.bar(agents, utilizations)
+        plt.bar(agents, [metrics["agent_utilization"][a] for a in agents])
         plt.title("Agent Utilization")
         plt.xticks(rotation=45)
         
-        # Priority efficiency
         plt.subplot(2, 2, 4)
-        efficiencies = [metrics["priority_efficiency"][t] for t in task_types]
-        plt.bar(task_types, efficiencies)
-        plt.title("Priority Efficiency (Success Rate * Speed)")
+        plt.bar(task_types, [metrics["priority_efficiency"][t] for t in task_types])
+        plt.title("Priority Efficiency")
         plt.xticks(rotation=45)
         
         plt.tight_layout()
-        
         if save_path:
             plt.savefig(save_path)
             plt.close()
@@ -294,8 +278,7 @@ class CollaborationManager:
         self.shared_memory = shared_memory or SharedMemory()
         self.registry = AgentRegistry(self.shared_memory)
         self.router = RLTaskRouter(self.shared_memory)
-        self.num_workers = num_workers or max(1, cpu_count() - 1)
-        self.pool = Pool(processes=self.num_workers)
+        self.num_workers = min(num_workers or cpu_count() - 1, 8)
         self.metrics = PerformanceMetrics()
     
     def register_agent(self, name: str, agent, capabilities: List[str]):
@@ -303,119 +286,84 @@ class CollaborationManager:
         logger.info(f"Registered agent {name} with capabilities: {capabilities}")
     
     def _execute_task(self, task: Task, agent_name: str) -> Tuple[Task, Dict[str, Any]]:
-        """Task execution function for multiprocessing"""
-        agent_data = self.registry.get_agent(agent_name)
-        agent = agent_data["instance"]
-        
         try:
+            agent_data = self.registry.get_agent(agent_name)
+            if not agent_data:
+                raise ValueError(f"Agent {agent_name} not found")
+                
+            agent = agent_data["instance"]
             result = agent.execute(task.type, task.data)
             task.status = "completed"
             return task, result
         except Exception as e:
-            logger.error(f"Task {task.id} failed in worker: {str(e)}")
+            logger.error(f"Task {task.id} failed: {str(e)}")
             task.status = "failed"
             return task, {"error": str(e)}
     
     def execute_task_cycle(self):
-        """Execute one full cycle of task processing with parallel execution"""
         tasks_to_execute = []
-        available_agents = []
+        available_agents = [name for name in self.registry.list_agents() 
+                          if self.registry.get_agent_status(name) == "idle"]
         
-        # Get available agents
-        for agent_name in self.registry.list_agents():
-            if self.registry.get_agent_status(agent_name) == "idle":
-                available_agents.append(agent_name)
-        
-        # Assign tasks to available agents
-        while available_agents and (task := self.router.get_next_task()):
-            task = self.task_queue.pop(0)
+        while available_agents and (task := self.router.pop_next_task()):
             agent_name = self.router.select_agent(task.type, available_agents)
-            
             if agent_name:
                 self.registry.update_status(agent_name, "busy")
                 task.assigned_agent = agent_name
                 tasks_to_execute.append((task, agent_name))
                 available_agents.remove(agent_name)
         
-        # Execute tasks in parallel
         if tasks_to_execute:
-            results = self.pool.starmap(self._execute_task, tasks_to_execute)
-            
-            for task, result in results:
-                # Update task status and store results
-                self.shared_memory.task_history.append(task)
-                
-                if task.status == "completed":
-                    # Generate embedding for the result
-                    embedding = self._generate_result_embedding(result)
-                    self.shared_memory.store_embedding(
-                        vector=embedding,
-                        metadata={
-                            "task": task.type,
-                            "agent": task.assigned_agent,
-                            "timestamp": time.time(),
-                            "result": result
-                        }
-                    )
-                    
-                    # Update RL router with performance
-                    performance = self._evaluate_performance(task, result)
-                    self.router.update_q_values(
-                        agent=task.assigned_agent,
-                        task_type=task.type,
-                        reward=performance,
-                        next_state_value=performance * 0.9  # Estimated next state value
-                    )
-                    
-                    # Create follow-up tasks
-                    self.router.create_child_tasks(task, result)
-                
-                # Mark agent as available again
-                self.registry.update_status(task.assigned_agent, "idle")
-            
+            with Pool(processes=self.num_workers) as pool:
+                results = pool.starmap(self._execute_task, tasks_to_execute)
+                for task, result in results:
+                    self._process_task_result(task, result)
             return True
-        
         return False
     
-    def _generate_result_embedding(self, result: Dict[str, Any]) -> np.ndarray:
-        """Convert result to embedding vector"""
-        # In production, use a proper embedding model
-        return np.random.rand(128)  # Placeholder
-    
-    def _evaluate_performance(self, task: Task, result: Dict[str, Any]) -> float:
-        """Evaluate task performance with multiple factors"""
-        time_taken = time.time() - task.created_at
-        success = 1.0 if task.status == "completed" else 0.0
-        quality = result.get("performance", 0.5)
-        safety = result.get("safety_score", 1.0)
+    def _process_task_result(self, task: Task, result: Dict[str, Any]):
+        self.shared_memory.task_history.append(task)
         
-        # Weighted combination of factors
-        return (0.4 * quality + 0.3 * success + 0.2 * safety + 0.1 * (1 - time_taken/100))
+        if task.status == "completed":
+            embedding = np.random.rand(128)  # Replace with actual embedding
+            self.shared_memory.store_embedding(
+                vector=embedding,
+                metadata={
+                    "task": task.type,
+                    "agent": task.assigned_agent,
+                    "timestamp": time.time(),
+                    "result": result
+                }
+            )
+            
+            performance = (0.4 * result.get("performance", 0.5) + 
+                         0.3 * 1.0 +  # Success
+                         0.2 * result.get("safety_score", 1.0) + 
+                         0.1 * (1 - (time.time() - task.created_at)/100))
+            
+            self.router.update_q_values(
+                task.assigned_agent,
+                task.type,
+                performance,
+                performance * 0.9
+            )
+            
+            self.router.create_child_tasks(task, result)
+        
+        self.registry.update_status(task.assigned_agent, "idle")
     
     def save_state(self, path: str = "slai_state"):
-        """Save the entire system state"""
-        # Save shared memory
         self.shared_memory.save()
-        
-        # Save router state
         with open(f"{path}.router", "wb") as f:
             pickle.dump(self.router.agent_q_values, f)
-        
-        # Save registry state
         self.registry.save(f"{path}.registry")
-        
         logger.info(f"System state saved to {path}")
     
     def load_state(self, path: str = "slai_state"):
-        """Load system state from disk"""
         try:
-            # Load router state
             with open(f"{path}.router", "rb") as f:
                 self.router.agent_q_values = pickle.load(f)
-            
-            # Load registry state
             self.registry.load(f"{path}.registry")
-            
             logger.info("Loaded system state from disk")
         except FileNotFoundError:
             logger.warning("No previous system state found")
@@ -452,24 +400,17 @@ class AgentRegistry:
             self.agents[name]["performance"] = score
             self.agents[name]["task_count"] += 1
     
-    def find_agents_for_task(self, task_type: str) -> List[str]:
-        return [name for name, data in self.agents.items() 
-                if task_type in data["capabilities"] and data["status"] == "idle"]
-    
     def save(self, path: str):
-        """Save registry state to disk"""
         with open(path, "wb") as f:
             pickle.dump(self.agents, f)
     
     def load(self, path: str):
-        """Load registry state from disk"""
         try:
             with open(path, "rb") as f:
                 self.agents = pickle.load(f)
         except FileNotFoundError:
             logger.warning("No previous registry state found")
 
-# Example Agent Implementations
 class SafeAIAgent:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -484,7 +425,7 @@ class SafeAIAgent:
                     "risk_score": risk_score,
                     "actions": ["halt_execution", "notify_operator"],
                     "safety_score": 0.1,
-                    "performance": 0.8  # High performance for catching risks
+                    "performance": 0.8
                 }
             else:
                 return {
@@ -503,7 +444,6 @@ class MultiTaskAgent:
     
     def execute(self, task_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         if task_type == "multi_task_learning":
-            # Simulate task learning with some variability
             performance = 0.7 + np.random.normal(0, 0.1)
             return {
                 "performance": performance,
@@ -514,11 +454,9 @@ class MultiTaskAgent:
         return {"status": "unhandled_task_type", "performance": 0.0}
 
 def initialize_system():
-    """Initialize the SLAI system with core components"""
     shared_memory = SharedMemory()
     collab_mgr = CollaborationManager(shared_memory, num_workers=4)
     
-    # Register core agents
     collab_mgr.register_agent(
         "safe_ai",
         SafeAIAgent({"risk_threshold": 0.25}),
@@ -531,7 +469,6 @@ def initialize_system():
         ["multi_task_learning", "adaptation"]
     )
     
-    # Initialize with some tasks
     initial_tasks = [
         Task(id="initial_safety", type="safety", data={"policy_risk_score": 0.2}),
         Task(id="initial_mtl", type="multi_task_learning", data={"domains": ["CartPole"]}),
@@ -546,27 +483,21 @@ def initialize_system():
 
 def main():
     logger.info("Starting SLAI v2.0 - Enhanced Collaborative Agent System")
-    
     collab_mgr = initialize_system()
     
     try:
-        # Main execution loop
-        for cycle in range(20):  # Run for 20 cycles
+        for cycle in range(20):
             logger.info(f"\n=== Execution Cycle {cycle + 1} ===")
             collab_mgr.execute_task_cycle()
             
-            # Periodically save state and show metrics
             if cycle % 5 == 0:
                 collab_mgr.save_state()
-                
-                # Calculate and visualize metrics
                 metrics = PerformanceMetrics.calculate_metrics(
                     collab_mgr.shared_memory.task_history,
                     collab_mgr.registry.agents
                 )
                 PerformanceMetrics.visualize_metrics(metrics, f"metrics_cycle_{cycle}.png")
         
-        # Final metrics and state save
         collab_mgr.save_state()
         metrics = PerformanceMetrics.calculate_metrics(
             collab_mgr.shared_memory.task_history,
@@ -577,9 +508,6 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")
         collab_mgr.save_state()
-    finally:
-        collab_mgr.pool.close()
-        collab_mgr.pool.join()
     
     logger.info("System execution completed")
 
