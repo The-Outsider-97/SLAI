@@ -630,78 +630,78 @@ if __name__ == "__main__":
             # Safety and Coordination Agents
             'SafeAI_Agent': {
                 'type': 'safety',
-                'capabilities': ['risk_assessment', 'threshold_adjustment']
+                'capabilities': ['risk_assessment', 'threshold_adjustment'],
                 'components': ['safety_module']
             },
             
             # Reinforcement Learning Agents
             'DQN_Agent': {
                 'type': 'dqn',
-                'capabilities': ['deep_q_learning', 'experience_replay']
+                'capabilities': ['deep_q_learning', 'experience_replay'],
                 'components': ['replay_buffer', 'q_network']
             },
             
             # Specialized RL Agents
             'MultiTaskRL_Agent': {
                 'type': 'multitask',
-                'capabilities': ['task_embedding', 'shared_representation']
+                'capabilities': ['task_embedding', 'shared_representation'],
                 'components': ['task_encoder']
             },
             'MAML_Agent': {
                 'type': 'meta_learning',
-                'capabilities': ['few_shot_adaptation', 'gradient_based_meta']
+                'capabilities': ['few_shot_adaptation', 'gradient_based_meta'],
                 'components': ['meta_policy']
             },
             
             # Financial/Technical Agents
             'RSI_Agent': {
                 'type': 'technical',
-                'capabilities': ['market_analysis', 'trend_detection']
+                'capabilities': ['market_analysis', 'trend_detection'],
                 'components': ['technical_indicators']
             },
             
             # Cognitive Agents
             'NL_Agent': {
                 'type': 'nlp',
-                'capabilities': ['language_understanding', 'text_generation']
+                'capabilities': ['language_understanding', 'text_generation'],
                 'components': ['language_model']
             },
             'Reasoning_Agent': {
                 'type': 'knowledge',
-                'capabilities': ['logical_inference', 'rule_based_reasoning']
+                'capabilities': ['logical_inference', 'rule_based_reasoning'],
                 'components': ['knowledge_graph']
             },
             
             # Planning/Execution Agents
             'Planning_Agent': {
                 'type': 'planning',
-                'capabilities': ['task_decomposition', 'resource_scheduling']
+                'capabilities': ['task_decomposition', 'resource_scheduling'],
                 'components': ['planner_module']
             },
             'Execution_Agent': {
                 'type': 'action',
-                'capabilities': ['operation_execution', 'environment_interaction']
+                'capabilities': ['operation_execution', 'environment_interaction'],
                 'components': ['actuator_interface']
             },
             
             # Perception Agents
             'Perception_Agent': {
                 'type': 'sensors',
-                'capabilities': ['multimodal_fusion', 'feature_extraction']
+                'capabilities': ['multimodal_fusion', 'feature_extraction'],
                 'components': ['sensor_processor']
             },
             
             # Adaptive Agents
             'Adaptive_Agent': {
                 'type': 'self_optimizing',
-                'capabilities': ['dynamic_parameter_adjustment', 'context_awareness']
+                'capabilities': ['dynamic_parameter_adjustment', 'context_awareness'],
                 'components': ['adaptation_engine']
             },
             
             # Evaluation Agents
             'Evaluation_Agent': {
                 'type': 'metrics',
-                'capabilities': ['performance_analysis', 'statistical_testing']
+                'capabilities': ['performance_analysis', 'statistical_testing'],
                 'components': ['metrics_dashboard']
             }
         },
@@ -741,7 +741,6 @@ if __name__ == "__main__":
     print(f"Current False Positive Rate: {result['performance_metrics']['false_positives']/result['performance_metrics']['assessments_completed']:.2%}")
 
 # Enhanced Task Coordination Example
-if __name__ == "__main__":
     # Define a complex set of tasks with dependencies and constraints
     tasks = [
         {
