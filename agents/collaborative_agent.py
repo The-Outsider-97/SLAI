@@ -472,93 +472,222 @@ if __name__ == "__main__":
             'SafeAI_Agent': {
                 'type': 'safety',
                 'capabilities': ['risk_assessment', 'threshold_adjustment']
+                'components': ['safety_module']
             },
             
             # Reinforcement Learning Agents
             'DQN_Agent': {
                 'type': 'dqn',
                 'capabilities': ['deep_q_learning', 'experience_replay']
+                'components': ['replay_buffer', 'q_network']
             },
             
             # Specialized RL Agents
             'MultiTaskRL_Agent': {
                 'type': 'multitask',
                 'capabilities': ['task_embedding', 'shared_representation']
+                'components': ['task_encoder']
             },
             'MAML_Agent': {
                 'type': 'meta_learning',
                 'capabilities': ['few_shot_adaptation', 'gradient_based_meta']
+                'components': ['meta_policy']
             },
             
             # Financial/Technical Agents
             'RSI_Agent': {
                 'type': 'technical',
                 'capabilities': ['market_analysis', 'trend_detection']
+                'components': ['technical_indicators']
             },
             
             # Cognitive Agents
             'NL_Agent': {
                 'type': 'nlp',
                 'capabilities': ['language_understanding', 'text_generation']
+                'components': ['language_model']
             },
             'Reasoning_Agent': {
                 'type': 'knowledge',
                 'capabilities': ['logical_inference', 'rule_based_reasoning']
+                'components': ['knowledge_graph']
             },
             
             # Planning/Execution Agents
             'Planning_Agent': {
                 'type': 'planning',
                 'capabilities': ['task_decomposition', 'resource_scheduling']
+                'components': ['planner_module']
             },
             'Execution_Agent': {
                 'type': 'action',
                 'capabilities': ['operation_execution', 'environment_interaction']
+                'components': ['actuator_interface']
             },
             
             # Perception Agents
             'Perception_Agent': {
                 'type': 'sensors',
                 'capabilities': ['multimodal_fusion', 'feature_extraction']
+                'components': ['sensor_processor']
             },
             
             # Adaptive Agents
             'Adaptive_Agent': {
                 'type': 'self_optimizing',
                 'capabilities': ['dynamic_parameter_adjustment', 'context_awareness']
+                'components': ['adaptation_engine']
             },
             
             # Evaluation Agents
             'Evaluation_Agent': {
                 'type': 'metrics',
                 'capabilities': ['performance_analysis', 'statistical_testing']
+                'components': ['metrics_dashboard']
             }
-        }
+        },
+        risk_threshold=0.35
     )
-    
-    # Example safety assessment
+
+    # Complex safety assessment scenario
     task_data = {
-        'policy_risk_score': 0.45,
-        'task_type': 'physical_manipulation',
-        'source_agent': 'RL_Agent1',
+        'policy_risk_score': 0.62,
+        'task_type': 'cross_agent_coordination',
+        'source_agent': 'Adaptive_Agent',
         'action_details': {
-            'type': 'grasp_object',
-            'tags': ['physical_action'],
-            'affected_components': ['arm1', 'camera2']
+            'type': 'system_parameter_update',
+            'tags': ['multitask', 'exploration_adjustment'],
+            'affected_components': ['dqn', 'meta_policy', 'actuator_interface'],
+            'parameters': {
+                'exploration_rate': 0.25,
+                'learning_rate': 0.001,
+                'safety_margin': 0.15
+            }
         }
     }
     
+    # Execute assessment with full agent context
     result = agent.execute(task_data)
-    print("Full Network Safety Assessment Result:\n", result)
+    print("Multi-Agent Safety Assessment Result:")
+    print(f"Risk Level: {result['assessment']['risk_level']}")
+    print(f"Recommendation: {result['assessment']['recommended_action']}")
+    print(f"Affected Agents: {result['assessment']['affected_agents']}")
+    print("\nDetailed Assessment:")
+    print(json.dumps(result, indent=2))
 
-    # Example task coordination
+    # Demonstrate cross-agent coordination
+    print("\nPerformance Metrics Overview:")
+    print(f"Total Assessments: {result['performance_metrics']['assessments_completed']}")
+    print(f"System Interventions: {result['performance_metrics']['interventions']}")
+    print(f"Current False Positive Rate: {result['performance_metrics']['false_positives']/result['performance_metrics']['assessments_completed']:.2%}")
+
+# Enhanced Task Coordination Example
+if __name__ == "__main__":
+    # Define a complex set of tasks with dependencies and constraints
     tasks = [
-        {'id': 't1', 'type': 'real_time_decision', 'requirements': ['low_latency', 'high_accuracy']},
-        {'id': 't2', 'type': 'long_term_planning', 'requirements': ['strategic_thinking', 'resource_optimization']}
+        {
+            'id': 't1',
+            'type': 'real_time_decision',
+            'requirements': ['low_latency', 'high_accuracy', 'safety_critical'],
+            'deadline': 0.5,  # seconds
+            'priority': 9,
+            'estimated_duration': 0.3,
+            'dependencies': []
+        },
+        {
+            'id': 't2',
+            'type': 'long_term_planning',
+            'requirements': ['strategic_thinking', 'resource_optimization', 'multi_agent'],
+            'deadline': 5.0,
+            'priority': 7,
+            'estimated_duration': 2.5,
+            'dependencies': ['t4']
+        },
+        {
+            'id': 't3',
+            'type': 'risk_assessment',
+            'requirements': ['safety_analysis', 'real_time_monitoring'],
+            'deadline': 1.0,
+            'priority': 8,
+            'estimated_duration': 0.8,
+            'dependencies': ['t1']
+        },
+        {
+            'id': 't4',
+            'type': 'data_processing',
+            'requirements': ['large_scale_processing', 'pattern_recognition'],
+            'deadline': 3.0,
+            'priority': 6,
+            'estimated_duration': 1.2,
+            'dependencies': []
+        }
     ]
-    
+
+    # Available agents with their capabilities and current workload
+    available_agents = {
+        'SafeAI_Agent': {
+            'capabilities': ['safety_analysis', 'risk_assessment'],
+            'current_load': 0.4,
+            'throughput': 5  # tasks/hour
+        },
+        'DQN_Agent': {
+            'capabilities': ['low_latency', 'high_accuracy'],
+            'current_load': 0.7,
+            'throughput': 20
+        },
+        'MultiTaskRL_Agent': {
+            'capabilities': ['multi_agent', 'resource_optimization'],
+            'current_load': 0.3,
+            'throughput': 15
+        },
+        'Planning_Agent': {
+            'capabilities': ['strategic_thinking', 'long_term_planning'],
+            'current_load': 0.5,
+            'throughput': 10
+        },
+        'Perception_Agent': {
+            'capabilities': ['pattern_recognition', 'real_time_monitoring'],
+            'current_load': 0.6,
+            'throughput': 18
+        }
+    }
+
+    # Execute coordination with optimization parameters
     coordination_result = agent.coordinate_tasks(
         tasks=tasks,
-        available_agents=['SafeAI_Agent', 'DQN_Agent', 'MultiTaskRL_Agent', 'MAML_Agent', 'RSI_Agent', 'NL_Agent', 'Reasoning_Agent', 'Planning_Agent', 'Execution_Agent', 'Adaptive_Agent', 'Perception_Agent', 'Evaluation_Agent', ]
+        available_agents=available_agents,
+        optimization_goals=['minimize_risk', 'maximize_throughput'],
+        constraints={
+            'max_concurrent_tasks': 3,
+            'safety_threshold': 0.4
+        }
     )
-    print("\nTask Coordination Result:\n", coordination_result)
+
+    # Print structured results
+    print("\n=== Task Coordination Results ===")
+    print(f"Total Tasks: {len(tasks)}")
+    print(f"Successfully Assigned: {len(coordination_result['assignments'])}")
+    print(f"High Risk Tasks: {coordination_result['metadata']['high_risk_tasks']}")
+    
+    print("\nDetailed Assignments:")
+    for task_id, assignment in coordination_result['assignments'].items():
+        task = next(t for t in tasks if t['id'] == task_id)
+        print(f"\nTask {task_id} ({task['type']}):")
+        print(f"  Assigned to: {assignment['agent']}")
+        print(f"  Start Time: {assignment['schedule']['start']:.1f}s")
+        print(f"  End Time: {assignment['schedule']['end']:.1f}s")
+        print(f"  Risk Assessment: {assignment['safety_check']['risk_level']}")
+        print(f"  Requirements Met: {', '.join(assignment['requirements_met'])}")
+    
+    print("\nSystem Metrics:")
+    print(f"Total Estimated Duration: {coordination_result['metadata']['total_duration']:.1f}s")
+    print(f"Resource Utilization: {coordination_result['metadata']['resource_utilization']:.1%}")
+    print(f"Safety Compliance: {coordination_result['metadata']['safety_compliance']:.1%}")
+
+    # Visualize schedule
+    print("\nGantt Chart Representation:")
+    for task_id, assignment in coordination_result['assignments'].items():
+        task = next(t for t in tasks if t['id'] == task_id)
+        duration = assignment['schedule']['end'] - assignment['schedule']['start']
+        bar = '█' * int(20 * duration / coordination_result['metadata']['total_duration'])
+        print(f"{task_id} [{bar}] {assignment['schedule']['start']:.1f}-{assignment['schedule']['end']:.1f}s ({assignment['agent']})")
