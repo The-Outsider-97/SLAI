@@ -79,6 +79,7 @@ Note: If you see an error about execution policy:
    pip install dotenv
    pap install matplotlib
    pip install faiss-cpu
+   pip install plotly
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
