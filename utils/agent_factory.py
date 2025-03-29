@@ -24,9 +24,8 @@ logger.setLevel(logging.INFO)
 
 # Agent registry mapping names to their module and class names
 AGENT_REGISTRY = {
-    "dqn": ("agents.dqn_agent", "DQNAgent"),
+    "dqn": ("agents.dqn_agent", "NeuralNetwork"),
     "evolution": ("agents.evolution_agent", "EvolutionAgent"),
-    "evolutionary_dqn": ("agents.evolutionary_dqn", "EvolutionaryDQNAgent"),
     "multitask": ("agents.multitask_rl", "MultiTaskRLAgent"),
     "maml": ("agents.maml_rl", "MAMLAgent"),
     "rsi": ("agents.rsi_agent", "RSI_Agent"),
@@ -39,7 +38,8 @@ AGENT_REGISTRY = {
     "perception": ("agents.perception_agent", "PerceptionAgent"),
     "adaptive": ("agents.adaptive_agent", "AdaptiveAgent"),
     "evaluation": ("agents.eval_agent", "EvaluationAgent"),
-    "execution": ("agents.execution_agent", "ExecutionAgent")
+    "execution": ("agents.execution_agent", "ExecutionAgent"),
+    "knowledge": ("agents.knowledge_agent", "KnowledgeAgent")
 }
 
 def create_agent(agent_name: str, config: Dict[str, Any]) -> Any:
