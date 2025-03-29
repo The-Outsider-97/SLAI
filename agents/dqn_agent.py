@@ -1,289 +1,340 @@
-import os, sys
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import random
+"""
+Deep Q-Network (DQN) Agent with Evolutionary Hyperparameter Optimization
+
+Key Academic References:
+1. DQN & Experience Replay: 
+   Mnih et al. (2015). Human-level control through deep reinforcement learning. Nature.
+2. Target Networks: 
+   Mnih et al. (2015) [Same as above].
+3. Evolutionary Strategies: 
+   Salimans et al. (2017). Evolution Strategies as a Scalable Alternative to RL. arXiv.
+
+Features:
+- Neural Network implemented with NumPy
+- Experience replay buffer
+- Epsilon-greedy exploration
+- Evolutionary hyperparameter optimization
+- Modular architecture for easy extension
+"""
+
 import numpy as np
-import logging
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from utils.replay_buffer import DistributedReplayBuffer
-from utils.data_loader import FlexibleDataLoader as DataLoader
-from agents.base_agent import BaseAgent
-
-class BaseAgent:
-    """
-    Base class for all agents.
-    """
-    def __init__(self, shared_memory=None):
-        self.shared_memory = shared_memory
-        self.name = "BaseAgent"
-
-    def execute(self, task_data):
-        raise NotImplementedError("Each agent must implement the execute method.")
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+import random
+from collections import deque
+import copy
 
 
+# ====================== Neural Network Core ======================
+class NeuralNetwork:
+    """Simple 3-layer neural network with manual backpropagation"""
+    
+    def __init__(self, input_dim, output_dim, hidden_dim=128):
+        # He initialization with ReLU
+        self.W1 = np.random.randn(input_dim, hidden_dim) * np.sqrt(2./input_dim)
+        self.b1 = np.zeros(hidden_dim)
+        self.W2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2./hidden_dim)
+        self.b2 = np.zeros(hidden_dim)
+        self.W3 = np.random.randn(hidden_dim, output_dim) * np.sqrt(2./hidden_dim)
+        self.b3 = np.zeros(output_dim)
+
+        # Intermediate values for backprop
+        self._cache = {}
+
+    def forward(self, X):
+        """Forward pass with ReLU activation"""
+        self._cache['z1'] = X @ self.W1 + self.b1
+        self._cache['a1'] = np.maximum(0, self._cache['z1'])  # ReLU
+        self._cache['z2'] = self._cache['a1'] @ self.W2 + self.b2
+        self._cache['a2'] = np.maximum(0, self._cache['z2'])
+        self._cache['out'] = self._cache['a2'] @ self.W3 + self.b3
+        return self._cache['out']
+
+    def backward(self, X, y, learning_rate):
+        """Manual backpropagation with MSE loss"""
+        m = X.shape[0]  # Batch size
+        out = self._cache['out']
+        
+        # Output layer gradient
+        dout = (out - y) * 2/m
+        dW3 = self._cache['a2'].T @ dout
+        db3 = np.sum(dout, axis=0)
+        
+        # Hidden layer 2 gradient
+        da2 = dout @ self.W3.T
+        dz2 = da2 * (self._cache['a2'] > 0)
+        dW2 = self._cache['a1'].T @ dz2
+        db2 = np.sum(dz2, axis=0)
+        
+        # Hidden layer 1 gradient
+        da1 = dz2 @ self.W2.T
+        dz1 = da1 * (self._cache['a1'] > 0)
+        dW1 = X.T @ dz1
+        db1 = np.sum(dz1, axis=0)
+        
+        # Parameter updates
+        self.W3 -= learning_rate * dW3
+        self.b3 -= learning_rate * db3
+        self.W2 -= learning_rate * dW2
+        self.b2 -= learning_rate * db2
+        self.W1 -= learning_rate * dW1
+        self.b1 -= learning_rate * db1
+
+    def get_weights(self):
+        return [self.W1, self.b1, self.W2, self.b2, self.W3, self.b3]
+
+    def set_weights(self, weights):
+        self.W1, self.b1, self.W2, self.b2, self.W3, self.b3 = weights
+
+
+# ====================== Experience Replay Buffer ======================
 class ReplayBuffer:
-    """
-    Experience Replay Buffer to store agent transitions.
-    Supports uniform sampling. Prioritized experience replay can be added later.
-    """
-
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.buffer = []
-        self.position = 0
-        logger.info(f"ReplayBuffer initialized with capacity {self.capacity}.")
-
-    def push(self, state, action, reward, next_state, done):
-        """Store a transition in the buffer."""
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
-        self.position = (self.position + 1) % self.capacity
-
-    def sample(self, batch_size: int):
-        """Randomly sample a batch from the buffer."""
-        return random.sample(self.buffer, batch_size)
-
+    """Experience replay buffer with uniform sampling"""
+    
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+    
+    def push(self, transition):
+        """Store transition (state, action, reward, next_state, done)"""
+        self.buffer.append(transition)
+    
+    def sample(self, batch_size):
+        """Random batch of transitions"""
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    
     def __len__(self):
         return len(self.buffer)
 
 
-class DQNNetwork(nn.Module):
-    """
-    A Deep Q-Network (DQN) implemented in PyTorch.
-    Supports arbitrary hidden sizes and activation functions.
-    """
-
-    def __init__(self, state_dim, action_dim, hidden_dim=128, activation=nn.ReLU):
-        super(DQNNetwork, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            activation(),
-            nn.Linear(hidden_dim, hidden_dim),
-            activation(),
-            nn.Linear(hidden_dim, action_dim)
-        )
-        logger.info(f"DQNNetwork initialized with state_dim={state_dim}, action_dim={action_dim}, hidden_dim={hidden_dim}")
-
-    def forward(self, state):
-        return self.layers(state)
-
-
+# ====================== Core DQN Agent ======================
 class DQNAgent:
-    """
-    A modular Deep Q-Learning Agent with experience replay and target networks.
-    Supports pretraining with datasets and online learning.
-    """
-
-    def __init__(self, state_size, action_size, config: dict, shared_memory=None):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.config = config
-        self.name = "DQNAgent"
-        self.shared_memory = shared_memory
-        
-        # Hyperparameters
+    """Standard DQN agent with neural network function approximation"""
+    
+    def __init__(self, state_dim, action_dim, config):
+        # Network parameters
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = config.get('hidden_size', 128)
         self.gamma = config.get('gamma', 0.99)
         self.epsilon = config.get('epsilon', 1.0)
         self.epsilon_min = config.get('epsilon_min', 0.01)
         self.epsilon_decay = config.get('epsilon_decay', 0.995)
-        self.learning_rate = config.get('learning_rate', 1e-3)
-        self.hidden_size = config.get('hidden_size', 128)
-        self.target_update_frequency = config.get('target_update_frequency', 10)
+        self.lr = config.get('learning_rate', 0.001)
         self.batch_size = config.get('batch_size', 64)
-        self.memory_capacity = config.get('memory_capacity', 10000)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"DQNAgent initialized on {self.device}.")
-
+        self.target_update = config.get('target_update_frequency', 100)
+        
         # Networks
-        self.policy_net = DQNNetwork(state_size, action_size, self.hidden_size).to(self.device)
-        self.target_net = DQNNetwork(state_size, action_size, self.hidden_size).to(self.device)
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
+        self.policy_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
+        self.target_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
+        self.update_target_net()
+        
+        # Replay buffer
+        self.memory = ReplayBuffer(config.get('buffer_size', 10000))
+        self.train_step = 0
 
-        # Experience Replay
-        self.memory = ReplayBuffer(capacity=self.memory_capacity)
-
-        # Synchronize target network
-        self.update_target_network(hard_update=True)
-
-        # Step counter for periodic updates
-        self.training_steps = 0
-
-    def execute(self, task_data):
-        """
-        Execute decision making or RL task.
-        Reads from shared memory and optionally writes.
-        """
-        print(f"[{self.name}] Executing task with data: {task_data}")
-
-        global_best = self.shared_memory.get("global_best_score") if self.shared_memory else None
-
-        # Simulated decision making
-        action = "move_left" if global_best and global_best > 0.6 else "move_right"
-
-        print(f"[{self.name}] Decision based on global_best_score={global_best}: {action}")
-
-        return {
-            "status": "success",
-            "agent": self.name,
-            "action": action
-        }
-
-    def update_target_network(self, hard_update=False):
-        """Soft or hard update for target network weights."""
-        if hard_update:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
-            logger.debug("Hard update performed on target network.")
-        else:
-            tau = 0.005
-            for target_param, local_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
-                target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
+    def update_target_net(self):
+        """Hard update target network weights"""
+        self.target_net.set_weights(self.policy_net.get_weights())
 
     def select_action(self, state, explore=True):
-        """
-        Epsilon-greedy action selection.
-        If explore is False, always exploit.
-        """
-        if explore and random.random() < self.epsilon:
-            action = random.randrange(self.action_size)
-            logger.debug(f"Random action {action} selected under epsilon {self.epsilon}")
-            return action
+        """Epsilon-greedy action selection"""
+        if explore and np.random.rand() < self.epsilon:
+            return np.random.randint(self.action_dim)
+        
+        q_values = self.policy_net.forward(np.array([state]))
+        return np.argmax(q_values[0])
 
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            q_values = self.policy_net(state_tensor)
-        action = q_values.argmax().item()
-        logger.debug(f"Greedy action {action} selected.")
-        return action
+    def store_transition(self, *transition):
+        self.memory.push(transition)
 
-    def act(self, state):
-        """
-        Alias for select_action without exploration.
-        Used in evaluation (EvolutionaryTrainer) and main_cartpole.py.
-        """
-        return self.select_action(state, explore=False)
-
-    def act(self, state):
-        """Alias for select_action without exploration (for evaluation purposes)."""
-        return self.select_action(state, explore=False)
-
-    def store_transition(self, state, action, reward, next_state, done):
-        self.memory.push(state, action, reward, next_state, done)
-        logger.debug(f"Transition stored. Memory size: {len(self.memory)}")
-
-    def train_step(self):
-        """One step of training from replay buffer."""
+    def train(self):
+        """Single training step from replay buffer"""
         if len(self.memory) < self.batch_size:
             return None
-
+        
+        # Sample batch
         batch = self.memory.sample(self.batch_size)
-        states, actions, rewards, next_states, dones = map(np.array, zip(*batch))
-
-        states = torch.FloatTensor(states).to(self.device)
-        actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        next_states = torch.FloatTensor(next_states).to(self.device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
-
-        # Current Q estimates
-        q_values = self.policy_net(states).gather(1, actions)
-
-        # Compute targets
-        with torch.no_grad():
-            next_q_values = self.target_net(next_states).max(1, keepdim=True)[0]
-            target_q = rewards + (1 - dones) * self.gamma * next_q_values
-
-        # Loss calculation
-        loss = nn.MSELoss()(q_values, target_q)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        logger.debug(f"Train step completed. Loss: {loss.item()}")
-
+        states, actions, rewards, next_states, dones = zip(*batch)
+        
+        # Convert to NumPy arrays
+        states = np.array(states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        next_states = np.array(next_states)
+        dones = np.array(dones)
+        
+        # Calculate target Q-values
+        current_q = self.policy_net.forward(states)
+        next_q = self.target_net.forward(next_states)
+        max_next_q = np.max(next_q, axis=1)
+        target = current_q.copy()
+        
+        # Bellman equation update
+        batch_idx = np.arange(self.batch_size)
+        target[batch_idx, actions] = rewards + (1 - dones) * self.gamma * max_next_q
+        
+        # Backpropagation
+        self.policy_net.backward(states, target, self.lr)
+        
         # Epsilon decay
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        self.epsilon = max(self.epsilon_min, self.epsilon*self.epsilon_decay)
+        
+        # Target network update
+        self.train_step += 1
+        if self.train_step % self.target_update == 0:
+            self.update_target_net()
+        
+        return np.mean(np.square(current_q - target))
 
-        # Periodic target net update
-        self.training_steps += 1
-        if self.training_steps % self.target_update_frequency == 0:
-            self.update_target_network(hard_update=True)
 
-        return loss.item()
+# ====================== Evolutionary Optimization ======================
+class EvolutionaryTrainer:
+    """Evolutionary hyperparameter optimization for DQN agents"""
+    
+    def __init__(self, env, state_dim, action_dim, 
+                 population_size=10, generations=20, mutation_rate=0.2):
+        self.env = env
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.pop_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.population = []
 
-    def pretrain_from_dataset(self, dataset_path: str, epochs: int = 10):
-        """
-        Load offline dataset and pretrain policy network.
-        Dataset must include keys: states, actions, rewards, next_states, dones.
-        """
-        logger.info(f"Starting pretraining from dataset {dataset_path}")
-        loader = DataLoader(validation_schema={
-            'states': list,
-            'actions': list,
-            'rewards': list,
-            'next_states': list,
-            'dones': list
-        })
-
-        dataset = loader.load(dataset_path)
-        num_samples = len(dataset['states'])
-
-        for epoch in range(epochs):
-            indices = np.arange(num_samples)
-            np.random.shuffle(indices)
-
-            total_loss = 0.0
-            batches = 0
-
-            for start_idx in range(0, num_samples, self.batch_size):
-                batch_indices = indices[start_idx:start_idx + self.batch_size]
-
-                batch = {
-                    key: [dataset[key][i] for i in batch_indices]
-                    for key in dataset
-                }
-
-                states = torch.FloatTensor(batch['states']).to(self.device)
-                actions = torch.LongTensor(batch['actions']).unsqueeze(1).to(self.device)
-                rewards = torch.FloatTensor(batch['rewards']).unsqueeze(1).to(self.device)
-                next_states = torch.FloatTensor(batch['next_states']).to(self.device)
-                dones = torch.FloatTensor(batch['dones']).unsqueeze(1).to(self.device)
-
-                q_values = self.policy_net(states).gather(1, actions)
-
-                with torch.no_grad():
-                    next_q_values = self.target_net(next_states).max(1, keepdim=True)[0]
-                    target_q = rewards + (1 - dones) * self.gamma * next_q_values
-
-                loss = nn.MSELoss()(q_values, target_q)
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-                total_loss += loss.item()
-                batches += 1
-
-            avg_loss = total_loss / batches
-            logger.info(f"Epoch [{epoch + 1}/{epochs}] - Avg Loss: {avg_loss:.4f}")
-
-    def execute(self, task_data):
-        """
-        Simulate decision making and training.
-        """
-        state = task_data.get("state", [0.0] * self.state_size)
-        action = self.act(state)
+    def _random_config(self):
+        """Generate random hyperparameter configuration"""
         return {
-            "status": "success",
-            "agent": "DQNAgent",
-            "action": action
+            'gamma': np.clip(np.random.normal(0.95, 0.02), 0.9, 0.999),
+            'epsilon_decay': np.clip(np.random.normal(0.995, 0.002), 0.99, 0.999),
+            'learning_rate': np.clip(10**np.random.uniform(-4, -2), 1e-4, 1e-2),
+            'hidden_size': np.random.choice([64, 128, 256]),
+            'buffer_size': 10000,
+            'batch_size': 64
         }
+
+    def _mutate(self, config):
+        """Apply Gaussian mutation to hyperparameters"""
+        mutated = copy.deepcopy(config)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['gamma'] = np.clip(config['gamma'] + np.random.normal(0, 0.01), 0.9, 0.999)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['learning_rate'] = np.clip(
+                config['learning_rate'] * np.random.lognormal(0, 0.2), 1e-4, 1e-2)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['epsilon_decay'] = np.clip(
+                config['epsilon_decay'] + np.random.normal(0, 0.003), 0.99, 0.999)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['hidden_size'] = np.random.choice([64, 128, 256])
+        
+        return mutated
+
+    def _evaluate(self, agent, episodes=3):
+        """Evaluate agent's performance in environment"""
+        total_rewards = []
+        for _ in range(episodes):
+            state = self.env.reset()
+            episode_reward = 0
+            done = False
+            while not done:
+                action = agent.select_action(state, explore=False)
+                next_state, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                state = next_state
+            total_rewards.append(episode_reward)
+        return np.mean(total_rewards)
+
+    def evolve(self):
+        """Run evolutionary training loop"""
+        # Initialize population
+        self.population = [DQNAgent(self.state_dim, self.action_dim, self._random_config())
+                          for _ in range(self.pop_size)]
+        
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitness = [(agent, self._evaluate(agent)) for agent in self.population]
+            fitness.sort(key=lambda x: x[1], reverse=True)
+            
+            # Selection (keep top 30%)
+            elite = [agent for agent, _ in fitness[:int(0.3*self.pop_size)]]
+            
+            # Create next generation
+            new_pop = []
+            while len(new_pop) < self.pop_size:
+                parent = np.random.choice(elite)
+                child_config = self._mutate(parent.config)
+                new_pop.append(DQNAgent(self.state_dim, self.action_dim, child_config))
+            
+            self.population = new_pop
+            print(f"Generation {gen+1} | Best Fitness: {fitness[0][1]:.1f}")
+        
+        return self.population[0]
+
+
+# ====================== Unified Interface ======================
+class UnifiedDQNAgent:
+    """Unified interface for standard and evolutionary DQN"""
+    
+    def __init__(self, mode='standard', state_dim=None, action_dim=None, config=None, env=None):
+        self.mode = mode
+        self.config = config or {}
+        
+        if mode == 'standard':
+            self.agent = DQNAgent(state_dim, action_dim, self.config)
+        elif mode == 'evolutionary':
+            if not env or not state_dim or not action_dim:
+                raise ValueError("Evolutionary mode requires environment specs")
+            self.trainer = EvolutionaryTrainer(env, state_dim, action_dim)
+        else:
+            raise ValueError("Invalid mode. Choose 'standard' or 'evolutionary'")
+
+    def train(self, episodes=1000):
+        if self.mode == 'standard':
+            # Standard training loop
+            for ep in range(episodes):
+                state = self.env.reset()
+                total_reward = 0
+                done = False
+                while not done:
+                    action = self.agent.select_action(state)
+                    next_state, reward, done, _ = self.env.step(action)
+                    self.agent.store_transition(state, action, reward, next_state, done)
+                    loss = self.agent.train()
+                    total_reward += reward
+                    state = next_state
+                print(f"Episode {ep} | Reward: {total_reward} | Loss: {loss:.4f}")
+        else:
+            self.agent = self.trainer.evolve()
+
+    def act(self, state, explore=False):
+        return self.agent.select_action(state, explore)
+
+    def save(self, path):
+        # Save weights implementation
+        pass
+
+    def load(self, path):
+        # Load weights implementation
+        pass
+
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    # Example environment setup
+    class MockEnv:
+        def reset(self):
+            return np.random.randn(4)
+        
+        def step(self, action):
+            return np.random.randn(4), np.random.rand(), random.choice([True, False]), {}
+    
+    # Initialize agent
+    agent = UnifiedDQNAgent(mode='standard',
+                          state_dim=4,
+                          action_dim=2,
+                          config={'hidden_size': 128, 'learning_rate': 0.001},
+                          env=MockEnv())
+    
+    # Training
+    agent.train(episodes=25)
