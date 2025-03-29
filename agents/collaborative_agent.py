@@ -22,6 +22,7 @@ import threading
 from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass, asdict, field
 from collections import defaultdict
+from scipy.stats import beta  # No error handling for missing dependency
 from enum import Enum
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -132,6 +133,7 @@ class DeadlineAwareScheduler(TaskScheduler):
             # Find best available agent considering capabilities and current load
             best_agent = None
             best_score = -1
+            best_requirements_met = []
             
             for agent, details in agents.items():
                 if agent_loads[agent] >= 1.0:
@@ -140,7 +142,8 @@ class DeadlineAwareScheduler(TaskScheduler):
                 # Calculate capability match score
                 capabilities = set(details['capabilities'])
                 requirements = set(task.get('requirements', []))
-                match_score = len(capabilities & requirements) / max(1, len(requirements))
+                requirements_met = list(capabilities & requirements)
+                match_score = len(requirements_met) / max(1, len(requirements))
                 
                 # Adjust for current load (prefer less loaded agents)
                 load_factor = 1 - details['current_load']
@@ -149,13 +152,14 @@ class DeadlineAwareScheduler(TaskScheduler):
                 if total_score > best_score:
                     best_score = total_score
                     best_agent = agent
+                    best_requirements_met = requirements_met
             
             if best_agent:
                 # Calculate start and end times
                 duration = task['estimated_duration']
                 start_time = max(
                     agent_loads[best_agent],
-                    max((assignments[dep]['end_time'] for dep in task['dependencies']), default=0)
+                    max((assignments[dep]['end_time'] for dep in task.get('dependencies', [])), default=0)
                 )
                 end_time = start_time + duration
                 
@@ -163,7 +167,8 @@ class DeadlineAwareScheduler(TaskScheduler):
                     'agent': best_agent,
                     'start_time': start_time,
                     'end_time': end_time,
-                    'risk_score': task.get('estimated_risk', 0.5)
+                    'risk_score': task.get('estimated_risk', 0.5),
+                    'requirements_met': best_requirements_met  # Track matched requirements
                 }
                 agent_loads[best_agent] = end_time
         
@@ -305,62 +310,162 @@ class CollaborativeAgent:
             affected_agents=self._identify_affected_agents(source_agent, action_details)
         )
 
-    def coordinate_tasks(
+
+
+def coordinate_tasks(
+    self,
+    tasks: List[Dict[str, Any]],
+    available_agents: List[str],
+    optimization_goals: List[str] = None,
+    constraints: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    Enhanced task coordination with optimization goals and constraints.
+    
+    Args:
+        tasks: List of tasks to be assigned
+        available_agents: List of agent names available for assignment
+        optimization_goals: List of optimization priorities:
+            - 'minimize_risk': Prefer lower-risk assignments
+            - 'maximize_throughput': Prefer higher-throughput agents
+            - 'balance_load': Distribute tasks evenly
+            - 'minimize_makespan': Optimize for fastest completion
+        constraints: Dictionary of constraints:
+            - 'max_concurrent_tasks': Maximum tasks per agent
+            - 'safety_threshold': Maximum allowed risk score
+            - 'required_capabilities': Mandatory capabilities
+    
+    Returns:
+        Dictionary containing task assignments and metrics
+    """
+    # Default values if not specified
+    optimization_goals = optimization_goals or ['minimize_risk']
+    constraints = constraints or {}
+    
+    # Filter available agents based on constraints
+    eligible_agents = {
+        agent: details 
+        for agent, details in self.agent_network.items() 
+        if agent in available_agents
+    }
+    
+    # Apply capability constraints if specified
+    if 'required_capabilities' in constraints:
+        eligible_agents = {
+            agent: details 
+            for agent, details in eligible_agents.items()
+            if all(
+                cap in details['capabilities']
+                for cap in constraints['required_capabilities']
+            )
+        }
+    
+    # Get base schedule from scheduler
+    schedule = self.scheduler.schedule(tasks, eligible_agents)
+    
+    # Apply optimization goals to refine assignments
+    if optimization_goals:
+        schedule = self._apply_optimizations(
+            schedule, 
+            tasks, 
+            eligible_agents,
+            optimization_goals,
+            constraints
+        )
+    
+    # Perform safety checks and prepare results
+    safety_checks = {}
+    for task_id, assignment in schedule.items():
+        task = next(t for t in tasks if t['id'] == task_id)
+        assessment = self.assess_risk(
+            risk_score=assignment['risk_score'],
+            task_type=task['type'],
+            source_agent=assignment['agent'],
+            action_details=task
+        )
+        safety_checks[task_id] = assessment
+        
+        # Apply safety threshold constraint
+        if 'safety_threshold' in constraints:
+            if assessment.risk_score > constraints['safety_threshold']:
+                schedule[task_id]['status'] = 'rejected_high_risk'
+    
+    # Calculate metrics
+    makespan = max((a['end_time'] for a in schedule.values()), default=0)
+    total_risk = sum(a['risk_score'] for a in schedule.values())
+    
+    return {
+        'assignments': schedule,
+        'safety_checks': {k: v.__dict__ for k, v in safety_checks.items()},
+        'metadata': {
+            'total_tasks': len(tasks),
+            'assigned_tasks': len(schedule),
+            'high_risk_tasks': sum(
+                1 for a in safety_checks.values() 
+                if a.risk_level >= RiskLevel.HIGH
+            ),
+            'makespan': makespan,
+            'average_risk': total_risk / len(schedule) if schedule else 0,
+            'optimization_goals': optimization_goals,
+            'constraints_violated': any(
+                a.get('status') == 'rejected_high_risk'
+                for a in schedule.values()
+            )
+        }
+    }
+
+    def _apply_optimizations(
         self,
+        schedule: Dict[str, Any],
         tasks: List[Dict[str, Any]],
-        available_agents: List[str],
-        optimization_goals: List[str] = None,
-        constraints: Dict[str, Any] = None
+        agents: Dict[str, Any],
+        goals: List[str],
+        constraints: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Coordinate task assignment based on agent capabilities, optimization goals, and constraints.
-
-        :param tasks: List of tasks (each task is a dict with required 'type' and optional 'constraints').
-        :param available_agents: List of agent names available for assignment.
-        :param optimization_goals: Goals like 'speed', 'accuracy', etc.
-        :param constraints: Optional constraints to filter eligible agents.
-        :return: Mapping of task index to selected agent name.
+        Apply optimization goals to the schedule.
         """
-        agent_scores = {}
-        assignments = {}
-        
-        # Get base schedule from scheduler
-        schedule = self.scheduler.schedule(tasks, {
-            agent: details 
-            for agent, details in self.agent_network.items() 
-            if agent in available_agents
-        })
-        
-        # Perform safety checks
-        safety_checks = {}
-        for task_id, assignment in schedule.items():
+        optimized_schedule = schedule.copy()
+    
+        # Apply max concurrent tasks constraint
+        if 'max_concurrent_tasks' in constraints:
+            agent_counts = defaultdict(int)
+            for task_id, assignment in optimized_schedule.items():
+                agent = assignment['agent']
+                agent_counts[agent] += 1
+                if agent_counts[agent] > constraints['max_concurrent_tasks']:
+                    optimized_schedule[task_id]['status'] = 'rejected_overload'
+    
+        # Score assignments based on optimization goals
+        for task_id, assignment in optimized_schedule.items():
+            if assignment.get('status') in ['rejected_high_risk', 'rejected_overload']:
+                continue
+            
+            agent = assignment['agent']
+            agent_details = agents[agent]
             task = next(t for t in tasks if t['id'] == task_id)
-            assessment = self.assess_risk(
-                risk_score=assignment['risk_score'],
-                task_type=task['type'],
-                source_agent=assignment['agent'],
-                action_details=task
-            )
-            safety_checks[task_id] = assessment
         
-        # Prepare response
-        return {
-            'assignments': schedule,
-            'safety_checks': {k: v.__dict__ for k, v in safety_checks.items()},
-            'metadata': {
-                'total_tasks': len(tasks),
-                'assigned_tasks': len(schedule),
-                'high_risk_tasks': sum(
-                    1 for a in safety_checks.values() 
-                    if a.risk_level >= RiskLevel.HIGH
-                ),
-                'makespan': max(
-                    (a['end_time'] for a in schedule.values()), 
-                    default=0
-                )
-            }
-        }
-
+            score = 0
+            weight = 1.0 / len(goals)  # Equal weighting
+        
+            for goal in goals:
+                if goal == 'minimize_risk':
+                    score += weight * (1 - assignment['risk_score'])
+                elif goal == 'maximize_throughput':
+                    score += weight * (agent_details['throughput'] / 100)
+                elif goal == 'balance_load':
+                    score += weight * (1 - agent_details['current_load'])
+                elif goal == 'minimize_makespan':
+                    score += weight * (1 / (assignment['end_time'] + 0.001))
+        
+            optimized_schedule[task_id]['optimization_score'] = score
+    
+        # For tasks with multiple possible agents, select best based on score
+        # (Implementation depends on your scheduler's flexibility)
+    
+    
+    return optimized_schedule
+    
     def train_risk_model(self, training_data: List[Dict[str, Any]]) -> None:
         """
         Enhanced training with Bayesian threshold adaptation
@@ -418,13 +523,6 @@ class CollaborativeAgent:
         # Final fallback to default threshold
         return self.risk_model['thresholds']['default'].get_threshold()
         
-        # Fall back to agent-specific threshold
-        if threshold is None and agent != "default":
-            threshold = self.risk_model['thresholds'].get(f"agent_{agent}")
-            
-        # Final fallback to default threshold
-        return threshold or self.risk_model['thresholds']['default']
-
     def _calculate_risk_level(self, risk_score: float, threshold: float) -> RiskLevel:
         """
         Calculate risk level based on score and threshold.
@@ -858,6 +956,6 @@ if __name__ == "__main__":
     print("\nGantt Chart Representation:")
     for task_id, assignment in coordination_result['assignments'].items():
         task = next(t for t in tasks if t['id'] == task_id)
-        duration = assignment['schedule']['end'] - assignment['schedule']['start']
+        duration = assignment['schedule']['end_time'] - assignment['schedule']['start_time']
         bar = '█' * int(20 * duration / coordination_result['metadata']['total_duration'])
-        print(f"{task_id} [{bar}] {assignment['schedule']['start']:.1f}-{assignment['schedule']['end']:.1f}s ({assignment['agent']})")
+        print(f"{task_id} [{bar}] {assignment['schedule']['start']:.1f}-{assignment['schedule']['end_time']:.1f}s ({assignment['agent']})")
