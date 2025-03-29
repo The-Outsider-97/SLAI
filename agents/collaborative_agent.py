@@ -305,13 +305,25 @@ class CollaborativeAgent:
             affected_agents=self._identify_affected_agents(source_agent, action_details)
         )
 
-    def coordinate_tasks(self, 
-                       tasks: List[Dict[str, Any]],
-                       available_agents: List[str],
-                       optimization_goals: List[str] = None) -> Dict[str, Any]:
+    def coordinate_tasks(
+        self,
+        tasks: List[Dict[str, Any]],
+        available_agents: List[str],
+        optimization_goals: List[str] = None,
+        constraints: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """
-        Enhanced task coordination with advanced scheduling
+        Coordinate task assignment based on agent capabilities, optimization goals, and constraints.
+
+        :param tasks: List of tasks (each task is a dict with required 'type' and optional 'constraints').
+        :param available_agents: List of agent names available for assignment.
+        :param optimization_goals: Goals like 'speed', 'accuracy', etc.
+        :param constraints: Optional constraints to filter eligible agents.
+        :return: Mapping of task index to selected agent name.
         """
+        agent_scores = {}
+        assignments = {}
+        
         # Get base schedule from scheduler
         schedule = self.scheduler.schedule(tasks, {
             agent: details 
