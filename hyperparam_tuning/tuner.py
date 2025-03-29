@@ -78,7 +78,7 @@ if __name__ == "__main__":
         return score
 
     # Example usage with Bayesian Search
-    bayesian_tuner = HyperParamTuner(
+    bayesian_tuner = HyperparamTuner(
         config_path='hyperparam_tuning/example_config.json',
         evaluation_function=dummy_evaluation,
         strategy='bayesian',
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     print("\nBest Params from Bayesian Search:", bayesian_best_params)
 
     # Example usage with Grid Search
-    grid_tuner = HyperParamTuner(
+    grid_tuner = HyperparamTuner(
         config_path='hyperparam_tuning/example_grid_config.json',
         evaluation_function=dummy_evaluation,
         strategy='grid'
