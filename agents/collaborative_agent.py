@@ -1036,8 +1036,8 @@ if __name__ == "__main__":
         task = next(t for t in tasks if t['id'] == task_id)
         print(f"\nTask {task_id} ({task['type']}):")
         print(f"  Assigned to: {assignment['agent']}")
-        print(f"  Start Time: {assignment['schedule']['start']:.1f}s")
-        print(f"  End Time: {assignment['schedule']['end']:.1f}s")
+        print(f"  Start Time: {assignment['schedule']['start_time']:.1f}s")
+        print(f"  End Time: {assignment['schedule']['end_time']:.1f}s")
         print(f"  Risk Assessment: {assignment['safety_check']['risk_level']}")
         print(f"  Requirements Met: {', '.join(assignment['requirements_met'])}")
     
