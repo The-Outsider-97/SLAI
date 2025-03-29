@@ -810,6 +810,32 @@ class TestCollaborativeAgent(unittest.TestCase):
         self.agent._validate_risk_score(0.5)
         self.agent._validate_risk_score(1.0)
     
+
+    def _calculate_coordination_metrics(self, assignments, safety_checks):
+        total_duration = 0
+        total_risk = 0
+        compliant_tasks = 0
+
+        for assignment in assignments.values():
+            duration = assignment.get("end_time", 0) - assignment.get("start_time", 0)
+            total_duration += duration
+
+        for task_id, check in safety_checks.items():
+            risk = check.get("risk_score", 1.0)
+            total_risk += risk
+            if check.get("risk_level", "") in ["low", "moderate"]:
+                compliant_tasks += 1
+
+        num_tasks = len(assignments) or 1
+        avg_risk = total_risk / num_tasks
+        safety_compliance = compliant_tasks / num_tasks
+
+        return {
+            "total_duration": round(total_duration, 2),
+            "average_risk_score": round(avg_risk, 2),
+            "safety_compliance": round(safety_compliance, 2),
+            "resource_utilization": f"{round(num_tasks / len(self.agent_network) * 100, 2)}%"
+        }
     def test_safety_assessment_serialization(self):
         assessment = SafetyAssessment(
             risk_score=0.7,
@@ -1034,14 +1060,13 @@ if __name__ == "__main__":
     print("\nDetailed Assignments:")
     for task_id, assignment in coordination_result['assignments'].items():
         task = next(t for t in tasks if t['id'] == task_id)
+        risk_level = coordination_result['safety_checks'][task_id]['risk_level']
         print(f"\nTask {task_id} ({task['type']}):")
         print(f"  Assigned to: {assignment['agent']}")
-        print(f"  Start Time: {assignment['schedule']['start_time']:.1f}s")
-        print(f"  End Time: {assignment['schedule']['end_time']:.1f}s")
-        print(f"  Risk Assessment: {assignment['safety_check']['risk_level']}")
+        print(f"  Start Time: {assignment['start_time']:.1f}s")
+        print(f"  End Time: {assignment['end_time']:.1f}s")
+        print(f"  Risk Assessment: {risk_level}")
         print(f"  Requirements Met: {', '.join(assignment['requirements_met'])}")
-    
-    print("\nSystem Metrics:")
     print(f"Total Estimated Duration: {coordination_result['metadata']['total_duration']:.1f}s")
     print(f"Resource Utilization: {coordination_result['metadata']['resource_utilization']:.1%}")
     print(f"Safety Compliance: {coordination_result['metadata']['safety_compliance']:.1%}")
