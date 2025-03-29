@@ -63,7 +63,7 @@ class CertificationManager:
             "content_hash": hash(str(evidence))
         })
     
-    def evaluate_certification(self) -> Tuple[bool, List[str]]:
+    def evaluate_certification(self) -> tuple[bool, List[str]]:
         """Determine if current evidence meets requirements"""
         unmet = []
         for req in self.requirements[self.current_level]:
