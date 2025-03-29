@@ -9,7 +9,7 @@ from hyperparam_tuning.bayesian_search import BayesianSearch
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-class HyperParamTuner:
+class HyperparamTuner:
     """
     HyperParamTuner orchestrates hyperparameter optimization strategies.
     Supports Grid Search and Bayesian Search, dynamically selecting the strategy
