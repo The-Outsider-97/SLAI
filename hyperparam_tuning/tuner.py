@@ -11,7 +11,7 @@ logger.setLevel(logging.INFO)
 
 class HyperparamTuner:
     """
-    HyperParamTuner orchestrates hyperparameter optimization strategies.
+    HyperparamTuner orchestrates hyperparameter optimization strategies.
     Supports Grid Search and Bayesian Search, dynamically selecting the strategy
     based on configuration or runtime input.
     """
