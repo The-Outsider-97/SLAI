@@ -1,36 +1,25 @@
 import re
 import json
 import time
-from typing import Dict, Tuple, Optional, List, Any, Union
+import pickle
+from pathlib import Path
+from typing import Dict, Tuple, Optional, List, Any
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
+from collections import deque
 
 @dataclass
 class DialogueContext:
     """Stores conversation history and environment state for multi-turn dialogues."""
-    history: deque = field(default_factory=lambda: deque(maxlen=10))  # Last 10 turns
-    environment_state: Dict[str, Any] = field(default_factory=dict)   # External state (e.g., API results)
-    user_preferences: Dict[str, Any] = field(default_factory=dict)    # User-specific settings
+    history: deque = field(default_factory=lambda: deque(maxlen=10))
+    environment_state: Dict[str, Any] = field(default_factory=dict)
+    user_preferences: Dict[str, Any] = field(default_factory=dict)
 
 class LanguageAgent:
-    def __init__(self, llm, max_retries: int = 3, timeout: int = 10):
-        """
-        Initialize the Language Agent with safety checks, context management, and benchmarking.
-        
-        Args:
-            llm: A Large Language Model with a `generate()` method.
-            max_retries: Retries for failed LLM calls (default: 3).
-            timeout: Timeout for LLM responses (default: 10 sec).
-        
-        References:
-            - Safety: Gehman et al. (2020). "RealToxicityPrompts".
-            - Context: Adiwardana et al. (2020). "Towards a Human-like Open-Domain Chatbot".
-            - Benchmarking: Wang et al. (2021). "SuperGLUE: A Stickier Benchmark for General-Purpose Language Models".
-        """
+    def __init__(self, llm, max_retries: int = 3, timeout: int = 15):
         self.llm = llm
         self.max_retries = max_retries
         self.timeout = timeout
-        self.context = DialogueContext()  # Multi-turn context manager
+        self.context = DialogueContext()
         self.benchmark_data = {
             "parsing_accuracy": [],
             "response_time": [],
@@ -38,7 +27,42 @@ class LanguageAgent:
         }
         self._validate_llm()
 
-    def _validate_llm(self):
+    def save_context(self, file_path: Union[str, Path]) -> None:
+        """
+        Save the current dialogue context to a file using pickle.
+        
+        Args:
+            file_path: Path to save the context (e.g., "context.pkl").
+        
+        Example:
+            >>> agent.save_context("chat_context.pkl")
+        """
+        with open(file_path, 'wb') as f:
+            pickle.dump(self.context, f)
+
+    def load_context(self, file_path: Union[str, Path]) -> None:
+        """
+        Load dialogue context from a pickle file.
+        
+        Args:
+            file_path: Path to the saved context file.
+        
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            pickle.UnpicklingError: If the file is corrupted.
+        
+        Example:
+            >>> agent.load_context("chat_context.pkl")
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                self.context = pickle.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Context file not found: {file_path}")
+        except pickle.UnpicklingError:
+            raise pickle.UnpicklingError(f"Failed to load context from {file_path}")
+
+    def _validate_llm(self) -> None:
         """Ensure the LLM has the required `generate` method."""
         if not hasattr(self.llm, 'generate') or not callable(self.llm.generate):
             raise AttributeError("LLM must implement a 'generate' method.")
@@ -53,48 +77,34 @@ class LanguageAgent:
         Returns:
             True if safe, False if unsafe.
         
-        References:
-            - Dinan et al. (2019). "Build it Break it Fix it for Dialogue Safety".
+        Notes:
+            Extend with ML-based classifiers (e.g., Hugging Face's `detoxify`) for production.
         """
-        # Rule-based safety checks (extend with ML-based filters if needed)
         unsafe_patterns = [
-            r"(?i)(kill|harm|hurt|attack|hate)\b",
+            r"(?i)\b(kill|harm|hurt|attack|hate)\b",
             r"\b\d{3}-\d{2}-\d{4}\b",  # SSN-like patterns
-            r"(?i)(password|credit card|social security)",
+            r"(?i)\b(password|credit\s*card|social\s*security)\b",
         ]
         
         for pattern in unsafe_patterns:
             if re.search(pattern, response):
                 self.benchmark_data["safety_violations"] += 1
                 return False
-        
         return True
 
     def update_context(self, user_input: str, llm_response: str) -> None:
-        """
-        Maintain conversation history and state for multi-turn dialogues.
-        
-        Args:
-            user_input: Latest user query.
-            llm_response: Generated assistant response.
-        
-        References:
-            - Roller et al. (2021). "Recipes for Building an Open-Domain Chatbot".
-        """
+        """Update dialogue history and environment state."""
         self.context.history.append((user_input, llm_response))
 
     def evaluate_parsing_accuracy(self, test_cases: List[Tuple[str, Dict]]) -> float:
         """
-        Benchmark the accuracy of `translate_user_input()` against labeled test cases.
+        Benchmark parsing accuracy against labeled test cases.
         
         Args:
             test_cases: List of (input_text, expected_parsed_output).
         
         Returns:
             Accuracy score (0.0 to 1.0).
-        
-        References:
-            - Rajpurkar et al. (2016). "SQuAD: 100,000+ Questions for Machine Comprehension".
         """
         correct = 0
         for text, expected in test_cases:
@@ -102,11 +112,10 @@ class LanguageAgent:
             if parsed == expected:
                 correct += 1
             self.benchmark_data["parsing_accuracy"].append(parsed == expected)
-        
         return correct / len(test_cases)
 
     def generate_prompt(self, user_input: str) -> str:
-        """(Previous implementation with context injection.)"""
+        """Generate a prompt with context and history."""
         prompt = f"User: {user_input}\nContext: {json.dumps(self.context.environment_state)}\n"
         if self.context.history:
             prompt += "Dialogue History:\n" + "\n".join([f"User: {u}\nBot: {r}" for u, r in self.context.history])
@@ -115,23 +124,20 @@ class LanguageAgent:
 
     def process_input(self, user_input: str) -> Tuple[str, Dict]:
         """
-        Full processing pipeline with safety, context, and benchmarking.
-        
-        Args:
-            user_input: Natural language input.
+        End-to-end processing pipeline.
         
         Returns:
-            (llm_response, structured_command)
+            Tuple of (LLM response, structured command).
         
         Raises:
             RuntimeError: If LLM fails or response is unsafe.
         """
         start_time = time.time()
         
-        # Step 1: Generate prompt with context
+        # Step 1: Generate prompt
         prompt = self.generate_prompt(user_input)
         
-        # Step 2: Get LLM response (with retries)
+        # Step 2: Get LLM response
         llm_response = self.interface_llm(prompt)
         
         # Step 3: Validate safety
@@ -148,21 +154,7 @@ class LanguageAgent:
         return llm_response, structured_input
 
     def interface_llm(self, prompt: str) -> str:
-        """
-        Robust interface with the LLM using exponential backoff for retries.
-        
-        Args:
-            prompt: Input prompt for the LLM.
-        
-        Returns:
-            LLM response (stripped of leading/trailing whitespace).
-        
-        Raises:
-            RuntimeError: If LLM fails to respond after max_retries.
-        
-        References:
-            - For retry mechanisms: Google Cloud API Design Guide (2021).
-        """
+        """Robust LLM interface with retries and timeout."""
         for attempt in range(self.max_retries):
             try:
                 response = self.llm.generate(prompt, timeout=self.timeout)
@@ -173,24 +165,9 @@ class LanguageAgent:
                 continue
 
     def translate_user_input(self, user_input: str) -> Dict:
-        """
-        Parse user input into structured commands using semantic parsing.
-        
-        Args:
-            user_input: Raw natural language input.
-        
-        Returns:
-            Dictionary with:
-                - 'intent': High-level goal (e.g., "search", "create")
-                - 'entities': Key objects/parameters
-                - 'args': Additional arguments
-        
-        References:
-            - Kamath & Das (2019). "A Survey on Semantic Parsing".
-        """
-        # Enhanced parsing with common NLP patterns
+        """Parse user input into structured commands."""
         patterns = {
-            'search': r'(?:search|find)\s+(?P<query>.+?)\s+(?:about|for)\s+(?P<topic>.+)',
+            'search': r'(?:search|find)\s+(?P<query>.+?)(?:\s+(?:about|for)\s+(?P<topic>.+))?',
             'create': r'(?:create|make)\s+(?P<object>\w+)(?:\s+with\s+(?P<params>.+))?',
             'default': r'(?P<command>\w+)(?:\s+(?P<args>.+))?'
         }
@@ -204,5 +181,4 @@ class LanguageAgent:
                     'entities': {k: v for k, v in groups.items() if v},
                     'args': groups.get('args', '').split() if 'args' in groups else []
                 }
-
         return {'intent': 'unknown', 'entities': {}, 'args': []}
