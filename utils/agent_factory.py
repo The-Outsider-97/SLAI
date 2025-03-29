@@ -194,7 +194,7 @@ def get_agent_documentation(agent_name: str) -> str:
 
 # Example usage
 if __name__ == "__main__":
-    # Example configuration for DQN agent
+    # Create sample configurations for all agent types
     dqn_config = {
         "state_size": 8,
         "action_size": 4,
@@ -204,9 +204,74 @@ if __name__ == "__main__":
         "epsilon_decay": 0.995
     }
     
-    try:
-        agent = create_agent("dqn", dqn_config)
-        print(f"Successfully created {agent.__class__.__name__} agent")
-        print("Available agents:", list(AGENT_REGISTRY.keys()))
-    except Exception as e:
-        print(f"Agent creation failed: {str(e)}")
+    maml_config = {
+        "state_size": 10,
+        "action_size": 5,
+        "hidden_size": 64,
+        "meta_lr": 0.001,
+        "inner_lr": 0.01,
+        "gamma": 0.95
+    }
+    
+    # Create shared memory instance for RSI
+    from collaborative.shared_memory import SharedMemory
+    shared_memory = SharedMemory()
+    
+    rsi_config = {
+        "state_size": 20,
+        "action_size": 3,
+        "shared_memory": shared_memory,
+        "config": {
+            "learning_rate": 0.001,
+            "window_size": 14
+        }
+    }
+
+    # Test creating all agents
+    agents_to_create = [
+        ("dqn", dqn_config),
+        ("maml", maml_config),
+        ("rsi", rsi_config)
+    ]
+
+    created_agents = {}
+    
+    for agent_type, config in agents_to_create:
+        try:
+            agent = create_agent(agent_type, config)
+            created_agents[agent_type] = agent
+            print(f"\n✅ Successfully created {agent.__class__.__name__}")
+            print(f"Configuration used:")
+            for k, v in config.items():
+                print(f" - {k}: {v if not isinstance(v, SharedMemory) else '<SharedMemory instance>'}")
+        except Exception as e:
+            print(f"\n❌ Failed to create {agent_type} agent: {str(e)}")
+            continue
+
+    # Display registry information
+    print("\nAgent Registry Summary:")
+    print(f"Total available agent types: {len(AGENT_REGISTRY)}")
+    print("Registered agents:")
+    for idx, (name, (module, cls)) in enumerate(AGENT_REGISTRY.items(), 1):
+        print(f"{idx}. {name.ljust(15)} ({module}.{cls})")
+
+    # Basic functionality test
+    if created_agents:
+        print("\n Basic functionality test:")
+        for name, agent in created_agents.items():
+            try:
+                if hasattr(agent, 'act'):
+                    test_state = np.random.randn(
+                        *dqn_config["state_size"] if name == "dqn" 
+                        else maml_config["state_size"] if name == "maml"
+                        else rsi_config["state_size"]
+                    )
+                    action = agent.act(test_state)
+                    print(f"{name.ljust(8)}: Selected action {action}")
+                
+                if hasattr(agent, 'train'):
+                    agent.train()
+                    print(f"{name.ljust(8)}: Training completed")
+                    
+            except Exception as e:
+                print(f"{name.ljust(8)}: Functionality test failed - {str(e)}")
