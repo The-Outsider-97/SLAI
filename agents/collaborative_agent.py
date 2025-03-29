@@ -436,7 +436,6 @@ class CollaborativeAgent:
         # (Implementation depends on your scheduler's flexibility)
     
     
-    
     def train_risk_model(self, training_data: List[Dict[str, Any]]) -> None:
         """
         Enhanced training with Bayesian threshold adaptation
