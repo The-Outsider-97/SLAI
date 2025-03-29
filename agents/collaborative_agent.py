@@ -16,10 +16,16 @@ Academic References:
 import logging
 import numpy as np
 import yaml
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass
+import random
+import json
+import threading
+from typing import Dict, List, Optional, Any, Tuple, Union
+from dataclasses import dataclass, asdict, field
 from collections import defaultdict
 from enum import Enum
+from pathlib import Path
+from abc import ABC, abstractmethod
+import unittest
 
 # Configure logging
 logging.basicConfig(
@@ -41,84 +47,200 @@ class RiskLevel(Enum):
 
 @dataclass
 class SafetyAssessment:
-    """Data structure for safety assessment results"""
+    """Enhanced data structure for safety assessment results with serialization"""
     risk_score: float
     risk_level: RiskLevel
     recommended_action: str
     confidence: float = 1.0
-    affected_agents: List[str] = None
+    affected_agents: List[str] = field(default_factory=list)
+    
+    def serialize(self) -> str:
+        """Serialize assessment to JSON string"""
+        return json.dumps({
+            **asdict(self),
+            'risk_level': self.risk_level.name
+        })
+    
+    @classmethod
+    def deserialize(cls, json_str: str) -> 'SafetyAssessment':
+        """Deserialize JSON string to SafetyAssessment"""
+        data = json.loads(json_str)
+        return cls(
+            risk_score=data['risk_score'],
+            risk_level=RiskLevel[data['risk_level']],
+            recommended_action=data['recommended_action'],
+            confidence=data['confidence'],
+            affected_agents=data['affected_agents']
+        )
+
+class ThreadSafeSharedMemory:
+    """Thread-safe wrapper for shared memory operations"""
+    def __init__(self):
+        self._data = {}
+        self._lock = threading.RLock()
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            return self._data.get(key, default)
+    
+    def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._data[key] = value
+    
+    def update(self, updates: Dict[str, Any]) -> None:
+        with self._lock:
+            self._data.update(updates)
+
+class BayesianThresholdAdapter:
+    """Bayesian risk threshold adaptation algorithm"""
+    def __init__(self, prior_alpha: float = 1.0, prior_beta: float = 1.0):
+        self.alpha = prior_alpha
+        self.beta = prior_beta
+    
+    def update(self, successes: int, failures: int) -> None:
+        """Update beta distribution parameters"""
+        self.alpha += successes
+        self.beta += failures
+    
+    def get_threshold(self, percentile: float = 0.9) -> float:
+        """Get threshold based on current beta distribution"""
+        if self.alpha + self.beta <= 1:
+            return 0.5  # Default prior
+        
+        from scipy.stats import beta
+        return beta.ppf(percentile, self.alpha, self.beta)
+
+class TaskScheduler(ABC):
+    """Abstract base class for task scheduling algorithms"""
+    @abstractmethod
+    def schedule(self, tasks: List[Dict], agents: Dict[str, Any]) -> Dict:
+        pass
+
+class DeadlineAwareScheduler(TaskScheduler):
+    """EDF (Earliest Deadline First) + Risk-Aware scheduling"""
+    def schedule(self, tasks: List[Dict], agents: Dict[str, Any]) -> Dict:
+        # Sort tasks by deadline and priority
+        sorted_tasks = sorted(
+            tasks,
+            key=lambda x: (x['deadline'], -x['priority'])
+        )
+        
+        assignments = {}
+        agent_loads = {agent: 0 for agent in agents}
+        
+        for task in sorted_tasks:
+            # Find best available agent considering capabilities and current load
+            best_agent = None
+            best_score = -1
+            
+            for agent, details in agents.items():
+                if agent_loads[agent] >= 1.0:
+                    continue
+                
+                # Calculate capability match score
+                capabilities = set(details['capabilities'])
+                requirements = set(task.get('requirements', []))
+                match_score = len(capabilities & requirements) / max(1, len(requirements))
+                
+                # Adjust for current load (prefer less loaded agents)
+                load_factor = 1 - details['current_load']
+                total_score = match_score * load_factor
+                
+                if total_score > best_score:
+                    best_score = total_score
+                    best_agent = agent
+            
+            if best_agent:
+                # Calculate start and end times
+                duration = task['estimated_duration']
+                start_time = max(
+                    agent_loads[best_agent],
+                    max((assignments[dep]['end_time'] for dep in task['dependencies']), default=0)
+                )
+                end_time = start_time + duration
+                
+                assignments[task['id']] = {
+                    'agent': best_agent,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'risk_score': task.get('estimated_risk', 0.5)
+                }
+                agent_loads[best_agent] = end_time
+        
+        return assignments
 
 class CollaborativeAgent:
-    """
-    Advanced collaborative agent for multi-agent systems with safety monitoring.
-    
-    Features:
-    - Real-time risk assessment
-    - Adaptive safety thresholds
-    - Inter-agent coordination
-    - Knowledge sharing
-    - Performance monitoring
-    """
+    """Enhanced collaborative agent with all new features"""
     
     def __init__(self, 
+                 config_path: Optional[str] = None,
                  shared_memory: Optional[Any] = None, 
                  risk_threshold: float = 0.2,
                  agent_network: Optional[Dict[str, Any]] = None):
         """
-        Initialize the collaborative agent.
-        
-        Args:
-            shared_memory: Shared memory object for inter-agent communication
-            risk_threshold: Initial risk threshold (0.0-1.0)
-            agent_network: Dictionary of known agents and their capabilities
+        Initialize with configuration file or direct parameters
         """
         self.name = "CollaborativeAgent"
-        self.shared_memory = shared_memory
+        self.shared_memory = shared_memory or ThreadSafeSharedMemory()
         self.risk_threshold = risk_threshold
-        self.agent_network = agent_network or {}
         
-        # Safety model components
+        # Load configuration if provided
+        if config_path:
+            self.agent_network = self._load_config(config_path)
+        else:
+            self.agent_network = agent_network or {}
+        
+        # Enhanced risk model with Bayesian adaptation
         self.risk_model = {
-            'task_risks': defaultdict(list),  # Historical risk data per task type
-            'agent_risks': defaultdict(list), # Risk profiles per agent
-            'thresholds': defaultdict(float)  # Learned thresholds
+            'task_risks': defaultdict(list),
+            'agent_risks': defaultdict(list),
+            'thresholds': defaultdict(BayesianThresholdAdapter)
         }
         
-        # Performance tracking
+        # Initialize with default threshold adapter
+        self.risk_model['thresholds']['default'] = BayesianThresholdAdapter()
+        
+        # Task scheduler
+        self.scheduler = DeadlineAwareScheduler()
+        
+        # Performance tracking with lock
         self.performance_metrics = {
             'assessments_completed': 0,
             'interventions': 0,
             'false_positives': 0,
             'false_negatives': 0
         }
-        
-        # Initialize with default threshold
-        self.risk_model['thresholds']['default'] = risk_threshold
+        self._metrics_lock = threading.Lock()
         
         logger.info(f"Initialized {self.name} with risk threshold: {risk_threshold}")
 
+    def _load_config(self, config_path: str) -> Dict:
+        """Load agent network configuration from YAML file"""
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+                logger.info(f"Loaded configuration from {config_path}")
+                return config.get('agent_network', {})
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return {}
+
+    def _validate_risk_score(self, score: float) -> None:
+        """Validate that risk score is between 0.0 and 1.0"""
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(f"Risk score must be between 0.0 and 1.0, got {score}")
+
     def execute(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute collaborative task with safety monitoring.
-        
-        Args:
-            task_data: Dictionary containing:
-                - 'policy_risk_score': Computed risk score (0.0-1.0)
-                - 'task_type': Category of task being performed
-                - 'source_agent': Originating agent (optional)
-                - 'action_details': Details of proposed action (optional)
-                
-        Returns:
-            Dictionary containing safety assessment and recommendations
-        """
-        # Validate input
-        if 'policy_risk_score' not in task_data:
-            return self._error_response("Missing required field: policy_risk_score")
+        """Enhanced execute with input validation"""
+        try:
+            if 'policy_risk_score' not in task_data:
+                return self._error_response("Missing required field: policy_risk_score")
             
-        risk_score = task_data['policy_risk_score']
-        task_type = task_data.get('task_type', 'general')
-        source_agent = task_data.get('source_agent', 'unknown')
-        
+            risk_score = task_data['policy_risk_score']
+            task_type = task_data.get('task_type', 'general')
+            source_agent = task_data.get('source_agent', 'unknown')
+            self._validate_risk_score(risk_score)
+            
         # Perform safety assessment
         assessment = self.assess_risk(
             risk_score=risk_score,
@@ -184,101 +306,105 @@ class CollaborativeAgent:
         )
 
     def coordinate_tasks(self, 
-                        tasks: List[Dict[str, Any]],
-                        available_agents: List[str]) -> Dict[str, Any]:
+                       tasks: List[Dict[str, Any]],
+                       available_agents: List[str],
+                       optimization_goals: List[str] = None) -> Dict[str, Any]:
         """
-        Coordinate tasks among available agents based on capabilities and risk profiles.
+        Enhanced task coordination with advanced scheduling
+        """
+        # Get base schedule from scheduler
+        schedule = self.scheduler.schedule(tasks, {
+            agent: details 
+            for agent, details in self.agent_network.items() 
+            if agent in available_agents
+        })
         
-        Args:
-            tasks: List of tasks to be assigned
-            available_agents: List of agent names available for assignment
-            
-        Returns:
-            Dictionary containing task assignments and safety assessments
-        """
-        assignments = {}
+        # Perform safety checks
         safety_checks = {}
+        for task_id, assignment in schedule.items():
+            task = next(t for t in tasks if t['id'] == task_id)
+            assessment = self.assess_risk(
+                risk_score=assignment['risk_score'],
+                task_type=task['type'],
+                source_agent=assignment['agent'],
+                action_details=task
+            )
+            safety_checks[task_id] = assessment
         
-        for task in tasks:
-            best_agent = self._select_optimal_agent(task, available_agents)
-            if best_agent:
-                # Perform pre-assignment safety check
-                assessment = self.assess_risk(
-                    risk_score=task.get('estimated_risk', 0.5),
-                    task_type=task['type'],
-                    source_agent=best_agent,
-                    action_details=task
-                )
-                
-                assignments[task['id']] = best_agent
-                safety_checks[task['id']] = assessment.__dict__
-                
+        # Prepare response
         return {
-            'assignments': assignments,
-            'safety_checks': safety_checks,
+            'assignments': schedule,
+            'safety_checks': {k: v.__dict__ for k, v in safety_checks.items()},
             'metadata': {
                 'total_tasks': len(tasks),
-                'assigned_tasks': len(assignments),
+                'assigned_tasks': len(schedule),
                 'high_risk_tasks': sum(
                     1 for a in safety_checks.values() 
-                    if a['risk_level'] >= RiskLevel.HIGH.value
+                    if a.risk_level >= RiskLevel.HIGH
+                ),
+                'makespan': max(
+                    (a['end_time'] for a in schedule.values()), 
+                    default=0
                 )
             }
         }
 
     def train_risk_model(self, training_data: List[Dict[str, Any]]) -> None:
         """
-        Train the risk assessment model with historical data.
-        
-        Args:
-            training_data: List of dictionaries containing:
-                - 'task_type': Task category
-                - 'risk_score': Observed risk score
-                - 'outcome': Whether the task succeeded (True/False)
-                - 'agent': Source agent (optional)
+        Enhanced training with Bayesian threshold adaptation
         """
         logger.info(f"Training risk model with {len(training_data)} samples")
         
         # Process training data
         for sample in training_data:
-            task_type = sample.get('task_type', 'general')
-            agent = sample.get('agent', 'default')
-            
-            # Store risk data
-            self.risk_model['task_risks'][task_type].append(sample['risk_score'])
-            self.risk_model['agent_risks'][agent].append(sample['risk_score'])
-            
-            # Update performance metrics based on outcomes
-            if 'outcome' in sample:
-                if sample['outcome'] is False and sample['risk_score'] < self._get_risk_threshold(task_type, agent):
-                    self.performance_metrics['false_negatives'] += 1
-                elif sample['outcome'] is True and sample['risk_score'] > self._get_risk_threshold(task_type, agent):
-                    self.performance_metrics['false_positives'] += 1
+            try:
+                self._validate_risk_score(sample['risk_score'])
+                task_type = sample.get('task_type', 'general')
+                agent = sample.get('agent', 'default')
+                
+                # Store risk data
+                self.risk_model['task_risks'][task_type].append(sample['risk_score'])
+                self.risk_model['agent_risks'][agent].append(sample['risk_score'])
+                
+                # Update Bayesian adapters
+                threshold_key = f"{task_type}_{agent}"
+                adapter = self.risk_model['thresholds'].get(threshold_key, BayesianThresholdAdapter())
+                
+                if 'outcome' in sample:
+                    if sample['outcome']:
+                        adapter.update(1, 0)  # Success
+                    else:
+                        adapter.update(0, 1)  # Failure
+                    
+                    # Update performance metrics
+                    with self._metrics_lock:
+                        if not sample['outcome'] and sample['risk_score'] < self._get_risk_threshold(task_type, agent):
+                            self.performance_metrics['false_negatives'] += 1
+                        elif sample['outcome'] and sample['risk_score'] > self._get_risk_threshold(task_type, agent):
+                            self.performance_metrics['false_positives'] += 1
+                
+                self.risk_model['thresholds'][threshold_key] = adapter
+                
+            except ValueError as e:
+                logger.warning(f"Invalid training sample skipped: {e}")
         
-        # Update thresholds based on 90th percentile of historical risks
-        for task_type, risks in self.risk_model['task_risks'].items():
-            if len(risks) >= 10:  # Only update with sufficient data
-                self.risk_model['thresholds'][task_type] = np.percentile(risks, 90)
-                
-        for agent, risks in self.risk_model['agent_risks'].items():
-            if len(risks) >= 10 and agent != 'default':
-                self.risk_model['thresholds'][f"agent_{agent}"] = np.percentile(risks, 85)
-                
         logger.info("Risk model training completed")
 
     def _get_risk_threshold(self, task_type: str, agent: str = "default") -> float:
         """
-        Get the appropriate risk threshold considering both task and agent factors.
-        
-        Args:
-            task_type: Task category
-            agent: Source agent identifier
-            
-        Returns:
-            Appropriate risk threshold (0.0-1.0)
+        Get threshold considering both task and agent factors using Bayesian adaptation
         """
-        # Try task-specific threshold first
-        threshold = self.risk_model['thresholds'].get(task_type)
+        # Try combined task-agent threshold first
+        threshold_key = f"{task_type}_{agent}"
+        if threshold_key in self.risk_model['thresholds']:
+            return self.risk_model['thresholds'][threshold_key].get_threshold()
+        
+        # Fall back to task-specific threshold
+        if task_type in self.risk_model['thresholds']:
+            return self.risk_model['thresholds'][task_type].get_threshold()
+            
+        # Final fallback to default threshold
+        return self.risk_model['thresholds']['default'].get_threshold()
         
         # Fall back to agent-specific threshold
         if threshold is None and agent != "default":
@@ -462,6 +588,39 @@ class CollaborativeAgent:
             'assessment': None,
             'recommendations': []
         }
+
+class TestCollaborativeAgent(unittest.TestCase):
+    """Comprehensive unit tests for CollaborativeAgent"""
+    
+    def setUp(self):
+        self.agent = CollaborativeAgent(risk_threshold=0.3)
+        
+    def test_risk_score_validation(self):
+        with self.assertRaises(ValueError):
+            self.agent._validate_risk_score(-0.1)
+        with self.assertRaises(ValueError):
+            self.agent._validate_risk_score(1.1)
+        
+        # Should not raise
+        self.agent._validate_risk_score(0.0)
+        self.agent._validate_risk_score(0.5)
+        self.agent._validate_risk_score(1.0)
+    
+    def test_safety_assessment_serialization(self):
+        assessment = SafetyAssessment(
+            risk_score=0.7,
+            risk_level=RiskLevel.HIGH,
+            recommended_action="halt",
+            confidence=0.9,
+            affected_agents=["agent1", "agent2"]
+        )
+        
+        serialized = assessment.serialize()
+        deserialized = SafetyAssessment.deserialize(serialized)
+        
+        self.assertEqual(assessment.risk_score, deserialized.risk_score)
+        self.assertEqual(assessment.risk_level, deserialized.risk_level)
+        self.assertEqual(assessment.recommended_action, deserialized.recommended_action)
 
 # Example usage
 if __name__ == "__main__":
