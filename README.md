@@ -6,7 +6,48 @@ SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Sel
 
 ---
 
-![Flow Diagram](frontend/assets/flow_diagram.png)
+[//]: <![Flow Diagram](frontend/assets/flow_diagram.png)>
+
+🧑‍💻 **User Input**
+   ↓
+🔀 **Task Router (Dispatcher)**
+   ↓
+🏭 **Agent Factory (Spawns Required Agents)**
+   ↓
+
+┌────────────────────────────────────────────────────────────┐
+│       🧠 Primary Processing Pipeline (DAG Execution)        │
+│                                                            │
+│  1️⃣  **Perception Agent** → Interprets raw input          │
+│       ↓                                                    │
+│  2️⃣  **Language Agent** → Parses query intent             │
+│       ↓                                                    │
+│  3️⃣  **Planning Agent** → Breaks down query into tasks    │
+│       ↓                                                    │
+│  4️⃣  **Collaboration Agent**                              │
+│       ↳ Assigns sub-tasks to:                              │
+│         - 📚 **Knowledge Agent** (RAG, memory recall)      │
+│         - 🧩 **Reasoning Agent** (symbolic/LLM logic)      │
+│         - ⚙️ **Execution Agent** (API calls, tool runs)    │
+│       ↓                                                    │
+│  5️⃣  **Result Aggregation** (via Collaboration Agent)     │
+│       ↓                                                    │
+│  6️⃣  **Safety Agent** → Filters unsafe, biased, or        │
+│      hallucinated content/actions                          │
+│       ↓                                                    │
+│  7️⃣  **Evaluation Agent** → Logs metrics, traces, scores  │
+└────────────────────────────────────────────────────────────┘
+
+   ↓
+📤 **User Output** ←–– Logs quality, correctness, response time
+
+   ↓
+🔁 **Adaptation Agent**
+   ↳ Checks evaluation logs  
+   ↳ Detects drift or poor performance  
+   ↳ Triggers 🧠 **Learning Agent** for retraining  
+   ↳ Updates models through 🏭 **Agent Factory**
+
 
 ## What It Does
 - Evolves deep neural networks (AutoML / NAS)  
