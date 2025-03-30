@@ -1,1 +1,340 @@
+"""
+Deep Q-Network (DQN) Agent with Evolutionary Hyperparameter Optimization
 
+Key Academic References:
+1. DQN & Experience Replay: 
+   Mnih et al. (2015). Human-level control through deep reinforcement learning. Nature.
+2. Target Networks: 
+   Mnih et al. (2015) [Same as above].
+3. Evolutionary Strategies: 
+   Salimans et al. (2017). Evolution Strategies as a Scalable Alternative to RL. arXiv.
+
+Features:
+- Neural Network implemented with NumPy
+- Experience replay buffer
+- Epsilon-greedy exploration
+- Evolutionary hyperparameter optimization
+- Modular architecture for easy extension
+"""
+
+import numpy as np
+import random
+from collections import deque
+import copy
+
+
+# ====================== Neural Network Core ======================
+class NeuralNetwork:
+    """Simple 3-layer neural network with manual backpropagation"""
+    
+    def __init__(self, input_dim, output_dim, hidden_dim=128):
+        # He initialization with ReLU
+        self.W1 = np.random.randn(input_dim, hidden_dim) * np.sqrt(2./input_dim)
+        self.b1 = np.zeros(hidden_dim)
+        self.W2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2./hidden_dim)
+        self.b2 = np.zeros(hidden_dim)
+        self.W3 = np.random.randn(hidden_dim, output_dim) * np.sqrt(2./hidden_dim)
+        self.b3 = np.zeros(output_dim)
+
+        # Intermediate values for backprop
+        self._cache = {}
+
+    def forward(self, X):
+        """Forward pass with ReLU activation"""
+        self._cache['z1'] = X @ self.W1 + self.b1
+        self._cache['a1'] = np.maximum(0, self._cache['z1'])  # ReLU
+        self._cache['z2'] = self._cache['a1'] @ self.W2 + self.b2
+        self._cache['a2'] = np.maximum(0, self._cache['z2'])
+        self._cache['out'] = self._cache['a2'] @ self.W3 + self.b3
+        return self._cache['out']
+
+    def backward(self, X, y, learning_rate):
+        """Manual backpropagation with MSE loss"""
+        m = X.shape[0]  # Batch size
+        out = self._cache['out']
+        
+        # Output layer gradient
+        dout = (out - y) * 2/m
+        dW3 = self._cache['a2'].T @ dout
+        db3 = np.sum(dout, axis=0)
+        
+        # Hidden layer 2 gradient
+        da2 = dout @ self.W3.T
+        dz2 = da2 * (self._cache['a2'] > 0)
+        dW2 = self._cache['a1'].T @ dz2
+        db2 = np.sum(dz2, axis=0)
+        
+        # Hidden layer 1 gradient
+        da1 = dz2 @ self.W2.T
+        dz1 = da1 * (self._cache['a1'] > 0)
+        dW1 = X.T @ dz1
+        db1 = np.sum(dz1, axis=0)
+        
+        # Parameter updates
+        self.W3 -= learning_rate * dW3
+        self.b3 -= learning_rate * db3
+        self.W2 -= learning_rate * dW2
+        self.b2 -= learning_rate * db2
+        self.W1 -= learning_rate * dW1
+        self.b1 -= learning_rate * db1
+
+    def get_weights(self):
+        return [self.W1, self.b1, self.W2, self.b2, self.W3, self.b3]
+
+    def set_weights(self, weights):
+        self.W1, self.b1, self.W2, self.b2, self.W3, self.b3 = weights
+
+
+# ====================== Experience Replay Buffer ======================
+class ReplayBuffer:
+    """Experience replay buffer with uniform sampling"""
+    
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+    
+    def push(self, transition):
+        """Store transition (state, action, reward, next_state, done)"""
+        self.buffer.append(transition)
+    
+    def sample(self, batch_size):
+        """Random batch of transitions"""
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ====================== Core DQN Agent ======================
+class DQNAgent:
+    """Standard DQN agent with neural network function approximation"""
+    
+    def __init__(self, state_dim, action_dim, config):
+        # Network parameters
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = config.get('hidden_size', 128)
+        self.gamma = config.get('gamma', 0.99)
+        self.epsilon = config.get('epsilon', 1.0)
+        self.epsilon_min = config.get('epsilon_min', 0.01)
+        self.epsilon_decay = config.get('epsilon_decay', 0.995)
+        self.lr = config.get('learning_rate', 0.001)
+        self.batch_size = config.get('batch_size', 64)
+        self.target_update = config.get('target_update_frequency', 100)
+        
+        # Networks
+        self.policy_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
+        self.target_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
+        self.update_target_net()
+        
+        # Replay buffer
+        self.memory = ReplayBuffer(config.get('buffer_size', 10000))
+        self.train_step = 0
+
+    def update_target_net(self):
+        """Hard update target network weights"""
+        self.target_net.set_weights(self.policy_net.get_weights())
+
+    def select_action(self, state, explore=True):
+        """Epsilon-greedy action selection"""
+        if explore and np.random.rand() < self.epsilon:
+            return np.random.randint(self.action_dim)
+        
+        q_values = self.policy_net.forward(np.array([state]))
+        return np.argmax(q_values[0])
+
+    def store_transition(self, *transition):
+        self.memory.push(transition)
+
+    def train(self):
+        """Single training step from replay buffer"""
+        if len(self.memory) < self.batch_size:
+            return None
+        
+        # Sample batch
+        batch = self.memory.sample(self.batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        
+        # Convert to NumPy arrays
+        states = np.array(states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        next_states = np.array(next_states)
+        dones = np.array(dones)
+        
+        # Calculate target Q-values
+        current_q = self.policy_net.forward(states)
+        next_q = self.target_net.forward(next_states)
+        max_next_q = np.max(next_q, axis=1)
+        target = current_q.copy()
+        
+        # Bellman equation update
+        batch_idx = np.arange(self.batch_size)
+        target[batch_idx, actions] = rewards + (1 - dones) * self.gamma * max_next_q
+        
+        # Backpropagation
+        self.policy_net.backward(states, target, self.lr)
+        
+        # Epsilon decay
+        self.epsilon = max(self.epsilon_min, self.epsilon*self.epsilon_decay)
+        
+        # Target network update
+        self.train_step += 1
+        if self.train_step % self.target_update == 0:
+            self.update_target_net()
+        
+        return np.mean(np.square(current_q - target))
+
+
+# ====================== Evolutionary Optimization ======================
+class EvolutionaryTrainer:
+    """Evolutionary hyperparameter optimization for DQN agents"""
+    
+    def __init__(self, env, state_dim, action_dim, 
+                 population_size=10, generations=20, mutation_rate=0.2):
+        self.env = env
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.pop_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.population = []
+
+    def _random_config(self):
+        """Generate random hyperparameter configuration"""
+        return {
+            'gamma': np.clip(np.random.normal(0.95, 0.02), 0.9, 0.999),
+            'epsilon_decay': np.clip(np.random.normal(0.995, 0.002), 0.99, 0.999),
+            'learning_rate': np.clip(10**np.random.uniform(-4, -2), 1e-4, 1e-2),
+            'hidden_size': np.random.choice([64, 128, 256]),
+            'buffer_size': 10000,
+            'batch_size': 64
+        }
+
+    def _mutate(self, config):
+        """Apply Gaussian mutation to hyperparameters"""
+        mutated = copy.deepcopy(config)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['gamma'] = np.clip(config['gamma'] + np.random.normal(0, 0.01), 0.9, 0.999)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['learning_rate'] = np.clip(
+                config['learning_rate'] * np.random.lognormal(0, 0.2), 1e-4, 1e-2)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['epsilon_decay'] = np.clip(
+                config['epsilon_decay'] + np.random.normal(0, 0.003), 0.99, 0.999)
+        
+        if np.random.rand() < self.mutation_rate:
+            mutated['hidden_size'] = np.random.choice([64, 128, 256])
+        
+        return mutated
+
+    def _evaluate(self, agent, episodes=3):
+        """Evaluate agent's performance in environment"""
+        total_rewards = []
+        for _ in range(episodes):
+            state = self.env.reset()
+            episode_reward = 0
+            done = False
+            while not done:
+                action = agent.select_action(state, explore=False)
+                next_state, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                state = next_state
+            total_rewards.append(episode_reward)
+        return np.mean(total_rewards)
+
+    def evolve(self):
+        """Run evolutionary training loop"""
+        # Initialize population
+        self.population = [DQNAgent(self.state_dim, self.action_dim, self._random_config())
+                          for _ in range(self.pop_size)]
+        
+        for gen in range(self.generations):
+            # Evaluate fitness
+            fitness = [(agent, self._evaluate(agent)) for agent in self.population]
+            fitness.sort(key=lambda x: x[1], reverse=True)
+            
+            # Selection (keep top 30%)
+            elite = [agent for agent, _ in fitness[:int(0.3*self.pop_size)]]
+            
+            # Create next generation
+            new_pop = []
+            while len(new_pop) < self.pop_size:
+                parent = np.random.choice(elite)
+                child_config = self._mutate(parent.config)
+                new_pop.append(DQNAgent(self.state_dim, self.action_dim, child_config))
+            
+            self.population = new_pop
+            print(f"Generation {gen+1} | Best Fitness: {fitness[0][1]:.1f}")
+        
+        return self.population[0]
+
+
+# ====================== Unified Interface ======================
+class UnifiedDQNAgent:
+    """Unified interface for standard and evolutionary DQN"""
+    
+    def __init__(self, mode='standard', state_dim=None, action_dim=None, config=None, env=None):
+        self.mode = mode
+        self.config = config or {}
+        
+        if mode == 'standard':
+            self.agent = DQNAgent(state_dim, action_dim, self.config)
+        elif mode == 'evolutionary':
+            if not env or not state_dim or not action_dim:
+                raise ValueError("Evolutionary mode requires environment specs")
+            self.trainer = EvolutionaryTrainer(env, state_dim, action_dim)
+        else:
+            raise ValueError("Invalid mode. Choose 'standard' or 'evolutionary'")
+
+    def train(self, episodes=1000):
+        if self.mode == 'standard':
+            # Standard training loop
+            for ep in range(episodes):
+                state = self.env.reset()
+                total_reward = 0
+                done = False
+                while not done:
+                    action = self.agent.select_action(state)
+                    next_state, reward, done, _ = self.env.step(action)
+                    self.agent.store_transition(state, action, reward, next_state, done)
+                    loss = self.agent.train()
+                    total_reward += reward
+                    state = next_state
+                print(f"Episode {ep} | Reward: {total_reward} | Loss: {loss:.4f}")
+        else:
+            self.agent = self.trainer.evolve()
+
+    def act(self, state, explore=False):
+        return self.agent.select_action(state, explore)
+
+    def save(self, path):
+        # Save weights implementation
+        pass
+
+    def load(self, path):
+        # Load weights implementation
+        pass
+
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    # Example environment setup
+    class MockEnv:
+        def reset(self):
+            return np.random.randn(4)
+        
+        def step(self, action):
+            return np.random.randn(4), np.random.rand(), random.choice([True, False]), {}
+    
+    # Initialize agent
+    agent = UnifiedDQNAgent(mode='standard',
+                          state_dim=4,
+                          action_dim=2,
+                          config={'hidden_size': 128, 'learning_rate': 0.001},
+                          env=MockEnv())
+    
+    # Training
+    agent.train(episodes=25)
