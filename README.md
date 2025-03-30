@@ -1,44 +1,93 @@
 ![Startup](frontend/assets/startup.png)
 ---
 
-An open-source AGI prototype that evolves, learns, and rewrites itself.
-SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Self-Improvement** into an autonomous research agent.
 
----
 
 [//]: <![Flow Diagram](frontend/assets/flow_diagram.png)>
-![Flow Diagram](frontend/assets/flow_diagram.png)
+## What is SLAI?
 
-## What It Does
-- Evolves deep neural networks (AutoML / NAS)  
-- Reinforcement learning agents (DQN, PPO)  
-- Meta-learning agents (MAML, Reptile) for few-shot task adaptation  
-- Recursive self-improvement: code generation, evaluation, and rewriting  
-- Multi-task RL framework  
-- Sandbox execution for safety  
+SLAI is a modular, distributed AI assistant framework composed of autonomous agents. It decomposes complex tasks into specialized processes handled by modular agents. Each agent is specialized (e.g., perception, planning, reasoning) and collectively they:
+
+- Process multimodal user input (text, voice, images)
+- Retrieve and validate knowledge from memory and external sources
+- Plan and execute complex tasks using tools or APIs
+- Perform logical reasoning and generate fluent natural language responses
+- Ensure output safety, ethical alignment, and continual improvement via learning
+- Adapt over time through user feedback, monitoring, and meta-learning
 
 ---
-## 💻 MINIMUM SYSTEM REQUIREMENTS
-## Hardware:
 
-| Component | Minimum        | Recommended                         |
-|-----------|----------------|-------------------------------------|
-| CPU       | 4-core         | 8-core (Intel i7/AMD Ryzen)         |
-| RAM       | 16 GB          | 32 GB                              |
-| GPU       | GTX 1060 (6GB) | RTX 3060+ or A100 (for large tasks) |
-| Storage   | 4 GB           | 10+ GB (model backups, logs)        |
+## Flow Diagram
 
-## Software:
-- OS: Ubuntu 20.04+, macOS 12+, Windows 10+
+[//]: < See `slai_flowchart.png` in the repo for the full data and agent pipeline.>
 
-- Python: 3.9+
+```mermaid
+graph TD
+    A[User Input] --> B[Collaboration Agent]
+    B --> C[Specialist Agents]
+    C --> D[Safety + Evaluation]
+    D --> E[Final Output]
+    E --> F[Feedback Loop: Adapt + Learn]
+    F --> B
+    E --> A[User Input]
 
-- PyTorch: 2.0+
+    subgraph C [Specialist Agents]
+        C1[Perception Agent]
+        C2[Knowledge Agent]
+        C3[Planning Agent]
+        C4[Reasoning Agent]
+        C5[Execution Agent]
+        C6[Language Agent]
+    end
+```
 
-- Required pip packages (already in requirements.txt)
-
-- Optional: PM2 (for deployment), graphviz for architecture visualization
 ---
+
+## Minimum System Requirements
+
+### Hardware
+
+| Component   | Minimum Requirement         | Recommended                                              |
+| ----------- | --------------------------- | -------------------------------------------------------- |
+| **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7)                              |
+| **RAM**     | 16 GB                       | 32 GB (fro multitasking)                                 |
+| **GPU**     | NVIDIA GTX 1060             | NVIDIA RTX 3060 or higher (for large tasks and training) |
+| **Storage** | 50 GB SSD                   | 100 GB SSD (for models + vector DBs + logs)              |
+
+### Software
+
+- **OS:** Ubuntu 22.04+ / Windows 10+
+- **Python:** 3.10+
+- **Dependencies:**
+  - `torch`, `transformers`, `sentence-transformers`, `faiss`, `gradio`
+  - `pydantic`, `langchain`, `openai` (optional)
+  - `graphviz`, `numpy`, `pandas`, `flask`, `uvicorn`
+
+---
+
+## How to Run
+
+```bash
+# 1. Clone the repository
+$ git clone https://github.com/The-Outsider-97/SLAI.git
+$ cd SLAI
+
+# 2. Create and activate a virtual environment
+$ python -m venv venv
+$ source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+$ pip install -r requirements.txt
+
+# 4. Launch the main interface (CLI or GUI)
+$ python main.py
+
+# Optionally, run a specific agent manually
+$ python main_reasoning.py
+```
+
+---
+
 
 # How to run
 
@@ -314,9 +363,16 @@ Moving from modular execution to autonomous collaboration and introspection.
 - Prioritize UI clarity: avoid clutter, maintain 2-panel simplicity
 
 ---
-## License
-This project is licensed under the MIT License.
+## 📄 License
 
-## License
-Built by The-Outsider-97
-With contributions from the SLAI Open AGI Initiative
+This project is licensed under the MIT License. See `LICENSE` for details.
+
+---
+
+### Contact
+
+Developed by [@The-Outsider-97](https://github.com/The-Outsider-97)
+
+---
+
+> SLAI is an experiment in building safe, scalable, intelligent systems that learn and grow with every user interaction.
