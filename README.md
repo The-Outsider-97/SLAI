@@ -25,11 +25,13 @@ SLAI is a modular, distributed AI assistant framework composed of autonomous age
 graph TD
     A[User Input] --> B[Collaboration Agent]
     B --> C[Specialist Agents]
-    C --> D[Safety + Evaluation]
-    D --> E[Final Output]
-    E --> F[Feedback Loop: Adapt + Learn]
-    F --> B
-    E --> A[User Input]
+    C --> D[Safety Agent]
+    D --> E[Evaluation Agent]
+    E --> F[Final Output]
+    E --> H[Logs]
+    F --> G[Feedback Loop: Adapt + Learn]
+    G --> B
+    F --> A[User Input]
 
     subgraph C [Specialist Agents]
         C1[Perception Agent]
@@ -50,7 +52,7 @@ graph TD
 | Component   | Minimum Requirement         | Recommended                                              |
 | ----------- | --------------------------- | -------------------------------------------------------- |
 | **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7)                              |
-| **RAM**     | 16 GB                       | 32 GB (fro multitasking)                                 |
+| **RAM**     | 16 GB                       | 32 GB (for multitasking)                                 |
 | **GPU**     | NVIDIA GTX 1060             | NVIDIA RTX 3060 or higher (for large tasks and training) |
 | **Storage** | 50 GB SSD                   | 100 GB SSD (for models + vector DBs + logs)              |
 
