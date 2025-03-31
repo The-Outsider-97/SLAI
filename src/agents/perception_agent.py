@@ -26,7 +26,7 @@ class TensorOps:
     
     @staticmethod
     def gelu(x):
-        return 0.5 * x * (1 + np.tanh(math.sqrt(2/math.pi) * (x + 0.044715 * x**3))
+        return 0.5 * x * (1 + np.tanh(math.sqrt(2/math.pi) * (x + 0.044715 * x**3)))
     
     @staticmethod
     def he_init(shape, fan_in):
@@ -145,14 +145,19 @@ class VisionEncoder:
         return x
 
     def load_pretrained(self, weights):
-        """Load pretrained weights in Vision Transformer format
-        Args:
+        pass
+        
+        def backward(self, dout):
+            return dout
+            """Load pretrained weights in Vision Transformer format
+            Args:
             weights: Dict containing:
-                - conv_proj: (patch_size, patch_size, 3, embed_dim) for Conv2D projection
-                - cls_token: (1, 1, embed_dim)
-                - pos_embed: (1, num_patches + 1, embed_dim)
-                - transformer_*: Transformer weights
-        """
+            - conv_proj: (patch_size, patch_size, 3, embed_dim) for Conv2D projection
+            - cls_token: (1, 1, embed_dim)
+            - pos_embed: (1, num_patches + 1, embed_dim)
+            - transformer_*: Transformer weights
+            """
+            
         # Convert Conv2D weights to linear projection
         if 'conv_proj' in weights:
             # Handle Conv2D -> Linear projection conversion
@@ -173,18 +178,24 @@ class VisionEncoder:
 
     def forward(self, x):
         x = self.extract_patches(x)
+        self._patches = x.copy()
         x = np.matmul(x, self.projection.data)
         cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
         x = np.concatenate((cls_tokens, x), axis=1)
         x += self.position_embed.data
-        return self.transformer.forward(x)
+        x = self.transformer.forward(x)
+        return x
+
+    def backward(self, dout):
+        d_x = self.transformer.backward(dout)
+        d_proj = np.matmul(self._patches.transpose(0, 2, 1), d_x[:, 1:, :])  # skip cls token
+        self.projection.grad += d_proj.sum(axis=0)
 
 class TextEncoder:
     def __init__(self, vocab_size=50257, embed_dim=512):
-        # Proper embedding initialization
         self.embedding = Parameter(np.random.randn(vocab_size, embed_dim) * 0.02)
         self.position_embed = Parameter(
-            TensorOps.he_init((1, 512, embed_dim), embed_dim)
+            TensorOps.he_init((1, 512, embed_dim), embed_dim))
         self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
 
     def load_pretrained(self, weights):
@@ -192,8 +203,16 @@ class TextEncoder:
         self.position_embed.data = weights['position_embedding']
 
     def forward(self, x):
+        self._tokens = x.copy()
         embed = np.take(self.embedding.data, x, axis=0) + self.position_embed.data[:, :x.shape[1]]
-        return self.transformer.forward(embed)
+        embed = self.transformer.forward(embed)
+        return embed
+
+    def backward(self, dout):
+        d_embed = self.transformer.backward(dout)
+        for i in range(self._tokens.shape[0]):
+            for j in range(self._tokens.shape[1]):
+                self.embedding.grad[self._tokens[i, j]] += d_embed[i, j]
 
 class PerceptionAgent:
     def __init__(self, config):
@@ -208,7 +227,7 @@ class PerceptionAgent:
         
         self.fusion = MultimodalFusion(embed_dim=config['embed_dim'])
         self.projection = Parameter(
-            TensorOps.he_init((config['embed_dim'], config['projection_dim']), config['embed_dim'])
+            TensorOps.he_init((config['embed_dim'], config['projection_dim']), config['embed_dim']))
         
         # Initialize gradients
         self.params = self._collect_parameters()
@@ -229,6 +248,7 @@ class PerceptionAgent:
         for modality, encoder in self.encoders.items():
             embeddings[modality] = encoder.forward(inputs[modality])
         fused = self.fusion.forward(embeddings)
+        self._cache = {'fused': fused}
         return np.matmul(TensorOps.layer_norm(fused), self.projection.data)
 
     def backward(self, dout):
@@ -247,6 +267,33 @@ class PerceptionAgent:
             encoder.backward(d_embeddings[modality])
         
         return None  # Final gradients stored in parameters
+
+class Transformer:
+    def __init__(self, num_layers, embed_dim):
+        pass
+
+    def forward(self, x):
+        return x
+
+    def load_pretrained(self, weights):
+        pass
+
+    def backward(self, dout):
+        return dout
+
+class MultimodalFusion:
+    def __init__(self, embed_dim):
+        self.embed_dim = embed_dim
+
+    def forward(self, embeddings):
+        self._shapes = {k: v.shape for k, v in embeddings.items()}
+        pooled = []
+        for value in embeddings.values():
+            pooled.append(value.mean(axis=1))  # Shape: (batch, embed_dim)
+        return sum(pooled) / len(pooled)  # Averaged across modalities
+
+    def backward(self, d_fused):
+        return {k: np.repeat(d_fused[:, None, :], self._shapes[k][1], axis=1) for k in self._shapes}
 
 # Complete Example Usage
 if __name__ == "__main__":
