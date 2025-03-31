@@ -11,6 +11,7 @@ Features:
 import json
 import re
 import math
+import itertools
 import random
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
