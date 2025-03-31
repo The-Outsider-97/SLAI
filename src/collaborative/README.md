@@ -64,7 +64,7 @@ This module can be used in real-life situations like:
 ## Example: Data Check Pipeline
 
 ```mermaid
-graph TD
+graph LR
     A[Upload File] --> B[Check Rules]
     B -->|Issues?| C[SafeAI Reviews Risk]
     C --> D[Apply Policies]
