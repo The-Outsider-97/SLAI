@@ -21,25 +21,36 @@ SLAI is a modular, distributed AI assistant framework composed of autonomous age
 
 [//]: < See `slai_flowchart.png` in the repo for the full data and agent pipeline.>
 
-```mermaid
-graph TD
-    A[User Input] --> B[Collaboration Agent]
-    B --> C[Specialist Agents]
-    C --> D[Safety Agent]
-    D --> E[Evaluation Agent]
-    E --> F[Final Output]
-    E --> H[Logs]
-    F --> G[Feedback Loop: Adapt + Learn]
-    G --> B
-    F --> A[User Input]
+```mermaid 
+graph LR
+    B[Collaboration Agent] --> C[Specialist Agents]
+    C --> D[Safety + Evaluation]
+    D --> E[Final Output]
+    D --> F[Logs]
+    G[User Feedback] --> H[Feedback Loop: Adapt + Learn]
+    D --> H
+    H --> B
+    E --> A[User Input]
+    A --> B
+    A --> G
 
     subgraph C [Specialist Agents]
+        direction LR
         C1[Perception Agent]
         C2[Knowledge Agent]
         C3[Planning Agent]
         C4[Reasoning Agent]
         C5[Execution Agent]
         C6[Language Agent]
+    end
+
+    subgraph D [Safety + Evaluation]
+        D1[Safety Agent] --> D2[Evaluation Agent]
+    end
+
+    subgraph H [Feedback Loop: Adapt + Learn]
+        H1[Learning Agent]
+        H2[Adaptation Agent]
     end
 ```
 
