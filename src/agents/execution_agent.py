@@ -8,10 +8,15 @@ Key Academic References:
 """
 
 import os
+import re
 import json
 import time
+import urllib
 import shelve
 import hashlib
+
+
+from json import JSONDecodeError
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 from urllib.parse import urlparse, urlencode
 from urllib.error import URLError, HTTPError
@@ -19,6 +24,7 @@ from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 from collections import deque
 from threading import Lock
+from typing import Dict, Callable
 
 class EnhancedHTMLParser(HTMLParser):
     """Extended HTML parser with support for common semantic elements"""
@@ -61,6 +67,55 @@ class EnhancedHTMLParser(HTMLParser):
     def handle_endtag(self, tag):
         self.current_tag = None
 
+class ToolLibrary:
+    """Tool selector using cosine similarity (simplified for minimal dependencies)"""
+    def __init__(self):
+        self.tools: Dict[str, Dict] = {
+            'web_search': {
+                'function': None,
+                'description': 'Perform web search operations',
+                'safety_level': 'high'
+            },
+            'code_exec': {
+                'function': None,
+                'description': 'Execute approved code snippets',
+                'safety_level': 'restricted'
+            }
+        }
+    
+    def register_tool(self, name: str, func: Callable, metadata: dict):
+        """Schick et al. (2023) inspired tool registration"""
+        self.tools[name] = {
+            'function': func,
+            'metadata': metadata
+        }
+    
+    def select_tool(self, query: str):
+        """Simplified semantic tool selection (TF-IDF cosine similarity substitute)"""
+        query = query.lower()
+        for tool, data in self.tools.items():
+            if re.search(rf'\b{tool}\b', query):
+                return data['function']
+        return None
+
+class SafeEnvironment:
+    """Amodei et al. (2016) inspired safety constraints"""
+    def __init__(self):
+        self.allowlisted_domains = ['api.crossref.org', 'api.semanticscholar.org', 'export.arxiv.org']
+        self.allowlisted_commands = ['calculate', 'fetch_data', 'transform_format']
+        self.restricted_paths = ['/sys/', '/etc/']
+    
+    def validate_request(self, url: str):
+        """Validate against allowlisted domains"""
+        domain = urlparse(url).netloc
+        if domain not in self.allowlisted_domains:
+            raise SecurityError(f"Blocked unauthorized domain: {domain}")
+    
+    def validate_file_path(self, path: str):
+        """Prevent path traversal attacks"""
+        if any(restricted in path for restricted in self.restricted_paths):
+            raise SecurityError(f"Restricted file path: {path}")
+
 class ExecutionAgent:
     def __init__(self, config=None):
         """
@@ -77,6 +132,9 @@ class ExecutionAgent:
         config = config or {}
         self.timeout = config.get('timeout', 10)
         self.user_agent = config.get('user_agent', "EnhancedExecutionAgent/2.0")
+        self.safety = SafeEnvironment()
+        self.toolbox = ToolLibrary()
+        self.thought_stack = deque()
         
         # Cookie management
         self.cookie_jar = CookieJar()
@@ -102,6 +160,12 @@ class ExecutionAgent:
             'json': json.loads
         }
 
+        # Register core tools
+        self.toolbox.register_tool('web_search', self.browse_web, 
+                                 {'rate_limit': 2, 'cache_ttl': 3600})
+        self.toolbox.register_tool('call_api', self.call_api,
+                                 {'allowed_endpoints': self.safety.allowlisted_domains})
+    
     def _init_cache(self):
         """Initialize persistent cache if configured"""
         if not self.cache_dir:
@@ -166,11 +230,11 @@ class ExecutionAgent:
             except (HTTPError, URLError) as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1])
+                    time.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
                     continue
                 raise ConnectionError(f"Request failed after {self.max_retries} attempts: {str(e)}")
 
-    def browse_web(self, url, parse=True, parser='html', use_cache=True):
+    def browse_web(self, url, parse=True, parser='html', use_cache=True, **kwargs):
         """
         Enhanced web browsing with multiple parser options
         
@@ -179,6 +243,7 @@ class ExecutionAgent:
             parse: Whether to parse content
             parser: Parser type ('html' or 'json')
             use_cache: Utilize caching system
+            kwargs: Allow flexible parameters for different search providers
             
         Returns:
             Parsed content or raw response
@@ -196,6 +261,13 @@ class ExecutionAgent:
             if parser == 'html':
                 parser_instance = self.parsers[parser]()
                 parser_instance.feed(content)
+
+                if 'max_results' in kwargs:
+                    return {
+                        'metadata': parser_instance.structure['metadata'],
+                        'results': parser_instance.structure['links'][:kwargs['max_results']]
+                    }
+
                 return parser_instance.structure
             else:
                 return self.parsers[parser](content)
@@ -305,3 +377,152 @@ class ExecutionAgent:
         """Cleanup resources"""
         if hasattr(self, 'cache') and not isinstance(self.cache, dict):
             self.cache.close()
+
+    def generate_react_loop(self, task: str, max_steps: int = 5):
+        """
+        ReAct framework implementation (Yao et al., 2022)
+        Example Thought-Action-Observation loop:
+        """
+        for _ in range(max_steps):
+            thought = self._generate_thought(task)
+            if '[ACTION]' in thought:
+                action = self._parse_action(thought)
+                result = self.execute_safe_action(action)
+                task += f"\nObservation: {result}"
+            else:
+                return thought
+        return "Max reasoning steps exceeded"
+    
+    def execute_safe_action(self, action: dict):
+        """Amodei-style safety validation"""
+        tool = self.toolbox.select_tool(action['type'])
+        if not tool:
+            raise SecurityError(f"Blocked unauthorized tool: {action['type']}")
+        
+        # Validate parameters
+        if action.get('url'):
+            self.safety.validate_request(action['url'])
+        if action.get('file_path'):
+            self.safety.validate_file_path(action['file_path'])
+        
+        return tool(**action['params'])
+    
+    def _generate_thought(self, task: str) -> str:
+        """
+        Hybrid neural-symbolic thought generator based on:
+        - Wei et al. (2022) "Chain-of-Thought Prompting"
+        - Parisi et al. (2022) "TidyBot: Personalized Robot Assistance"
+    
+        Implements a simplified version of the TidyBot decision architecture
+        """
+        # Local decision model (simplified transformer-like logic)
+        def minimal_decision_model(prompt: str) -> dict:
+            """Rule-based approximation of LLM decision-making"""
+            patterns = {
+                r'\b(search|find|look up)\b': 'web_search',
+                r'\b(calculate|compute|math)\b': 'calculator',
+                r'\b(file|document|write)\b': 'file_ops',
+                r'\b(API|fetch data)\b': 'call_api'
+            }
+        
+            # Match against known tool patterns
+            for pattern, tool in patterns.items():
+                if re.search(pattern, prompt, flags=re.IGNORECASE):
+                    return {
+                        'thought': f"Determined need for {tool.replace('_', ' ')}",
+                        'action': tool,
+                        'confidence': 0.85
+                    }
+        
+            # Default cognitive pattern
+            return {
+                'thought': "Analyzing task requirements...",
+                'action': 'information_gathering',
+                'confidence': 0.65
+            }
+
+        # Build cognitive context
+        context = {
+            'task': task,
+            'available_tools': list(self.toolbox.tools.keys()),
+            'previous_actions': list(self.thought_stack)[-3:]
+        }
+
+        # Generate model response
+        model_response = minimal_decision_model(task)
+    
+        # Construct action payload
+        if model_response['confidence'] > 0.7:
+            action_template = {
+                'web_search': {
+                    'params': {
+                        'url': self._build_scholarly_url(task),
+                        'max_results': 10
+                    }
+                },
+                'calculator': {
+                    'params': {
+                        'expression': next(iter(re.findall(r'\b(\d+[\+\-\*\/]\d+)\b', task)), '0+0')
+                    }
+                }
+            }
+        
+            action = action_template.get(model_response['action'], {})
+            action_str = f"[ACTION] {model_response['action']} params: {json.dumps(action.get('params', {}))}"
+        
+            return f"Thought: {model_response['thought']}\n{action_str}"
+    
+        return f"Thought: {model_response['thought']} [NEED MORE INFO]"
+
+    def _build_scholarly_url(self, query: str) -> str:
+        """Build validated academic search URL based on configurable endpoints"""
+        # Academic search endpoints (RFC 3986-compliant URI construction)
+        endpoints = {
+            'crossref': 'https://api.crossref.org/works?query=',
+            'semantic_scholar': 'https://api.semanticscholar.org/graph/v1/paper/search?query=',
+            'arxiv': 'http://export.arxiv.org/api/query?search_query='
+        }
+    
+        # Select endpoint based on safety configuration
+        selected = next((e for e in endpoints if urlparse(endpoints[e]).netloc in self.safety.allowlisted_domains), None)
+
+        if not selected:
+            raise SecurityError("No allowlisted academic endpoints available")
+    
+        return f"{endpoints[selected]}{urllib.parse.quote(query)}&rows=10"
+
+
+
+    def _parse_action(self, thought: str) -> dict:  # <-- ADD THIS METHOD
+        """Parse action details from thought string"""
+    
+        # Match action pattern: [ACTION] <type> params: {<params>}
+        match = re.search(r'\[ACTION\] (\w+)\s+params:\s+({.*?})$', thought)
+        if not match:
+            raise ValueError(f"Malformed action string: {thought}")
+    
+        action_type = match.group(1)
+        params_str = match.group(2).replace("'", '"')  # Convert to JSON format
+    
+        try:
+            params = json.loads(params_str)
+        except JSONDecodeError:
+            raise ValueError(f"Invalid parameter format in: {params_str}")
+    
+        return {'type': action_type, 'params': params}
+
+class SecurityError(Exception):
+    """Custom exception for safety violations"""
+    pass
+
+# Example usage
+if __name__ == "__main__":
+    agent = ExecutionAgent(config={
+        'cache_dir': '.slaicache',
+        'rate_limit': 3
+    })
+    
+    result = agent.generate_react_loop(
+        "Find recent papers about AI safety from trusted sources"
+    )
+    print(result)
