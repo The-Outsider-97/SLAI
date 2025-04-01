@@ -120,7 +120,3 @@ This architecture is grounded in:
 | Adaptive Thresholding | Li et al., 2010; Wu et al., 2016 |
 | Drift Detection | Wasserstein Distance; Liang et al., 2022 |
 | Safe Interruptibility | Orseau & Armstrong, 2016 |
-
----
-
-Would you like this flow also exported as a `.pdf`/`.docx` visual + written report format for documentation or publication purposes?
