@@ -1,3 +1,9 @@
+logging:
+  log_level: INFO
+  audit_log_path: logs/audit.log
+  log_rotation: 7  # days
+  enable_hashing: true
+
 monitor:
   fairness_metrics:
     - statistical_parity
@@ -59,3 +65,41 @@ corrections:
       action: human_intervention
     - threshold: 0.5
       action: freeze_agent
+
+explainability:
+  enable_attention_monitoring: true
+  visualize_attention: true
+  saliency_method: integrated_gradients
+  explanation_format: html
+
+human_feedback:
+  enabled: true
+  feedback_mode: implicit  # or explicit
+  feedback_storage_path: data/human_feedback.json
+  max_human_overrides: 5
+
+agent_lifecycle:
+  max_risk_tolerance: 0.6
+  cooldown_after_correction: 60  # seconds
+  quarantine_threshold: 0.8
+  quarantine_action: self_suspend
+
+drift:
+  enable_concept_drift: true
+  method: wasserstein
+  drift_window: 50
+  auto_threshold_adjustment: true
+
+policy_constraints:
+  disallowed_actions:
+    - access_user_data
+    - self_modify
+  soft_limits:
+    max_retries: 3
+    time_limit: 300  # seconds
+
+evaluation:
+  frequency: 5000
+  modes: [alignment, fairness, robustness]
+  auto_export_report: true
+  export_path: reports/latest_alignment_eval.yaml
