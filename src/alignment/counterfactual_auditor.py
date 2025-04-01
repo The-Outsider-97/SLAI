@@ -8,43 +8,42 @@ Policy decision sensitivity analysis
 import logging
 import numpy as np
 import pandas as pd
+
+from auditors.causal_model import CausalGraphBuilder
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from scipy.stats import ttest_ind
 from causalinference import CausalModel
+from auditors.fairness_metrics import CounterfactualFairness
 
-# Internal imports
-from .causal_models import CausalGraphBuilder
-from .fairness_metrics import CounterfactualFairness
-
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 @dataclass
 class CounterfactualConfig:
-"""Configuration for counterfactual analysis"""
-num_perturbations: int = 5
-epsilon_range: Tuple[float, float] = (0.1, 0.3)
-sensitivity_threshold: float = 0.15
-causal_confounders: List[str] = field(default_factory=list)
-fairness_thresholds: Dict[str, float] = field(default_factory=lambda: {
-'individual_fairness': 0.8,
-'group_disparity': 0.1,
-'causal_effect': 0.05
-})
+    """Configuration for counterfactual analysis"""
+    num_perturbations: int = 5
+    epsilon_range: Tuple[float, float] = (0.1, 0.3)
+    sensitivity_threshold: float = 0.15
+    causal_confounders: List[str] = field(default_factory=list)
+    fairness_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'individual_fairness': 0.8,
+        'group_disparity': 0.1,
+        'causal_effect': 0.05
+        })
 
 class CounterfactualAuditor:
-"""
-Causal counterfactual analysis system implementing:
-- Structural equation modeling for scenario generation
-- Decision boundary sensitivity testing
-- Cross-world independence verification
-- Counterfactual fairness certification
-Key Components:
-1. CausalGraphBuilder: Domain-aware structural model construction
-2. CausalModel: Potential outcome estimation
-3. CounterfactualFairness: Multi-level fairness quantification
-"""
+    """
+    Causal counterfactual analysis system implementing:
+    - Structural equation modeling for scenario generation
+    - Decision boundary sensitivity testing
+    - Cross-world independence verification
+    - Counterfactual fairness certification
+    Key Components:
+    1. CausalGraphBuilder: Domain-aware structural model construction
+    2. CausalModel: Potential outcome estimation
+    3. CounterfactualFairness: Multi-level fairness quantification
+    """
 
 def __init__(self, config: Optional[CounterfactualConfig] = None):
     self.config = config or CounterfactualConfig()
