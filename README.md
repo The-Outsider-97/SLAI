@@ -23,7 +23,8 @@ SLAI is a modular, distributed AI assistant framework composed of autonomous age
 
 ```mermaid 
 graph LR
-    B[Collaboration Agent] --> C[Specialist Agents]
+    B[Collaboration Agent] --> I[Agent Factory]
+    I --> C[Specialist Agents]
     C --> D[Safety + Evaluation]
     D --> E[Final Output]
     D --> F[Logs]
