@@ -27,8 +27,6 @@ graph TD
     O --> P[Adapt Thresholds]
 ```
 
-Here’s a comprehensive **step-by-step narrative explanation** of the **SLAI Alignment Flow Architecture** based on your diagram and the underlying code across your modules:
-
 ---
 
 ### 1. Task Initiation
