@@ -295,7 +295,7 @@ Moving from modular execution to autonomous collaboration and introspection.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| Agent self-analysis | Each agent can evaluate and log its own weaknesses | ☐ |
+| Agent self-analysis | Each agent can evaluate and log its own weaknesses | [x] |
 | Shared scoring memory | All evaluation results pushed to a central ranking list | ☐ |
 | Recursive retraining | Underperforming agents can request tuning | ☐ |
 | Agent voting mechanism | Agents can vote on proposed actions (task democracy) | ☐ |
