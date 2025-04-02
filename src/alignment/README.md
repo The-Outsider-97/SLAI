@@ -1,17 +1,18 @@
 
 ```mermaid
 graph TD
-    A[SafeAI Agent] --> B[Execute Task]
-    B --> C[AlignmentAgent.verify_alignment]
-    C --> D[AlignmentMonitor.assess]
+    A[Safety Agent] --> B[Execute Task]
 
-    D --> E[BiasDetection]
-    D --> F[FairnessEvaluator]
-    D --> G[EthicalConstraints]
-    D --> H[ValueEmbeddingModel]
-    D --> Q[CounterfactualAuditor]
+    B --> C[Alignment Agent]
+    C --> D[Alignment Monitor]
 
-    E --> I[AlignmentMemory]
+    D --> E[Bias Detection]
+    D --> F[Fairness Evaluator]
+    D --> G[Ethical Constraints]
+    D --> H[Value Embedding Model]
+    D --> Q[Counterfactual Auditor]
+
+    E --> I[Alignment Memory]
     F --> I
     G --> I
     H --> I
