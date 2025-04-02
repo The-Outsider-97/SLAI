@@ -34,34 +34,50 @@ def validate_paths(*paths):
 def run_monitoring(shared_memory: SharedMemory, alert_config: dict) -> Monitoring:
     monitor = Monitoring(shared_memory=shared_memory, alert_config=alert_config)
 
-    # Simulate dynamic scoring
+    # Weighted scoring functions
     def calculate_accuracy_score(raw_accuracy: float) -> float:
-        return round(min(max(raw_accuracy, 0.0), 1.0), 2)
+        return min(max(raw_accuracy, 0.0), 1.0)
 
     def calculate_f1_score_score(raw_f1: float) -> float:
-        return round(min(max(raw_f1, 0.0), 1.0), 2)
+        return min(max(raw_f1, 0.0), 1.0)
 
     def calculate_risk_score(raw_risk: float) -> float:
-        return round(1.0 - min(max(raw_risk, 0.0), 1.0), 2)  # Lower risk = higher score
+        return 1.0 - min(max(raw_risk, 0.0), 1.0)  # Lower risk = higher score
 
-    # Example values (can later be loaded or dynamically computed)
-    raw_accuracy = 0.75
-    raw_f1_score = 0.75
-    raw_risk_score = 0.25
+    # Example values
+    raw_accuracy = 0.82
+    raw_f1_score = 0.79
+    raw_risk_score = 0.31
 
+    # Compute individual scores
     accuracy_score = calculate_accuracy_score(raw_accuracy)
     f1_score_score = calculate_f1_score_score(raw_f1_score)
     risk_score = calculate_risk_score(raw_risk_score)
 
+    # Apply weights (e.g. accuracy=0.5, f1_score=0.3, risk_score=0.2)
+    weights = {
+        "accuracy": 0.5,
+        "f1_score": 0.3,
+        "risk_score": 0.2
+    }
+
+    weighted_composite_score = round(
+        accuracy_score * weights["accuracy"] +
+        f1_score_score * weights["f1_score"] +
+        risk_score * weights["risk_score"],
+        3
+    )
+
     model_metrics = {
         "accuracy": raw_accuracy,
         "f1_score": raw_f1_score,
-        "composite_score": round((accuracy_score + f1_score_score) / 2, 2)
+        "composite_score_weighted": weighted_composite_score
     }
 
     safe_ai_metrics = {
         "risk_score": raw_risk_score,
-        "risk_level": risk_score
+        "risk_level": round(risk_score, 3),
+        "composite_score_weighted": weighted_composite_score
     }
 
     record_metrics(monitor, "model_trainer", model_metrics)
