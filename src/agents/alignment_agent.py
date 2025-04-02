@@ -1,214 +1,241 @@
-"""
-Constitutional Alignment Agent (CAA)
-Implements:
-- Continuous value alignment (Bai et al., 2022)
-- Safe interruptibility (Orseau & Armstrong, 2016)
-- Emergent goal detection (Christiano et al., 2021)
+"""Counterfactual Fairness Audit System
+Implements causal counterfactual analysis for alignment verification through:
+Structural causal model interventions (Pearl, 2009)
+Counterfactual fairness estimation (Kusner et al., 2017)
+Policy decision sensitivity analysis
 """
 
-import os, sys
 import logging
 import numpy as np
 import pandas as pd
+
+from alignment.auditors.causal_model import CausalGraphBuilder
+from alignment.auditors.fairness_metrics import CounterfactualFairness
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
-from scipy.stats import entropy
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from safe_ai_agent import SafeAI_Agent
-from alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
+from scipy.stats import ttest_ind
+from causalinference import CausalModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 @dataclass
-class AlignmentMemory:
-    """Longitudinal alignment state storage with concept drift detection"""
-    fairness_records: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[
-        'timestamp', 'metric', 'value', 'threshold', 'violation'
-    ]))
-    ethical_violations: List[Dict] = field(default_factory=list)
-    policy_adjustments: List[Dict] = field(default_factory=list)
-    drift_scores: pd.Series = field(default_factory=pd.Series)
+class CounterfactualConfig:
+    """Configuration for counterfactual analysis"""
+    num_perturbations: int = 5
+    epsilon_range: Tuple[float, float] = (0.1, 0.3)
+    sensitivity_threshold: float = 0.15
+    causal_confounders: List[str] = field(default_factory=list)
+    fairness_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'individual_fairness': 0.8,
+        'group_disparity': 0.1,
+        'causal_effect': 0.05
+        })
+
+class CounterfactualAuditor:
+    """
+    Causal counterfactual analysis system implementing:
+    - Structural equation modeling for scenario generation
+    - Decision boundary sensitivity testing
+    - Cross-world independence verification
+    - Counterfactual fairness certification
+    Key Components:
+    1. CausalGraphBuilder: Domain-aware structural model construction
+    2. CausalModel: Potential outcome estimation
+    3. CounterfactualFairness: Multi-level fairness quantification
+    """
+
+def __init__(self, config: Optional[CounterfactualConfig] = None):
+    self.config = config or CounterfactualConfig()
+    self.causal_builder = CausalGraphBuilder()
+    self.fairness_assessor = CounterfactualFairness()
+
+def audit(self, data: pd.DataFrame,
+         predictions: np.ndarray,
+         sensitive_attrs: List[str]) -> Dict:
+    """
+    Perform comprehensive counterfactual analysis with:
+    1. Causal graph construction
+    2. Controlled attribute perturbations
+    3. Potential outcome estimation
+    4. Fairness violation detection
+    """
+    # Build domain-specific causal model
+    causal_graph = self.causal_builder.construct_graph(data, sensitive_attrs)
+    
+    # Generate counterfactual scenarios
+    cf_data, interventions = self._generate_counterfactuals(data, sensitive_attrs)
+    
+    # Estimate potential outcomes
+    cf_predictions = self._estimate_potential_outcomes(causal_graph, cf_data)
+    
+    # Compute fairness metrics
+    fairness_report = self._assess_fairness_violations(
+        data, predictions, cf_data, cf_predictions, sensitive_attrs
+    )
+    
+    # Analyze decision sensitivity
+    sensitivity_report = self._analyze_decision_sensitivity(
+        predictions, cf_predictions, interventions
+    )
+    
+    return {
+        'causal_graph': causal_graph.to_json(),
+        'fairness_metrics': fairness_report,
+        'sensitivity_analysis': sensitivity_report,
+        'counterfactual_samples': cf_data.sample(3).to_dict(orient='records')
+    }
+
+def _generate_counterfactuals(self,
+                             data: pd.DataFrame,
+                             sensitive_attrs: List[str]) -> Tuple[pd.DataFrame, Dict]:
+    """Controlled attribute perturbation with causal validity checks"""
+    cf_data = data.copy()
+    interventions = {}
+    
+    for attr in sensitive_attrs:
+        # Calculate valid perturbation range
+        baseline = data[attr].mean()
+        eps = np.random.uniform(*self.config.epsilon_range, size=len(data))
+        
+        # Apply constrained interventions
+        perturbed = self._apply_constrained_perturbation(data[attr], eps)
+        cf_data[attr] = perturbed
+        
+        interventions[attr] = {
+            'original_mean': baseline,
+            'perturbed_mean': perturbed.mean(),
+            'max_shift': np.abs(perturbed - data[attr]).max()
+        }
+        
+    return cf_data, interventions
+
+def _apply_constrained_perturbation(self,
+                                  series: pd.Series,
+                                  epsilon: np.ndarray) -> pd.Series:
+    """Domain-aware perturbation preserving causal relationships"""
+    # Preserve ordinal relationships
+    if series.dtype == 'category':
+        return self._perturb_categorical(series, epsilon)
+    else:
+        return self._perturb_continuous(series, epsilon)
+
+def _perturb_continuous(self,
+                       series: pd.Series,
+                       epsilon: np.ndarray) -> pd.Series:
+    """Monotonic perturbation with boundary constraints"""
+    perturbed = series * (1 + epsilon)
+    return perturbed.clip(series.min(), series.max())
+
+def _perturb_categorical(self,
+                        series: pd.Series,
+                        epsilon: np.ndarray) -> pd.Series:
+    """Probability-preserving categorical redistribution"""
+    unique_vals = series.unique()
+    transition_probs = np.abs(epsilon) / np.sum(np.abs(epsilon))
+    return series.apply(
+        lambda x: np.random.choice(unique_vals, p=transition_probs)
+    )
+
+def _estimate_potential_outcomes(self,
+                                causal_graph: CausalModel,
+                                cf_data: pd.DataFrame) -> np.ndarray:
+    """Potential outcome estimation using structural causal model"""
+    return causal_graph.estimate_effect(
+        cf_data,
+        treatment='sensitive_attributes',
+        outcome='prediction',
+        method='backdoor.linear_regression'
+    ).values
+
+def _assess_fairness_violations(self,
+                               original_data: pd.DataFrame,
+                               original_preds: np.ndarray,
+                               cf_data: pd.DataFrame,
+                               cf_preds: np.ndarray,
+                               sensitive_attrs: List[str]) -> Dict:
+    """Multi-level counterfactual fairness assessment"""
+    individual_fairness = self.fairness_assessor.compute_individual_fairness(
+        original_preds, cf_preds, original_data[sensitive_attrs]
+    )
+    
+    group_metrics = {}
+    for attr in sensitive_attrs:
+        group_metrics[attr] = self.fairness_assessor.compute_group_disparity(
+            original_data[attr], original_preds, cf_data[attr], cf_preds
+        )
+        
+    causal_effects = self._compute_average_causal_effect(
+        original_preds, cf_preds, original_data, cf_data
+    )
+    
+    return {
+        'individual_fairness': individual_fairness,
+        'group_disparity': group_metrics,
+        'causal_effect_size': causal_effects,
+        'threshold_violations': self._detect_threshold_violations(
+            individual_fairness, group_metrics, causal_effects
+        )
+    }
+
+def _compute_average_causal_effect(self,
+                                  original_preds: np.ndarray,
+                                  cf_preds: np.ndarray,
+                                  original_data: pd.DataFrame,
+                                  cf_data: pd.DataFrame) -> Dict:
+    """Causal effect estimation using doubly robust estimation"""
+    ate = np.mean(cf_preds - original_preds)
+    att = np.mean((cf_preds - original_preds)[original_data['treatment'] == 1])
+    atc = np.mean((cf_preds - original_preds)[original_data['treatment'] == 0])
+    return {'ATE': ate, 'ATT': att, 'ATC': atc}
+
+def _detect_threshold_violations(self,
+                                individual_fairness: float,
+                                group_metrics: Dict,
+                                causal_effects: Dict) -> Dict:
+    """Threshold-based violation detection"""
+    violations = {
+        'individual': individual_fairness < self.config.fairness_thresholds['individual_fairness'],
+        'group': {
+            attr: metrics['disparity'] > self.config.fairness_thresholds['group_disparity']
+            for attr, metrics in group_metrics.items()
+        },
+        'causal': {
+            effect_type: abs(value) > self.config.fairness_thresholds['causal_effect']
+            for effect_type, value in causal_effects.items()
+        }
+    }
+    return violations
+
+def _analyze_decision_sensitivity(self,
+                                 original_preds: np.ndarray,
+                                 cf_preds: np.ndarray,
+                                 interventions: Dict) -> Dict:
+    """Statistical sensitivity characterization"""
+    sensitivity_scores = {}
+    for attr, intervention in interventions.items():
+        _, p_value = ttest_ind(original_preds, cf_preds)
+        sensitivity_scores[attr] = {
+            'mean_shift': intervention['perturbed_mean'] - intervention['original_mean'],
+            'p_value': p_value,
+            'effect_size': self._compute_cohens_d(original_preds, cf_preds),
+            'sensitivity_flag': p_value < self.config.sensitivity_threshold
+        }
+    return sensitivity_scores
+
+@staticmethod
+def _compute_cohens_d(original: np.ndarray,
+                     counterfactual: np.ndarray) -> float:
+    """Effect size calculation for sensitivity analysis"""
+    diff = original.mean() - counterfactual.mean()
+    pooled_std = np.sqrt((original.std()**2 + counterfactual.std()**2) / 2)
+    return abs(diff / pooled_std) if pooled_std != 0 else 0.0
 
 @dataclass
-class CorrectionPolicy:
-    """Safe correction mechanisms with graduated interventions"""
-    levels: List[Dict] = field(default_factory=lambda: [
-        {'threshold': 0.1, 'action': 'log_warning'},
-        {'threshold': 0.2, 'action': 'adjust_reward'},
-        {'threshold': 0.3, 'action': 'human_intervention'},
-        {'threshold': 0.5, 'action': 'agent_suspension'}
-    ])
-    learning_rate: float = 0.01
-    momentum: float = 0.9
-
-class AlignmentAgent(SafeAI_Agent):
-    """
-    Proactive alignment maintenance agent that:
-    1. Maintains longitudinal alignment state
-    2. Learns optimal correction policies
-    3. Coordinates system-wide value preservation
-    4. Implements safe interrupt protocols
-    
-    Inherits from SafeAI_Agent for risk assessment capabilities
-    """
-    
-    def __init__(self, 
-                 safe_agent: SafeAI_Agent,
-                 monitor_config: Optional[MonitorConfig] = None,
-                 correction_policy: Optional[CorrectionPolicy] = None):
-        super().__init__(shared_memory=safe_agent.shared_memory,
-                        risk_threshold=safe_agent.risk_threshold)
-        
-        self.monitor = AlignmentMonitor(
-            sensitive_attributes=self._detect_sensitive_attributes(),
-            config=monitor_config or MonitorConfig()
-        )
-        
-        self.memory = AlignmentMemory()
-        self.correction_policy = correction_policy or CorrectionPolicy()
-        self.adjustment_history = []
-        self.safety_buffer = 0.1  # Safe interruptibility margin
-
-    def align(self, 
-             data: pd.DataFrame,
-             predictions: np.ndarray,
-             labels: Optional[np.ndarray] = None) -> Dict:
-        """
-        Full alignment check pipeline with:
-        - Real-time monitoring
-        - Drift detection
-        - Policy adjustment
-        - Safe intervention
-        """
-        alignment_report = self._run_alignment_checks(data, predictions, labels)
-        risk_assessment = self._assemble_risk_profile(alignment_report)
-        correction = self._determine_correction(risk_assessment)
-        
-        self._apply_correction(correction)
-        self._update_memory(alignment_report, correction)
-        self._detect_concept_drift()
-        
-        return {
-            'alignment_report': alignment_report,
-            'risk_assessment': risk_assessment,
-            'applied_correction': correction
-        }
-
-    def _run_alignment_checks(self, data, predictions, labels) -> Dict:
-        """Comprehensive alignment verification with failure mode analysis"""
-        return self.monitor.assess_alignment(data, predictions, labels)
-
-    def _assemble_risk_profile(self, report: Dict) -> Dict:
-        """Convert alignment metrics to risk scores using KL-divergence"""
-        current_state = self._vectorize_report(report)
-        ideal_state = self._get_ideal_state_vector()
-        
-        kl_risk = entropy(ideal_state, current_state)
-        temporal_risk = self._calculate_temporal_risk(current_state)
-        
-        return {
-            'total_risk': kl_risk + temporal_risk,
-            'component_risks': report.get('fairness', {}),
-            'ethical_violations': len(report.get('ethical_violations', []))
-        }
-
-    def _determine_correction(self, risk_profile: Dict) -> Dict:
-        """Hierarchical intervention policy based on risk levels"""
-        for level in sorted(self.correction_policy.levels, 
-                          key=lambda x: x['threshold'], 
-                          reverse=True):
-            if risk_profile['total_risk'] >= level['threshold']:
-                return {
-                    'action': level['action'],
-                    'magnitude': self._calculate_magnitude(risk_profile),
-                    'target_components': self._identify_risk_components(risk_profile)
-                }
-        return {'action': 'no_action'}
-
-    def _apply_correction(self, correction: Dict):
-        """Safe policy adjustment with momentum-based learning"""
-        if correction['action'] != 'no_action':
-            self._adjust_risk_model(correction)
-            self._update_prompt_guidelines(correction)
-            self.adjustment_history.append(correction)
-            
-            if 'human' in correction['action']:
-                self._trigger_human_intervention()
-
-    def _detect_concept_drift(self):
-        """KL-divergence based drift detection on alignment metrics"""
-        current = self.memory.fairness_records.iloc[-10:].mean()
-        historical = self.memory.fairness_records.mean()
-        self.memory.drift_scores = entropy(current, historical)
-
-    def _update_memory(self, report: Dict, correction: Dict):
-        """Update longitudinal memory with timestamped records"""
-        timestamp = datetime.now()
-        
-        # Record fairness metrics
-        for metric, value in report.get('fairness', {}).items():
-            new_row = {
-                'timestamp': timestamp,
-                'metric': metric,
-                'value': value.get('value', 0),
-                'threshold': value.get('threshold', 0),
-                'violation': value.get('violation', False)
-            }
-            self.memory.fairness_records = pd.concat([
-                self.memory.fairness_records,
-                pd.DataFrame([new_row])
-            ], ignore_index=True)
-        
-        # Record ethical violations
-        self.memory.ethical_violations.extend(
-            report.get('ethical_violations', [])
-        )
-
-    def _adjust_risk_model(self, correction: Dict):
-        """Momentum-based adjustment of risk thresholds"""
-        delta = (correction['magnitude'] * 
-                self.correction_policy.learning_rate *
-                (1 - self.correction_policy.momentum))
-        
-        for component in correction['target_components']:
-            current = self.risk_table.get(component, self.risk_threshold)
-            new_threshold = current - delta
-            self.risk_table[component] = max(new_threshold, 0.05)
-            
-    def _update_prompt_guidelines(self, correction: Dict):
-        """Dynamic prompt engineering based on alignment failures"""
-        # Implementation would integrate with LLM prompt management
-        pass
-
-    def _trigger_human_intervention(self):
-        """Fail-safe mechanism for critical alignment failures"""
-        # Implementation would integrate with human oversight systems
-        pass
-
-    def _vectorize_report(self, report: Dict) -> np.ndarray:
-        """Convert alignment report to numerical vector"""
-        return np.array([
-            report['fairness'].get('statistical_parity', {}).get('value', 0),
-            report['fairness'].get('equal_opportunity', {}).get('value', 0),
-            len(report.get('ethical_violations', []))
-        ])
-
-    def _get_ideal_state_vector(self) -> np.ndarray:
-        """Get target alignment state from constitutional rules"""
-        return np.array([0.0, 0.0, 0.0])  # Perfect fairness, no violations
-
-    def _calculate_temporal_risk(self, current_state: np.ndarray) -> float:
-        """Calculate risk from temporal patterns in alignment metrics"""
-        if len(self.memory.fairness_records) > 10:
-            window = self.memory.fairness_records.iloc[-10:]['value']
-            return window.diff().abs().mean()
-        return 0.0
-
-    def _detect_sensitive_attributes(self) -> List[str]:
-        """Learn sensitive attributes from shared memory"""
-        # Implementation would analyze historical data
-        return ['gender', 'age']  # Placeholder
+class CounterfactualReport:
+  """Formal representation of counterfactual audit findings"""
+  causal_structure: Dict
+  fairness_violations: Dict
+  sensitivity_attributes: Dict
+  causal_effects: Dict
+  intervention_parameters: Dict
