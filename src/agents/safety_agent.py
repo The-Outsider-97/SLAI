@@ -1,3 +1,4 @@
+
 """
 SAFE_AI_FACTORY.PY - Constitutional Safety Framework
 
@@ -23,11 +24,14 @@ import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from evaluators.report import PerformanceEvaluator
+from agents.alignment_agent import AlignmentAgent
 from collaborative.shared_memory import SharedMemory
+from alignment.alignment_monitor import AlignmentMonitor
+from evaluators.report import PerformanceEvaluator
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
+    
 class RewardModel:
     def __init__(self):
         self.rules = {
@@ -55,12 +59,21 @@ class SafeAI_Agent:
             handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             self.logger.addHandler(handler)
 
+        self.alignment_agent = AlignmentAgent(
+            sensitive_attrs=['gender', 'race'],
+            config=load_config('alignment_config.yaml'),
+            shared_memory=shared_memory
+        )
 
         # Risk model: (task_type, risk_score) pairs
         self.training_data = []  # stores past risk data for training
         self.risk_table = {}     # learned safety thresholds per task type
         self.evaluator = PerformanceEvaluator(threshold=risk_threshold * 100)
+        self.alignment_monitor = AlignmentMonitor(...)
         self.audit_trail = []
+
+    def run_alignment_check(self, data, predictions, probs, labels, actions):
+        return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)
 
     def _load_constitution(self, config: Dict) -> Dict:
         """Load safety rules from config or default constitution"""
@@ -110,7 +123,11 @@ class SafeAI_Agent:
         """
         policy_score = task_data.get("policy_risk_score", None)
         task_type = task_data.get("task_type", "general")
+        alignment_report = self.alignment_agent.verify_alignment(task_data)
 
+        if not alignment_report['approved']:
+            return self.apply_corrections(alignment_report['corrections'])
+        
         if policy_score is None:
             return {
                 "status": "failed",
@@ -119,6 +136,7 @@ class SafeAI_Agent:
 
         safe = self.assess_risk(policy_score, task_type)
         correction = self.suggest_correction(policy_score, task_type)
+        self.alignment_agent.monitor_in_execution(task_data)
 
         # Evaluate performance
         percent_score = round((1.0 - policy_score) * 100, 2)  # Lower risk = better
@@ -143,6 +161,7 @@ class SafeAI_Agent:
             "recommendation": correction
         }
 
+        self.alignment_agent.log_outcomes(task_data)
         self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
         return result
 
