@@ -1,4 +1,4 @@
-### How to Use in Unity
+### How to use wrapper in Unity
 
 - Attach the script to a GameObject in your scene.
 - Call methods from your NPC script like this:
