@@ -24,13 +24,12 @@ import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agents.alignment_agent import AlignmentAgent
-from collaborative.shared_memory import SharedMemory
-from alignment.alignment_monitor import AlignmentMonitor
 from evaluators.report import PerformanceEvaluator
+from collaborative.shared_memory import SharedMemory
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-
+from alignment.alignment_monitor import AlignmentMonitor
+    
     
 class RewardModel:
     def __init__(self):
