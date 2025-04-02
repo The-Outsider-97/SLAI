@@ -79,30 +79,6 @@ graph LR
 
 ---
 
-## How to Run
-
-```bash
-# 1. Clone the repository
-$ git clone https://github.com/The-Outsider-97/SLAI.git
-$ cd SLAI
-
-# 2. Create and activate a virtual environment
-$ python -m venv venv
-$ source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
-$ pip install -r requirements.txt
-
-# 4. Launch the main interface (CLI or GUI)
-$ python main.py
-
-# Optionally, run a specific agent manually
-$ python main_reasoning.py
-```
-
----
-
-
 # How to run
 
 ## Clone this repo.
