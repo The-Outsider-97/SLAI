@@ -1,9 +1,20 @@
-from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
-from slai.core.collaboration import CollaborationManager
 import uvicorn
 import logging
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.collaboration.collaboration_manager import CollaborationManager
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, FastAPI, Request, HTTPException
+from pydantic import BaseModel
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    if token != "your_token_here":  # Replace with real validation
+        raise HTTPException(status_code=401, detail="Invalid token")
+        
 app = FastAPI(title="SLAI API Gateway", version="1.0")
 
 # Initialize the Collaboration Manager
