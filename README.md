@@ -254,18 +254,6 @@ ___
 
 ---
 
-### 🧪 How to Run
-
-```bash
-# Launch the web frontend
-python app.py
-
-# Launch an agent manually
-python main_safe_ai.py
-```
-
-___
----
 
 # SLAI v1.6 Roadmap
 
