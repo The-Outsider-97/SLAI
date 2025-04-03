@@ -25,12 +25,10 @@ from typing import Dict, List, Tuple, defaultdict
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from collaborative.shared_memory import SharedMemory
+from ..collaborative.shared_memory import SharedMemory
 from learning.dqn import DQNAgent
 from learning.maml_rl import MAMLAgent
 from learning.rsi import RSI_Agent
-from learning.rl_agent import RLAgent
-
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +79,6 @@ class LearningAgent:
                 shared_memory=self.shared_memory,
                 config=self.config.get('rsi', {})
             ),
-            'rl': RLAgent(**self.config.get('rl', {}))
         }
         
         # Learning state
