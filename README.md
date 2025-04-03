@@ -123,7 +123,9 @@ Note: If you see an error about execution policy:
    pip install statsmodels
    pip install causalinference
    pip install pyyaml
+   pip install textstat
    ```
+
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
 4. Run a basic reinforcement learning task (CartPole with DQN):
