@@ -1,5 +1,3 @@
-
-
 # ===== START OF main.py =====
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
@@ -18,15 +16,23 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # === Logger Setup ===
 from logs.logger import get_logger, get_log_queue
-from utils.logger import setup_logger
+from src.utils.logger import setup_logger
+
 logger = setup_logger("SLAI", level=logging.DEBUG)
+
+try:
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    logger.error(f"Failed to load config.yaml: {e}")
+    sys.exit(1)
 
 log_queue = get_log_queue()
 metric_queue = queue.Queue()
 
-# === UI Setup ===
+# === UI Imports ===
 from frontend.startup_screen import StartupScreen
-from frontend.main_window import MainWindow
+from frontend.main_window import MainWindow  # <- REAL MainWindow from frontend
 
 def launch_ui():
     app = QApplication(sys.argv)
@@ -38,7 +44,6 @@ def launch_ui():
     app.splash_screen = StartupScreen(on_ready_to_proceed=show_main_window)
     app.splash_screen.show()
 
-    # Simulate preload (adjust as needed)
     QTimer.singleShot(2000, app.splash_screen.notify_launcher_ready)
 
     sys.exit(app.exec_())
@@ -60,20 +65,17 @@ import torch
 import shutil
 import logging
 import subprocess
-from agents.rl_agent import RLAgent
 from logs.logs_parser import LogsParser
-from utils.agent_factory import create_agent
-from utils.logger import setup_logger
-from alignment_checks.bias_detection import BiasDetection
-from alignment_checks.ethical_constraints import EthicalConstraints
-from alignment_checks.fairness_evaluator import FairnessEvaluator
-from evaluators.behavioral_tests import BehavioralTests
-from evaluators.reward_function import RewardFunction
-from evaluators.static_analysis import StaticAnalysis
+from src.utils.agent_factory import create_agent
+from src.utils.logger import setup_logger
+from src.alignment.bias_detection import BiasDetection
+from src.alignment.ethical_constraints import EthicalConstraints
+from src.alignment.fairness_evaluator import FairnessEvaluator
+from src.agents.evaluation_agent import BehavioralValidator, SafetyRewardModel, StaticAnalyzer
 from deployment.git.rollback_handler import RollbackHandler
-from hyperparam_tuning.bayesian_search import BayesianSearch
-from hyperparam_tuning.grid_search import GridSearch
-from hyperparam_tuning.tuner import HyperParamTuner
+from src.tuning.bayesian_search import BayesianSearch
+from src.tuning.grid_search import GridSearch
+from src.tuning.tuner import HyperParamTuner
 from logging.handlers import RotatingFileHandler
 
 os.makedirs("models/", exist_ok=True)
@@ -175,12 +177,12 @@ class AutoTuneOrchestrator:
             hyperparam_tuner=self.hyperparam_tuner
         )
 
-        self.behavioral_tests = BehavioralTests(
+        self.behavioral_tests = BehavioralValidator(
             rollback_handler=self.rollback_handler,
             hyperparam_tuner=self.hyperparam_tuner
         )
 
-        self.reward_function = RewardFunction(
+        self.reward_function = SafetyRewardModel(
             rollback_handler=self.rollback_handler,
             hyperparam_tuner=self.hyperparam_tuner,
             safety_thresholds={
@@ -189,7 +191,7 @@ class AutoTuneOrchestrator:
             }
         )
 
-        self.static_analyzer = StaticAnalysis(
+        self.static_analyzer = StaticAnalyzer(
             codebase_path='src/',
             rollback_handler=self.rollback_handler,
             hyperparam_tuner=self.hyperparam_tuner,
@@ -1095,8 +1097,8 @@ from collections import deque
 from pathlib import Path
 
 # Local imports following project structure
-from utils.agent_factory import create_agent, validate_config
-from collaborative.shared_memory import SharedMemory
+from src.utils.agent_factory import create_agent, validate_config
+from src.collaborative.shared_memory import SharedMemory
 
 class ContinualLearner:
     """
@@ -1412,7 +1414,7 @@ main_reasoning.py - Entry point for the Cognitive Hybrid Reasoning Intelligent A
 
 import sys
 import time
-from utils.agent_factory import AgentFactory
+from src.utils.agent_factory import AgentFactory
 from config.settings import AGENT_CONFIG, ENVIRONMENT_CONFIG
 
 class ReasoningSystem:
@@ -1542,18 +1544,18 @@ import torch
 import logging
 
 from logs.logger import get_logger
-from utils.logger import setup_logger, cleanup_logger
+from src.utils.logger import setup_logger, cleanup_logger
+from src.research.evaluator import Evaluator
+from src.research.experiment_manager import ExperimentManager
+from src.tuning.tuner import HyperparamTuner
+from src.utils.agent_factory import create_agent
+from src.collaborative.shared_memory import SharedMemory
 from modules.data_handler import DataHandler
 from modules.model_trainer import ModelTrainer
 from modules.security_manager import SecurityManager
 from modules.monitoring import Monitoring
 from modules.compliance_auditor import ComplianceAuditor
-from rnd_loop.evaluator import Evaluator
-from rnd_loop.experiment_manager import ExperimentManager
-from rnd_loop.hyperparam_tuner import HyperparamTuner
 from deployment.git.rollback_handler import RollbackHandler
-from utils.agent_factory import create_agent
-from collaborative.shared_memory import SharedMemory
 
 logger = setup_logger("SafeAIAgent", level=logging.INFO)
 
