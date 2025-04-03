@@ -122,6 +122,7 @@ Note: If you see an error about execution policy:
    pip install plotly
    pip install statsmodels
    pip install causalinference
+   pip install pyyaml
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
