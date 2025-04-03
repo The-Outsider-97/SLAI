@@ -125,6 +125,7 @@ Note: If you see an error about execution policy:
    pip install pyyaml
    pip install textstat
    pip install ply
+   pip install textstat
 ```
 
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
