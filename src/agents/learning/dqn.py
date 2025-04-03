@@ -17,11 +17,14 @@ Features:
 - Modular architecture for easy extension
 """
 
+import os, sys
 import numpy as np
 import random
 from collections import deque
 import copy
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from ....src.collaborative.shared_memory import SharedMemory
 
 # ====================== Neural Network Core ======================
 class NeuralNetwork:
@@ -108,7 +111,7 @@ class ReplayBuffer:
 class DQNAgent:
     """Standard DQN agent with neural network function approximation"""
     
-    def __init__(self, state_dim, action_dim, config):
+    def __init__(self, state_dim, action_dim, action_dimshared_memory: SharedMemory, config):
         # Network parameters
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -120,6 +123,10 @@ class DQNAgent:
         self.lr = config.get('learning_rate', 0.001)
         self.batch_size = config.get('batch_size', 64)
         self.target_update = config.get('target_update_frequency', 100)
+
+        self.shared_memory = SharedMemory
+        self.config = config or {}
+        self.model_id = "DQN_Agent"
         
         # Networks
         self.policy_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
