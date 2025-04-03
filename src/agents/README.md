@@ -31,15 +31,6 @@ Combines evolutionary principles with DQN-style policy evaluation.
 
 ---
 
-### `multitask_agent.py`
-**Multi-Task Reinforcement Agent**  
-Capable of training across multiple environments or tasks simultaneously.
-
-- Shares a single model across domains.
-- Tracks task-specific performance and gradient flows.
-
----
-
 ### `maml_agent.py`
 **Model-Agnostic Meta-Learning (MAML) Agent**  
 Learns a meta-policy that can adapt quickly to new tasks with minimal data.
@@ -64,15 +55,6 @@ Monitors and assesses the risk of actions or policies taken by other agents.
 
 - Learns thresholds per task type based on policy risk scores.
 - Suggests corrective actions if safety is compromised.
-
----
-
-### `autotune_agent.py`
-**Autotuning Agent**  
-Optimizes hyperparameters dynamically based on task feedback and performance trends.
-
-- Focused on learning rate, batch size, and architecture tuning.
-- Can be embedded as a support module for other agents.
 
 ---
 
