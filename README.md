@@ -126,6 +126,8 @@ Note: If you see an error about execution policy:
    pip install textstat
    pip install ply
    pip install textstat
+   pip install spacy
+   python -m spacy download en_core_web_sm
 ```
 
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
