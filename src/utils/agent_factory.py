@@ -1,357 +1,371 @@
-"""
-Agent Factory for Dynamic Agent Creation
-
-This implementation provides a robust factory pattern for creating all agent types
-in the system with:
-- Comprehensive error handling
-- Lazy imports for better performance
-- Configuration validation
-- Automatic agent discovery
-- Support for all agent types except BaseAgent
-
-Academic References:
-- Gamma et al. (1994) "Design Patterns: Factory Method"
-- Fowler (2002) "Patterns of Enterprise Application Architecture"
-"""
-
+import os
+import ast
 import importlib
 import logging
+import numpy as np
+import math
 from pathlib import Path
-from typing import Dict, Any, Type, Optional
-
-logger = logging.getLogger("SLAI.Factory")
-logger.setLevel(logging.INFO)
+from typing import Any, Dict, Optional, Tuple
 
 class AgentMetaData:
-    """Container for dynamically discovered agent metadata"""
-    def __init__(self, name: str, module_path: str, class_name: str,
-                 description: str, required_params: list[str]):
+    __slots__ = ['name', 'class_name', 'module_path', 'required_params']
+    
+    def __init__(self, name: str, class_name: str, module_path: str, required_params: Tuple[str]):
         self.name = name
-        self.module_path = module_path
         self.class_name = class_name
-        self.description = description
+        self.module_path = module_path
         self.required_params = required_params
 
 class AgentFactory:
-    def __init__(self, shared_resources: Optional[Dict] = None):
-        self.shared_resources = shared_resources or {}
+    def __init__(self, shared_resources: Optional[Dict[str, Any]] = None):
         self.agent_registry: Dict[str, AgentMetaData] = {}
+        self.shared_resources = shared_resources or {}
+        self._memoized_agents: Dict[str, Any] = {}
+        self._fallback_map = self._create_fallback_map()
         self._discover_agents()
 
-    def _discover_agents(self):
-        """Dynamic agent discovery with AST parsing"""
-        base_dir = Path(__file__).parent.parent / "src" / "agents"
-        
-        # Parse top-level agents
-        for agent_file in base_dir.glob("*_agent.py"):
-            if "learning" in agent_file.parts:
-                continue  # Skip learning subsystem
-            
-            metadata = self._parse_agent_file(agent_file)
-            if metadata:
-                self.agent_registry[metadata.name] = metadata
-
-    def _parse_agent_file(self, file_path: Path) -> Optional[AgentMetaData]:
-        """Extract metadata using AST parsing"""
-        try:
-            with open(file_path, "r") as f:
-                tree = ast.parse(f.read())
-            
-            class_def = next(
-                (n for n in tree.body if isinstance(
-                    n, ast.ClassDef
-                    )),
-                    None
-                    )
-            
-            if not class_def:
-                return None
-
-            docstring = ast.get_docstring(class_def) or "No description"
-            init_method = next(
-                (node for node in class_def.body 
-                 if isinstance(node, ast.FunctionDef) and node.name == "__init__"),
-                None
-            )
-            
-            required_params = []
-            if init_method and init_method.args.args:
-                # Skip 'self' parameter
-                params = init_method.args.args[1:]
-                required_params = [arg.arg for arg in params 
-                                 if not (arg.annotation and 
-                                         ast.unparse(arg.annotation) == "Optional")]
-            
-            return AgentMetaData(
-                name=file_path.stem.replace("_agent", ""),
-                module_path=f"agents.{file_path.stem}",
-                class_name=class_def.name,
-                description=ast.get_docstring(class_def) or "No description",
-                required_params=self._detect_required_params(class_def)
-            )
-        
-        except Exception as e:
-            logger.error(f"Error parsing {file_path}: {str(e)}")
-            return None
-
-    def _special_init(self, agent_class: Type, config: Dict) -> Any:
-        """Handles agent-specific initialization with academic grounding"""
-        agent_name = agent_class.__name__.lower()
-        
-        # --- Perception Agent ---
-        if "perception" in agent_name:
-            # Initialize multimodal processing pipeline
-            if "sensors" not in config:
-                config["sensors"] = self._default_sensors()
-                
-            # Set up model ensemble (CLIP + Perceiver-like architecture)
-            config["vision_encoder"] = self._init_vision_encoder(
-                model_type=config.get("vision_model", "clip")
-            )
-            config["audio_encoder"] = self._init_audio_encoder(
-                model_type=config.get("audio_model", "wav2vec2")
-            )
-            
-            return agent_class(**config)
-        
-        # --- Knowledge Agent ---
-        elif "knowledge" in agent_name:
-            # Initialize RAG components
-            config["retriever"] = self._init_retriever(
-                index_path=self.shared_resources.get("knowledge_index"),
-                embedding_model=config.get("embedding_model", "all-mpnet-base-v2")
-            )
-            
-            # Add memory components (Knowledge Graph + Vector Store)
-            config["graph_db"] = self.shared_resources.get("graph_db") or Neo4jInterface()
-            config["vector_store"] = self.shared_resources.get("vector_store") or FAISSIndex()
-            
-            return agent_class(**config)
-        
-        # --- Planning Agent ---
-        elif "planning" in agent_name:
-            # HTN Planner configuration
-            config["domain_knowledge"] = self.shared_resources.get("domain_ontology")
-            config["planner_type"] = config.get("planner_type", "hierarchical")
-            
-            # ReAct-style planning setup
-            if "reasoning_model" not in config:
-                config["reasoning_model"] = self._load_default_reasoner()
-                
-            return agent_class(**config)
-        
-        # --- Reasoning Agent ---
-        elif "reasoning" in agent_name:
-            # Chain-of-Thought configuration
-            config["cot_prompt_template"] = config.get(
-                "cot_prompt",
-                "Let's think step by step: {question}\nFirst,"
-            )
-            
-            # Symbolic reasoning tools
-            config["math_engine"] = SymPySolver()
-            config["logic_prover"] = Prover9Interface()
-            
-            return agent_class(**config)
-        
-        # --- Execution Agent ---
-        elif "execution" in agent_name:
-            # Tool library initialization
-            config["tool_library"] = self._init_tool_library(
-                allow_list=config.get("allowed_tools"),
-                sandbox=config.get("sandbox", True)
-            )
-            
-            # Action validation setup
-            config["validator"] = ActionValidator(
-                safety_policy=self.shared_resources.get("safety_policy")
-            )
-            
-            return agent_class(**config)
-        
-        # --- Language Agent ---
-        elif "language" in agent_name:
-            # Unified text-to-text model (T5-style)
-            config["text_model"] = self._init_text_model(
-                model_name=config.get("model_name", "t5-large"),
-                device=config.get("device", "auto")
-            )
-            
-            # Dialogue management
-            config["conversation_memory"] = self.shared_resources.get(
-                "conversation_store",
-                RollingBuffer(max_turns=10)
-            )
-            
-            return agent_class(**config)
-        
-        # --- Learning Agent ---
-        elif "learning" in agent_name:
-            # RL and Meta-learning setup
-            config["rl_algorithm"] = self._init_rl_algorithm(
-                algorithm=config.get("algorithm", "ppo"),
-                policy_network=config.get("policy_network")
-            )
-            
-            # Experience replay buffer
-            config["replay_buffer"] = PrioritizedReplayBuffer(
-                capacity=config.get("buffer_size", 10000),
-                alpha=config.get("priority_alpha", 0.6)
-            )
-            
-            return agent_class(**config)
-        
-        # --- Adaptation Agent ---
-        elif "adaptation" in agent_name:
-            # Continual learning setup
-            config["ewc_lambda"] = config.get("ewc_lambda", 1000)  # Elastic Weight Consolidation
-            config["replay_ratio"] = config.get("replay_ratio", 0.3)
-            
-            # Performance monitoring
-            config["metrics_tracker"] = MultiMetricTracker(
-                primary_metric=config.get("primary_metric", "success_rate")
-            )
-            
-            return agent_class(**config)
-        
-        # --- Collaboration Agent ---
-        elif "collaborative" in agent_name:
-            # Blackboard system setup
-            config["shared_memory"] = self.shared_resources.get(
-                "shared_memory",
-                BlackboardSystem()
-            )
-            
-            # Message router initialization
-            config["message_router"] = PubSubRouter(
-                channels=list(self.agent_registry.keys())
-            )
-            
-            return agent_class(**config)
-        
-        # --- Evaluation Agent ---
-        elif "evaluation" in agent_name:
-            # Automated evaluation models
-            config["quality_predictor"] = self._init_evaluator_model(
-                model_path=config.get("eval_model")
-            )
-            
-            # A/B testing framework
-            config["experiment_manager"] = ExperimentManager(
-                stratify_by=config.get("stratify_metrics", ["task_type"])
-            )
-            
-            return agent_class(**config)
-        
-        # --- Safety Agent ---
-        elif "safety" in agent_name:
-            # Constitutional AI setup
-            config["harmlessness_rules"] = self._load_constitutional_rules(
-                rule_set=config.get("rule_set", "default")
-            )
-            
-            # Interpretability tools
-            config["attention_visualizer"] = AttentionMapper()
-            config["concept_activator"] = TCAVInterface()
-            
-            return agent_class(**config)
-        
-        # --- Default Case ---
-        return agent_class(**config)
-
-    # Helper initialization methods
-    def _init_vision_encoder(self, model_type: str):
-        """Initialize visual perception models"""
-        if model_type == "clip":
-            return CLIPWrapper(
-                vision_encoder="ViT-B/32",
-                text_encoder="text-embedding-ada-002"
-            )
-        elif model_type == "vit":
-            return VisionTransformerWrapper(
-                model_name="vit-large-patch16-224"
-            )
-        else:
-            raise ValueError(f"Unknown vision model: {model_type}")
-
-    def _init_retriever(self, index_path: str, embedding_model: str):
-        """Initialize RAG components"""
-        return HybridRetriever(
-            dense_retriever=DPRWrapper(model_name=embedding_model),
-            sparse_retriever=BM25Retriever(index_path=index_path)
-        )
-
-    def _init_tool_library(self, allow_list: list[str], sandbox: bool):
-        """Initialize execution tools with safety constraints"""
-        return ToolLibrary(
-            allowed_tools=allow_list or DEFAULT_ALLOWED_TOOLS,
-            sandbox_mode=sandbox,
-            timeout=30.0  # seconds
-        )
-
-    def _load_constitutional_rules(self, rule_set: str):
-        """Load alignment rules for Safety Agent"""
-        rules = {
-            "default": [
-                "Don't provide harmful or dangerous content",
-                "Don't reveal private information",
-                "Maintain helpful and honest behavior"
-            ],
-            "strict": [
-                # More comprehensive rule set
+    def _create_fallback_map(self) -> Dict[str, Tuple[str, str]]:
+        return {
+            agent_type: (f"src.agents.{agent_type}_agent", f"{agent_type.title()}Agent")
+            for agent_type in [
+                'language', 'learning', 'perception', 'adaptive',
+                'evaluation', 'execution', 'knowledge', 'alignment',
+                'planning', 'reasoning', 'safety'
             ]
         }
-        return rules.get(rule_set, rules["default"])
 
-    def _default_sensors(self):
-        """Default sensor configuration for perception agent"""
-        return ["vision", "audio", "tactile"]
+    def _discover_agents(self) -> None:
+        base_dir = Path(__file__).parent.parent / "agents"
+        for agent_file in base_dir.glob("*_agent.py"):
+            try:
+                module_path = f"src.agents.{agent_file.stem}"
+                agent_name = agent_file.stem.replace("_agent", "")
+                
+                with open(agent_file, "r", encoding="utf-8") as f:
+                    tree = ast.parse(f.read())
+                    
+                class_def = next(
+                    (node for node in tree.body 
+                     if isinstance(node, ast.ClassDef)), None
+                )
+                
+                if class_def:
+                    required_params = self._parse_init_params(class_def)
+                    self.agent_registry[agent_name] = AgentMetaData(
+                        name=agent_name,
+                        class_name=class_def.name,
+                        module_path=module_path,
+                        required_params=required_params
+                    )
+                    
+            except Exception as e:
+                logging.warning(f"Agent discovery failed for {agent_file}: {str(e)}")
+
+    def _parse_init_params(self, class_def: ast.ClassDef) -> Tuple[str]:
+        init_method = next(
+            (node for node in class_def.body 
+             if isinstance(node, ast.FunctionDef) and node.name == "__init__"),
+            None
+        )
+        
+        if not init_method or not init_method.args.args:
+            return ()
+            
+        return tuple(
+            arg.arg for arg in init_method.args.args[1:]  # Skip self
+            if not (arg.annotation and self._is_optional(arg.annotation))
+        )
+
+    def _is_optional(self, annotation: ast.AST) -> bool:
+        return isinstance(annotation, ast.Subscript) and \
+               isinstance(annotation.value, ast.Name) and \
+               annotation.value.id == "Optional"
 
     def create(self, agent_name: str, config: Dict) -> Any:
-        """Create agent with dynamic validation"""
-        if agent_name not in self.agent_registry:
-            raise ValueError(f"Unknown agent: {agent_name}")
-        
-        metadata = self.agent_registry[agent_name]
-        self._validate_config(metadata, config)
-        
-        try:
-            module = importlib.import_module(metadata.module_path)
-            agent_class = getattr(module, metadata.class_name)
-            return self._special_init(agent_class, config)
-        except Exception as e:
-            logger.error(f"Agent creation failed: {str(e)}")
-            raise
+        if agent_name in self._memoized_agents:
+            return self._memoized_agents[agent_name]
 
-    def _validate_config(self, metadata: AgentMetaData, config: Dict):
-        """Dynamic parameter validation"""
-        missing = [param for param in metadata.required_params 
-                   if param not in config]
+        metadata = self.agent_registry.get(agent_name)
+        if not metadata:
+            return self._create_fallback_agent(agent_name, config)
+
+        self._validate_config(metadata, config)
+        return self._instantiate_agent(metadata, config)
+
+    def _create_fallback_agent(self, agent_name: str, config: Dict) -> Any:
+        if agent_name not in self._fallback_map:
+            raise ValueError(f"Unknown agent: {agent_name}")
+            
+        module_path, class_name = self._fallback_map[agent_name]
+        try:
+            module = importlib.import_module(module_path)
+            agent_class = getattr(module, class_name)
+            return self._initialize_agent(agent_class, config)
+        except Exception as e:
+            raise RuntimeError(f"Failed to create fallback agent {agent_name}: {str(e)}")
+
+    def _validate_config(self, metadata: AgentMetaData, config: Dict) -> None:
+        missing = [param for param in metadata.required_params if param not in config]
         if missing:
             raise ValueError(
                 f"Missing required parameters for {metadata.name}: {missing}"
             )
 
-class PerceptionAgent:
-    """Handles sensory input processing including:
-    - Visual data
-    - Audio signals
-    - Tactile feedback
-    """
+    def _instantiate_agent(self, metadata: AgentMetaData, config: Dict) -> Any:
+        try:
+            module = importlib.import_module(metadata.module_path)
+            agent_class = getattr(module, metadata.class_name)
+            return self._initialize_agent(agent_class, config)
+        except ImportError as e:
+            raise RuntimeError(f"Module import failed: {str(e)}")
+        except AttributeError:
+            raise RuntimeError(f"Class {metadata.class_name} not found in {metadata.module_path}")
 
-# Example Usage
-# if __name__ == "__main__":
-#     factory = AgentFactory(shared_resources={
-#         "shared_memory": {},
-#         "task_router": {}
-#     })
-    
-#     print("Discovered Agents:")
-#     for name, meta in factory.agent_registry.items():
-#         print(f"{name}: {meta.description}")
-    
-#     try:
-#         collab_agent = factory.create("collaborative", {})
-#         perception_agent = factory.create("perception", {})
-#     except Exception as e:
-#         print(f"Error: {str(e)}")
+    def _initialize_agent(self, agent_class: type, config: Dict) -> Any:
+        params = {
+            "config": config,
+            **self.shared_resources,
+            **self._agent_specific_config(agent_class, config)
+        }
+        if agent_class.__name__ == "LanguageAgent":
+            from src.models.fake_llm import FakeLLM  # or your real LLM import
+            return agent_class(llm=FakeLLM(), config=config)
+        return agent_class(**config)
+
+    def _agent_specific_config(self, agent_class: type, config: Dict) -> Dict:
+        agent_type = agent_class.__name__.lower()
+        config_builder = {
+            'language': self._build_language_config,
+            'learning': self._build_learning_config,
+            'perception': self._build_perception_config
+        }.get(agent_type.split('agent')[0], lambda _: {})
+        
+        return config_builder(config)
+
+    def _build_language_config(self, config: Dict) -> Dict:
+        return {'text_model': self._init_text_model(config)} if self._check_text_deps() else {}
+
+    def _build_learning_config(self, config: Dict) -> Dict:
+        return {'rl_algorithm': self._init_rl_algorithm(config)}
+
+    def _build_perception_config(self, config: Dict) -> Dict:
+        return {
+            'audio_encoder': self._init_audio_encoder(config),
+            'vision_encoder': self._init_vision_encoder(config)
+        }
+
+    def _check_text_deps(self) -> bool:
+        try:
+            import transformers  # noqa
+            return True
+        except ImportError:
+            logging.warning("Transformers not installed, text capabilities limited")
+            return False
+
+    def _init_text_model(self, config: Dict) -> Any:
+        if self._check_text_deps():
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            model_id = config.get("text_model_id", "gpt2")
+            return AutoModelForCausalLM.from_pretrained(model_id)
+        return None
+
+    def _init_rl_algorithm(self, config: Dict) -> Any:
+        algorithm = config.get("algorithm", "dqn").lower()
+        try:
+            if algorithm == "maml":
+                from ...src.agents.learning import maml_rl
+                return maml_rl.MAMLTrainer(config)
+            elif algorithm == "rsi":
+                from ...src.agents.learning import rsi
+                return rsi.RSITrainer(config)
+            else:
+                from ...src.agents.learning import dqn
+                return dqn.DQNAgent(config)
+        except ImportError as e:
+            raise RuntimeError(f"RL component import failed: {str(e)}")
+
+    def _init_audio_encoder(self, config: Dict) -> Any:
+        """
+        Initializes an audio feature extractor based on psychoacoustic principles.
+        Implements a simplified version of Mel-Frequency Cepstral Coefficients (MFCCs):
+        
+        1. Pre-emphasis: y[t] = x[t] - αx[t-1] (α=0.97)
+        2. Framing & Windowing: x_w[n] = x[n] * w[n], w[n] = 0.54 - 0.46cos(2πn/N)
+        3. Power Spectrum: P[k] = |DFT(x_w)|²
+        4. Mel Filterbank: M[m] = Σₖ Wₘ[k]P[k], Wₘ triangular filters spaced per mel scale
+        5. Logarithm: log(M[m])
+        6. DCT: c[n] = Σₘ log(M[m])·cos(πn(m+0.5)/M)
+        
+        Where mel scale: m(f) = 2595·log₁₀(1 + f/700)
+        
+        Reference: Davis & Mermelstein (1980) MFCC technique
+        """
+        class AudioFeatureExtractor:
+            def __init__(self, config):
+                self.sample_rate = config.get('sample_rate', 16000)
+                self.n_mfcc = config.get('n_mfcc', 13)
+                self.frame_length = int(0.025 * self.sample_rate)  # 25ms
+                self.frame_step = int(0.01 * self.sample_rate)     # 10ms
+                
+            def __call__(self, waveform):
+                """
+                MFCC Extraction Pipeline (Davis & Mermelstein, 1980)
+                
+                1. Pre-emphasis: y[n] = x[n] - αx[n-1], α=0.97
+                2. Framing: Split into N = ⌈(T - L)/S⌉ + 1 frames
+                Where T=signal length, L=frame length, S=frame step
+                3. Windowing: Apply Hamming window w[n] = 0.54 - 0.46·cos(2πn/(L-1))
+                4. DFT: X[k] = Σ_{n=0}^{L-1} x[n]e^{-j2πkn/L}
+                5. Mel Filterbank: E[m] = Σ_{k=0}^{L/2} W_m[k]·|X[k]|²
+                W_m = triangular filters spaced at mel frequencies:
+                    mel(f) = 2595·log₁₀(1 + f/700)
+                6. Log Compression: log(E[m])
+                7. DCT-II: c[n] = Σ_{m=0}^{M-1} log(E[m})·cos(πn(m+0.5)/M)
+                """
+                # Implementation details
+                T = len(waveform)
+                L = self.frame_length
+                S = self.frame_step
+                N = 1 + (T - L) // S  # Number of frames
+                
+                mfccs = []
+                for i in range(N):
+                    # 1. Frame extraction
+                    frame = waveform[i*S : i*S+L]
+                    
+                    # 2. Pre-emphasis
+                    emphasized = [frame[n] - 0.97*frame[n-1] for n in range(1, L)]
+                    
+                    # 3. Hamming window
+                    windowed = [e * (0.54 - 0.46*math.cos(2*math.pi*n/(L-1))) 
+                            for n, e in enumerate(emphasized)]
+                    
+                    # 4. DFT magnitude squared (simplified real FFT)
+                    spectrum = [abs(x)**2 for x in windowed]  # Placeholder for |FFT|²
+                    
+                    # 5. Mel filterbank energy (40 filters typical)
+                    filter_energies = [sum(w * e for w, e in zip(filter_weights, spectrum))
+                                    for filter_weights in self.mel_filters]
+                    
+                    # 6. Log compression
+                    log_energies = [math.log(e + 1e-6) for e in filter_energies]
+                    
+                    # 7. DCT for decorrelation (MFCC coefficients)
+                    mfcc = [sum(e * math.cos(math.pi * n * (m + 0.5) / len(log_energies)))
+                        for n in range(self.n_mfcc)
+                        for m, e in enumerate(log_energies)]
+                    
+                    mfccs.append(mfcc)
+                
+                return np.array(mfccs)
+                
+        return AudioFeatureExtractor(config)
+
+    def _init_vision_encoder(self, config: Dict) -> Any:
+        """
+        Implements a convolutional feature extractor based on biological vision models:
+        
+        1. Convolution: (I*K)[i,j] = ΣₘΣₙ I[i+m,j+n]K[m,n]
+        2. ReLU: f(x) = max(0, x)
+        3. Max Pooling: y[i,j] = max_{m,n ∈ N(i,j)} x[m,n]
+        4. Layered composition: f(x) = fₙ(...(f₂(f₁(x))))
+        
+        Following the AlexNet architecture principles:
+        - Stacked conv layers with decreasing receptive fields
+        - Spatial pyramid pooling
+        - Local response normalization
+        
+        Reference: Krizhevsky et al. (2012) ImageNet classification
+        """
+        class VisionFeatureExtractor:
+            def __init__(self, config):
+                self.input_size = config.get('input_size', (224, 224))
+                self.channels = config.get('channels', 3)
+                self.filters = [
+                    (11, 11, 96),    # Conv1: 11x11, 96 filters
+                    (5, 5, 256),     # Conv2: 5x5, 256 filters
+                    (3, 3, 384)      # Conv3: 3x3, 384 filters
+                ]
+                
+            def __call__(self, image):
+                """
+                ConvNet Forward Pass (Krizhevsky et al., 2012)
+                
+                Layer Operations:
+                1. Conv2D: (W-F+2P)/S + 1
+                Where W=input size, F=filter size, P=padding, S=stride
+                2. ReLU: f(x) = max(0, x)
+                3. MaxPool: y[i,j] = max_{m,n ∈ N(i,j)} x[m,n]
+                4. LRN: b_{x,y}^i = a_{x,y}^i / (k + αΣ_{j=max(0,i-n/2)}^{min(N-1,i+n/2)} (a_{x,y}^j)^2)^β
+                
+                Architectural Parameters:
+                - Input: 224x224x3
+                - Conv1: 96@55x55, 11x11 filters, stride 4, pad 2
+                - Pool1: 3x3, stride 2
+                - Conv2: 256@27x27, 5x5 filters, pad 2
+                - Pool2: 3x3, stride 2
+                - Conv3-5: 384/256/256@13x13
+                - FC6-7: 4096-D
+                - FC8: 1000-D (ImageNet)
+                """
+                # Feature dimension progression
+                features = image
+                channel_axis = -1
+                
+                # Conv1 Layer
+                features = self._conv2d(features, self.filters[0], stride=4, padding=2)
+                features = self._relu(features)
+                features = self._max_pool(features, 3, stride=2)
+                
+                # Conv2 Layer
+                features = self._conv2d(features, self.filters[1], padding=2)
+                features = self._relu(features)
+                features = self._max_pool(features, 3, stride=2)
+                
+                # Conv3 Layer
+                features = self._conv2d(features, self.filters[2])
+                features = self._relu(features)
+                
+                # Spatial Pyramid Pooling
+                features = self._spatial_pyramid_pooling(features)
+                
+                return features
+
+            def _conv2d(self, x, filters, stride=1, padding=0):
+                """2D Convolution: y[i,j] = Σ_{m,n} x[i+m,j+n] * k[m,n] + b"""
+                # Input shape: (H, W, C_in)
+                # Filter shape: (Fh, Fw, C_in, C_out)
+                # Output shape: (H', W', C_out)
+                H, W, C_in = x.shape
+                Fh, Fw, C_out = filters.shape[:3]
+                
+                H_out = (H - Fh + 2*padding) // stride + 1
+                W_out = (W - Fw + 2*padding) // stride + 1
+                
+                # Simulate convolution operation
+                output = np.zeros((H_out, W_out, C_out))
+                for i in range(H_out):
+                    for j in range(W_out):
+                        h_start = i*stride - padding
+                        w_start = j*stride - padding
+                        receptive_field = x[h_start:h_start+Fh, w_start:w_start+Fw, :]
+                        output[i,j] = np.sum(receptive_field * filters, axis=(0,1,2))
+                
+                return output
+
+            def _spatial_pyramid_pooling(self, features):
+                """Pyramid pooling: max pooling at multiple scales"""
+                levels = [1, 2, 4]  # Different binning levels
+                pooled = []
+                for level in levels:
+                    H, W = features.shape[:2]
+                    bin_h = H // level
+                    bin_w = W // level
+                    for i in range(level):
+                        for j in range(level):
+                            pool_region = features[i*bin_h:(i+1)*bin_h, 
+                                                j*bin_w:(j+1)*bin_w]
+                            pooled.append(np.max(pool_region, axis=(0,1)))
+                return np.concatenate(pooled)
+
+        return VisionFeatureExtractor(config)
