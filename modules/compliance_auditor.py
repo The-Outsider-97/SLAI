@@ -1,5 +1,3 @@
-# modules/compliance_auditor.py
-
 import logging
 import os
 import json
@@ -71,11 +69,16 @@ class ComplianceAuditor:
         for root, _, files in os.walk(self.logs_path):
             for file in files:
                 if file.endswith(".log"):
-                    with open(os.path.join(root, file), "r", encoding="utf-8") as f:
-                        for line in f:
-                            for pattern in pii_patterns:
-                                if re.search(pattern, line, re.IGNORECASE):
-                                    flagged_entries.append(line.strip())
+                    try:
+                        with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                    except UnicodeDecodeError:
+                        with open(os.path.join(root, file), "r", encoding="latin-1") as f:
+                            lines = f.readlines()
+                            for line in lines:
+                                for pattern in pii_patterns:
+                                    if re.search(pattern, line, re.IGNORECASE):
+                                        flagged_entries.append(line.strip())
 
         if flagged_entries:
             self.violations.append("PII patterns detected in logs.")

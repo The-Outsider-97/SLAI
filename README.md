@@ -1,42 +1,82 @@
 ![Startup](frontend/assets/startup.png)
 ---
 
-An open-source AGI prototype that evolves, learns, and rewrites itself.
-SLAI combines **Reinforcement Learning**, **Meta-Learning**, and **Recursive Self-Improvement** into an autonomous research agent.
+
+
+[//]: <![Flow Diagram](frontend/assets/flow_diagram.png)>
+## What is SLAI?
+
+SLAI is a modular, distributed AI assistant framework composed of autonomous agents. It decomposes complex tasks into specialized processes handled by modular agents. Each agent is specialized (e.g., perception, planning, reasoning) and collectively they:
+
+- Process multimodal user input (text, voice, images)
+- Retrieve and validate knowledge from memory and external sources
+- Plan and execute complex tasks using tools or APIs
+- Perform logical reasoning and generate fluent natural language responses
+- Ensure output safety, ethical alignment, and continual improvement via learning
+- Adapt over time through user feedback, monitoring, and meta-learning
 
 ---
 
-![Flow Diagram](frontend/assets/flow_diagram.png)
+## Flow Diagram
 
-## What It Does
-- Evolves deep neural networks (AutoML / NAS)  
-- Reinforcement learning agents (DQN, PPO)  
-- Meta-learning agents (MAML, Reptile) for few-shot task adaptation  
-- Recursive self-improvement: code generation, evaluation, and rewriting  
-- Multi-task RL framework  
-- Sandbox execution for safety  
+[//]: < See `slai_flowchart.png` in the repo for the full data and agent pipeline.>
+
+```mermaid 
+graph LR
+    B[Collaboration Agent] --> I[Agent Factory]
+    I --> C[Specialist Agents]
+    C --> D[Safety + Evaluation]
+    D --> E[Final Output]
+    D --> F[Logs]
+    G[User Feedback] --> H[Feedback Loop: Adapt + Learn]
+    D --> H
+    H --> B
+    E --> A[User Input]
+    A --> B
+    A --> G
+
+    subgraph C [Specialist Agents]
+        direction LR
+        C1[Perception Agent]
+        C2[Knowledge Agent]
+        C3[Planning Agent]
+        C4[Reasoning Agent]
+        C5[Execution Agent]
+        C6[Language Agent]
+    end
+
+    subgraph D [Safety + Evaluation]
+        D1[Safety Agent] --> D2[Evaluation Agent]
+    end
+
+    subgraph H [Feedback Loop: Adapt + Learn]
+        H1[Learning Agent]
+        H2[Adaptation Agent]
+    end
+```
 
 ---
-## 💻 MINIMUM SYSTEM REQUIREMENTS
-## Hardware:
 
-| Component | Minimum        | Recommended                         |
-|-----------|----------------|-------------------------------------|
-| CPU       | 4-core         | 8-core (Intel i7/AMD Ryzen)         |
-| RAM       | 16 GB          | 32 GB                              |
-| GPU       | GTX 1060 (6GB) | RTX 3060+ or A100 (for large tasks) |
-| Storage   | 4 GB           | 10+ GB (model backups, logs)        |
+## Minimum System Requirements
 
-## Software:
-- OS: Ubuntu 20.04+, macOS 12+, Windows 10+
+### Hardware
 
-- Python: 3.9+
+| Component   | Minimum Requirement         | Recommended                                              |
+| ----------- | --------------------------- | -------------------------------------------------------- |
+| **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7)                              |
+| **RAM**     | 16 GB                       | 32 GB (for multitasking)                                 |
+| **GPU**     | NVIDIA GTX 1060             | NVIDIA RTX 3060 or higher (for large tasks and training) |
+| **Storage** | 50 GB SSD                   | 100 GB SSD (for models + vector DBs + logs)              |
 
-- PyTorch: 2.0+
+### Software
 
-- Required pip packages (already in requirements.txt)
+- **OS:** Ubuntu 22.04+ / Windows 10+
+- **Python:** 3.10+
+- **Dependencies:**
+  - `torch`, `transformers`, `sentence-transformers`, `faiss`, `gradio`
+  - `pydantic`, `langchain`, `openai` (optional)
+  - `graphviz`, `numpy`, `pandas`, `flask`, `uvicorn`
 
-- Optional: PM2 (for deployment), graphviz for architecture visualization
 ---
 
 # How to run
@@ -78,6 +118,10 @@ Note: If you see an error about execution policy:
    pip install PyQt5
    pip install dotenv
    pap install matplotlib
+   pip install faiss-cpu
+   pip install plotly
+   pip install statsmodels
+   pip install causalinference
    ```
 Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
 
@@ -210,18 +254,6 @@ ___
 
 ---
 
-### 🧪 How to Run
-
-```bash
-# Launch the web frontend
-python app.py
-
-# Launch an agent manually
-python main_safe_ai.py
-```
-
-___
----
 
 # SLAI v1.6 Roadmap
 
@@ -251,7 +283,7 @@ Moving from modular execution to autonomous collaboration and introspection.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| Agent self-analysis | Each agent can evaluate and log its own weaknesses | ☐ |
+| Agent self-analysis | Each agent can evaluate and log its own weaknesses | [x] |
 | Shared scoring memory | All evaluation results pushed to a central ranking list | ☐ |
 | Recursive retraining | Underperforming agents can request tuning | ☐ |
 | Agent voting mechanism | Agents can vote on proposed actions (task democracy) | ☐ |
@@ -311,9 +343,16 @@ Moving from modular execution to autonomous collaboration and introspection.
 - Prioritize UI clarity: avoid clutter, maintain 2-panel simplicity
 
 ---
-## License
-This project is licensed under the MIT License.
+## 📄 License
 
-## License
-Built by The-Outsider-97
-With contributions from the SLAI Open AGI Initiative
+This project is licensed under the MIT License. See `LICENSE` for details.
+
+---
+
+### Contact
+
+Developed by [@The-Outsider-97](https://github.com/The-Outsider-97)
+
+---
+
+> SLAI is an experiment in building safe, scalable, intelligent systems that learn and grow with every user interaction.

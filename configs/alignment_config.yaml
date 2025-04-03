@@ -1,0 +1,105 @@
+logging:
+  log_level: INFO
+  audit_log_path: logs/audit.log
+  log_rotation: 7  # days
+  enable_hashing: true
+
+monitor:
+  fairness_metrics:
+    - statistical_parity
+    - equal_opportunity
+    - predictive_parity
+    - disparate_impact
+  drift_threshold: 0.15
+  audit_frequency: 1000
+  adaptive_weights:
+    fairness: 0.4
+    ethics: 0.3
+    safety: 0.3
+
+ethics:
+  safety_constraints:
+    physical_harm: ["Prevent injury to humans", "Avoid property damage"]
+    psychological_harm: ["Prevent emotional distress", "Avoid manipulation"]
+  fairness_constraints:
+    distribution: ["Ensure equitable resource allocation"]
+    procedure: ["Maintain transparent decision processes"]
+  constitutional_rules:
+    privacy: ["Protect personal data", "Minimize data collection"]
+    transparency: ["Explain decisions", "Maintain audit trails"]
+  constraint_priorities:
+    - safety
+    - privacy
+    - fairness
+    - transparency
+  adaptation_rate: 0.1
+
+counterfactual:
+  num_perturbations: 5
+  epsilon_range: [0.1, 0.3]
+  sensitivity_threshold: 0.15
+  fairness_thresholds:
+    individual_fairness: 0.8
+    group_disparity: 0.1
+    causal_effect: 0.05
+  causal_confounders: []
+
+value_model:
+  embedding_dim: 512
+  num_cultural_dimensions: 6
+  num_ethical_principles: 12
+  temperature: 0.07
+  dropout: 0.1
+  margin: 0.2
+  max_seq_length: 128
+
+memory:
+  replay_buffer_size: 10000
+  retention_period: 365
+
+corrections:
+  levels:
+    - threshold: 0.1
+      action: log_warning
+    - threshold: 0.3
+      action: human_intervention
+    - threshold: 0.5
+      action: freeze_agent
+
+explainability:
+  enable_attention_monitoring: true
+  visualize_attention: true
+  saliency_method: integrated_gradients
+  explanation_format: html
+
+human_feedback:
+  enabled: true
+  feedback_mode: implicit  # or explicit
+  feedback_storage_path: data/human_feedback.json
+  max_human_overrides: 5
+
+agent_lifecycle:
+  max_risk_tolerance: 0.6
+  cooldown_after_correction: 60  # seconds
+  quarantine_threshold: 0.8
+  quarantine_action: self_suspend
+
+drift:
+  enable_concept_drift: true
+  method: wasserstein
+  drift_window: 50
+  auto_threshold_adjustment: true
+
+policy_constraints:
+  disallowed_actions:
+    - access_user_data
+    - self_modify
+  soft_limits:
+    max_retries: 3
+    time_limit: 300  # seconds
+
+evaluation:
+  frequency: 5000
+  modes: [alignment, fairness, robustness]
+  auto_export_report: true
+  export_path: reports/latest_alignment_eval.yaml
