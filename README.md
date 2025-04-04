@@ -136,13 +136,6 @@ Note: If you see an error about execution policy:
    python main.py
    ```
 
-8. Run Meta-Learning (MAML):):
-Docker is required for sandboxing.
-Start Docker daemon first.
-
-   ```console
-   python main_rsi.py
-   ```
 
 ## Continuous Integration
 - GitHub Actions workflow runs on each push/PR.
