@@ -128,32 +128,12 @@ Note: If you see an error about execution policy:
    pip install textstat
    pip install spacy
    python -m spacy download en_core_web_sm
-```
+    ```
 
-Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
-
-4. Run a basic reinforcement learning task (CartPole with DQN):
+4. Run Model:
 
    ```console
-   python main_cartpole.py
-   ```
-
-5. Run Evolutionary Hyperparameter Optimization (CartPole + Evolution):
-
-   ```console
-   python main_cartpole_evolve.py
-   ```
-
-6. Run multi-task learning agent:
-
-   ```console
-   python main_multitask.py
-   ```
-
-7. Run Meta-Learning (MAML):):
-
-   ```console
-   python main_maml.py
+   python main.py
    ```
 
 8. Run Meta-Learning (MAML):):
