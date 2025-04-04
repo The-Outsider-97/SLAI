@@ -12,6 +12,14 @@ run:
   output_dir: "logs/"
   plots_dir: "plots/"
 
+language:  
+  llm: null  
+  history: []  
+  summary: null  
+  memory_limit: 1000  
+  enable_summarization: true  
+  summarizer: null
+
 agent:
   type: dqn
   state_dim: 4
