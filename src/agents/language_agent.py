@@ -1,8 +1,12 @@
+import os, sys
 import re
 import json
 import time
+import datetime
+import math
 import pickle
 import hashlib
+import logging
 import ply.lex as lex
 
 from textstat import textstat
@@ -11,22 +15,69 @@ from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union
 from dataclasses import dataclass, field
 from collections import deque, defaultdict, OrderedDict
 
-@dataclass
-class DialogueContext:
-    """Stores conversation history and environment state. 
-    Inspired by Adiwardana et al. (2020) for dialogue coherence."""
-    history: deque = field(default_factory=lambda: deque(maxlen=10))
-    environment_state: Dict[str, Any] = field(default_factory=dict)
-    user_preferences: Dict[str, Any] = field(default_factory=dict)
-    attention_weights: Dict[str, float] = field(default_factory=dict)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from models.slai_lm import SLAILM
 
-    def compress_history(self, threshold: float = 0.7) -> None:
-        """Remove less important context entries using attention weights"""
-        self.history = deque(
-            [entry for entry, weight in zip(self.history, self.attention_weights.values()) 
-             if weight > threshold],
-            maxlen=self.history.maxlen
-        )
+class DialogueContext:
+    def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None):
+        """
+        Manages dialogue memory, optionally summarizes long histories.
+
+        Args:
+            llm: Reference to the language model (e.g., SLAILM)
+            history (list): List of previous messages.
+            summary (str): Optional summary of long-past context.
+            memory_limit (int): Max number of messages to keep before summarizing.
+            enable_summarization (bool): Whether to enable summarization.
+            summarizer (Callable): Custom summarizer function.
+        """
+        self.llm = llm
+        self.history = history if history is not None else []
+        self.summary = summary
+        self.memory_limit = memory_limit
+        self.enable_summarization = enable_summarization
+        self.summarizer = summarizer or self.default_summarizer
+
+    def add(self, message: str):
+        """Add a message to the history and optionally summarize."""
+        self.history.append(message)
+        if self.enable_summarization and len(self.history) > self.memory_limit:
+            self._summarize()
+
+    def _summarize(self):
+        """Summarize current history and reset memory."""
+        if self.summarizer:
+            summary = self.summarizer(self.history, self.summary)
+            self.summary = summary
+            self.history = []
+
+    def get_context(self) -> str:
+        """Get full context including summary and current history."""
+        parts = []
+        if self.summary:
+            parts.append(f"[Summary]\n{self.summary}")
+        if self.history:
+            parts.append(f"[History]\n" + "\n".join(self.history))
+        return "\n\n".join(parts)
+
+    def clear(self):
+        """Clear the history and summary."""
+        self.history = []
+        self.summary = None
+
+    def default_summarizer(self, messages: list, existing_summary: str = None) -> str:
+        """Basic summarizer using LLM if provided."""
+        context = ""
+        if existing_summary:
+            context += f"Previous summary:\n{existing_summary}\n\n"
+        context += "Recent messages:\n" + "\n".join(messages)
+        
+        if self.llm:
+            prompt = f"Summarize the following conversation:\n\n{context}"
+            return self.llm.generate(prompt)
+        else:
+            # Fallback simple summarization
+            return "Summary: " + " | ".join(messages[-3:])  # crude fallback
 
 @dataclass 
 class LinguisticFrame:
@@ -43,7 +94,7 @@ class LinguisticFrame:
 class Wordlist:
     """Advanced linguistic processor with phonetics, morphology, and semantic analysis"""
     
-    def __init__(self, path: Union[str, Path] = "learning/structured_wordlist_en.json"):
+    def __init__(self, path: Union[str, Path] = "src/agents/learning/structured_wordlist_en.json"):
         self.path = Path(path)
         self.data = {}
         self.metadata = {}
@@ -63,11 +114,99 @@ class Wordlist:
         self.ngram_model = defaultdict(lambda: defaultdict(int))
         self._build_ngram_model()
         
-        # Keyboard proximity costs
+        # Keyboard proximity costs, using a QWERTY keyboard
         self.keyboard_layout = {
             'q': {'w': 0.5, 'a': 0.7}, 'w': {'e': 0.5, 's': 0.7},
-            # ... complete keyboard proximity mapping
+            'w': {'q': 0.4, 'e': 0.4, 'a': 0.6, 's': 0.5, 'd': 0.6},
+            'e': {'w': 0.4, 'r': 0.4, 's': 0.6, 'd': 0.5, 'f': 0.6},
+            'r': {'e': 0.4, 't': 0.4, 'd': 0.6, 'f': 0.5, 'g': 0.6},
+            't': {'r': 0.4, 'y': 0.4, 'f': 0.6, 'g': 0.5, 'h': 0.6},
+            'y': {'t': 0.4, 'u': 0.4, 'g': 0.6, 'h': 0.5, 'j': 0.6},
+            'u': {'y': 0.4, 'i': 0.4, 'h': 0.6, 'j': 0.5, 'k': 0.6},
+            'i': {'u': 0.4, 'o': 0.4, 'j': 0.6, 'k': 0.5, 'l': 0.6},
+            'o': {'i': 0.4, 'p': 0.4, 'k': 0.6, 'l': 0.5},
+            'p': {'o': 0.4, 'l': 0.6},
+            
+            'a': {'q': 0.6, 'w': 0.6, 's': 0.4, 'z': 0.7},
+            's': {'q': 0.7, 'w': 0.5, 'e': 0.6, 'a': 0.4, 'd': 0.4, 'z': 0.6, 'x': 0.7},
+            'd': {'w': 0.6, 'e': 0.5, 'r': 0.6, 's': 0.4, 'f': 0.4, 'x': 0.6, 'c': 0.7},
+            'f': {'e': 0.6, 'r': 0.5, 't': 0.6, 'd': 0.4, 'g': 0.4, 'c': 0.6, 'v': 0.7},
+            'g': {'r': 0.6, 't': 0.5, 'y': 0.6, 'f': 0.4, 'h': 0.4, 'v': 0.6, 'b': 0.7},
+            'h': {'t': 0.6, 'y': 0.5, 'u': 0.6, 'g': 0.4, 'j': 0.4, 'b': 0.6, 'n': 0.7},
+            'j': {'y': 0.6, 'u': 0.5, 'i': 0.6, 'h': 0.4, 'k': 0.4, 'n': 0.6, 'm': 0.7},
+            'k': {'u': 0.6, 'i': 0.5, 'o': 0.6, 'j': 0.4, 'l': 0.4, 'm': 0.6},
+            'l': {'i': 0.6, 'o': 0.5, 'p': 0.6, 'k': 0.4},
+            
+            'z': {'a': 0.7, 's': 0.6, 'x': 0.4},
+            'x': {'s': 0.7, 'd': 0.6, 'z': 0.4, 'c': 0.4},
+            'c': {'d': 0.7, 'f': 0.6, 'x': 0.4, 'v': 0.4},
+            'v': {'f': 0.7, 'g': 0.6, 'c': 0.4, 'b': 0.4},
+            'b': {'g': 0.7, 'h': 0.6, 'v': 0.4, 'n': 0.4},
+            'n': {'h': 0.7, 'j': 0.6, 'b': 0.4, 'm': 0.4},
+            'm': {'j': 0.7, 'k': 0.6, 'n': 0.4},
+            
+            # Number row and special characters
+            '1': {'2': 0.4, 'q': 0.6, '!': 0.3},
+            '!': {'1': 0.3, '2': 0.5, 'q': 0.6},
+            '2': {'1': 0.4, '3': 0.4, 'q': 0.6, 'w': 0.6, '@': 0.3},
+            '@': {'2': 0.3, '3': 0.5, 'w': 0.6},
+            '3': {'2': 0.4, '4': 0.4, 'w': 0.6, 'e': 0.6, '#': 0.3},
+            '#': {'3': 0.3, '4': 0.5, 'e': 0.6},
+            '4': {'3': 0.4, '5': 0.4, 'e': 0.6, 'r': 0.6, '$': 0.3},
+            '$': {'4': 0.3, '5': 0.5, 'r': 0.6},
+            '5': {'4': 0.4, '6': 0.4, 'r': 0.6, 't': 0.6, '%': 0.3},
+            '%': {'5': 0.3, '6': 0.5, 't': 0.6},
+            '6': {'5': 0.4, '7': 0.4, 't': 0.6, 'y': 0.6, '^': 0.3},
+            '^': {'6': 0.3, '7': 0.5, 'y': 0.6},
+            '7': {'6': 0.4, '8': 0.4, 'y': 0.6, 'u': 0.6, '&': 0.3},
+            '&': {'7': 0.3, '8': 0.5, 'u': 0.6},
+            '8': {'7': 0.4, '9': 0.4, 'u': 0.6, 'i': 0.6, '*': 0.3},
+            '*': {'8': 0.3, '9': 0.5, 'i': 0.6},
+            '9': {'8': 0.4, '0': 0.4, 'i': 0.6, 'o': 0.6, '(': 0.3},
+            '(': {'9': 0.3, '0': 0.5, 'o': 0.6},
+            '0': {'9': 0.4, 'p': 0.6, ')': 0.3, '-': 0.4},
+            ')': {'0': 0.3, 'p': 0.6, '-': 0.5},
+
+            # Top-right special characters
+            '-': {'0': 0.4, 'p': 0.6, '=': 0.4, '_': 0.3},
+            '_': {'-': 0.3, '=': 0.5},
+            '=': {'-': 0.4, '[': 0.6, '+': 0.3},
+            '+': {'=': 0.3, '[': 0.5},
+            
+            # Brackets and backslash
+            '[': {'p': 0.6, ']': 0.4, '=': 0.6, '{': 0.3},
+            '{': {'[': 0.3, ']': 0.5},
+            ']': {'[': 0.4, '\\': 0.4, '}': 0.3},
+            '}': {']': 0.3, '\\': 0.5},
+            '\\': {']': 0.4, "'": 0.6, '|': 0.3},
+            '|': {'\\': 0.3},
+
+            # Right-side punctuation
+            ';': {'l': 0.6, "'": 0.4, ':': 0.3},
+            ':': {';': 0.3, "'": 0.5},
+            "'": {';': 0.4, 'k': 0.6, ',': 0.4, '"': 0.3},
+            '"': {"'": 0.3, ',': 0.5},
+            ',': {'m': 0.6, '.': 0.4, 'k': 0.6, '<': 0.3},
+            '<': {',': 0.3, '.': 0.5},
+            '.': {',': 0.4, '/': 0.4, 'm': 0.6, '>': 0.3},
+            '>': {'.': 0.3, '/': 0.5},
+            '/': {'.': 0.4, 'shift': 0.6, '?': 0.3},
+            '?': {'/': 0.3},
+
+            # Space and modifiers (approximate positions)
+            'space': {'v': 0.7, 'b': 0.7, 'n': 0.7, 'm': 0.7},
+            'caps': {'a': 0.6, 'q': 0.6, 'tab': 0.4},
+            'tab': {'q': 0.6, 'caps': 0.4},
         }
+
+        # Add reverse relationships automatically
+        reverse_mapping = defaultdict(dict)
+        for char, neighbors in self.keyboard_layout.items():
+            for neighbor, cost in neighbors.items():
+                if neighbor not in reverse_mapping or char not in reverse_mapping[neighbor]:
+                    reverse_mapping[neighbor][char] = cost
+
+        self.keyboard_layout.update(reverse_mapping)
 
     def _load(self) -> None:
         """Robust data loading with validation"""
@@ -94,16 +233,31 @@ class Wordlist:
                 raise ValueError(f"Missing required fields in entry: {word}")
 
     def _precompute_linguistic_data(self) -> None:
-        """Precompute phonetic and n-gram indexes"""
+        """Enhanced n-gram profiles with positional and variable-length grams"""
         for word in self.data:
-            # Phonetic representations
-            self.phonetic_index[self._soundex(word)].add(word)
-            self.phonetic_index[self._metaphone(word)].add(word)
+            word_lc = word.lower()
             
-            # N-gram profiles (tri-grams)
-            ngrams = self._generate_ngrams(word, 3)
-            for ng in ngrams:
-                self.ngram_index[ng].add(word)
+            # Phonetic representations
+            self.phonetic_index[self._soundex(word_lc)].add(word)
+            self.phonetic_index[self._metaphone(word_lc)].add(word)
+            
+            # Generate multiple n-gram types
+            for n in [2, 3, 4]:  # Bigrams, trigrams, and quadgrams
+                # Standard n-grams
+                for i in range(len(word_lc) - n + 1):
+                    ng = word_lc[i:i+n]
+                    self.ngram_index[ng].add(word)
+                
+                # Position-aware n-grams with boundary markers
+                padded = f'^{word_lc}$'
+                for i in range(len(padded) - n + 1):
+                    bng = padded[i:i+n]
+                    self.ngram_index[bng].add(word)
+            
+            # Skip-grams (capture character patterns with gaps)
+            if len(word_lc) >= 4:
+                self.ngram_index[(word_lc[0], word_lc[2])].add(word)  # 1-skip
+                self.ngram_index[(word_lc[1], word_lc[3])].add(word)
 
     def _build_ngram_model(self) -> None:
         """Build basic n-gram frequency model"""
@@ -130,8 +284,46 @@ class Wordlist:
     # ADVANCED SPELLING CORRECTION ----------------------------------------------
     
     def weighted_edit_distance(self, a: str, b: str) -> float:
-        """Keyboard-aware weighted edit distance"""
-        # Implementation with dynamic programming and keyboard cost matrix...
+        """Keyboard-aware edit distance using dynamic programming"""
+        m, n = len(a), len(b)
+        dp = [[0.0]*(n+1) for _ in range(m+1)]
+        
+        # Initialize base cases
+        for i in range(m+1):
+            dp[i][0] = i * 1.5  # Higher deletion cost
+        for j in range(n+1):
+            dp[0][j] = j * 1.5  # Higher insertion cost
+        
+        # Populate DP table
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                deletion = dp[i-1][j] + 1.5
+                insertion = dp[i][j-1] + 1.5
+                
+                # Calculate substitution cost
+                if a[i-1] == b[j-1]:
+                    substitution = dp[i-1][j-1]
+                else:
+                    # Get keyboard proximity cost
+                    c1, c2 = a[i-1], b[j-1]
+                    cost = min(
+                        self.keyboard_layout.get(c1, {}).get(c2, float('inf')),
+                        self.keyboard_layout.get(c2, {}).get(c1, float('inf'))
+                    )
+                    if cost == float('inf'):
+                        # Penalize non-adjacent substitutions
+                        cost = 2.0 if c1.isalpha() == c2.isalpha() else 3.0
+                    substitution = dp[i-1][j-1] + cost
+                    
+                # Transposition (Damerau-Levenshtein extension)
+                transposition = float('inf')
+                if i > 1 and j > 1 and a[i-1] == b[j-2] and a[i-2] == b[j-1]:
+                    transpose_cost = 0.8  # Lower than substitution
+                    transposition = dp[i-2][j-2] + transpose_cost
+                    
+                dp[i][j] = min(deletion, insertion, substitution, transposition)
+        
+        return dp[m][n]
     
     def phonetic_candidates(self, word: str) -> List[str]:
         """Get phonetically similar candidates"""
@@ -147,8 +339,34 @@ class Wordlist:
         return self._cosine_similarity(vec1, vec2)
     
     def _word_vector(self, word: str) -> Dict[str, int]:
-        """Build co-occurrence vector for a word"""
-        # Implementation using n-gram model...
+        """Build co-occurrence vector using n-gram transition frequencies"""
+        vector = defaultdict(int)
+        
+        # Sum n-gram transitions for all character pairs in the word
+        for i in range(len(word) - 1):
+            current = word[i]
+            next_char = word[i+1]
+            
+            # Get all possible transitions for current character
+            transitions = self.ngram_model.get(current, {})
+            
+            # Add weighted transitions to vector
+            for following_char, count in transitions.items():
+                proximity_weight = 1.0  # Base weight (could use position weights)
+                if following_char == next_char:
+                    # Boost actual observed transitions
+                    proximity_weight = 2.0  
+                vector[following_char] += int(count * proximity_weight)
+        
+        # Add reverse transitions for context symmetry
+        for i in range(1, len(word)):
+            current = word[i]
+            prev_char = word[i-1]
+            
+            transitions = self.ngram_model.get(prev_char, {})
+            vector[current] += transitions.get(current, 0)
+        
+        return dict(vector)
     
     def _cosine_similarity(self, vec1: Dict, vec2: Dict) -> float:
         """Calculate cosine similarity between vectors"""
@@ -222,29 +440,173 @@ class Wordlist:
 
 class NLUEngine:
     """Rule-based semantic parser with fallback patterns"""
-    def __init__(self, wordlist_path: str = "learning/wordlist_en.json"):
-        self.intent_patterns = {
-            'information_request': [
-                r'(what|where|when|how)\s+is\s+the',
-                r'explain\s+.*',
-            ],
-            'action_request': [
-                r'(please|kindly)\s+(run|execute|perform)',
-                r'^(start|stop)\s+',
-            ],
-            'clarification': [
-                r'^do\s+you\s+mean',
-                r'^(wait|hold\s+on)',
-            ]
+    def __init__(self, wordlist_path: str = "src/agents/learning/structured_wordlist_en.json"):
+        # Hierarchical intent recognition system with pattern clusters
+        self.intent_weights = {
+            'information_request': {
+                'patterns': [
+                    # Primary patterns (high specificity)
+                    (r'^(what|where|when|how)\s+(is|are|does)\s+the?\b', 2.5),
+                    (r'explain\s+(the\s+)?(concept|process|idea)\b', 2.4),
+                    
+                    # Secondary patterns (medium specificity)
+                    (r'\b(define|describe|elaborate)\s+on\b', 2.0),
+                    (r'\b(meaning|significance)\s+of\b', 1.8),
+                    
+                    # Tertiary patterns (contextual)
+                    (r'\b(can\s+you|could\s+you)\s+clarify\b', 1.6),
+                ],
+                'exclusions': [
+                    r'\b(how\s+to|tutorial|guide)\b',  # Exclude instructional queries
+                ],
+                'context_requirements': {
+                    'required_pos': ['NOUN', 'PROPN'],
+                    'proximity_window': 3  # Words within 3 positions
+                }
+            },
+            'action_request': {
+                'patterns': [
+                    # Imperative structures
+                    (r'^(please|kindly|urgently)\s+(execute|run|perform)\b', 2.8),
+                    (r'\b(start|stop|restart)\s+the\s+process\b', 2.7),
+                    
+                    # Modal verb constructions
+                    (r'\b(must|should)\s+(be\s+)?(initiated|terminated)\b', 2.5),
+                    (r'\b(initiate|terminate)\s+immediately\b', 2.6),
+                ],
+                'context_requirements': {
+                    'required_verbs': ['execute', 'run', 'start', 'stop'],
+                    'dependency_relations': ['dobj', 'xcomp']  # Verb-object relations
+                }
+            },
+            # ... other intents ...
         }
         
+        # Entity recognition system with composable patterns
         self.entity_patterns = {
-            'date': r'\b(\d{4}-\d{2}-\d{2}|tomorrow|today)\b',
-            'url': r'https?://\S+',
-            'number': r'\b\d+\b'
+            'temporal': {
+                'components': {
+                    'date': r'\d{4}-\d{2}-\d{2}',
+                    'relative': r'(today|tomorrow|next\s+\w+)',
+                    'time': r'\d{1,2}:\d{2}\s?(?:AM|PM)?'
+                },
+                'pattern': r'(?:{date}|{relative}|{time})',
+                'pos_constraints': ['NOUN', 'ADV'],
+                'validation': self._validate_temporal,
+                'priority': 1
+            },
+            'quantitative': {
+                'components': {
+                    'number': r'\b\d+(?:\.\d+)?\b',
+                    'unit': r'(kg|ml|m|cm|Hz|W)'
+                },
+                'pattern': r'{number}\s*{unit}',
+                'pos_constraints': ['NUM', 'ADJ'],
+                'validation': self._validate_quantity,
+                'priority': 2
+            },
+            'technical': {
+                'components': {
+                    'protocol': r'(HTTP|FTP|SSH)',
+                    'code': r'[A-Z]{3}-\d{4}',
+                    'version': r'\bv?\d+\.\d+(?:\.\d+)?\b'
+                },
+                'pattern': r'({protocol}/\d\.\d|{code}|{version})',
+                'pos_constraints': ['PROPN', 'NOUN'],
+                'validation': self._validate_technical,
+                'priority': 3
+            }
         }
-        self.wordlist = Wordlist(wordlist_path)
 
+        # Sentiment lexicon (word: polarity_score)
+        self.sentiment_lexicon = {
+            # Strong Positive (1.5-3.0)
+            'excellent': 2.9, 'outstanding': 2.8, 'magnificent': 2.7,
+            'superb': 2.6, 'brilliant': 2.5, 'fantastic': 2.4,
+            
+            # Moderate Positive (0.5-1.4)
+            'good': 1.3, 'pleasing': 1.2, 'satisfactory': 1.0,
+            'adequate': 0.8, 'acceptable': 0.6,
+            
+            # Weak Positive (0.1-0.4)
+            'neutral': 0.3, 'tolerable': 0.2, 'passable': 0.1,
+            
+            # Strong Negative (-3.0--1.5)
+            'horrendous': -2.9, 'atrocious': -2.8, 'abysmal': -2.7,
+            'disastrous': -2.6, 'appalling': -2.5,
+            
+            # Moderate Negative (-1.4--0.5)
+            'poor': -1.3, 'subpar': -1.2, 'deficient': -1.0,
+            'unsatisfactory': -0.8, 'inadequate': -0.6,
+            
+            # Weak Negative (-0.4--0.1)
+            'questionable': -0.3, 'dubious': -0.2, 'mediocre': -0.1,
+            
+            # Intensifiers/Modifiers
+            'very': 0.5, 'extremely': 0.7, 'somewhat': -0.3,
+            'slightly': -0.2, 'remarkably': 0.6
+        }
+
+        # Modality markers
+        self.modality_markers = {
+            'epistemic': {  # Knowledge/belief
+                'certainly', 'probably', 'possibly', 
+                'apparently', 'seemingly', 'evidently'
+            },
+            'deontic': {  # Obligation/permission
+                'must', 'should', 'ought', 
+                'permitted', 'allowed', 'forbidden'
+            },
+            'dynamic': {  # Ability/capacity
+                'can', 'could', 'able', 
+                'capable', 'enable', 'capacity'
+            },
+            'alethic': {  # Logical necessity
+                'necessarily', 'possibly', 
+                'contingently', 'impossibly'
+            },
+            'interrogative': {
+                'who', 'what', 'when', 
+                'where', 'why', 'how', 
+                'which', 'whom', 'whose'
+            },
+            'imperative': {
+                'please', 'kindly', 'urgently',
+                'immediately', 'require', 'demand'
+            },
+            'conditional': {
+                'if', 'unless', 'provided',
+                'assuming', 'contingent', 'conditional'
+            }
+        }
+
+        self.wordlist = self._load_wordlist(wordlist_path)  # Assume returns POS-annotated dict
+
+    def _validate_temporal(self, entity: str) -> bool:
+        """Temporal validation using date logic"""
+        if re.match(r'\d{4}-\d{2}-\d{2}', entity):
+            try:
+                datetime.strptime(entity, '%Y-%m-%d')
+                return True
+            except ValueError:
+                return False
+        return True  # Accept relative times
+
+    def _validate_quantity(self, entity: str) -> bool:
+        """Physical quantity validation"""
+        value, unit = re.match(r'(\d+)\s*(\D+)', entity).groups()
+        return unit.lower() in {
+            'kg', 'g', 'ml', 'l', 
+            'm', 'cm', 'hz', 'khz', 'w', 'kw'
+        }
+
+    def _validate_technical(self, entity: str) -> bool:
+        """Technical spec validation"""
+        if '-' in entity:
+            prefix, code = entity.split('-', 1)
+            return prefix.isalpha() and code.isdigit()
+        return True
+    
     def parse(self, text: str) -> LinguisticFrame:
         """Hybrid parsing using rules and simple statistics"""
         frame = LinguisticFrame(
@@ -284,10 +646,62 @@ class NLUEngine:
 
     def _calculate_sentiment(self, text: str) -> float:
         """Basic sentiment analysis using lexicon approach"""
-        positive = len(re.findall(r'\b(good|great|excellent)\b', text, re.IGNORECASE))
-        negative = len(re.findall(r'\b(bad|terrible|horrible)\b', text, re.IGNORECASE))
-        return (positive - negative) / max(len(text.split()), 1)  # Prevent division by zero
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        base_score = 0.0
+        current_intensity = 1.0
+        
+        for i, token in enumerate(tokens):
+            # Handle intensifiers
+            if token in {'very', 'extremely', 'remarkably'}:
+                current_intensity *= 1.5
+                continue
+            elif token in {'somewhat', 'slightly'}:
+                current_intensity *= 0.7
+                continue
+                
+            # Reset intensity after each sentiment-bearing word
+            if token in self.sentiment_lexicon:
+                base_score += self.sentiment_lexicon[token] * current_intensity
+                current_intensity = 1.0  # Reset modifier
 
+        # Normalization using softmax-inspired approach
+        normalized = math.tanh(base_score / math.sqrt(len(tokens))) if tokens else 0.0
+        return round(normalized, 2)
+
+    def _detect_modality(self, text: str) -> str:
+        """Hierarchical modality detection"""
+        text_lower = text.lower()
+        
+        # Priority detection order
+        modalities = [
+            ('interrogative', any(m in text_lower for m in self.modality_markers['interrogative'])),
+            ('imperative', any(m in text_lower for m in self.modality_markers['imperative'])),
+            ('conditional', any(m in text_lower for m in self.modality_markers['conditional'])),
+            ('epistemic', any(m in text_lower for m in self.modality_markers['epistemic'])),
+            ('deontic', any(m in text_lower for m in self.modality_markers['deontic'])),
+            ('dynamic', any(m in text_lower for m in self.modality_markers['dynamic'])),
+            ('alethic', any(m in text_lower for m in self.modality_markers['alethic'])),
+        ]
+
+        for mod_type, detected in modalities:
+            if detected:
+                return mod_type
+        return 'declarative'
+    
+    def _calculate_confidence(self, text: str) -> float:
+        total_weight = 0.0
+        for intent, patterns in self.intent_weights.items():
+            for pattern, weight in patterns.items():
+                if re.search(pattern, text, re.IGNORECASE):
+                    total_weight += weight
+        
+        # Sigmoid function for confidence scaling
+        return 1 / (1 + math.exp(-total_weight/3))  # Logistic curve
+
+    def _load_wordlist(self, path: str) -> Dict[str, Any]:
+        # Assume implementation loads wordlist with POS data
+        return {}  # Placeholder
+    
 # --------------------------
 # Enhanced NLU Components
 # --------------------------
@@ -329,7 +743,7 @@ class EnhancedNLU(NLUEngine):
             else:
                 word_sentiment = self.wordlist.query(node['word']).get('sentiment', 0)
                 sentiment += word_sentiment * node['intensity']
-        return tanh(sentiment)  # Squash to [-1, 1]
+        return math.tanh(sentiment)  # Squash to [-1, 1]
 
     def _detect_modality(self, parse_tree: Dict) -> str:
         """Detect speech modality using verb patterns"""
@@ -366,10 +780,47 @@ class ShallowDependencyParser:
 # --------------------------
 class NLGEngine:
     """Controlled text generation with style management"""
-    def __init__(self, templates_path: str = "learning/nlg_templates.json"):
+    def __init__(self, templates_path: str = "src/agents/learning/nlg_templates_en.json"):
+
+
         self.templates = self._load_templates(templates_path)
         self.style = {'formality': 0.5, 'verbosity': 1.0}
         self.coherence_checker = ResponseCoherence()
+
+    def _load_templates(self, path: str) -> Dict[str, List[str]]:
+        """Load and validate response templates from JSON file"""
+        template_path = Path(path)
+        
+        if not template_path.exists():
+            raise FileNotFoundError(f"Template file missing at: {template_path}")
+            
+        try:
+            with open(template_path, 'r') as f:
+                templates = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format in templates: {e}")
+
+        # Validate template structure
+        required_categories = {
+            'greeting', 'farewell', 'default',
+            'acknowledgement', 'error', 'thanks'
+        }
+        
+        missing = required_categories - templates.keys()
+        if missing:
+            raise ValueError(f"Missing required template categories: {missing}")
+
+        # Validate each category has at least one template
+        for category, entries in templates.items():
+            if isinstance(entries, dict):
+                if "responses" not in entries or not isinstance(entries["responses"], list):
+                    raise ValueError(f"Invalid template format for category: {category}")
+            elif isinstance(entries, list):
+                continue  # accept flat list for backward compatibility
+            else:
+                raise ValueError(f"Invalid template format for category: {category}")
+
+        return templates
 
     def generate(self, frame: LinguisticFrame, context: DialogueContext) -> str:
         """Generate response using hybrid template-neural approach"""
@@ -468,16 +919,34 @@ class SafetyGuard:
         return text
 
 class LanguageAgent:
-    def __init__(self, llm, config: Dict):
+    def __init__(self, llm: SLAILM, config: Dict):
         self.llm = llm
         self.nlu = NLUEngine()
         self.cache = KnowledgeCache(max_size=config.get('cache_size', 1000))
         self.safety = SafetyGuard()
-        self.context = DialogueContext()
+        allowed_keys = {'history', 'environment_state', 'user_preferences', 'attention_weights'}
+        context_args = {k: v for k, v in config.items() if k in allowed_keys}
+        self.context = DialogueContext(
+            llm=llm,
+            history=config.get("history", []),
+            summary=config.get("summary"),
+            memory_limit=config.get("memory_limit", 1000),
+            enable_summarization=config.get("enable_summarization", True),
+            summarizer=config.get("summarizer"))
         self.dialogue_policy = self._load_dialogue_policy()
         self.wordlist = Wordlist(config.get('wordlist_path'))
         self.nlu = NLUEngine(config.get('wordlist_path'))
-        self.nlg = NLGEngine(config.get('nlg_templates'))
+        self.nlg = NLGEngine(config.get('nlg_templates_en', 'src/agents/learning/nlg_templates_en.json'))
+
+    def parse_intent(self, user_input: str) -> str:
+        """Match user input against known triggers per intent."""
+        user_input = user_input.lower()
+        for intent, entry in self.nlg.templates.items():
+            if isinstance(entry, dict):
+                triggers = entry.get("triggers", [])
+                if any(trigger in user_input for trigger in triggers):
+                    return intent
+        return "default"
 
     def preprocess_input(self, text: str) -> str:
         words = text.split()
@@ -496,8 +965,7 @@ class LanguageAgent:
         
         # Stage 3: Context-aware response generation
         cache_key = self.cache.hash_query(clean_input)
-        if cached := self.cache.get(cache_key):
-            return safe_response, frame
+        
             
         prompt = self._construct_prompt(clean_input, frame)
         raw_response = self.llm.generate(prompt)
@@ -658,76 +1126,3 @@ class LanguageAgent:
             prompt += "Dialogue History:\n" + "\n".join([f"User: {u}\nBot: {r}" for u, r in self.context.history])
         prompt += "\nAssistant:"
         return prompt
-
-    def process_input(self, user_input: str) -> Tuple[str, Dict]:
-        """
-        End-to-end processing pipeline.
-        
-        Returns:
-            Tuple of (LLM response, structured command).
-        
-        Raises:
-            RuntimeError: If LLM fails or response is unsafe.
-        """
-        start_time = time.time()
-        
-        # Step 1: Generate prompt
-        prompt = self.generate_prompt(user_input)
-        
-        # Step 2: Get LLM response
-        llm_response = self.interface_llm(prompt)
-        
-        # Step 3: Validate safety
-        if not self.validate_response(llm_response):
-            llm_response = "[SAFETY FILTER] I cannot comply with this request."
-        
-        # Step 4: Parse and update context
-        structured_input = self.translate_user_input(user_input)
-        self.update_context(user_input, llm_response)
-        
-        # Step 5: Record performance
-        self.benchmark_data["response_time"].append(time.time() - start_time)
-        
-        return llm_response, structured_input
-
-    def interface_llm(self, prompt: str) -> str:
-        """Robust LLM interface with retries and timeout."""
-        for attempt in range(self.max_retries):
-            try:
-                response = self.llm.generate(prompt, timeout=self.timeout)
-                return response.strip()
-            except Exception as e:
-                if attempt == self.max_retries - 1:
-                    raise RuntimeError(f"LLM failed after {self.max_retries} attempts: {str(e)}")
-                continue
-
-    def translate_user_input(self, user_input: str) -> Dict:
-        """Parse user input into structured commands."""
-        patterns = {
-            'search': r'(?:search|find)\s+(?P<query>.+?)(?:\s+(?:about|for)\s+(?P<topic>.+))?',
-            'create': r'(?:create|make)\s+(?P<object>\w+)(?:\s+with\s+(?P<params>.+))?',
-            'default': r'(?P<command>\w+)(?:\s+(?P<args>.+))?'
-        }
-
-        for intent, pattern in patterns.items():
-            match = re.match(pattern, user_input.strip(), re.IGNORECASE)
-            if match:
-                groups = match.groupdict()
-                return {
-                    'intent': intent,
-                    'entities': {k: v for k, v in groups.items() if v},
-                    'args': groups.get('args', '').split() if 'args' in groups else []
-                }
-        return {'intent': 'unknown', 'entities': {}, 'args': []}
-
-# --------------------------
-# Utility Functions
-# --------------------------
-def load_config(config_path: Union[str, Path]) -> Dict:
-    """Load configuration with integrity checking"""
-    # Implementation omitted for brevity
-    return {}
-
-def initialize_agent(llm, config_path: str = "config.json") -> LanguageAgent:
-    config = load_config(config_path)
-    return LanguageAgent(llm, config)
