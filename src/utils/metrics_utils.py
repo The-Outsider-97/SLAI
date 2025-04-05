@@ -5,203 +5,183 @@ import yaml
 import csv
 import pickle
 import torch
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# ============================================
-# Threshold Evaluators
-# ============================================
-
-def check_statistical_parity(parity_difference: float, threshold: float) -> Tuple[bool, str]:
+class FairnessMetrics:
     """
-    Checks whether the statistical parity difference breaches the defined threshold.
-    
-    Args:
-        parity_difference (float): The calculated parity difference.
-        threshold (float): The acceptable threshold limit.
-
-    Returns:
-        Tuple[bool, str]: (True if violation exists, message)
+    Implements fairness metrics from algorithmic fairness literature.
+    Reference: Barocas et al., "Fairness and Machine Learning", 2022
     """
-    logger.info(f"Checking statistical parity: diff={parity_difference}, threshold={threshold}")
     
-    if abs(parity_difference) > threshold:
-        message = f"Statistical Parity Violation: {parity_difference:.4f} exceeds threshold {threshold:.4f}"
-        logger.warning(message)
-        return True, message
-    
-    return False, "Statistical parity within acceptable range."
+    @staticmethod
+    def demographic_parity(sensitive_groups: List[str], 
+                          positive_rates: Dict[str, float],
+                          threshold: float = 0.05) -> Tuple[bool, str]:
+        """
+        Check demographic parity (Dwork et al., 2012)
+        :param sensitive_groups: List of group identifiers
+        :param positive_rates: Dictionary of P(ŷ=1|group) per group
+        :param threshold: Maximum allowable difference (ϵ)
+        :return: Tuple (violation, message)
+        """
+        if len(positive_rates) < 2:
+            raise ValueError("Requires rates for at least 2 groups")
+            
+        rates = np.array(list(positive_rates.values()))
+        max_diff = np.max(rates) - np.min(rates)
+        
+        violation = max_diff > threshold
+        msg = (f"Demographic Parity {'Violation' if violation else 'Satisfied'}: "
+               f"Max group difference {max_diff:.3f} vs threshold {threshold}")
+        return violation, msg
 
+    @staticmethod
+    def equalized_odds(sensitive_groups: List[str],
+                      tprs: Dict[str, float],
+                      fprs: Dict[str, float],
+                      threshold: float = 0.05) -> Tuple[bool, str]:
+        """
+        Check equalized odds (Hardt et al., 2016)
+        :param tprs: True positive rates per group
+        :param fprs: False positive rates per group
+        :return: Tuple (violation, message)
+        """
+        tpr_values = np.array(list(tprs.values()))
+        fpr_values = np.array(list(fprs.values()))
+        
+        tpr_diff = np.max(tpr_values) - np.min(tpr_values)
+        fpr_diff = np.max(fpr_values) - np.min(fpr_values)
+        
+        violation = (tpr_diff > threshold) or (fpr_diff > threshold)
+        msg = (f"Equalized Odds {'Violation' if violation else 'Satisfied'}: "
+               f"TPR diff {tpr_diff:.3f}, FPR diff {fpr_diff:.3f} vs threshold {threshold}")
+        return violation, msg
 
-def check_equal_opportunity(tpr_difference: float, threshold: float) -> Tuple[bool, str]:
+    @staticmethod
+    def counterfactual_fairness(predictions: Dict[str, Dict[str, float]],
+                               threshold: float = 0.05) -> Tuple[bool, str]:
+        """
+        Check counterfactual fairness (Kusner et al., 2017)
+        :param predictions: Dict of {individual: {scenario: prediction}}
+        :return: Tuple (violation, message)
+        """
+        max_diffs = []
+        for indv, scenarios in predictions.items():
+            diffs = [abs(p1 - p2) for p1 in scenarios.values() for p2 in scenarios.values()]
+            max_diffs.append(max(diffs) if diffs else 0)
+            
+        avg_max_diff = np.mean(max_diffs)
+        violation = avg_max_diff > threshold
+        msg = (f"Counterfactual Fairness {'Violation' if violation else 'Satisfied'}: "
+               f"Average max scenario difference {avg_max_diff:.3f} vs threshold {threshold}")
+        return violation, msg
+
+class PerformanceMetrics:
     """
-    Checks whether the equal opportunity difference breaches the threshold.
-    
-    Args:
-        tpr_difference (float): The true positive rate difference between groups.
-        threshold (float): The maximum allowable difference.
-    
-    Returns:
-        Tuple[bool, str]: (True if violation exists, message)
+    Implements robust performance metrics from ML literature
+    Reference: Dietterich, "Machine Learning for Sequential Data", 2002
     """
-    logger.info(f"Checking equal opportunity: diff={tpr_difference}, threshold={threshold}")
     
-    if abs(tpr_difference) > threshold:
-        message = f"Equal Opportunity Violation: {tpr_difference:.4f} exceeds threshold {threshold:.4f}"
-        logger.warning(message)
-        return True, message
+    @staticmethod
+    def class_balanced_accuracy(y_true: np.ndarray,
+                               y_pred: np.ndarray,
+                               classes: List[int]) -> float:
+        """
+        Calculate balanced accuracy (Brodersen et al., 2010)
+        """
+        per_class_acc = []
+        for cls in classes:
+            mask = y_true == cls
+            if np.sum(mask) == 0:
+                continue
+            per_class_acc.append(np.mean(y_pred[mask] == y_true[mask]))
+        return np.mean(per_class_acc) if per_class_acc else 0.0
 
-    return False, "Equal opportunity within acceptable range."
+    @staticmethod
+    def calibration_error(y_true: np.ndarray,
+                        probs: np.ndarray,
+                        bins: int = 10) -> float:
+        """
+        Calculate expected calibration error (Guo et al., 2017)
+        """
+        bin_boundaries = np.linspace(0, 1, bins + 1)
+        bin_lowers = bin_boundaries[:-1]
+        bin_uppers = bin_boundaries[1:]
+        
+        errors = []
+        for bl, bu in zip(bin_lowers, bin_uppers):
+            in_bin = (probs >= bl) & (probs < bu)
+            prop = np.mean(y_true[in_bin]) if np.any(in_bin) else 0
+            avg_prob = np.mean(probs[in_bin]) if np.any(in_bin) else 0
+            errors.append(np.abs(avg_prob - prop) * np.sum(in_bin))
+            
+        return np.sum(errors) / len(y_true)
 
-
-def check_predictive_parity(ppv_difference: float, threshold: float) -> Tuple[bool, str]:
+class BiasDetection:
     """
-    Checks whether the predictive parity difference breaches the threshold.
-
-    Args:
-        ppv_difference (float): The positive predictive value difference between groups.
-        threshold (float): Maximum allowable difference.
-
-    Returns:
-        Tuple[bool, str]: (True if violation exists, message)
+    Statistical bias detection methods from social sciences
+    Reference: West et al., "Discrimination in Algorithmic Decision Making", 2023
     """
-    logger.info(f"Checking predictive parity: diff={ppv_difference}, threshold={threshold}")
     
-    if abs(ppv_difference) > threshold:
-        message = f"Predictive Parity Violation: {ppv_difference:.4f} exceeds threshold {threshold:.4f}"
-        logger.warning(message)
-        return True, message
+    @staticmethod
+    def subgroup_variance(scores: Dict[str, np.ndarray],
+                         alpha: float = 0.05) -> Tuple[bool, str]:
+        """
+        Bartlett's test for variance homogeneity across groups
+        Reference: Bartlett, "Properties of Sufficiency and Statistical Tests", 1937
+        """
+        from scipy.stats import bartlett
+        group_vars = [np.var(g_scores) for g_scores in scores.values()]
+        stat, pval = bartlett(*scores.values())
+        
+        violation = pval < alpha
+        msg = (f"Subgroup Variance {'Heterogeneity' if violation else 'Homogeneity'}: "
+               f"p={pval:.4f}, variances={group_vars}")
+        return violation, msg
+
+    @staticmethod
+    def disparate_mistreatment(y_true: np.ndarray,
+                              y_pred: np.ndarray,
+                              sensitive_attr: np.ndarray,
+                              metric: str = 'fpr') -> float:
+        """
+        Calculate disparate mistreatment (Zafar et al., 2017)
+        :param metric: 'fpr' (false positive) or 'fnr' (false negative)
+        """
+        if metric not in ['fpr', 'fnr']:
+            raise ValueError("Invalid metric, choose 'fpr' or 'fnr'")
+            
+        disparity = 0.0
+        groups = np.unique(sensitive_attr)
+        group_metrics = []
+        
+        for group in groups:
+            mask = sensitive_attr == group
+            if metric == 'fpr':
+                rate = np.mean(y_pred[mask][y_true[mask] == 0] == 1)
+            else:  # fnr
+                rate = np.mean(y_pred[mask][y_true[mask] == 1] == 0)
+            group_metrics.append(rate)
+            
+        return max(group_metrics) - min(group_metrics)
+
+class MetricSummarizer:
+    """
+    Aggregate results with academic references
+    Reference: Mitchell et al., "Model Cards for Model Reporting", 2019
+    """
     
-    return False, "Predictive parity within acceptable range."
-
-def check_individual_fairness(unfairness_rate: float, threshold: float) -> Tuple[bool, str]:
-    """
-    Checks whether individual fairness breaches threshold.
-
-    Args:
-        unfairness_rate (float): Proportion of similar individuals treated differently.
-        threshold (float): Maximum acceptable rate.
-
-    Returns:
-        Tuple[bool, str]: (True if violation exists, message)
-    """
-    logger.info(f"Checking individual fairness: rate={unfairness_rate}, threshold={threshold}")
-
-    if unfairness_rate > threshold:
-        message = f"Individual Fairness Violation: rate {unfairness_rate:.4f} exceeds threshold {threshold:.4f}"
-        logger.warning(message)
-        return True, message
-
-    return False, "Individual fairness within acceptable range."
-
-# ============================================
-# Performance Evaluators
-# ============================================
-
-def evaluate_performance(performance: Dict[str, Any], reward_threshold: float) -> Tuple[bool, str]:
-    """
-    Evaluate performance metrics from parsed logs.
-    
-    Args:
-        performance (dict): Contains keys like 'best_reward', 'average_reward'.
-        reward_threshold (float): Minimum acceptable reward threshold.
-    
-    Returns:
-        Tuple[bool, str]: (True if performance is insufficient, message)
-    """
-    best_reward = performance.get("best_reward", 0.0)
-    logger.info(f"Evaluating performance: best_reward={best_reward}, threshold={reward_threshold}")
-
-    if best_reward < reward_threshold:
-        message = f"Performance Violation: best_reward {best_reward:.4f} is below threshold {reward_threshold:.4f}"
-        logger.warning(message)
-        return True, message
-
-    return False, "Performance within acceptable range."
-
-# ============================================
-# Summary and Report Generators
-# ============================================
-
-def summarize_violations(*violation_messages: Tuple[bool, str]) -> Dict[str, Any]:
-    """
-    Collects all violations and summarizes them.
-    
-    Args:
-        *violation_messages (Tuple[bool, str]): Results from threshold checks.
-    
-    Returns:
-        dict: Summary of violations detected.
-    """
-    logger.info("Summarizing violations...")
-
-    summary = {
-        "violations_detected": False,
-        "details": []
-    }
-
-    for violation, message in violation_messages:
-        if violation:
-            summary["violations_detected"] = True
-            summary["details"].append(message)
-
-    if not summary["violations_detected"]:
-        summary["details"].append("No violations detected.")
-
-    logger.info(f"Summary: {summary}")
-    return summary
-
-# ==========================================
-# Actual Usage in Main AutoTune Pipeline
-# ==========================================
-if __name__ == "__main__":
-    import json
-    from utils.metrics_utils_extension import (
-        plot_learning_curve,
-        plot_bias_metrics,
-        time_series_analysis
-    )
-
-    # Simulated parsed_metrics.json loading (after logs_parser.parse_logs() execution)
-    with open("logs/parsed_metrics.json", "r") as f:
-        parsed_metrics = json.load(f)
-
-    # === Plot Learning Curve ===
-    learning_curve_data = parsed_metrics.get("performance", {}).get("learning_curve", [])
-    if learning_curve_data:
-        plot_learning_curve(
-            rewards=learning_curve_data,
-            title=f"Learning Curve - Model {parsed_metrics.get('model_version', 'N/A')}",
-            save_path=f"plots/{parsed_metrics.get('run_id', 'run')}_learning_curve.png"
-        )
-
-    # === Plot Bias Metrics ===
-    parity_diff = parsed_metrics.get("statistical_parity", {}).get("parity_difference", 0.0)
-    tpr_diff = parsed_metrics.get("equal_opportunity", {}).get("tpr_difference", 0.0)
-    ppv_diff = parsed_metrics.get("predictive_parity", {}).get("ppv_difference", 0.0)
-
-    plot_bias_metrics(
-        parity_diff=parity_diff,
-        tpr_diff=tpr_diff,
-        ppv_diff=ppv_diff,
-        save_path=f"plots/{parsed_metrics.get('run_id', 'run')}_bias_metrics.png"
-    )
-
-    # === Time-Series Analysis Across Multiple Runs ===
-    import glob
-
-    all_metrics = []
-    for file_path in glob.glob("logs/history/parsed_metrics_run_*.json"):
-        with open(file_path, "r") as f:
-            all_metrics.append(json.load(f))
-
-    if all_metrics:
-        trend_summary = time_series_analysis(
-            metrics=all_metrics,
-            metric_key="performance.best_reward"
-        )
-        print("\nTime-Series Trend Summary:", trend_summary)
-
-    print("✅ Metrics visualization and time-series analysis complete.")
+    @staticmethod
+    def create_model_card(metrics: Dict[str, Any],
+                        references: Dict[str, str]) -> Dict:
+        """
+        Generate model card with metric provenance
+        """
+        return {
+            'metrics': metrics,
+            'provenance': references,
+            'timestamp': np.datetime64('now')
+        }
