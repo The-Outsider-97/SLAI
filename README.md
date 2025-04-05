@@ -117,7 +117,6 @@ Note: If you see an error about execution policy:
    pip install psutil
    pip install PyQt5
    pip install dotenv
-   pap install matplotlib
    pip install faiss-cpu
    pip install plotly
    pip install statsmodels
