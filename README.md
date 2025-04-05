@@ -126,6 +126,7 @@ Note: If you see an error about execution policy:
    pip install ply
    pip install textstat
    pip install matplotlib opencv-python
+   pip install gymnasium
     ```
 
 4. Run Model:
