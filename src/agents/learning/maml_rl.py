@@ -6,6 +6,9 @@ import torch.optim as optim
 import numpy as np
 from collections import namedtuple
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from src.collaborative.shared_memory import SharedMemory
+
 Transition = namedtuple('Transition', ['state', 'action', 'reward'])
 
 class PolicyNetwork(nn.Module):
@@ -21,10 +24,11 @@ class PolicyNetwork(nn.Module):
         return torch.softmax(self.fc3(x), dim=-1)
 
 class MAMLAgent:
-    def __init__(self, state_size, action_size, hidden_size=64, meta_lr=0.001, inner_lr=0.01, gamma=0.99):
+    def __init__(self, state_size, action_size, hidden_size=64, meta_lr=0.001, inner_lr=0.01, gamma=0.99, shared_memory=None):
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
+        self.shared_memory = shared_memory
 
         self.policy = PolicyNetwork(state_size, action_size, hidden_size)
         self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=meta_lr)
