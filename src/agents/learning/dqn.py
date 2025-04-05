@@ -24,7 +24,7 @@ from collections import deque
 import copy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-from ....src.collaborative.shared_memory import SharedMemory
+from src.collaborative.shared_memory import SharedMemory
 
 # ====================== Neural Network Core ======================
 class NeuralNetwork:
