@@ -136,6 +136,22 @@ class DistributedReplayBuffer:
             
         return self._process_batch(samples[:batch_size])
 
+    def _uniform_sample(self, batch_size):
+        """Random uniform sampling from all experiences.
+        
+        Implements baseline experience replay from:
+        Mnih et al., "Playing Atari with Deep Reinforcement Learning", 2013
+        
+        Returns:
+            tuple: (agent_ids, states, actions, rewards, next_states, dones)
+        """
+        # Randomly select experiences without prioritization
+        indices = random.sample(range(len(self.buffer)), batch_size)
+        batch = [self.buffer[i] for i in indices]
+        
+        # Return formatted batch with original priority weights (1.0 for all)
+        return self._process_batch(batch)
+    
     def _remove_stale_experiences(self):
         """Automatic removal of stale experiences (Agarwal et al., 2021)"""
         now = datetime.now()
