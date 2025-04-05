@@ -1,5 +1,3 @@
-# SLAI/models/slai_lm.py
-
 import os, sys
 import random
 import re
@@ -85,6 +83,8 @@ class SLAILM:
         )
 
     def _prime_factors(self, n):
+        if not isinstance(n, int):
+            raise TypeError(f"Expected integer, got {type(n)}")
         """Prime factorization using trial division (Cormen et al., 2009)"""
         factors = []
         d = 2
