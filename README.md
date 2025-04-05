@@ -126,8 +126,7 @@ Note: If you see an error about execution policy:
    pip install textstat
    pip install ply
    pip install textstat
-   pip install spacy
-   python -m spacy download en_core_web_sm
+   pip install opencv-python
     ```
 
 4. Run Model:
