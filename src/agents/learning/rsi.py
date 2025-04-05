@@ -7,7 +7,7 @@ import numpy as np
 from collections import deque
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-from ....src.collaborative.shared_memory import SharedMemory
+from src.collaborative.shared_memory import SharedMemory
 
 class RSI_Agent:
     def __init__(self, state_size, action_size, shared_memory: SharedMemory, config: dict = None):
