@@ -111,6 +111,8 @@ Note: If you see an error about execution policy:
    ```console
    pip install torch torchvision torchaudio
    pip install -r requirements.txt
+   pip install pyyaml
+   pip install PyQt5
     ```
 
 4. Run Model:
