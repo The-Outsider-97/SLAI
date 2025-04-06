@@ -1,11 +1,15 @@
-import os
+import os, sys
 import ast
+import yaml
 import importlib
-import logging
+import logging as logger, logging
 import numpy as np
 import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.agents.language_agent import LanguageAgent
 
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
@@ -20,9 +24,38 @@ class AgentFactory:
     def __init__(self, shared_resources: Optional[Dict[str, Any]] = None):
         self.agent_registry: Dict[str, AgentMetaData] = {}
         self.shared_resources = shared_resources or {}
-        self._memoized_agents: Dict[str, Any] = {}
+        self._memorized_agents: Dict[str, Any] = {}
         self._fallback_map = self._create_fallback_map()
         self._discover_agents()
+        self.registry = {}
+
+    def register(self, name: str, agent_cls):
+        self.registry[name] = agent_cls
+
+    def create(self, agent_type: str, config: dict):
+        build_config_fn = getattr(self, f"_build_{agent_type}_config", None)
+
+        # Attempt registered agents first
+        if agent_type in self.registry:
+            agent_cls = self.registry[agent_type]
+            final_config = build_config_fn(config) if build_config_fn else config
+
+            # Validate parameters
+            try:
+                init_func = agent_cls.__init__
+                required_params = init_func.__code__.co_varnames[1:init_func.__code__.co_argcount]
+            except AttributeError:
+                # Class does not override __init__, skip param check
+                required_params = []
+            missing = [k for k in required_params if k not in final_config]
+            if missing:
+                raise ValueError(f"Missing required parameters for {agent_type}: {missing}")
+
+            return agent_cls(**final_config)
+
+        # Fallback mechanism
+        logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
+        return self._create_fallback_agent(agent_type, config)
 
     def _create_fallback_map(self) -> Dict[str, Tuple[str, str]]:
         return {
@@ -81,16 +114,23 @@ class AgentFactory:
                isinstance(annotation.value, ast.Name) and \
                annotation.value.id == "Optional"
 
-    def create(self, agent_name: str, config: Dict) -> Any:
-        if agent_name in self._memoized_agents:
-            return self._memoized_agents[agent_name]
-
-        metadata = self.agent_registry.get(agent_name)
-        if not metadata:
-            return self._create_fallback_agent(agent_name, config)
-
-        self._validate_config(metadata, config)
-        return self._instantiate_agent(metadata, config)
+    def parse_intent(self, prompt):
+        # Add input safety checks
+        if not prompt or len(prompt.strip()) < 1:
+            return {"intent": "unknown", "confidence": 0.0}
+        
+        # Limit input length and handle encoding
+        clean_prompt = prompt.strip()[:200]  # Truncate long inputs
+        try:
+            # Add fallback for empty token lists
+            tokens = self.llm.tokenizer.tokenize(clean_prompt)
+            if not tokens:
+                return {"intent": "generic", "confidence": 0.5}
+                
+            # Rest of intent parsing logic...
+        except Exception as e:
+            logger.error(f"Intent parsing error: {str(e)}")
+            return {"intent": "error", "confidence": 0.0}
 
     def _create_fallback_agent(self, agent_name: str, config: Dict) -> Any:
         if agent_name not in self._fallback_map:
@@ -122,14 +162,17 @@ class AgentFactory:
             raise RuntimeError(f"Class {metadata.class_name} not found in {metadata.module_path}")
 
     def _initialize_agent(self, agent_class: type, config: Dict) -> Any:
-        params = {
-            "config": config,
-            **self.shared_resources,
-            **self._agent_specific_config(agent_class, config)
-        }
-        if agent_class.__name__ == "LanguageAgent":
-            from src.models.fake_llm import FakeLLM  # or your real LLM import
-            return agent_class(llm=FakeLLM(), config=config)
+        if agent_class.__name__ == "DialogueContext":
+            from models.slai_lm import SLAILM
+            return agent_class(
+                llm=config.get("llm", SLAILM()),
+                history=config.get("history", []),
+                summary=config.get("summary", None),
+                memory_limit=config.get("memory_limit", 1000),
+                enable_summarization=config.get("enable_summarization", True),
+                summarizer=config.get("summarizer", None)
+            )
+
         return agent_class(**config)
 
     def _agent_specific_config(self, agent_class: type, config: Dict) -> Dict:
@@ -142,9 +185,23 @@ class AgentFactory:
         
         return config_builder(config)
 
-    def _build_language_config(self, config: Dict) -> Dict:
-        return {'text_model': self._init_text_model(config)} if self._check_text_deps() else {}
-
+    def _build_language_config(self, config: dict) -> dict:
+        from models.slai_lm import SLAILM
+        llm_instance = config.get("llm", SLAILM())
+        return {
+            "llm": llm_instance,
+            "config": {
+                "history": config.get("history", []),
+                "summary": config.get("summary", None),
+                "memory_limit": config.get("memory_limit", 1000),
+                "enable_summarization": config.get("enable_summarization", True),
+                "summarizer": config.get("summarizer", None),
+                "wordlist_path": config.get("wordlist_path", "src/agents/learning/structured_wordlist_en.json"),
+                "nlg_templates": config.get("nlg_templates", "src/agents/learning/nlg_templates_en.json"),
+                "cache_size": config.get("cache_size", 1000)
+            }
+        }
+    
     def _build_learning_config(self, config: Dict) -> Dict:
         return {'rl_algorithm': self._init_rl_algorithm(config)}
 
@@ -170,17 +227,20 @@ class AgentFactory:
         return None
 
     def _init_rl_algorithm(self, config: Dict) -> Any:
-        algorithm = config.get("algorithm", "dqn").lower()
+        algorithm = config.get("algorithm", "rl").lower()
         try:
             if algorithm == "maml":
-                from ...src.agents.learning import maml_rl
+                from src.agents.learning import maml_rl
                 return maml_rl.MAMLTrainer(config)
             elif algorithm == "rsi":
-                from ...src.agents.learning import rsi
+                from src.agents.learning import rsi
                 return rsi.RSITrainer(config)
-            else:
-                from ...src.agents.learning import dqn
+            elif algorithm == "dqn":
+                from src.agents.learning import dqn
                 return dqn.DQNAgent(config)
+            else:
+                from src.agents.learning import rl_agent
+                return rl_agent.RLAgent(config)
         except ImportError as e:
             raise RuntimeError(f"RL component import failed: {str(e)}")
 
