@@ -3,6 +3,7 @@ import random
 import re
 import math
 import time
+import logging as logger, logging
 import datetime
 from collections import defaultdict
 import hashlib
@@ -44,6 +45,22 @@ class SLAILM:
                 "Matrix multiplication via Strassen algorithm (Strassen, 1969):\n"
                 "Reducing complexity to O(n^2.807)..."
             ],
+            "translation": {
+                "en-es": {
+                    "hello": "hola",
+                    "world": "mundo",
+                    "help": "ayuda",
+                    "cat": "gato",
+                    "dog": "perro"
+                },
+                "en-fr": {
+                    "hello": "bonjour",
+                    "world": "monde",
+                    "help": "aide",
+                    "cat": "chat",
+                    "dog": "chien"
+                }
+            }
         }
 
         # Initialize core components with academic references
@@ -107,9 +124,26 @@ class SLAILM:
                                  ttl=timedelta(hours=12))
 
     def generate_response(self, prompt):
-        """Enhanced academic response generation with mathematical processing"""
-        prompt = prompt.lower()
-        response = None
+        # Add rigorous input checking
+        if not isinstance(prompt, str) or len(prompt.strip()) < 1:  # Changed from 3 to 1
+            return "[SLAILM] Input too short to generate meaningful output."
+        
+        # Ensure safe context addition
+        if self.context_memory:
+            try:
+                context_str = " ".join(map(str, self.context_memory[-1][:3]))
+                prompt += f" [Context: {context_str}...]"
+            except (IndexError, TypeError) as e:
+                logger.error(f"Context formatting error: {str(e)}")
+
+        # Add try-catch for forward pass
+        try:
+            response = self.forward_pass(prompt[:500])  # Limit input length
+        except Exception as e:
+            logger.error(f"Forward pass failed: {str(e)}")
+            return "[SLAILM] Error processing request"
+
+            return f"ACADEMIC RESPONSE:\n{response}\n\nReferences:\n{self._generate_citations()}"
 
         # Mathematical equation processing
         equation_match = re.search(r'([-+]?\d*\.?\d+)[xX]\²?\^2?\s*([+-])\s*(\d+)[xX]\s*([+-])\s*(\d+)\s*=\s*0', prompt)
@@ -364,13 +398,22 @@ class SLAILM:
             return self.knowledge_graph.get(concept.lower(), ["Concept not in academic database"])
 
     def forward_pass(self, prompt):
-        """Simulated neural forward pass using academic methods"""
-        tokens = self.tokenizer.tokenize(prompt)
-        embeddings = [self.embedder.embed(t) for t in tokens]
+        if not prompt or len(prompt.strip()) == 0:
+            raise ValueError("Prompt is empty. Cannot generate response.")
+        
+        # Add safe tokenization
+        try:
+            tokens = self.tokenizer.tokenize(prompt)
+            if not tokens:
+                return "No meaningful tokens found in input"
+        except Exception as e:
+            logger.error(f"Tokenization error: {str(e)}")
+            return "Tokenization failed"
 
-        # Simple positional encoding (Vaswani et al., 2017)
-        positions = [self._positional_encoding(i, len(embeddings[0])) for i in range(len(embeddings))]
-        embeddings = [[e+p for e,p in zip(emb, pos)] for emb, pos in zip(embeddings, positions)]
+        # Add empty check for embeddings
+        embeddings = [self.embedder.embed(t) for t in tokens if t]
+        if not embeddings:
+            return "No valid embeddings generated"
 
         # Attention processing
         query = embeddings[-1]  # Last token as query
@@ -439,6 +482,8 @@ class SLAILM:
         return random.choice(closures)
 
     def generate_response(self, prompt):
+        if not isinstance(prompt, str) or len(prompt.strip()) < 3:
+            return "[SLAILM] Input too short to generate meaningful output."
         """Full academic response generation pipeline"""
         if len(self.context_memory) > 0:
             prompt += " [Context: " + " ".join(str(v) for v in self.context_memory[-1][:3]) + "...]"
