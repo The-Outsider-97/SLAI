@@ -9,7 +9,6 @@ import random
 import getpass
 from datetime import datetime
 
-
 from torch.nn.functional import cosine_similarity
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QComboBox, QFrame, QSizePolicy, QFileDialog
