@@ -1,0 +1,89 @@
+{
+  "greeting": [
+    "¡Hola! ¿En qué puedo ayudarte hoy?",
+    "¡Hola! ¿Sobre qué te gustaría hablar?",
+    "¡Hola! Estoy aquí para asistirte.",
+    "¡Buenos días! ¿Listo para resolver tus preguntas?",
+    "¡Buenas tardes! ¿Cómo puedo apoyarte?",
+    "¡Saludos! Pregúntame lo que quieras, estoy aquí.",
+    "¿Qué tal? Cuéntame en qué piensas.",
+    "¡Me alegra verte! ¿Qué te trae por aquí hoy?"
+  ],
+  "farewell": [
+    "¡Adiós! Avísame si necesitas algo más.",
+    "¡Cuídate! Hasta la próxima.",
+    "¡Hasta luego! Estoy aquí cuando me necesites.",
+    "¡Hasta pronto! No dudes en volver si necesitas ayuda.",
+    "¡Que tengas un día fantástico!",
+    "Hasta la próxima. ¡Sigue brillando!",
+    "Me desconecto, pero puedes contactarme cuando quieras.",
+    "¡Nos vemos! Mantente genial."
+  ],
+  "default": [
+    "Todavía no sé cómo responder a eso.",
+    "¿Podrías decirlo de otra manera?",
+    "Interesante... Cuéntame más.",
+    "Sigo aprendiendo. ¿Puedes reformular la pregunta?",
+    "Vamos a intentar otro enfoque. ¿Qué quieres decir exactamente?",
+    "Me encantaría ayudar. ¿Podrías aclarar tu solicitud?",
+    "¿Quieres preguntar sobre noticias, curiosidades o tecnología?",
+    "Este tema es nuevo para mí. ¿Pruebas con otra cosa?"
+  ],
+  "acknowledgement": [
+    "Entendido.",
+    "Comprendido.",
+    "Gracias por la actualización.",
+    "Anotado. ¿Qué sigue?",
+    "Claro como el agua. Procedamos.",
+    "Confirmado. Espero tu siguiente acción.",
+    "Registrado y listo."
+  ],
+  "error": [
+    "Ups, algo salió mal en mi parte.",
+    "Hubo un error. ¿Podrías intentarlo de nuevo?",
+    "Ocurrió un problema. Por favor, reintenta tu solicitud.",
+    "Mis circuitos están fallando hoy. ¿Lo intentamos otra vez?",
+    "Error 404: Respuesta ingeniosa no encontrada. ¡Reintenta!",
+    "¡Fallo técnico detectado! Vuelve a intentarlo.",
+    "¡Vaya! Ignoremos eso. ¿Podrías repetirlo?",
+    "El servidor está en pausa. Intenta de nuevo en un momento."
+  ],
+  "thanks": [
+    "¡De nada!",
+    "¡No hay problema!",
+    "¡Me alegra haber ayudado!",
+    "¡Siempre a la orden!",
+    "Fue un placer. ¿Necesitas algo más?",
+    "Es mi deber ayudarte.",
+    "¡Gracias a ti por preguntar!",
+    "Misión cumplida. ¿Algo más?"
+  ],
+  "positive_feedback": [
+    "¡Gracias por tus amables palabras!",
+    "Me sonrojas. ¿En qué más puedo ayudar?",
+    "¡Acabas de mejorar mi día!",
+    "Tus elogios significan mucho para mí.",
+    "¡Sigamos así!"
+  ],
+  "negative_feedback": [
+    "Lamento escuchar eso. ¿Cómo puedo mejorar?",
+    "Tu feedback es valioso. Trabajaré en ello.",
+    "Disculpa las molestias. Intentaré corregirlo.",
+    "Ajustaré mis respuestas. Gracias por tu paciencia.",
+    "Crítica constructiva recibida. Aprenderé de esto."
+  ],
+  "help": [
+    "Claro. Pregúntame sobre el clima, noticias o datos. ¿En qué necesitas ayuda?",
+    "Puedo explicar conceptos, resolver cálculos o conversar. ¿Qué necesitas?",
+    "¿Necesitas ayuda? Prueba: '¿Cuál es la capital de Perú?' o 'Define la física cuántica.'",
+    "Soy una navaja suiza de conocimiento. ¿Cuál es tu consulta?",
+    "¿Atascado? Escribe 'consejos' para ideas o pregunta directamente."
+  ],
+  "apology": [
+    "Mis disculpas. Intentémoslo de nuevo.",
+    "Ups, no quise confundirte.",
+    "Perdona mi torpeza digital. Empecemos de nuevo.",
+    "Error mío. ¿Lo reformulamos?",
+    "Te debo un café por ese error. ¿Reintentamos?"
+  ]
+}

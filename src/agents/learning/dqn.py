@@ -17,11 +17,14 @@ Features:
 - Modular architecture for easy extension
 """
 
+import os, sys
 import numpy as np
 import random
 from collections import deque
 import copy
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from src.collaborative.shared_memory import SharedMemory
 
 # ====================== Neural Network Core ======================
 class NeuralNetwork:
@@ -120,6 +123,10 @@ class DQNAgent:
         self.lr = config.get('learning_rate', 0.001)
         self.batch_size = config.get('batch_size', 64)
         self.target_update = config.get('target_update_frequency', 100)
+
+        self.shared_memory = SharedMemory
+        self.config = config or {}
+        self.model_id = "DQN_Agent"
         
         # Networks
         self.policy_net = NeuralNetwork(state_dim, action_dim, self.hidden_dim)
@@ -148,7 +155,7 @@ class DQNAgent:
     def train(self):
         """Single training step from replay buffer"""
         if len(self.memory) < self.batch_size:
-            return None
+            return 50
         
         # Sample batch
         batch = self.memory.sample(self.batch_size)
@@ -279,8 +286,11 @@ class UnifiedDQNAgent:
     def __init__(self, mode='standard', state_dim=None, action_dim=None, config=None, env=None):
         self.mode = mode
         self.config = config or {}
+        self.env = env  # Store environment for all modes
         
         if mode == 'standard':
+            if state_dim is None or action_dim is None:
+                raise ValueError("State and action dimensions required for standard mode")
             self.agent = DQNAgent(state_dim, action_dim, self.config)
         elif mode == 'evolutionary':
             if not env or not state_dim or not action_dim:
@@ -289,34 +299,118 @@ class UnifiedDQNAgent:
         else:
             raise ValueError("Invalid mode. Choose 'standard' or 'evolutionary'")
 
-    def train(self, episodes=1000):
+    def _run_validation(self, episodes=5):
+        """Run evaluation episodes without exploration"""
+        total_rewards = []
+        for _ in range(episodes):
+            state = self.env.reset()
+            done = False
+            episode_reward = 0
+            while not done:
+                action = self.agent.select_action(state, explore=False)
+                next_state, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                state = next_state
+            total_rewards.append(episode_reward)
+        return np.mean(total_rewards)
+
+    def train(self, episodes=1000, validation_freq=50, validation_episodes=5,
+              checkpoint_dir='checkpoints', early_stop_patience=20, target_reward=None):
+        """Enhanced training loop with comprehensive features"""
         if self.mode == 'standard':
-            # Standard training loop
+            if self.env is None:
+                raise ValueError("Environment not provided for standard training")
+
+            # Initialize training metrics
+            episode_rewards = []
+            episode_losses = []
+            episode_lengths = []
+            best_val_reward = -np.inf
+            early_stop_counter = 0
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
             for ep in range(episodes):
                 state = self.env.reset()
                 total_reward = 0
+                steps = 0
+                losses = []
+
                 done = False
                 while not done:
                     action = self.agent.select_action(state)
                     next_state, reward, done, _ = self.env.step(action)
                     self.agent.store_transition(state, action, reward, next_state, done)
+                    
                     loss = self.agent.train()
+                    if loss is not None:
+                        losses.append(loss)
+                    
                     total_reward += reward
                     state = next_state
-                print(f"Episode {ep} | Reward: {total_reward} | Loss: {loss:.4f}")
+                    steps += 1
+
+                # Episode statistics
+                avg_loss = np.mean(losses) if losses else 0
+                episode_rewards.append(total_reward)
+                episode_losses.append(avg_loss)
+                episode_lengths.append(steps)
+
+                # Calculate moving averages
+                avg_reward_10 = np.mean(episode_rewards[-10:]) if len(episode_rewards) >= 10 else total_reward
+                avg_loss_10 = np.mean(episode_losses[-10:]) if len(episode_losses) >= 10 else avg_loss
+
+                print(f"Episode {ep+1}/{episodes} | "
+                      f"Reward: {total_reward:.1f} (Avg10: {avg_reward_10:.1f}) | "
+                      f"Loss: {avg_loss:.4f} (Avg10: {avg_loss_10:.4f}) | "
+                      f"Steps: {steps} | "
+                      f"ε: {self.agent.epsilon:.3f}")
+
+                # Validation and checkpointing
+                if (ep + 1) % validation_freq == 0:
+                    val_reward = self._run_validation(validation_episodes)
+                    print(f"Validation | Avg Reward: {val_reward:.1f}")
+
+                    if val_reward > best_val_reward:
+                        best_val_reward = val_reward
+                        self.save(os.path.join(checkpoint_dir, f'best_ep{ep+1}.npz'))
+                        early_stop_counter = 0
+                    else:
+                        early_stop_counter += 1
+
+                    # Early stopping
+                    if early_stop_patience and early_stop_counter >= early_stop_patience:
+                        print(f"Early stopping at episode {ep+1}")
+                        break
+
+                # Target reward termination
+                if target_reward and avg_reward_10 >= target_reward:
+                    print(f"Target reward achieved at episode {ep+1}!")
+                    break
+
+            print("Training completed")
+            return {
+                'rewards': episode_rewards,
+                'losses': episode_losses,
+                'lengths': episode_lengths
+            }
         else:
             self.agent = self.trainer.evolve()
 
-    def act(self, state, explore=False):
-        return self.agent.select_action(state, explore)
-
     def save(self, path):
-        # Save weights implementation
-        pass
+        """Save policy network weights"""
+        weights = self.agent.policy_net.get_weights()
+        np.savez(path, *weights)
+        print(f"Model saved to {path}")
 
     def load(self, path):
-        # Load weights implementation
-        pass
+        """Load policy network weights"""
+        with np.load(path) as data:
+            weights = [data[f'arr_{i}'] for i in range(len(data.files))]
+        self.agent.policy_net.set_weights(weights)
+        print(f"Model loaded from {path}")
+
+    def act(self, state, explore=False):
+        return self.agent.select_action(state, explore)
 
 
 # ====================== Usage Example ======================
@@ -331,10 +425,17 @@ if __name__ == "__main__":
     
     # Initialize agent
     agent = UnifiedDQNAgent(mode='standard',
-                          state_dim=4,
-                          action_dim=2,
-                          config={'hidden_size': 128, 'learning_rate': 0.001},
-                          env=MockEnv())
-    
-    # Training
-    agent.train(episodes=25)
+                        state_dim=4,
+                        action_dim=2,
+                        config={'hidden_size': 128, 'learning_rate': 0.001},
+                        env=MockEnv())
+
+    # Start training with enhanced parameters
+    metrics = agent.train(
+        episodes=500,
+        validation_freq=20,
+        validation_episodes=3,
+        checkpoint_dir='dqn_checkpoints',
+        early_stop_patience=5,
+        target_reward=195  # Example for CartPole target
+    )

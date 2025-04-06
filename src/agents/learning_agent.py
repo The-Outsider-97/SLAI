@@ -21,23 +21,22 @@ import numpy as np
 from collections import deque
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, defaultdict
+from typing import Dict, List, Tuple, defaultdict, Optional, Any
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from collaborative.shared_memory import SharedMemory
-from learning.dqn import DQNAgent
-from learning.maml_rl import MAMLAgent
-from learning.rsi import RSI_Agent
-from learning.rl_agent import RLAgent
-
+from ..collaborative.shared_memory import SharedMemory
+from ..agents.learning.dqn import DQNAgent
+from ..agents.learning.maml_rl import MAMLAgent
+from ..agents.learning.rsi import RSI_Agent
+from ..agents.learning.rl_agent import RLAgent
 
 logger = logging.getLogger(__name__)
 
 class LearningAgent:
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
     
-    def __init__(self, env, shared_memory: SharedMemory, config=None):
+    def __init__(self, env=None, config: dict = None, shared_memory: Optional[Any] = None):
         """
         Initialize learning subsystems with environment context
         
@@ -46,48 +45,127 @@ class LearningAgent:
             config: Dictionary with agent configurations
         """
         self.env = env
-        self.shared_memory = shared_memory
         self.config = config or {}
+        self.shared_memory = shared_memory
+        self.rl_algorithm = self.config.get("rl_algorithm", None)
         self.strategy_weights = np.ones(4)  # [RL, DQN, MAML, RSI]
         self.performance_history = deque(maxlen=1000)
-        
+
         # Initialize learning subsystems
-        self._initialize_agents()
+        self.performance_metrics = defaultdict(lambda: deque(maxlen=1000))
+        self._initialize_agents(
+            env=self.env,
+            performance_metrics=self.performance_metrics,
+            shared_memory=self.shared_memory
+        )
+        self.agents = {
+            'dqn': self._create_agent('dqn', self.config.get('dqn', {})),
+            'maml': self._create_agent('maml', self.config.get('maml', {})),
+            'rsi': self._create_agent('rsi', self.config.get('rsi', {})),
+            'rl': self._create_agent('rl', self.config.get('rl', {}))
+        }
         self._setup_continual_learning()
         self._setup_trigger_system()
-        
+
         # State tracking
-        self.performance_metrics = defaultdict(lambda: deque(maxlen=1000))
         self.concept_drift_detector = ConceptDriftDetector()
         self.last_retraining = datetime.now()
-        
+
         # Initialize sub-agents
-    def _initialize_agents(self):
-        """Initialize all learning strategies with configurable architectures"""
-        self.agents = {
-            'dqn': DQNAgent(
-                state_dim=self.env.observation_space.shape[0],
-                action_dim=self.env.action_space.n,
-                config=self.config.get('dqn', {})
-            ),
-            'maml': MAMLAgent(
-                state_size=self.env.observation_space.shape[0],
-                action_size=self.env.action_space.n,
-                **self.config.get('maml', {})
-            ),
-            'rsi': RSI_Agent(
-                state_size=self.env.observation_space.shape[0],
-                action_size=self.env.action_space.n,
-                shared_memory=self.shared_memory,
-                config=self.config.get('rsi', {})
-            ),
-            'rl': RLAgent(**self.config.get('rl', {}))
+    def _initialize_agents(self, env, performance_metrics, shared_memory, 
+                 mutation_rate=0.1, top_k=2):
+        self.env = env
+        self.performance = performance_metrics
+        self.shared_memory = shared_memory
+        self.mutation_rate = mutation_rate
+        self.top_k = top_k
+        self.param_bounds = {
+            'dqn': {
+                'hidden_size': (64, 512),
+                'learning_rate': (1e-5, 0.1),
+                'batch_size': (32, 1024),
+                'target_update_frequency': (50, 500)
+            },
+            'maml': {
+                'meta_lr': (1e-5, 0.01),
+                'inner_lr': (1e-4, 0.1),
+                'adaptation_steps': (1, 10)
+            },
+            'rsi': {
+                'memory_size': (1000, 50000),
+                'exploration_rate': (0.01, 0.5),
+                'plasticity': (0.1, 2.0)
+            },
+            'rl': {
+                'learning_rate': (1e-4, 0.1),
+                'discount_factor': (0.8, 0.999),
+                'epsilon': (0.01, 1.0),
+                'epsilon_decay': (0.9, 0.9999)
+            }
         }
         
         # Learning state
         self.meta_update_interval = 100
         self.curiosity_beta = 0.2  # Pathak et al. (2017)
         self.ewc_lambda = 0.4  # Kirkpatrick et al. (2017)
+
+    def _create_agent(self, agent_id, params):
+        """Instantiate new agent with mutated parameters"""
+        state_size = self.env.observation_space.shape[0]
+        action_size = self.env.action_space.n
+        
+        if agent_id == 'dqn':
+            return DQNAgent(
+                state_dim=state_size,
+                action_dim=action_size,
+                config=params
+            )
+        elif agent_id == 'maml':
+            return MAMLAgent(
+                state_size=state_size,
+                action_size=action_size,
+                shared_memory=self.shared_memory,
+                **params
+            )
+        elif agent_id == 'rsi':
+            return RSI_Agent(
+                state_size=state_size,
+                action_size=action_size,
+                shared_memory=self.shared_memory,
+                config=params
+            )
+        elif agent_id == 'rl':
+            return RLAgent(
+                possible_actions=list(range(action_size)),
+                learning_rate=params.get('learning_rate', 0.001),
+                discount_factor=params.get('discount_factor', 0.99),
+                epsilon=params.get('epsilon', 1.0)
+            )
+        raise ValueError(f"Unknown agent type: {agent_id}")
+
+    def _select_action(self, state, agent_type):
+        """
+        Select action based on agent type.
+        
+        Args:
+            state: Current environment state
+            agent_type: One of ['rl', 'dqn', 'maml', 'rsi']
+        
+        Returns:
+            action: Selected action
+        """
+        agent = self.agents[agent_type]
+        
+        if agent_type == "rl":
+            return agent.select_action(state)
+        elif agent_type == "dqn":
+            return agent.select_action(state)
+        elif agent_type == "maml":
+            return agent.select_action(state)
+        elif agent_type == "rsi":
+            return agent.select_action(state)
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
 
     def train_episode(self, agent_type="dqn"):
         """
@@ -120,6 +198,31 @@ class LearningAgent:
         self._update_strategy_weights(loss)
         
         return total_reward
+
+    def _process_feedback(self, state, action, reward):
+        """
+        Process feedback for online learning, memory updates, or logging.
+        
+        Args:
+            state: Current state
+            action: Action taken
+            reward: Reward received
+        """
+        agent_type = self.rl_algorithm or "rl"
+        agent = self.agents.get(agent_type)
+
+        if not agent:
+            logger.warning(f"No agent found for feedback processing: {agent_type}")
+            return
+
+        if hasattr(agent, 'process_feedback'):
+            # Custom feedback handler (if implemented by agent)
+            agent.process_feedback(state, action, reward)
+        elif hasattr(agent, 'remember'):
+            # Generic memory-based learning
+            agent.remember((state, action, reward))
+        else:
+            logger.debug(f"Agent '{agent_type}' does not support feedback processing.")
 
     def meta_learn(self, num_tasks=5):
         """
@@ -333,40 +436,141 @@ class LearningAgent:
                 if hasattr(agent, 'get_parameters')}
 
 class ConceptDriftDetector:
-    """Statistical concept drift detection system"""
+    """Statistical concept drift detection system using multivariate Gaussian KL-divergence"""
     
-    def __init__(self, window_size=100, threshold=0.15):
+    def __init__(self, window_size=100, threshold=0.15, epsilon=1e-8):
         self.data_window = deque(maxlen=window_size)
         self.threshold = threshold
+        self.epsilon = epsilon  # Numerical stability constant
 
     def analyze(self, data_stream):
-        """Detect distribution shifts using KL-divergence"""
-        if not data_stream:
+        """Detect distribution shifts using KL-divergence between historical and current data"""
+        if not data_stream or len(data_stream) < 10:  # Minimum data requirement
             return False
             
-        current_batch = list(data_stream)[-len(self.data_window):]
-            
-        kl_div = self._calculate_kl_divergence(self.data_window, current_batch)
+        # Convert to numpy arrays and check dimensions
+        current_batch = np.array(list(data_stream)[-len(self.data_window):])
+        historical_data = np.array(self.data_window)
+        
+        # Handle initial window population
+        if len(historical_data) < 10:
+            self.data_window.extend(current_batch)
+            return False
+
+        # Calculate KL divergence
+        kl_div = self._calculate_kl_divergence(historical_data, current_batch)
         self.data_window.extend(current_batch)
+        
         return kl_div > self.threshold
 
     def _calculate_kl_divergence(self, p, q):
-        """Compute KL-divergence between two distributions"""
-        # Implementation details omitted
-        return 0.1  # Placeholder
+        """Compute KL(P||Q) between two multivariate Gaussian distributions"""
+        # Add epsilon to prevent singular matrices
+        p += np.random.normal(0, self.epsilon, p.shape)
+        q += np.random.normal(0, self.epsilon, q.shape)
+        
+        # Calculate means and covariance matrices
+        mu_p = np.mean(p, axis=0)
+        sigma_p = np.cov(p, rowvar=False) + np.eye(p.shape[1])*self.epsilon
+        mu_q = np.mean(q, axis=0)
+        sigma_q = np.cov(q, rowvar=False) + np.eye(q.shape[1])*self.epsilon
+        
+        # KL divergence formula for multivariate Gaussians
+        diff = mu_q - mu_p
+        sigma_q_inv = np.linalg.inv(sigma_q)
+        n = mu_p.shape[0]
+        
+        trace_term = np.trace(sigma_q_inv @ sigma_p)
+        quad_form = diff.T @ sigma_q_inv @ diff
+        logdet_term = np.log(np.linalg.det(sigma_q)/np.linalg.det(sigma_p))
+        
+        return 0.5 * (trace_term + quad_form - n + logdet_term)
 
 class EvolutionaryFactory:
-    """Evolutionary strategy optimization factory"""
+    """Evolutionary strategy optimization factory with parameter mutation"""
     
-    def __init__(self, env, performance_metrics, mutation_rate=0.1):
+    def __init__(self, env, performance_metrics, shared_memory, 
+                 mutation_rate=0.1, top_k=2):
         self.env = env
         self.performance = performance_metrics
+        self.shared_memory = shared_memory
         self.mutation_rate = mutation_rate
+        self.top_k = top_k
+        self.param_bounds = {
+            'dqn': {
+                'hidden_size': (64, 512),
+                'learning_rate': (1e-5, 0.1),
+                'batch_size': (32, 1024)
+            },
+            'maml': {
+                'meta_lr': (1e-5, 0.01),
+                'inner_lr': (1e-4, 0.1),
+                'adaptation_steps': (1, 10)
+            },
+            'rsi': {
+                'memory_size': (1000, 50000),
+                'exploration_rate': (0.01, 0.5),
+                'plasticity': (0.1, 2.0)
+            },
+            'rl': {
+                'learning_rate': (1e-4, 0.1),
+                'discount_factor': (0.8, 0.999),
+                'epsilon': (0.01, 1.0),
+                'epsilon_decay': (0.9, 0.9999)
+            }
+        }
 
     def generate_new_strategies(self):
-        """Produce optimized agent variants"""
-        # Implementation details omitted
+        """Generate new agents through selection, mutation, and crossover"""
+        optimized_agents = []
+        
+        # Select top performing agents
+        sorted_agents = sorted(self.performance.items(), 
+                             key=lambda x: x[1], reverse=True)[:self.top_k]
+        
+        for agent_id, _ in sorted_agents:
+            # Create mutated variants
+            for _ in range(2):  # Generate 2 variants per top agent
+                mutated_params = self._mutate_parameters(agent_id)
+                optimized_agents.append(
+                    self._create_agent(agent_id, mutated_params)
+                )
+        
+        # Add crossover between top performers
+        if len(sorted_agents) >= 2:
+            hybrid_params = self._crossover(sorted_agents[0][0], sorted_agents[1][0])
+            optimized_agents.append(
+                self._create_agent(sorted_agents[0][0], hybrid_params)
+            )
+        
         return optimized_agents
+
+    def _mutate_parameters(self, agent_id):
+        """Apply Gaussian mutation to parameters within defined bounds"""
+        params = {}
+        for param, (min_val, max_val) in self.param_bounds[agent_id].items():
+            # Get base value from current best parameters
+            base_val = (max_val + min_val)/2  # In real implementation, use actual current values
+            # Apply mutation
+            mutated = base_val * (1 + self.mutation_rate * np.random.randn())
+            params[param] = np.clip(mutated, min_val, max_val)
+            
+            # Round integer parameters
+            if param in ['hidden_size', 'batch_size', 'memory_size', 'adaptation_steps']:
+                params[param] = int(params[param])
+                
+        return params
+
+    def _crossover(self, agent_id1, agent_id2):
+        """Combine parameters from two different agent types"""
+        common_params = set(self.param_bounds[agent_id1]) & set(self.param_bounds[agent_id2])
+        hybrid_params = {}
+        for param in common_params:
+            if np.random.rand() > 0.5:
+                hybrid_params[param] = self.param_bounds[agent_id1][param][1]
+            else:
+                hybrid_params[param] = self.param_bounds[agent_id2][param][1]
+        return hybrid_params
 
 class SLAIEnv:
     """Base environment interface for SLAI operations"""
@@ -403,10 +607,11 @@ learning_agent = LearningAgent(
     config={
         'dqn': {'hidden_size': 256},
         'maml': {'meta_lr': 0.001},
-        'rsi': {'memory_size': 10000}
+        'rsi': {'memory_size': 10000},
+        'rl': {'learning_rate': 0.001}
     }
 )
 
 # Continuous operation loop
-while True:
-    learning_agent.run_learning_cycle()
+#while True:
+#    learning_agent.run_learning_cycle()

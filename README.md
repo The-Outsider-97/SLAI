@@ -109,58 +109,16 @@ Note: If you see an error about execution policy:
 3. Install requirements:
 
    ```console
-   pip install torch
+   pip install torch torchvision torchaudio
    pip install -r requirements.txt
-   pip install argparse
-   pip install tensorflow
-   pip install gputil
-   pip install psutil
-   pip install PyQt5
-   pip install dotenv
-   pap install matplotlib
-   pip install faiss-cpu
-   pip install plotly
-   pip install statsmodels
-   pip install causalinference
-   pip install pyyaml
-   pip install textstat
-   pip install ply
-   pip install textstat
-```
+    ```
 
-Optional: For CUDA (GPU), install PyTorch with the correct CUDA version. See: https://pytorch.org/get-started/locally/
-
-4. Run a basic reinforcement learning task (CartPole with DQN):
+4. Run Model:
 
    ```console
-   python main_cartpole.py
+   python main.py
    ```
 
-5. Run Evolutionary Hyperparameter Optimization (CartPole + Evolution):
-
-   ```console
-   python main_cartpole_evolve.py
-   ```
-
-6. Run multi-task learning agent:
-
-   ```console
-   python main_multitask.py
-   ```
-
-7. Run Meta-Learning (MAML):):
-
-   ```console
-   python main_maml.py
-   ```
-
-8. Run Meta-Learning (MAML):):
-Docker is required for sandboxing.
-Start Docker daemon first.
-
-   ```console
-   python main_rsi.py
-   ```
 
 ## Continuous Integration
 - GitHub Actions workflow runs on each push/PR.
