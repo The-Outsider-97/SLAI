@@ -13,7 +13,7 @@ run:
   plots_dir: "plots/"
 
 language:  
-  llm: null  
+  llm: SLAILM()  
   history: []  
   summary: null  
   memory_limit: 1000  
@@ -45,6 +45,7 @@ agent:
 
 agent:
   type: rsi
+  target_update_frequency: 100
   state_size: 52
   action_size: 3
   shared_memory: null  # Or pass a mock/dummy instance in agent_factory
