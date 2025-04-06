@@ -9,11 +9,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(file), '..', '..', '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 from src.collaborative.shared_memory import SharedMemory
 
 class RSI_Agent:
-    def init(self, state_size, action_size, shared_memory: SharedMemory, config: dict = None):
+    def __init__(self, state_size, action_size, shared_memory: SharedMemory, config: dict = None):
         self.state_size = state_size
         self.action_size = action_size
         self.memory = deque(maxlen=2000)
