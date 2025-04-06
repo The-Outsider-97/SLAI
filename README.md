@@ -114,6 +114,9 @@ Note: If you see an error about execution policy:
    pip install pyyaml
    pip install PyQt5
    pip install psutil
+   pip install GPUtil
+   pip install ply
+   pip install textstat
     ```
 
 4. Run Model:
