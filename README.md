@@ -109,24 +109,8 @@ Note: If you see an error about execution policy:
 3. Install requirements:
 
    ```console
-   pip install torch
+   pip install torch torchvision torchaudio
    pip install -r requirements.txt
-   pip install argparse
-   pip install tensorflow
-   pip install gputil
-   pip install psutil
-   pip install PyQt5
-   pip install dotenv
-   pip install faiss-cpu
-   pip install plotly
-   pip install statsmodels
-   pip install causalinference
-   pip install pyyaml
-   pip install textstat
-   pip install ply
-   pip install textstat
-   pip install matplotlib opencv-python
-   pip install gymnasium
     ```
 
 4. Run Model:
