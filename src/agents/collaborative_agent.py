@@ -1,5 +1,5 @@
 """
-Enhanced Collaborative Agent with Safety Monitoring and Task Coordination
+Collaborative Agent with Safety Monitoring and Task Coordination
 
 Features:
 1. Comprehensive safety monitoring with Bayesian risk assessment
