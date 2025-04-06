@@ -119,6 +119,7 @@ Note: If you see an error about execution policy:
    pip install textstat
    pip install opencv-python
    pip install matplotlib
+   pip install scipy
     ```
 
 4. Run Model:
