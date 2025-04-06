@@ -27,9 +27,11 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from ..utils.agent_factory import AgentFactory
-from ..collaborative.shared_memory import SharedMemory
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.utils.agent_factory import AgentFactory
+from src.collaborative.shared_memory import SharedMemory
+from models.slai_lm import SLAILM
+
 
 # Scientific computing import with error handling
 try:
@@ -230,6 +232,15 @@ class CollaborativeAgent:
             "task_router": {}     # If routing modules exist
         }
         self.factory = AgentFactory(shared_resources=self.shared_resources)
+        from ..agents.language_agent import LanguageAgent
+        from ..agents.learning_agent import LearningAgent, SLAIEnv
+        self.factory.register("language", LanguageAgent)
+        self.factory.register(
+            "learning",
+            lambda **kwargs: LearningAgent(
+                env=SLAIEnv(),
+                config=kwargs.get('config', {}),
+                shared_memory=self.shared_memory))
 
         # Load configuration
         self.agent_network = self._load_config(config_path) if config_path else agent_network or {}
@@ -637,13 +648,25 @@ class CollaborativeAgent:
     def generate(self, prompt: str) -> str:
         """Enhanced generation with proper learning subsystem routing"""
         try:
-            # Parse intent using language agent
+            if not prompt or len(prompt.strip()) < 1:
+                raise ValueError("Empty input")
+                
+            # Add input sanitization
+            prompt = prompt.strip()[:1000]  # Prevent overly long inputs
+            
+            # Safe agent creation
             lang_agent = self.factory.create(
                 "language", {
-                    "model_name": "slai",
-                    "safety_filter": True
-            })
-            intent = lang_agent.parse_intent(prompt)
+                    "llm": SLAILM(),
+                    "history": [],
+                    "summary": "",
+                    "memory_limit": 1000,
+                    "enable_summarization": True,
+                    "summarizer": None
+                })
+                
+            # Add null check for intent parsing
+            intent = lang_agent.parse_intent(prompt) or {"type": "unknown"}
             
             # Dynamic agent selection
             agent_config = self._build_learning_config(intent)
@@ -653,25 +676,28 @@ class CollaborativeAgent:
             return f"[SLAI: Learning Agent]: Training complete.\n→ Reward: {reward:.2f}"
 
         except Exception as e:
-            logger.error(f"Generation failed: {str(e)}")
+            logger.error(f"Generation failed: {str(e)}", exc_info=True)
             return f"[System Error] Generation failed: {str(e)}"
 
-    def _build_learning_config(self, intent: str) -> Dict:
-        """Dynamic config builder for learning agents"""
+    def _build_learning_config(self, config: Optional[Dict] = None) -> Dict:
         base_config = {
             "algorithm": "ppo",
             "policy_network": "transformer",
             "buffer_size": 10000,
-            "priority_alpha": 0.6
-        }
-        
-        # Add RSI-specific parameters
-        base_config.update({
+            "priority_alpha": 0.6,
             "oversold_threshold": 30,
             "overbought_threshold": 70,
             "learning_schedule": "exponential_decay"
-        })
-        
+        }
+        print("Received config for learning agent:", config)
+
+        # Only update if config is a proper dictionary
+        if isinstance(config, dict):
+            base_config.update(config)
+        else:
+            import logging
+            logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
+
         return base_config
 
     def _generate_recommendation(self,
@@ -862,6 +888,7 @@ class CollaborativeAgent:
             logger.error(f"Agent response error: {str(e)}")
             return f"[System Error] Agent communication failed"
 
+    def agent_name(self, leaarner, params, plan, prompt):
         """Specialized handler for learning subsystem"""  # <-- This causes syntax error
         learner = self.learning_subsystems.get(agent_name.lower())
         if not learner:
@@ -932,11 +959,31 @@ class TestCollaborativeAgent(unittest.TestCase):
         )
 
     def test_full_coordination_flow(self):
-        tasks = [...]  # Add test tasks
-        agents = {...}  # Add test agents
+        tasks = [
+            {
+                'id': 'task_1',
+                'type': 'test_type',
+                'requirements': ['testing'],
+                'deadline': 5.0,
+                'priority': 5,
+                'estimated_duration': 1.0,
+                'dependencies': [],
+                'estimated_risk': 0.2
+            }
+        ]
+        agents = {
+            'TestAgent': {
+                'capabilities': ['testing'],
+                'current_load': 0.1,
+                'throughput': 10
+            }
+        }
+
         result = self.agent.coordinate_tasks(tasks, agents)
-        self.assertIn('assignments', result)
         self.assertEqual(result['status'], 'success')
+        self.assertIn('assignments', result)
+        self.assertIn('task_1', result['assignments'])
+        self.assertEqual(result['assignments']['task_1']['agent'], 'TestAgent')
         
     def test_risk_score_validation(self):
         with self.assertRaises(ValueError):
