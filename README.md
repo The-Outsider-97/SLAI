@@ -117,6 +117,8 @@ Note: If you see an error about execution policy:
    pip install GPUtil
    pip install ply
    pip install textstat
+   pip install opencv-python
+   pip install matplotlib
     ```
 
 4. Run Model:
