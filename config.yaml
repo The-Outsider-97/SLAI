@@ -5,7 +5,7 @@
 
 model:
   name: SLAI-Agent
-  version: v1.4.1
+  version: v1.6.0
 
 run:
   id_prefix: "run"
@@ -20,38 +20,49 @@ language:
   enable_summarization: true  
   summarizer: null
 
-agent:
-  type: dqn
-  state_dim: 4
-  action_dim: 2
-  hidden_size: 128
-  learning_rate: 0.001
-  gamma: 0.99
-  epsilon: 1.0
-  epsilon_decay: 0.995
-  epsilon_min: 0.01
-  buffer_size: 10000
-  batch_size: 64
-  target_update_frequency: 100
+agents:
+  dqn:
+    type: dqn
+    state_dim: 4
+    action_dim: 2
+    hidden_size: 128
+    learning_rate: 0.001
+    gamma: 0.99
+    epsilon: 1.0
+    epsilon_decay: 0.995
+    epsilon_min: 0.01
+    buffer_size: 10000
+    batch_size: 64
+    target_update_frequency: 100
 
-agent:
-  type: maml
-  state_size: 52
-  action_size: 3
-  hidden_size: 64
-  meta_lr: 0.001
-  inner_lr: 0.01
-  gamma: 0.99
+  maml:
+    type: maml
+    state_size: 52
+    action_size: 3
+    hidden_size: 64
+    meta_lr: 0.001
+    inner_lr: 0.01
+    gamma: 0.99
 
-agent:
-  type: rsi
-  target_update_frequency: 100
-  state_size: 52
-  action_size: 3
-  shared_memory: null  # Or pass a mock/dummy instance in agent_factory
+  rsi:
+    type: rsi
+    target_update_frequency: 100
+    state_size: 52
+    action_size: 3
+    shared_memory: null
 
-agent:
-  type: eval
+  rl:
+    type: rl
+    learning_rate: 0.01
+    discount_factor: 0.99
+    epsilon: 0.1
+
+  eval:
+    type: eval
+
+  safe_ai:
+    type: safe_ai
+    risk_threshold: 0.2
 
 training:
   num_samples: 500
@@ -154,9 +165,6 @@ security:
   adversarial_training: false
   backup_on_threat: true
 
-agent:
-  type: safe_ai
-
 # ==========================
 # Data Autit
 # ==========================
@@ -175,9 +183,6 @@ monitoring_weights:
 alert_thresholds:
   accuracy: 0.75
   risk_score: 0.25
-
-safe_ai:
-  risk_threshold: 0.2
 
 security_policy:
   safe_ai:
