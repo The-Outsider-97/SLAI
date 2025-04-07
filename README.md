@@ -114,7 +114,6 @@ Note: If you see an error about execution policy:
 
 4. Install requirements:
    ```console
-   python -m pip install --upgrade pip
    pip install torch torchvision torchaudio
    pip install -r requirements.txt
    pip install pyyaml
