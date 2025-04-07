@@ -160,78 +160,128 @@ Note: If you see an error about execution policy:
    pytest tests/
    ```
 
-## Roadmap
-- [x] Basic evolutionary agent
-- [x] Multi-Task RL with shared policies
-- [x] Meta-Learning (MAML / Reptile)
-- [x] Recursive Self-Improvement (Codegen + Evaluation Loop)
-- [x] Safe AI & Alignment Checks
-- [x] Collaborative Agents & Task Routing
-- [x] Automated R&D Loop
-
-___
 ---
+# SLAI: Roadmap to Autonomous Self-Improvement and Refactoring
 
-## SLAI v1.5 — Modular, Collaborative, and Visual
-
-**Release Date:** March 2025  
-**Branch:** `SLAI-v.1.5`
-
-### 🔍 Goals
-
-- Build a fully modular system to support:
-  - Collaborative agent architecture with task routing
-  - Automated research and development loop
-  - Frontend interface for real-time monitoring and agent control
+This document outlines the current state of SLAI (Safe Learning AI) and identifies the required features and improvements for it to reach its goal of safe, mostly autonomous self-improvement and self-refactoring.
 
 ---
 
-### ✅ Key Features
+## Vision
 
-#### 1. Collaborative Agents & Task Routing
-- Dynamic agent registry with capability tagging
-- TaskRouter with fallback handling and success-based ranking
-- Shared memory architecture for knowledge transfer
-- Agent interface standardization (`execute(task_data)`)
+SLAI aims to be an autonomous, modular AI assistant that can:
+- Learn and improve over time via reinforcement and user feedback.
+- Edit and refactor its own Python source code to enhance performance.
+- Operate autonomously with minimal user intervention.
+- Ensure safety, reliability, and continuous adaptation.
 
-#### 2. Automated R&D Loop
-- Modular pipeline for hyperparameter tuning, experiment management, and evaluation
-- Grid search with integrated evaluator and model registry
-- Centralized metrics logging (F1, accuracy, risk score, etc.)
-- Top agent auto-registration after tuning
-
-#### 3. Frontend Visualization
-- Flask-based frontend replicating terminal-style UI
-- Real-time log streaming via `/logs`
-- Live metric updates via `/metrics`
-- Agent dropdown launcher with backend subprocess support
-- Modular components (`window_controls`, `metrics_box`, `buttons`)
+SLAI is designed to evolve over time based on the user’s hardware capabilities and engagement. It is a long-term project targeting AI autonomy while prioritizing transparency, control, and safe alignment with human users.
 
 ---
 
-### 📦 Backend Modules
+## Capability Summary
 
-| Folder            | Description                                         |
-|------------------|-----------------------------------------------------|
-| `agents/`         | All agent classes (DQN, MAML, RSI, SafeAI, etc.)   |
-| `collaborative/`  | Registry, task router, shared memory               |
-| `rnd_loop/`       | Evaluator, experiment manager, hyperparam tuner    |
-| `modules/`        | Monitoring, logging, compliance, training, security |
-| `deployment/`     | Model registry, inference API, batch processing    |
-| `frontend/`       | Templates, styles, and visual interface components |
+| **Aspect** | **Current Capabilities** | **Missing / Underdeveloped** |
+|-----------|--------------------------|-------------------------------|
+| **Performance Optimization & Refactoring** | DQN, MAML, RSI, and Evo agents with hyperparameter tuning. RSI module can adjust model structure/config. | No advanced code analysis, static profiling, or AI-guided refactoring. |
+| **User Feedback Utilization** | Feedback conceptually embedded in architecture. | No actual ingestion, parsing, or processing of user feedback into actions. |
+| **Self-Editing (Code)** | RSI module can modify code (e.g. layers) with rollback. | Edits are hardcoded templates. No intelligent edits, testing, or Git integration. |
+| **Autonomous Operation** | TaskRouter + Collaboration Agent coordinate workflows. Automated R&D loop trains agents. | No proactive task generation or idle self-improvement. Minimal long-term memory or preference learning. |
 
 ---
 
-### 🧠 Intelligence Infrastructure
+## Current Features
 
-- Real-time `logger.py` with queue integration
-- Monitoring logs pushed to frontend terminal
-- Shared memory supports inter-agent communication
-- Evaluation results feed back into tuning and registry
+### Modular Agent Framework
+- Perception, Planning, Reasoning, Language, SafeAI, RSI, and more.
+- Agents are dynamically routed based on task input.
+
+### Recursive Self-Improvement (RSI)
+- Rewrites model architecture on stagnated reward.
+- Can insert new layers and modify config files.
+- Hot reloads agents at runtime with backup handling.
+
+### Automated R&D Engine
+- Performs hyperparameter tuning (grid/Bayesian).
+- Can evaluate and select top-performing agents.
+
+### Learning Agent
+- Implements online learning during runtime.
+- Supports lifelong improvement through training from new inputs.
+
+### Safety & Rollback System
+- Backs up Python files before applying RSI modifications.
+- Recovers original code if modifications fail or result in errors.
 
 ---
 
+## Recommendations for Advancing SLAI
 
+### 1. Robust Self-Assessment & Testing
+- Integrate and auto-run unit and integration tests post-edit.
+- Run benchmark queries to measure real-world performance before/after edits.
+- Create detailed metrics for agent scoring.
+
+### 2. Version Control Integration
+- Implement `GitPython` to version all RSI edits.
+- Auto-commit with timestamp and reason for change.
+- Store edit results in an experiment log.
+- Optional: Merge successful edits into `main` branch only after passing tests.
+
+### 3. Autonomous Refactoring Engine
+- Add `CodeImprovementAgent` using LLM for advanced suggestions.
+- Profile slow functions and optimize logic beyond neural layers.
+- Integrate PEP8 linter and performance cost analyzer.
+
+### 4. User Feedback System
+- Frontend: rating system, correction field, feature request queue.
+- Backend: interpret ratings as reward modifiers.
+- Enable user preferences to persist via embeddings or logs.
+
+### 5. Deeper Autonomy & Scheduling
+- Task scheduler to initiate self-checks and improvements.
+- Allow idle-time training, code audit, and model tuning.
+- Agents should suggest improvements or experiments.
+- Develop persistent memory across sessions.
+
+---
+
+## Goals for Long-Term Autonomy
+
+| **Goal** | **Milestone** |
+|---------|---------------|
+| Self-healing system | Detects faults and patches own modules |
+| Meta-learning loop | Learns from feedback on its own suggestions |
+| Zero-touch maintenance | Operates for long durations without intervention |
+| Preference-aligned behavior | Adjusts based on learned user traits or habits |
+| Agent democracy | Voting system for agents to decide structural changes |
+
+---
+
+## Development Roadmap (Proposed)
+
+### Phase 1: Foundation
+- Refactor agent factory and task router for extensibility.
+- Ensure all agent outputs are logged and rated.
+
+### Phase 2: Safety & Testing
+- Enable live testing post-modification.
+- Connect Git versioning to rollback logic.
+
+### Phase 3: Feedback Integration
+- Launch UI input fields for feedback.
+- Train an LLM-based interpreter for feedback-to-action mapping.
+
+### Phase 4: Autonomous Research
+- Add research goals as tasks (e.g., tune a model, explore algorithm X).
+- Implement automatic literature retrieval and concept learning.
+
+### Phase 5: Real-Time Adaptation
+- Support real-time changes and learning during execution.
+- Add a runtime UI for agent performance insights.
+
+
+---
 # SLAI v1.6 Roadmap
 
 **Milestone Focus:**  
@@ -310,16 +360,16 @@ Moving from modular execution to autonomous collaboration and introspection.
 
 ---
 
-## 📝 Notes
+## How to Contribute
 
-- All new modules should integrate with:
-  - `shared_memory`
-  - `logger.py`
-  - `evaluator.py`
-- Focus on reusable interfaces so agents can plug in different types of self-analysis logic
-- Prioritize UI clarity: avoid clutter, maintain 2-panel simplicity
+We welcome collaborators interested in AGI safety, reinforcement learning, or AI-driven automation. You can:
+- Fork the repository and submit a PR.
+- Open issues for feature ideas or design reviews.
+- Help with documentation, examples, and agent tutorials.
 
+  
 ---
+
 ## 📄 License
 
 This project is licensed under the MIT License. See `LICENSE` for details.
