@@ -124,7 +124,8 @@ Note: If you see an error about execution policy:
    pip install opencv-python
    pip install matplotlib
    pip install scipy
-   pip install idioms==1.0.1
+   pip install watchdog
+   pip install deepmerge
     ```
 
 5. Run Model:
