@@ -109,6 +109,7 @@ Note: If you see an error about execution policy:
 3. Install requirements:
 
    ```console
+   python -m pip install --upgrade pip
    pip install torch torchvision torchaudio
    pip install -r requirements.txt
    pip install pyyaml
@@ -120,6 +121,7 @@ Note: If you see an error about execution policy:
    pip install opencv-python
    pip install matplotlib
    pip install scipy
+   pip install idioms==1.0.1
     ```
 
 4. Run Model:
