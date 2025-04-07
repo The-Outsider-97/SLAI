@@ -118,8 +118,7 @@ Note: If you see an error about execution policy:
    pip install -r requirements.txt
    pip install pyyaml
    pip install PyQt5
-   pip install psutil
-   pip install GPUtil
+   pip install psutil gputil
    pip install ply
    pip install textstat
    pip install opencv-python
