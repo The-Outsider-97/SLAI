@@ -106,8 +106,13 @@ Note: If you see an error about execution policy:
    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
    .\venv\Scripts\Activate.ps1
    ```
-3. Install requirements:
 
+3. You'll need the latest pip installer
+   ```console
+   python -m pip install --upgrade pip
+   ```
+
+4. Install requirements:
    ```console
    python -m pip install --upgrade pip
    pip install torch torchvision torchaudio
@@ -124,7 +129,7 @@ Note: If you see an error about execution policy:
    pip install idioms==1.0.1
     ```
 
-4. Run Model:
+5. Run Model:
 
    ```console
    python main.py
