@@ -5,15 +5,23 @@ import math
 import time
 import logging as logger, logging
 import datetime
-from collections import defaultdict
 import hashlib
 import threading
+import torch
+import torch.nn as nn
+from collections import defaultdict
 from datetime import timedelta
 
 from src.collaborative.shared_memory import SharedMemory
 
-class SLAILM:
-    def __init__(self, node_id="main"):
+class SLAILM(nn.Module):
+    def __init__(self, input_dim=768, hidden_dim=512, output_dim=10, node_id=None):
+        super(SLAILM, self).__init__()
+        self.input_dim = input_dim
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim))
         self.responses = {
             "default": [
                 "As a large language model, I'm here to assist you.",
@@ -88,6 +96,9 @@ class SLAILM:
         # Replace context_memory with shared memory integration
         self.memory_ttl = timedelta(minutes=30)   # From Miller's memory studie
         self.context_history = [] # For simple context-aware responses
+        
+    def forward(self, x):
+        return self.model(x)
 
     def _solve_quadratic(self, a, b, c):
         """Implements quadratic formula with error handling"""
