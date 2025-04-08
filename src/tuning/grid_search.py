@@ -3,9 +3,15 @@ import json
 import torch
 import numpy as np
 import itertools
+from joblib import Parallel, delayed
+from typing import Dict, List, Callable, Tuple, Any
+from pathlib import Path
 from skopt import gp_minimize
 from skopt.space import Real, Integer, Categorical
 from skopt.utils import use_named_args
+from sklearn.model_selection import KFold
+
+from src.agents.reasoning_agent import ReasoningAgent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -16,7 +22,24 @@ class GridSearch:
     over all possible combinations of provided hyperparameter values.
     """
 
-    def __init__(self, config_file, evaluation_function):
+    def __init__(self,
+                 config_file: str,
+                 evaluation_function: Callable[[Dict], float],
+                 reasoning_agent: ReasoningAgent = None,
+                 n_jobs: int = -1,
+                 cross_val_folds: int = 5):
+        self.config_file = Path(config_file)
+        self.evaluation_function = evaluation_function
+        self.reasoning_agent = reasoning_agent or ReasoningAgent()
+        self.n_jobs = n_jobs
+        self.cross_val_folds = cross_val_folds
+        
+        self.hyperparam_space, self.param_names = self._load_search_space()
+        self._validate_search_space()
+        
+        self.results = []
+        self.best_params = None
+        self.best_score = -np.inf
         """
         Initializes the GridSearch instance.
         
@@ -28,7 +51,11 @@ class GridSearch:
         self.evaluation_function = evaluation_function
         self.hyperparam_space, self.param_names = self._load_search_space()
 
-    def _load_search_space(self):
+    def _load_search_space(self) -> Tuple[List[List], List[str]]:
+        if "prior_research" in param:
+            self.reasoning_agent.add_fact(
+                (param['name'], 'has_prior_study', param['prior_research'])
+            )
         """
         Loads hyperparameter search space from the config file.
 
@@ -43,24 +70,139 @@ class GridSearch:
         param_values = []
 
         for param in config['hyperparameters']:
-            name = param['name']
-            param_type = param['type']
-            param_names.append(name)
-
-            if param_type == 'int':
-                values = list(range(param['min'], param['max'] + 1, param.get('step', 1)))
-            elif param_type == 'float':
-                steps = param.get('steps', 10)
-                values = [param['min'] + x * (param['max'] - param['min']) / (steps - 1) for x in range(steps)]
-            elif param_type == 'categorical':
-                values = param['choices']
-            else:
-                raise ValueError(f"Unsupported parameter type: {param_type}")
-
-            param_values.append(values)
-            logger.info("Loaded %d values for hyperparameter: %s", len(values), name)
-
+            if 'values' not in param:
+                raise ValueError("Grid config requires explicit 'values' array")
+                
+            param_names.append(param['name'])
+            param_values.append(param['values'])
+            
+            # Register parameter space with reasoning agent
+            self._register_param_space(param)
+            
         return param_values, param_names
+        
+    def _register_param_space(self, param: Dict) -> None:
+        """Structure parameter metadata for agent's knowledge base"""
+        fact = (
+            param['name'],
+            'has_domain',
+            json.dumps({
+                'type': param['type'],
+                'values': param['values'],
+                'search_type': 'grid'
+            })
+        )
+        self.reasoning_agent.add_fact(fact, confidence=0.95)
+
+    def _validate_search_space(self) -> None:
+        """Combinatorial complexity check (Li et al., 2017)"""
+        total_comb = np.prod([len(v) for v in self.hyperparam_space])
+        logger.info(f"Total parameter combinations: {total_comb}")
+        
+        if total_comb > 1e6:
+            raise ValueError(f"Combinatorial explosion: {total_comb} > 1e6")
+
+    def _cross_validate(self, params: Dict) -> Dict[str, float]:
+        """k-fold cross-validation with confidence intervals"""
+        kf = KFold(n_splits=self.cross_val_folds)
+        scores = []
+        
+        for fold, (train_idx, val_idx) in enumerate(kf.split(np.arange(100))):  # Dummy split
+            score = self.evaluation_function(params, fold=fold)
+            scores.append(score)
+            
+            # Register fold performance with agent
+            self.reasoning_agent.add_fact(
+                (json.dumps(params), 
+                f'fold_{fold}_score', 
+                score
+            ))
+            
+        mean_score = np.mean(scores)
+        std_score = np.std(scores)
+        
+        return {
+            'mean': mean_score,
+            'std': std_score,
+            'ci95': (
+                mean_score - 1.96*std_score/np.sqrt(len(scores)),
+                mean_score + 1.96*std_score/np.sqrt(len(scores))
+            )
+        }
+
+    def _evaluate_combination(self, combo: tuple) -> Dict:
+        """Parallel evaluation with statistical validation"""
+        params = dict(zip(self.param_names, combo))
+        cv_results = self._cross_validate(params)
+        
+        # Register with agent's knowledge base
+        self.reasoning_agent.add_fact(
+            ('hyperparameters', 'current_evaluation'),
+            json.dumps({'params': params, 'results': cv_results})
+        )
+        
+        return {
+            'params': params,
+            'scores': cv_results,
+            'effect_size': self._calculate_effect_size(params)
+        }
+
+    def _calculate_effect_size(self, params: Dict) -> float:
+        """Cohen's d effect size relative to current best"""
+        if not self.best_params:
+            return 0.0
+            
+        baseline_score = self.best_score
+        current_score = self.evaluation_function(params)
+        pooled_std = np.sqrt((0 + self.results[-1]['scores']['std']**2)/2)
+        
+        return (current_score - baseline_score) / pooled_std
+
+    def run_search(self) -> Dict:
+        """Parallel grid search with agent-guided early stopping"""
+        combinations = list(itertools.product(*self.hyperparam_space))
+        
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(self._evaluate_combination)(combo)
+            for combo in combinations
+        )
+        
+        # Find optimal parameters using agent's reasoning
+        optimal_params = self._agent_best_selection(results)
+        self._save_results(optimal_params)
+        
+        return optimal_params
+
+    def _agent_best_selection(self, results: List[Dict]) -> Dict:
+        """Use agent's probabilistic reasoning to select best params"""
+        query = {
+            "type": "parameter_selection",
+            "results": results,
+            "strategy": "grid_search"
+        }
+        response = self.reasoning_agent.react_loop(json.dumps(query))
+        return json.loads(response['optimal_parameters'])
+
+    def _save_results(self, best_params: Dict) -> None:
+        """Save full results with academic metadata"""
+        output = {
+            'best_parameters': best_params,
+            'search_space': {
+                'param_names': self.param_names,
+                'param_values': self.hyperparam_space
+            },
+            'statistical_metrics': {
+                'effect_sizes': [r['effect_size'] for r in self.results],
+                'confidence_intervals': [r['scores']['ci95'] for r in self.results]
+            },
+            'agent_knowledge_snapshot': self.reasoning_agent.knowledge_base
+        }
+        
+        output_file = self.config_file.parent / f"grid_results_{self.config_file.stem}.json"
+        with open(output_file, 'w') as f:
+            json.dump(output, f, indent=2)
+            
+        logger.info(f"Saved full grid results to {output_file}")
 
     def run_search(self):
         """
@@ -107,80 +249,10 @@ class GridSearch:
 
         logger.info("Best hyperparameters saved to: %s", output_file)
 
-if __name__ == "__main__":
-
-    # Example evaluation function
-    def rl_agent_evaluation(params):
-        """
-        Evaluates an RL agent's policy using hyperparameters.
-
-        Args:
-            params (dict): Dictionary of hyperparameters.
-
-        Returns:
-            float: Average cumulative reward across validation episodes.
-        """
-        # Extract parameters
-        learning_rate = params['learning_rate']
-        num_layers = params['num_layers']
-        activation_function = params['activation']
-
-        # Initialize and train the RL agent (pseudo-code)
-        agent = RLAgent(
-            learning_rate=learning_rate,
-            num_layers=num_layers,
-            activation=activation_function
-        )
-        agent.train(episodes=100)
-
-        # Evaluate the agent on validation episodes
-        rewards = []
-        for _ in range(10):
-            cumulative_reward = agent.evaluate()
-            rewards.append(cumulative_reward)
-
-        avg_reward = np.mean(rewards)
-        return avg_reward
-
-    # Example hyperparameter config
-    example_config = {
-        "hyperparameters": [
-            {
-                "name": "learning_rate",
-                "type": "float",
-                "min": 0.0001,
-                "max": 0.1,
-                "prior": "log-uniform"
-            },
-            {
-                "name": "num_layers",
-                "type": "int",
-                "min": 1,
-                "max": 10
-            },
-            {
-                "name": "batch_size",
-                "type": "int",
-                "min": 16,
-                "max": 256
-            },
-            {
-                "name": "optimizer",
-                "type": "categorical",
-                "choices": ["adam", "sgd", "rmsprop"]
-            }
-        ]
-    }
-
-    # Save the example config for demonstration
-    with open('hyperparam_tuning/example_grid_config.json', 'w') as f:
-        json.dump(example_config, f, indent=4)
-
-    # Run the GridSearch
-    grid_search = GridSearch(
-        config_file='hyperparam_tuning/example_grid_config.json',
-        evaluation_function=dummy_evaluation
-    )
-
-    best_params = grid_search.run_search()
-    print("\nBest Hyperparameters:", best_params)
+    def _plot_learning_curve(self) -> None:
+        """Generate effect size vs parameter space exploration plot"""
+        # Implementation would use matplotlib to show:
+        # 1. Effect size progression
+        # 2. Confidence interval narrowing
+        # 3. Agent's confidence in parameter regions
+        pass
