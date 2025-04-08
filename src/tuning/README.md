@@ -89,20 +89,21 @@ bayesian_config.json: Ranges + priors for smarter search
 1. [Author or agent] writes tuning schema in YAML or uses generator.
 2. `hyperparam_config_generator.py` creates configs.
 3. `tuner.py` loads chosen strategy and config.
+
    ├── if grid → `GridSearch`
    └── if bayesian → `BayesianSearch`
-4. Evaluation function (usually a `RLAgent`) trains + scores model.
-5. Best params & results saved in `results/`, monitored via logs.
-6. `tuner_cli.py` provides easy shell-level access to this entire pipeline.
+5. Evaluation function (usually a `RLAgent`) trains + scores model.
+6. Best params & results saved in `results/`, monitored via logs.
+7. `tuner_cli.py` provides easy shell-level access to this entire pipeline.
 ---
 
-```mermaid
+```mermaid 
 graph TD
     A[Start Tuning Process] --> B{Use Existing Config or Generate New?}
     B -->|Generate| C[hyperparam_config_generator.py<br>Create JSON config files]
     B -->|Existing| D[Use YAML or JSON Config]
 
-    D --> E[Parse config<br>(tuner.py)]
+    D --> E[Parse config - tuner.py]
     C --> E
 
     E --> F{Strategy?}
