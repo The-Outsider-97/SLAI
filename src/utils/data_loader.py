@@ -3,60 +3,198 @@ import json
 import yaml
 import csv
 import pickle
-import torch
+import logging
+import warnings
 import pandas as pd
 import pyarrow.parquet as pq
 from typing import Any, Dict, List, Optional, Callable, Union
-import logging
 from functools import lru_cache
-from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader
+from pathlib import Path
+import numpy as np
+import re
 
-# ============================================
-# Logger Configuration
-# ============================================
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("SafeDataLoader")
 
-# ============================================
-# Supported Formats
-# ============================================
-SUPPORTED_FORMATS = ["json", "yaml", "csv", "parquet", "pickle"]
+class DataValidationError(Exception):
+    """Custom exception for data validation failures"""
+    pass
 
-# ============================================
-# Dummy Data Generator
-# ============================================
-def generate_dummy_data(batch_size: int = 32, num_batches: int = 10, input_size: int = 10, output_size: int = 2) -> TorchDataLoader:
-    """
-    Generates dummy data loaders for training and validation.
+class SafeDataLoader:
+    """Secure data loader with Ferreres-inspired sanitization framework"""
+    
+    def __init__(self, validation_schema: Optional[Dict] = None, secure_mode: bool = True):
+        """
+        Initialize with validation rules and security constraints
+        
+        Args:
+            validation_schema: Nested dictionary specifying data constraints
+            secure_mode: Disables risky formats like pickle when True (default)
+        """
+        self.validation_schema = validation_schema or {}
+        self.secure_mode = secure_mode
+        self._init_builtin_preprocessors()
+        logger.info("Initialized SafeDataLoader with Ferreres sanitization protocols")
 
-    Args:
-        batch_size (int): Number of samples per batch.
-        num_batches (int): Number of batches.
-        input_size (int): Number of input features.
-        output_size (int): Number of output classes (as class indices).
+    def load(self, file_path: str, preprocessors: Optional[List[str]] = None) -> Any:
+        """
+        Secure loading pipeline with validation and sanitization
+        
+        1. Format detection
+        2. Schema validation
+        3. Data sanitization
+        4. Preprocessing
+        """
+        self._validate_file_path(file_path)
+        file_format = self._detect_format(file_path)
+        load_fn = getattr(self, f"_load_{file_format}", None)
+        
+        if not load_fn:
+            raise ValueError(f"Unsupported format: {file_format}")
+            
+        raw_data = load_fn(file_path)
+        self._validate_schema(raw_data)
+        sanitized = self._sanitize_data(raw_data)
+        
+        if preprocessors:
+            for p in preprocessors:
+                sanitized = self._apply_preprocessor(sanitized, p)
+                
+        return sanitized
 
-    Returns:
-        TorchDataLoader: PyTorch DataLoader containing the dummy dataset.
-    """
-    logger.debug(f"Generating dummy data with batch_size={batch_size}, num_batches={num_batches}, input_size={input_size}, output_size={output_size}")
+    def _validate_file_path(self, file_path: str) -> None:
+        """Security checks for file access"""
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+            
+        if os.path.islink(file_path):
+            raise SecurityError("Symbolic links are not allowed for security reasons")
 
-    if not isinstance(batch_size, int) or batch_size <= 0:
-        raise ValueError(f"batch_size must be a positive integer, got {batch_size}")
-    if not isinstance(num_batches, int) or num_batches <= 0:
-        raise ValueError(f"num_batches must be a positive integer, got {num_batches}")
-    if input_size <= 0 or output_size <= 0:
-        raise ValueError("input_size and output_size must be positive integers")
+    def _detect_format(self, file_path: str) -> str:
+        """Multi-layered format detection with content analysis"""
+        ext = Path(file_path).suffix[1:].lower()
+        
+        # Content-based validation
+        with open(file_path, 'rb') as f:
+            header = f.read(4)
+            
+        if ext == 'parquet' and header == b'PAR1':
+            return 'parquet'
+        if ext == 'csv' and self._is_valid_csv(f):
+            return 'csv'
+        if ext == 'pickle' and self.secure_mode:
+            raise SecurityError("Pickle loading disabled in secure mode")
+            
+        return ext  # Fallback to extension-based
 
-    total_samples = batch_size * num_batches
+    def _load_csv(self, file_path: str) -> pd.DataFrame:
+        """Secure CSV loading with type inference"""
+        try:
+            df = pd.read_csv(file_path, engine='python', on_bad_lines='warn')
+            logger.info(f"Loaded CSV with shape {df.shape}")
+            return df
+        except pd.errors.ParserError as e:
+            raise DataValidationError(f"CSV parsing error: {str(e)}")
 
-    X = torch.randn(total_samples, input_size)
-    y = torch.randint(0, output_size, (total_samples,))
+    def _load_parquet(self, file_path: str) -> pd.DataFrame:
+        """Parquet loading with schema validation"""
+        try:
+            table = pq.read_table(file_path)
+            df = table.to_pandas()
+            
+            # Validate parquet schema
+            if self.validation_schema:
+                for col, meta in self.validation_schema.items():
+                    if col not in table.schema.names:
+                        raise DataValidationError(f"Missing required column: {col}")
+            return df
+        except Exception as e:
+            raise DataValidationError(f"Parquet error: {str(e)}")
 
-    dataset = TensorDataset(X, y)
-    loader = TorchDataLoader(dataset, batch_size=batch_size, shuffle=True)
+    def _validate_schema(self, data: Union[Dict, pd.DataFrame]) -> None:
+        """Multi-level schema validation"""
+        if isinstance(data, dict):
+            self._validate_dict_schema(data)
+        elif isinstance(data, pd.DataFrame):
+            self._validate_df_schema(data)
+        else:
+            logger.warning("Schema validation skipped for unsupported type")
 
-    logger.info(f"Dummy dataset created with {total_samples} samples.")
-    return loader
+    def _validate_df_schema(self, df: pd.DataFrame) -> None:
+        """Advanced DataFrame validation with type checking"""
+        for col, constraints in self.validation_schema.items():
+            if col not in df.columns:
+                raise DataValidationError(f"Missing column: {col}")
+                
+            # Type validation
+            if 'type' in constraints:
+                if not df[col].apply(lambda x: isinstance(x, constraints['type'])).all():
+                    raise DataValidationError(f"Type mismatch in column {col}")
+
+            # Value constraints
+            if 'min' in constraints:
+                if df[col].min() < constraints['min']:
+                    raise DataValidationError(f"Value below min in {col}")
+                    
+            if 'regex' in constraints:
+                pattern = re.compile(constraints['regex'])
+                if not df[col].astype(str).str.match(pattern).all():
+                    raise DataValidationError(f"Pattern mismatch in {col}")
+
+    def _sanitize_data(self, data: Any) -> Any:
+        """Core sanitization pipeline"""
+        if isinstance(data, pd.DataFrame):
+            return self._sanitize_dataframe(data)
+        elif isinstance(data, dict):
+            return self._sanitize_dict(data)
+        return data
+
+    def _sanitize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """DataFrame-specific sanitization"""
+        # Remove NaN values
+        df = df.dropna()
+        
+        # Escape potential HTML/JS
+        str_cols = df.select_dtypes(include=['object']).columns
+        df[str_cols] = df[str_cols].applymap(lambda x: html.escape(x) if isinstance(x, str) else x)
+        
+        return df
+
+    def _init_builtin_preprocessors(self) -> None:
+        """Register built-in preprocessing functions"""
+        self.preprocessors = {
+            'normalize': self._normalize,
+            'fill_na': self._fill_missing,
+            'encode_categorical': self._encode_categorical
+        }
+
+    def _apply_preprocessor(self, data: Any, name: str) -> Any:
+        """Apply named preprocessing step"""
+        if name not in self.preprocessors:
+            raise ValueError(f"Unknown preprocessor: {name}")
+        return self.preprocessors[name](data)
+
+    def _normalize(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Z-score normalization for numerical columns"""
+        num_cols = data.select_dtypes(include=np.number).columns
+        data[num_cols] = (data[num_cols] - data[num_cols].mean()) / data[num_cols].std()
+        return data
+
+    def _fill_missing(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Advanced missing value handling"""
+        # Numerical: median imputation
+        num_cols = data.select_dtypes(include=np.number).columns
+        data[num_cols] = data[num_cols].fillna(data[num_cols].median())
+        
+        # Categorical: mode imputation
+        cat_cols = data.select_dtypes(exclude=np.number).columns
+        data[cat_cols] = data[cat_cols].fillna(data[cat_cols].mode().iloc[0])
+        
+        return data
+
+    def _encode_categorical(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Safe one-hot encoding implementation"""
+        return pd.get_dummies(data, drop_first=True)
 
 # ============================================
 # Flexible Data Loader Class
@@ -174,3 +312,17 @@ class FlexibleDataLoader:
         return results
 
 DataLoader = FlexibleDataLoader
+
+# Example usage
+if __name__ == "__main__":
+    schema = {
+        "age": {"type": int, "min": 18, "max": 100},
+        "email": {"type": str, "regex": r"^[^@]+@[^@]+\.[^@]+$"}
+    }
+    
+    loader = SafeDataLoader(validation_schema=schema)
+    data = loader.load(
+        "users.csv",
+        preprocessors=["fill_na", "encode_categorical"]
+    )
+    print("Sanitized data:", data.head())
