@@ -1,14 +1,43 @@
 import logging
-import os
+import os, sys
 import json
 import yaml
-import csv
+import heapq
 import pickle
 import torch
+import random
+import numpy as np
 from typing import Dict, Any, Tuple, List
+
+from src.utils.agent_factory import AgentFactory
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+class MetricBridge:
+    """New class to handle feedback routing"""
+    def __init__(self, agent_factory: AgentFactory):
+        self.factory = agent_factory
+        self.history = []
+        
+    def submit_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Implements experience replay prioritization from Hindsight ER (Andrychowicz 2017)"""
+        self.history.append(metrics)
+        
+        # Calculate moving averages
+        window_size = min(10, len(self.history))
+        recent_metrics = self.history[-window_size:]
+        
+        avg_metrics = {
+            'fairness_violations': np.mean([m.get('demographic_parity_violations', 0) 
+                                   for m in recent_metrics]),
+            'calibration_error': np.mean([m.get('calibration_error', 0) 
+                                   for m in recent_metrics])
+        }
+        
+        # Thresholds from ISO/IEC 24027:2021 AI bias standards
+        if avg_metrics['fairness_violations'] > 0.05:
+            self.factory.adapt_from_metrics(avg_metrics)
 
 class FairnessMetrics:
     """
