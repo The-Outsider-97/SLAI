@@ -10,13 +10,18 @@ import queue
 import logging
 import threading
 import subprocess
-
+from src.utils.system_optimizer import SystemOptimizer
 
 # Add project root directory to Python path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 from models.slai_lm import SLAILM
+import torch
+
+model = SLAILM()
+dummy_input = torch.randn(1, model.input_dim)
+model_memory_estimate = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)  # MB
 
 # === Logger Setup ===
 from logs.logger import get_logger, get_log_queue
@@ -31,8 +36,34 @@ except Exception as e:
     logger.error(f"Failed to load config.yaml: {e}")
     sys.exit(1)
 
+logger = get_logger(__name__)
 log_queue = get_log_queue()
 metric_queue = queue.Queue()
+
+def main(self, optimizer: SystemOptimizer):
+    # Init core components
+    optimizer = SystemOptimizer()
+    logger = ResourceLogger(optimizer)
+    data_loader = FlexibleDataLoader(optimizer=optimizer)
+    metric_bridge = MetricBridge(factory, optimizer)
+
+    # Training loop
+    while training:
+        # Collect metrics from all sources
+        system_metrics = logger.collect_metrics()
+        fairness_metrics = calculate_fairness()
+        
+        # Unified optimization
+        metric_bridge.submit_metrics({
+            'system': system_metrics,
+            'fairness': fairness_metrics
+        })
+        
+        # Dynamic data loading
+        batch = data_loader.load("data.parquet", system_metrics=system_metrics)
+        
+        # Optimized agent creation
+        agent = factory.create("rl_agent", base_config, system_metrics)
 
 # === UI Imports ===
 from frontend.startup_screen import StartupScreen
