@@ -1,10 +1,15 @@
+import os, sys
 import logging
 import json
+import yaml
 import torch
 import numpy as np
-import itertools
-from hyperparam_tuning.grid_search import GridSearch
-from hyperparam_tuning.bayesian_search import BayesianSearch
+from pathlib import Path
+from src.tuning.grid_search import GridSearch
+from src.tuning.bayesian_search import BayesianSearch
+from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
+
+from src.agents.evaluation_agent import EvaluationAgent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -16,7 +21,14 @@ class HyperparamTuner:
     based on configuration or runtime input.
     """
 
-    def __init__(self, config_path, evaluation_function=None, strategy='bayesian', n_calls=20, n_random_starts=5):
+    def __init__(self,
+                 config_path=None,
+                 evaluation_function=None,
+                 strategy='bayesian',
+                 n_calls=20,
+                 n_random_starts=5,
+                 allow_generate=True,
+                 config_format=None):
         """
         Initializes the tuner.
 
@@ -27,16 +39,31 @@ class HyperparamTuner:
             n_calls (int): Number of iterations for Bayesian optimization.
             n_random_starts (int): Random starts for Bayesian optimization.
         """
-        self.config_path = config_path
+
         self.evaluation_function = evaluation_function
         self.strategy = strategy.lower()
         self.n_calls = n_calls
         self.n_random_starts = n_random_starts
 
-        if not evaluation_function:
+        if not self.evaluation_function:
             raise ValueError("An evaluation_function must be provided to the tuner.")
 
-        # Strategy Selection
+        # Determine config path or dynamically generate
+        if config_path and os.path.exists(config_path):
+            self.config_path = config_path
+            logger.info("Using provided config file: %s", self.config_path)
+        elif allow_generate:
+            generator = HyperparamConfigGenerator()
+            fmt = config_format or 'json'
+            self.config_path = generator.generate_configs(strategy=self.strategy, fmt=fmt, auto_load=True)
+            logger.info("Generated config at: %s", self.config_path)
+        else:
+            raise FileNotFoundError("No valid config file provided and generation not allowed.")
+
+        # Load config format (YAML/JSON)
+        self.config_data = self._load_config()
+
+        # Strategy selection
         if self.strategy == 'bayesian':
             self.optimizer = BayesianSearch(
                 config_file=self.config_path,
@@ -50,49 +77,47 @@ class HyperparamTuner:
                 evaluation_function=self.evaluation_function
             )
         else:
-            raise ValueError("Unsupported strategy '{}'. Choose 'bayesian' or 'grid'.".format(self.strategy))
+            raise ValueError(f"Unsupported strategy '{self.strategy}'. Choose 'bayesian' or 'grid'.")
 
-        logger.info("HyperParamTuner initialized with strategy: %s", self.strategy)
+    def _load_config(self):
+        if self.config_path.endswith('.yaml') or self.config_path.endswith('.yml'):
+            with open(self.config_path, 'r') as f:
+                return yaml.safe_load(f)
+        elif self.config_path.endswith('.json'):
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        else:
+            raise ValueError(f"Unsupported config file format: {self.config_path}")
 
     def run_tuning_pipeline(self):
-        """
-        Runs the selected hyperparameter optimization strategy.
-
-        Returns:
-            dict: Best hyperparameters found.
-        """
         logger.info("Running hyperparameter tuning pipeline using %s strategy...", self.strategy)
         best_params = self.optimizer.run_search()
-
         logger.info("Hyperparameter tuning completed. Best parameters: %s", best_params)
         return best_params
 
+
 if __name__ == "__main__":
-    # Dummy evaluation function for demonstration
-    def dummy_evaluation(params):
-        """
-        Dummy evaluation function that simulates model performance.
-        Higher score is better.
-        """
-        score = -((params['learning_rate'] - 0.01) ** 2 + (params['num_layers'] - 3) ** 2)
-        return score
+    args = parser.parse_args()
+    logging.info("Starting tuner with strategy: %s", args.strategy)
 
-    # Example usage with Bayesian Search
-    bayesian_tuner = HyperparamTuner(
-        config_path='hyperparam_tuning/example_config.json',
-        evaluation_function=dummy_evaluation,
-        strategy='bayesian',
-        n_calls=10,
-        n_random_starts=2
-    )
-    bayesian_best_params = bayesian_tuner.run_tuning_pipeline()
-    print("\nBest Params from Bayesian Search:", bayesian_best_params)
+    try:
+        tuner = HyperparamTuner(
+            config_path=None,  # Leave None to auto-generate
+            evaluation_function=EvaluationAgent,
+            strategy='grid',
+            config_format='yaml'
+          )  # Choose output format if generating
+        grid_search = GridSearch(
+            config_file="src/tuning/configs/grid_config.json",
+            evaluation_function=rl_agent_evaluate,
+            reasoning_agent=ReasoningAgent(),
+            n_jobs=8,
+            cross_val_folds=5
+        )
 
-    # Example usage with Grid Search
-    grid_tuner = HyperparamTuner(
-        config_path='hyperparam_tuning/example_grid_config.json',
-        evaluation_function=dummy_evaluation,
-        strategy='grid'
-    )
-    grid_best_params = grid_tuner.run_tuning_pipeline()
-    print("\nBest Params from Grid Search:", grid_best_params)
+        best_params = grid_search.run_search()
+        best = tuner.run_tuning_pipeline()
+        print("Best parameters:", best)
+    except Exception as e:
+        logging.error("Tuning failed: %s", str(e))
+        sys.exit(1)
