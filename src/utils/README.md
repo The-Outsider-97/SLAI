@@ -130,7 +130,16 @@ graph RL
     D -->|Updated Agents| A
     D -->|Updated Agents| C
 ````
-   
+
+```mermaid
+graph LR
+  A[ResourceLogger] -->|System Metrics| B[SystemOptimizer]
+  B -->|Batch Size| C[DataLoader]
+  B -->|Agent Params| D[AgentFactory]
+  B -->|Throughput Opt| E[MetricBridge]
+  E -->|Fairness Data| B
+```
+  
 Scientific Underpinnings:
 - Implements the "Red Teams" framework (Bommasani 2022) by providing tools for evaluating and mitigating potential risks.
 - Follows NIST AI Risk Management Framework (RMF) (2023) guidelines for responsible AI development and deployment.
