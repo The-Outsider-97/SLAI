@@ -31,6 +31,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from src.utils.agent_factory import AgentFactory
 from src.collaborative.shared_memory import SharedMemory
 from models.slai_lm import SLAILM
+from src.agents.learning.grammar_processor import GrammarProcessor
 
 
 # Scientific computing import with error handling
@@ -207,62 +208,67 @@ class DeadlineAwareScheduler(TaskScheduler):
         
         return assignments
 
+
 class CollaborativeAgent:
     """Main collaborative agent implementation"""
     
-    def __init__(self, 
-                 config_path: Optional[str] = None,
-                 shared_memory: Optional[Any] = None, 
-                 risk_threshold: float = 0.2,
-                 agent_network: Optional[Dict[str, Any]] = None):
-        """
-        Initialize collaborative agent.
+    def __init__(self, agent_factory: AgentFactory, config: Optional[Dict] = None,
+                risk_threshold=0.2, shared_memory=None, agent_network: Optional[Dict] = None,
+                config_path: Optional[str] = None):
         
-        Args:
-            config_path: Path to YAML config file
-            shared_memory: Optional shared memory instance
-            risk_threshold: Initial risk threshold (0.0-1.0)
-            agent_network: Predefined agent network dictionary
-        """
-        self.name = "CollaborativeAgent"
-        self.shared_memory = shared_memory or ThreadSafeSharedMemory()
+        self.agent_factory = agent_factory
         self.risk_threshold = max(0.0, min(1.0, risk_threshold))
+        self.shared_memory = shared_memory or ThreadSafeSharedMemory()
+        self.agents = {}
+
+        # Load config if needed
+        if config_path and not agent_network:
+            self.agent_network = self._load_config(config_path)
+        else:
+            self.agent_network = agent_network or {}
+
+        # Prefer manual config if valid
+        if isinstance(config, dict) and "agents" in config:
+            for agent_type, agent_cfg in config["agents"].items():
+                try:
+                    agent = self.agent_factory.create(agent_type, agent_cfg)
+                    self.agents[agent_type] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to initialize {agent_type}: {e}")
+        elif self.agent_network:
+            for agent_name, agent_info in self.agent_network.items():
+                try:
+                    agent = self.agent_factory.create(agent_name, agent_info)
+                    self.agents[agent_name] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to load {agent_name}: {e}")
+        else:
+            logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
+
+        logger.info(f"Initialized CollaborativeAgent with {len(self.agents)} agents")
+
+        # Core components
+        self.name = "CollaborativeAgent"
         self.shared_resources = {
-            "shared_memory": {},  # Replace with real Blackboard if needed
-            "task_router": {}     # If routing modules exist
+            "shared_memory": {},  # Use actual shared components if needed
+            "task_router": {}
         }
         self.factory = AgentFactory(shared_resources=self.shared_resources)
-        from ..agents.language_agent import LanguageAgent
-        from ..agents.learning_agent import LearningAgent, SLAIEnv
+        from src.agents.language_agent import LanguageAgent
+        from src.agents.learning_agent import LearningAgent, SLAIEnv
         self.factory.register("language", LanguageAgent)
-        self.factory.register(
-            "learning",
-            lambda **kwargs: LearningAgent(
-                env=SLAIEnv(),
-                config=kwargs.get('config', {}),
-                shared_memory=self.shared_memory))
+        self.factory.register("learning", lambda **kwargs: LearningAgent(env=SLAIEnv(), config=kwargs.get("config", {}), shared_memory=self.shared_memory))
 
-        # Load configuration
-        self.agent_network = self._load_config(config_path) if config_path else agent_network or {}
-        
-        # Initialize risk model
+        self.grammar = GrammarProcessor(lang='en')
         self.risk_model = {
             'task_risks': defaultdict(list),
             'agent_risks': defaultdict(list),
             'thresholds': defaultdict(BayesianThresholdAdapter)
         }
         self.risk_model['thresholds']['default'] = BayesianThresholdAdapter()
-        
-        # Initialize components
         self.scheduler = DeadlineAwareScheduler()
-        self._metrics_lock = threading.Lock()
         self._init_performance_metrics()
-        
-        logger.info(f"Initialized {self.name} with {len(self.agent_network)} agents")
-
-        # Add learning subsystem integration
-        self.learning_subsystems = {
-        }
+        self.learning_subsystems = {}
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
@@ -413,6 +419,26 @@ class CollaborativeAgent:
             for task_id, assignment in optimized.items()
         }
 
+        # Collect fairness metrics (Added after safety checks)
+        from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, MetricBridge
+        self.metric_bridge = MetricBridge(self.factory)
+        
+        metrics = {
+            'demographic_parity_violations': FairnessMetrics.demographic_parity(
+                sensitive_groups=list(self.agent_network.keys()),
+                positive_rates={agent: len(assignments.get(agent, []))/len(tasks) 
+                                for agent in self.agent_network}
+            )[0],
+            'calibration_error': PerformanceMetrics.calibration_error(
+                y_true=np.array([t.get('priority', 0.5) for t in tasks]),
+                probs=np.array([a.get('optimization_score', 0.5) 
+                                for a in assignments.values()])
+            )
+        }
+        
+        if hasattr(self, 'metric_bridge'):
+            self.metric_bridge.submit_metrics(metrics)
+    
         # Your task coordination logic should populate safety_checks and optimized_schedule
         return {
             'status': 'success',
@@ -422,7 +448,7 @@ class CollaborativeAgent:
                 optimized,
                 safety_checks)
         }
-    
+
     def _apply_optimizations(
         self,
         schedule: Dict[str, Any],
@@ -673,7 +699,13 @@ class CollaborativeAgent:
             agent = self.factory.create("learning", agent_config)
                 
             reward = agent.train_episode()
-            return f"[SLAI: Learning Agent]: Training complete.\n→ Reward: {reward:.2f}"
+            raw_facts = {
+                'agent': 'SLAI Learning Agent',
+                'event': 'training_complete',
+                'metric': 'reward',
+                'value': round(reward, 2)
+            }
+            return self.grammar.compose_sentence(raw_facts)
 
         except Exception as e:
             logger.error(f"Generation failed: {str(e)}", exc_info=True)
@@ -1037,6 +1069,29 @@ class TestCollaborativeAgent(unittest.TestCase):
         self.assertEqual(assessment.risk_score, deserialized.risk_score)
         self.assertEqual(assessment.risk_level, deserialized.risk_level)
         self.assertEqual(assessment.recommended_action, deserialized.recommended_action)
+
+class MetricBridge:
+    def __init__(self, agent_factory):
+        self.factory = agent_factory
+        self.metrics_history = []
+        
+    def submit_metrics(self, metrics: dict):
+        """Implements exponential moving average from Brown's smoothing (1956)"""
+        self.metrics_history.append(metrics)
+        
+        # Weighted average (α=0.2)
+        decay_factor = 0.2
+        avg_metrics = {}
+        for key in metrics.keys():
+            series = [m.get(key, 0) for m in self.metrics_history[-10:]]
+            avg_metrics[key] = sum(
+                decay_factor*(1-decay_factor)**i * val 
+                for i, val in enumerate(reversed(series))
+            )
+            
+        # Thresholds from ISO/IEC 24029-1:2021 AI quality standards
+        if avg_metrics.get('demographic_parity_violations', 0) > 0.1:
+            self.factory.adapt_from_metrics(avg_metrics)
 
 # Example usage
 if __name__ == "__main__":
