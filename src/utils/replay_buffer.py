@@ -8,6 +8,7 @@ import random
 from collections import deque, defaultdict
 from threading import Lock
 from datetime import datetime, timedelta
+from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
 
 logger = logging.getLogger("DistributedReplayBuffer")
 
@@ -42,7 +43,19 @@ class DistributedReplayBuffer:
         
         # Quality metrics
         self.reward_stats = {'sum': 0.0, 'max': -np.inf, 'min': np.inf}
-        
+
+        # Fairness tracking
+        self.fairness_stats = {
+            'demographic_parity_violations': 0,
+            'equalized_odds_violations': 0
+        }
+         
+        # Academic provenance tracking
+        self.metric_provenance = {
+             'prioritized_sampling': "Schaul et al. (2015) Prioritized Experience Replay",
+             'fairness_metrics': "Barocas et al. (2022) Fairness and Machine Learning"
+         }
+ 
         # Seed for reproducibility
         if seed is not None:
             random.seed(seed)
@@ -74,6 +87,9 @@ class DistributedReplayBuffer:
                 self.reward_stats['max'] = reward
             if reward < self.reward_stats['min']:
                 self.reward_stats['min'] = reward
+        
+            # Track demographic distribution
+            self._update_fairness_stats(agent_id, reward)
 
     def sample(self, batch_size, strategy='uniform', beta=0.4, agent_distribution=None):
         """
@@ -89,15 +105,79 @@ class DistributedReplayBuffer:
             
             if batch_size > len(self.buffer):
                 raise ValueError(f"Insufficient samples ({len(self.buffer)} available)")
-                
+
+            # Get raw batch first
             if strategy == 'prioritized':
-                return self._prioritized_sample(batch_size, beta)
+                raw_batch, indices, weights = self._prioritized_sample(batch_size, beta)
             elif strategy == 'reward':
-                return self._reward_based_sample(batch_size)
+                raw_batch = self._reward_based_sample(batch_size)
             elif strategy == 'agent_balanced':
-                return self._agent_balanced_sample(batch_size, agent_distribution)
+                raw_batch = self._agent_balanced_sample(batch_size, agent_distribution)
             else:
-                return self._uniform_sample(batch_size)
+                raw_batch = self._uniform_sample(batch_size)
+
+            # Process batch for return
+            processed_batch = self._process_batch(raw_batch)
+
+            # Collect metrics from RAW batch before processing
+            from src.utils.metrics_utils import PerformanceMetrics
+            batch_metrics = {
+                'calibration_error': PerformanceMetrics.calibration_error(
+                    y_true=np.array([exp[3] for exp in raw_batch]),  # Use raw batch rewards
+                    probs=np.array([abs(exp[3]) for exp in raw_batch])
+                )
+            }
+
+            if hasattr(self, 'metric_bridge'):
+                self.metric_bridge.submit_metrics(batch_metrics)
+
+            # Return processed batch with numpy arrays
+            return processed_batch
+
+    def _update_fairness_stats(self, agent_id, reward):
+        """Track metrics for autonomous bias detection"""
+        with self.lock:
+            # Track reward distribution per agent
+            if agent_id not in self.reward_stats:
+                self.reward_stats[agent_id] = []
+            self.reward_stats[agent_id].append(reward)
+
+    def _check_fairness(self, batch, strategy):
+        """Implements Barocas's fairness framework for experience selection"""
+        agent_ids = batch[0]
+        unique, counts = np.unique(agent_ids, return_counts=True)
+        selection_rates = {aid: count/len(agent_ids) for aid, count in zip(unique, counts)}
+        
+        # Demographic parity check
+        violation, msg = FairnessMetrics.demographic_parity(
+            sensitive_groups=list(selection_rates.keys()),
+            positive_rates=selection_rates,
+            threshold=0.1
+        )
+        
+        if violation:
+            self.fairness_stats['demographic_parity_violations'] += 1
+            logger.warning(f"Fairness Alert: {msg}")
+            
+        # Reward distribution analysis
+        reward_calibration = PerformanceMetrics.calibration_error(
+            y_true=np.array([exp[3] for exp in self.buffer]),
+            probs=np.array([abs(exp[3]) for exp in self.buffer])
+        )
+        logger.info(f"Reward calibration error: {reward_calibration:.4f}")
+
+    def generate_health_report(self):
+        """Autonomous self-assessment per Mitchell's model cards"""
+        return MetricSummarizer.create_model_card(
+            metrics={
+                'fairness': self.fairness_stats,
+                'performance': {
+                    'reward_mean': np.mean([exp[3] for exp in self.buffer]),
+                    'reward_variance': np.var([exp[3] for exp in self.buffer])
+                }
+            },
+            references=self.metric_provenance
+        )
 
     def _prioritized_sample(self, batch_size, beta):
         """Prioritized sampling based on stored priorities (Schaul et al., 2015)"""
@@ -196,7 +276,9 @@ class DistributedReplayBuffer:
                 'capacity': self.capacity,
                 'prioritization_alpha': self.alpha,
                 'staleness_threshold': self.staleness_threshold.total_seconds(),
-                'reward_stats': self.reward_stats
+                'reward_stats': self.reward_stats,
+                'fairness_stats': self.fairness_stats,
+                'metric_provenance': self.metric_provenance
             }
             np.savez_compressed(
                 filepath,
@@ -216,6 +298,8 @@ class DistributedReplayBuffer:
             self.alpha = meta['prioritization_alpha']
             self.staleness_threshold = timedelta(seconds=meta['staleness_threshold'])
             self.reward_stats = meta['reward_stats']
+            self.fairness_stats = meta.get('fairness_stats', {})
+            self.metric_provenance = meta.get('metric_provenance', {})
             
             self.buffer = deque(data['buffer'].tolist(), maxlen=self.capacity)
             self.timestamps = deque(data['timestamps'].tolist(), maxlen=self.capacity)
