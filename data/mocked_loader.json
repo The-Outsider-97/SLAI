@@ -1,1 +1,7 @@
-
+{
+  "id": 1,
+  "name": "Sample User",
+  "age": 30,
+  "email": "sample@example.com",
+  "is_active": true
+}
