@@ -3,8 +3,13 @@
     {
       "name": "learning_rate",
       "type": "float",
-      "values": [0.0001, 0.001, 0.01, 0.05, 0.1]
-    },
+      "values": [0.0001, 0.001, 0.01, 0.05, 0.1],
+      "prior_research": {
+        "citation": "Andrychowicz et al. (2020), PNAS 117(48)",
+        "optimal_range": [0.001, 0.01]
+      },
+      "physiological_basis": "Matching neural plasticity time constants"
+},
     {
       "name": "num_layers",
       "type": "int",
@@ -13,7 +18,11 @@
     {
       "name": "batch_size",
       "type": "int",
-      "values": [16, 64, 128, 256]
+      "values": [16, 64, 128, 256, 512, 1024],
+      "hardware_constraints": {
+        "vram_usage_model": "linear",
+        "max_acceptable": 1024
+      }
     },
     {
       "name": "optimizer",
