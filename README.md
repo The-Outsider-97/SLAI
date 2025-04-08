@@ -127,6 +127,7 @@ Note: If you see an error about execution policy:
    pip install watchdog
    pip install deepmerge
    pip install joblib
+   pip install pandas
     ```
 
 5. Run Model:
