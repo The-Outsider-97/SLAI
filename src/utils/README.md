@@ -120,8 +120,17 @@ graph TD
     J --> C;
     C --> K(Updated agents);
     K --> L(Improved performance);
-````
+```
 
+```mermaid
+graph RL
+    A[Replay Buffer] -->|Sampling Metrics| B[Metric Bridge]
+    C[Collaborative Agent] -->|Coordination Metrics| B
+    B -->|Adaptation Signals| D[Agent Factory]
+    D -->|Updated Agents| A
+    D -->|Updated Agents| C
+````
+   
 Scientific Underpinnings:
 - Implements the "Red Teams" framework (Bommasani 2022) by providing tools for evaluating and mitigating potential risks.
 - Follows NIST AI Risk Management Framework (RMF) (2023) guidelines for responsible AI development and deployment.
