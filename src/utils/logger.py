@@ -1,14 +1,18 @@
+from __future__ import annotations
 import logging
 import tempfile
 import subprocess
 import os
 import time
 import ast
-
+import psutil
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.utils.system_optimizer import SystemOptimizer
 
-def get_logger(name):
+def get_logger(name: str):
     """
     Return an existing logger or create a new one with default DEBUG level and single file output.
     """
@@ -19,6 +23,8 @@ def get_logger(name):
         os.makedirs("logs", exist_ok=True)
         file_handler = logging.FileHandler(f"logs/{name}.log")
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
@@ -64,3 +70,20 @@ def cleanup_logger(name):
         handler.flush()
         handler.close()
         logger.removeHandler(handler)
+
+class ResourceLogger:
+    """New subclass for system monitoring"""
+    def __init__(self, optimizer: SystemOptimizer):
+        self.optimizer = optimizer
+        
+    def collect_metrics(self) -> dict:
+        return {
+            'cpu': psutil.cpu_percent(),
+            'mem': psutil.virtual_memory().percent,
+            'gpu': self._get_gpu_usage(),
+            'throughput': self._calc_throughput()
+        }
+    
+    def _get_gpu_usage(self):
+        # Implementation using NVML or other libs
+        pass
