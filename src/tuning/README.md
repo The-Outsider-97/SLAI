@@ -132,7 +132,7 @@ graph TD
 ```
 
 ```mermaid 
-graph TD
+graph LR
     A[Grid Config] -->|Explicit Values| B[Space Generation]
     B --> C[Combinatorial Validation]
     C -->|Pass| D[Parallel Evaluation]
