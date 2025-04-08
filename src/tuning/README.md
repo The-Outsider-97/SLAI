@@ -131,3 +131,14 @@ graph TD
     end
 ```
 
+```mermaid 
+graph TD
+    A[Grid Config] -->|Explicit Values| B[Space Generation]
+    B --> C[Combinatorial Validation]
+    C -->|Pass| D[Parallel Evaluation]
+    D --> E[Statistical Analysis]
+    E --> F[Space Pruning]
+    F --> G{Improvement Significant?}
+    G -->|Yes| D
+    G -->|No| H[Final Ranking]
+```
