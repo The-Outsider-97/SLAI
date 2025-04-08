@@ -1,15 +1,15 @@
 import os, sys
 import ast
 import yaml
-import importlib
-import logging as logger, logging
-import numpy as np
 import math
+import inspect
+import importlib
+import numpy as np
+import logging as logger, logging
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.utils.system_optimizer import SystemOptimizer
 from src.agents.language_agent import LanguageAgent
 
 class AgentMetaData:
@@ -22,7 +22,7 @@ class AgentMetaData:
         self.required_params = required_params
 
 class AgentFactory:
-    def __init__(self, shared_resources: Optional[Dict[str, Any]] = None):
+    def __init__(self, shared_resources: Optional[Dict[str, Any]] = None, optimizer: 'SystemOptimizer' = None):
         self.agent_registry: Dict[str, AgentMetaData] = {}
         self.shared_resources = shared_resources or {}
         self._memorized_agents: Dict[str, Any] = {}
@@ -30,42 +30,53 @@ class AgentFactory:
         self._discover_agents()
         self.registry = {}
         self.metrics_adapter = MetricsAdapter()
-                
-    def reconfigure_from_metrics(self, metrics: Dict[str, Any]):
-        """Public interface for metric-driven adaptation"""
-        adjustments = self.metric_adapter.process_metrics(
-            metrics, 
-            agent_types=list(self.registry.keys())
-        )
-        self.metric_adapter.update_factory_config(self, adjustments)
+        self.optimizer = optimizer
 
-    def register(self, name: str, agent_cls):
-        self.registry[name] = agent_cls
+    def create(self, agent_type: str, config: dict, system_metrics: dict = None):
+        """Optimized agent creation"""
+        if self.optimizer and system_metrics:
+            config.update(
+                self.optimizer.recommend_agent_params(
+                    agent_type=agent_type,
+                    system_status=system_metrics
+                )
+            )
 
-    def create(self, agent_type: str, config: dict):
         build_config_fn = getattr(self, f"_build_{agent_type}_config", None)
 
-        # Attempt registered agents first
         if agent_type in self.registry:
             agent_cls = self.registry[agent_type]
             final_config = build_config_fn(config) if build_config_fn else config
 
-            # Validate parameters
-            try:
-                init_func = agent_cls.__init__
-                required_params = init_func.__code__.co_varnames[1:init_func.__code__.co_argcount]
-            except AttributeError:
-                # Class does not override __init__, skip param check
-                required_params = []
-            missing = [k for k in required_params if k not in final_config]
-            if missing:
-                raise ValueError(f"Missing required parameters for {agent_type}: {missing}")
+            # === Validate config before instantiation ===
+            init_sig = inspect.signature(agent_cls.__init__)
+            missing_args = []
+            for name, param in init_sig.parameters.items():
+                if name == "self":
+                    continue
+                if param.default == inspect.Parameter.empty and name not in final_config:
+                    missing_args.append(name)
+            
+            if missing_args:
+                raise ValueError(
+                    f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}"
+                )
 
             return agent_cls(**final_config)
 
-        # Fallback mechanism
         logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
         return self._create_fallback_agent(agent_type, config)
+                  
+    def reconfigure_from_metrics(self, metrics: Dict[str, Any]):
+        """Public interface for metric-driven adaptation"""
+        adjustments = self.metrics_adapter.process_metrics(
+            metrics,
+            agent_types=list(self.registry.keys())
+        )
+        self.metrics_adapter.update_factory_config(self, adjustments)
+
+    def register(self, name: str, agent_cls):
+        self.registry[name] = agent_cls
         
     def adapt_from_metrics(self, metrics_data: Dict[str, Any]) -> None:
         """
@@ -163,8 +174,7 @@ class AgentFactory:
             tokens = self.llm.tokenizer.tokenize(clean_prompt)
             if not tokens:
                 return {"intent": "generic", "confidence": 0.5}
-                
-            # Rest of intent parsing logic...
+
         except Exception as e:
             logger.error(f"Intent parsing error: {str(e)}")
             return {"intent": "error", "confidence": 0.0}
