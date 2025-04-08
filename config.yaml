@@ -12,13 +12,16 @@ run:
   output_dir: "logs/"
   plots_dir: "plots/"
 
-language:  
-  llm: SLAILM()  
-  history: []  
-  summary: null  
-  memory_limit: 1000  
-  enable_summarization: true  
-  summarizer: null
+agent-network:
+  language:  
+    llm: SLAILM()  
+    history: []  
+    summary: null  
+    memory_limit: 1000  
+    enable_summarization: true  
+    summarizer: null
+
+  learning: greeting
 
 agents:
   dqn:
@@ -125,8 +128,8 @@ tuning:
   n_random_starts: 5         # used for Bayesian
 
 configs:
-  bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
-  grid_config: "hyperparam_tuning/example_grid_config.json"
+  bayesian_config: "src/tuning/configs/bayesian_config.json"
+  grid_config: "src/tuning/configs/grid_config.json"
 
 # ==========================
 # Thresholds and Alignment
@@ -169,7 +172,7 @@ security:
 # Data Autit
 # ==========================
 
-dataset_path: "datasets/dataset.csv"
+dataset_path: "data/dataset.csv"
 config_path: "config.yaml"
 logs_path: "logs/"
 audit_output_dir: "audits/"
@@ -223,4 +226,4 @@ monitoring:
       bias_increase: 0.05
 
 paths:
-  data_source: "datasets/sample_dataset.csv"
+  data_source: "data/sample_dataset.csv"
