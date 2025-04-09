@@ -129,6 +129,7 @@ Note: If you see an error about execution policy:
    pip install joblib
    pip install pandas
    pip install pyarrow
+   pip install spacy
     ```
 
 5. Run Model:
