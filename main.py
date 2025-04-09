@@ -1,9 +1,8 @@
 # ===== START OF main.py =====
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QTimer
-from torch.utils.data import DataLoader, TensorDataset
 
 import os, sys
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 import yaml
 import torch
 import queue
@@ -11,18 +10,20 @@ import logging
 import threading
 import subprocess
 from src.utils.system_optimizer import SystemOptimizer
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
+from torch.utils.data import DataLoader, TensorDataset
 
-# Add project root directory to Python path
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 from models.slai_lm import SLAILM
 import torch
+from src.utils.agent_factory import AgentFactory
+from src.agents.language_agent import LanguageAgent
+
+AgentFactory().register("language", LanguageAgent)
 
 model = SLAILM()
-dummy_input = torch.randn(1, model.input_dim)
-model_memory_estimate = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)  # MB
-
+model_memory_estimate = sum(
+    p.numel() * p.element_size()for p in model.parameters()) / (1024 ** 2) if hasattr(model, "parameters") else 0
 # === Logger Setup ===
 from logs.logger import get_logger, get_log_queue
 from src.utils.logger import setup_logger
