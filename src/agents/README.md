@@ -40,6 +40,25 @@ Learns a meta-policy that can adapt quickly to new tasks with minimal data.
 
 ---
 
+### `knowledge_agent.py`
+```mermaid
+graph TD
+    SLAI -->|is| IntelligentAgent
+    IntelligentAgent -->|has| ReasoningCapabilities
+    ReasoningAgent -->|uses| Rules
+    ReasoningAgent -->|uses| Facts
+    RuleBasedReasoning -->|is| Deductive
+    ProbabilisticReasoning -->|is| Uncertain
+    LanguageModel -->|is| NeuralNetwork
+    SLAI -->|includes| LanguageModel
+    SLAI -->|supports| MultiAgentCommunication
+    MultiAgentSystem -->|requires| Collaboration
+    SafeAI -->|monitors| RiskTriggers
+
+```
+
+---
+
 ### `rsi_agent.py`
 **Reinforcement Self-Improving Agent (RSI)**  
 Focuses on continuous policy refinement by leveraging shared memory.
