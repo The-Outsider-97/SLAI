@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple, List
 from src.utils.system_optimizer import SystemOptimizer
 from src.agents.language_agent import LanguageAgent
 
+
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
     
@@ -31,8 +32,11 @@ class AgentFactory:
         self.registry = {}
         self.metrics_adapter = MetricsAdapter()
         self.optimizer = optimizer
+        
 
     def create(self, agent_type: str, config: dict, system_metrics: dict = None):
+        if not isinstance(config, dict):
+            raise TypeError(f"[AgentFactory] Config must be a dict, got {type(config)} with value: {config}")
         """Optimized agent creation"""
         if self.optimizer and system_metrics:
             config.update(
@@ -58,11 +62,29 @@ class AgentFactory:
                     missing_args.append(name)
             
             if missing_args:
-                raise ValueError(
-                    f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}"
-                )
+                raise ValueError(f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}")
 
             return agent_cls(**final_config)
+        
+        if agent_type.lower() == "language":
+            from models.slai_lm import SLAILM
+            from src.agents.language_agent import DialogueContext
+            from src.agents.language.grammar_processor import GrammarProcessor
+
+            slailm_instance = SLAILM()
+            grammar = GrammarProcessor(
+                structured_wordlist=slailm_instance.structured_wordlist,
+                wordlist=slailm_instance.wordlist,
+                knowledge_agent=slailm_instance.knowledge
+            )
+            context = DialogueContext(llm=slailm_instance)
+
+            return LanguageAgent(
+                llm=slailm_instance,
+                grammar_processor=grammar,
+                dialogue_context=context,
+                config=config
+            )
 
         logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
         return self._create_fallback_agent(agent_type, config)
@@ -187,7 +209,15 @@ class AgentFactory:
         try:
             module = importlib.import_module(module_path)
             agent_class = getattr(module, class_name)
-            return self._initialize_agent(agent_class, config)
+            
+            # Apply agent-specific config builder if available
+            build_config_fn = getattr(self, f"_build_{agent_name}_config", None)
+            if build_config_fn:
+                final_config = build_config_fn(config)
+            else:
+                final_config = config
+                
+            return self._initialize_agent(agent_class, final_config)
         except Exception as e:
             raise RuntimeError(f"Failed to create fallback agent {agent_name}: {str(e)}")
 
@@ -234,7 +264,10 @@ class AgentFactory:
 
     def _build_language_config(self, config: dict) -> dict:
         from models.slai_lm import SLAILM
+        from src.agents.language_agent import DialogueContext
         llm_instance = config.get("llm", SLAILM())
+        dialogue_context = DialogueContext(llm=llm_instance)
+
         return {
             "llm": llm_instance,
             "config": {
@@ -250,7 +283,15 @@ class AgentFactory:
         }
     
     def _build_learning_config(self, config: Dict) -> Dict:
-        return {'rl_algorithm': self._init_rl_algorithm(config)}
+        return {
+            "algorithm": config.get("algorithm", "dqn"),
+            "epsilon": 0.1,
+            "discount": 0.95,
+            "memory_limit": 50000,
+            "learning_rate": 0.001,
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {})
+        }
 
     def _build_perception_config(self, config: Dict) -> Dict:
         return {
