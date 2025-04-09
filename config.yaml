@@ -21,7 +21,12 @@ agent-network:
     enable_summarization: true  
     summarizer: null
 
-  learning: greeting
+  learning:
+    algorithm: dqn
+    epsilon: 0.1
+    discount: 0.95
+    memory_limit: 50000
+    learning_rate: 0.001
 
 agents:
   dqn:
@@ -173,7 +178,7 @@ security:
 # ==========================
 
 dataset_path: "data/dataset.csv"
-config_path: "config.yaml"
+config_path: "configs/config.yaml"
 logs_path: "logs/"
 audit_output_dir: "audits/"
 processed_output_path: "data/processed_dataset.csv"
