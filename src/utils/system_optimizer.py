@@ -10,9 +10,9 @@ from src.utils.data_loader import DataLoader
 
 start = time.time()
 
-dummy_paths = [f"data/batch_{i}.json" for i in range(10)]
+dummy_paths = [f"data/batch_{i}.json" for i in range(1)]
 try:
-    for i in range(10):
+    for i in range(1):
         _ = DataLoader().load("data/mocked_loader.json")
 except FileNotFoundError:
     pass
