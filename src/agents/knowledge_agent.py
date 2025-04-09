@@ -3,14 +3,18 @@ Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence)
 Implements core RAG functionality with TF-IDF based retrieval from scratch
 """
 
+import os
+import json
 import math
 import re
 from collections import defaultdict
 from heapq import nlargest
 
 class KnowledgeAgent:
-    def __init__(self):
-        self.knowledge_base = []
+    def __init__(self, knowledge_agent_dir=None, persist_file: str = None):
+        self.cache = {}
+        self.cache_size = 1000
+        self.knowledge_agent = []
         self.vocabulary = set()
         self.document_frequency = defaultdict(int)
         self.total_documents = 0
@@ -24,29 +28,48 @@ class KnowledgeAgent:
             'their', 'you', 'your', 'we', 'our', 'us', 'i', 'me', 'my', 'mine'
         ])
 
-    def add_document(self, text, metadata=None):
-        """Store documents with preprocessing and vocabulary update"""
-        tokens = self._preprocess(text)
-        self.knowledge_base.append({'text': text, 'tokens': tokens, 'metadata': metadata})
-        
-        # Update vocabulary and document frequency
-        unique_tokens = set(tokens)
-        for token in unique_tokens:
-            self.document_frequency[token] += 1
-        self.vocabulary.update(unique_tokens)
-        self.total_documents += 1
+        if knowledge_agent_dir:
+            self.load_from_directory(knowledge_agent_dir)
+
+    def load_from_directory(self, directory_path: str):
+        """Loads all .txt and .json files in the directory as knowledge documents."""
+
+        if not os.path.isdir(directory_path):
+            print(f"[KnowledgeAgent] Invalid directory: {directory_path}")
+            return
+
+        for fname in os.listdir(directory_path):
+            fpath = os.path.join(directory_path, fname)
+            try:
+                if fname.endswith(".txt"):
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        text = f.read().strip()
+                        self.add_document(text, metadata={"source": fname})
+
+                elif fname.endswith(".json"):
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        for entry in data:
+                            text = entry.get("text") or str(entry)
+                            self.add_document(text, metadata={"source": fname})
+            except Exception as e:
+                print(f"[KnowledgeAgent] Failed to load {fname}: {e}")
 
     def retrieve(self, query, k=5, similarity_threshold=0.2):
+        cache_key = hash(query)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+    
         """Retrieve relevant documents using TF-IDF cosine similarity"""
         query_tokens = self._preprocess(query)
-        if not query_tokens or not self.knowledge_base:
+        if not query_tokens or not self.knowledge_agent:
             return []
 
         # Calculate TF-IDF vectors
         query_vector = self._calculate_tfidf(query_tokens, is_query=True)
         document_vectors = [
             (doc, self._calculate_tfidf(doc['tokens']))
-            for doc in self.knowledge_base
+            for doc in self.knowledge_agent
         ]
 
         # Calculate cosine similarities
@@ -56,8 +79,28 @@ class KnowledgeAgent:
             if similarity >= similarity_threshold:
                 similarities.append((similarity, doc))
 
+        if len(self.cache) > self.cache_size:
+            self.cache.popitem()
+            self.cache[cache_key] = results
+            return results
+    
         # Return top k results with similarity scores
         return nlargest(k, similarities, key=lambda x: x[0])
+
+    def add_document(self, text, metadata=None):
+        if not isinstance(text, str) or len(text.strip()) < 3:
+            raise ValueError("Document text must be non-empty string")
+
+        """Store documents with preprocessing and vocabulary update"""
+        tokens = self._preprocess(text)
+        self.knowledge_agent.append({'text': text, 'tokens': tokens, 'metadata': metadata})
+        
+        # Update vocabulary and document frequency
+        unique_tokens = set(tokens)
+        for token in unique_tokens:
+            self.document_frequency[token] += 1
+        self.vocabulary.update(unique_tokens)
+        self.total_documents += 1
 
     def _preprocess(self, text):
         """Text normalization and tokenization"""
@@ -108,11 +151,25 @@ class KnowledgeAgent:
         # Implementation stub for contextual search
         return self.retrieve(query)
 
+    def get_references_for_concepts(self, concepts: list, k: int = 3) -> list:
+        """
+        Retrieve textual references related to a list of concept strings using semantic TF-IDF search.
+        """
+        references = []
+        for concept in concepts:
+            if not isinstance(concept, str) or not concept.strip():
+                continue
+            results = self.retrieve(concept, k=k)
+            for score, doc in results:
+                references.append(doc.get("text", ""))
+
+        return references
+
 # Example usage
 if __name__ == "__main__":
     agent = KnowledgeAgent()
     
-    # Populate knowledge base
+    # Populate knowledge agent
     documents = [
         "Reinforcement learning uses rewards to train agents",
         "Neural networks are computational models inspired by biological brains",
