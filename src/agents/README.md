@@ -85,6 +85,20 @@ Delegates tasks to the most suitable registered agent based on task type and con
 - Integrates and manages multi-agent collaboration at runtime.
 
 ---
+### `Rule Chain Map`
+```mermaid
+flowchart LR
+    A1["SLAI → is → IntelligentAgent"]
+    A2["IntelligentAgent → has → ReasoningCapabilities"]
+    A1 & A2 --> R1["Rule: Deductive_Reasoning_Chain"]
+    R1 --> I1["Inference: SLAI → has → ReasoningCapabilities"]
+
+    B1["SafeAI → monitors → RiskTriggers"]
+    B2["SLAI → includes → SafeAI"]
+    B1 & B2 --> R2["Rule: SafeAI_Monitoring"]
+    R2 --> I2["Inference: SLAI → monitors → RiskTriggers"]
+```
+---
 
 ## Agent Integration
 
