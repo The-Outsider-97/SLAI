@@ -23,20 +23,18 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, defaultdict, Optional, Any
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from ..collaborative.shared_memory import SharedMemory
-from ..agents.learning.dqn import DQNAgent
-from ..agents.learning.maml_rl import MAMLAgent
-from ..agents.learning.rsi import RSI_Agent
-from ..agents.learning.rl_agent import RLAgent
+from src.collaborative.shared_memory import SharedMemory
+from src.agents.learning.dqn import DQNAgent
+from src.agents.learning.maml_rl import MAMLAgent
+from src.agents.learning.rsi import RSI_Agent
+from src.agents.learning.rl_agent import RLAgent
 
 logger = logging.getLogger(__name__)
 
 class LearningAgent:
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
     
-    def __init__(self, env=None, config: dict = None, shared_memory: Optional[Any] = None):
+    def __init__(self, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
         """
         Initialize learning subsystems with environment context
         
