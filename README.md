@@ -133,6 +133,8 @@ Note: If you see an error about execution policy:
    pip install transformers
    pip install tenacity
    pip install rollback
+   pip install statsmodels
+   pip install numpy scipy scikit-learn
    ```
 
 5. Run Model:
