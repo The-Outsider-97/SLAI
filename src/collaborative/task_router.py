@@ -21,7 +21,7 @@ class TaskRouter:
         self.registry = registry
         self.shared_memory = shared_memory
 
-    def route(self, task_type, task_data, context=None):
+    def route(self, task_type, task_data):
         eligible_agents = self.registry.get_agents_by_task(task_type)
         context = self.shared_memory.get('task_context', {})
 
@@ -34,8 +34,19 @@ class TaskRouter:
         # Step 2: Try each agent in order until success
         for agent_name, agent in sorted_agents:
             try:
+                # Increment active tasks BEFORE execution
+                agent_stats = self.shared_memory.get("agent_stats", {})
+                current_tasks = agent_stats.get(agent_name, {}).get("active_tasks", 0)
+                agent_stats[agent_name]["active_tasks"] = current_tasks + 1  # Thread-safe via SharedMemory
+
+                self.shared_memory.set("agent_stats", agent_stats)
                 logger.info(f"Routing task '{task_type}' to agent: {agent_name}")
                 result = agent.execute(task_data)
+
+                # Decrement on SUCCESS
+                agent_stats = self.shared_memory.get("agent_stats", {})
+                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
+                self.shared_memory.set("agent_stats", agent_stats)
 
                 # Step 3: Log success to shared memory
                 self._record_success(agent_name)
@@ -43,6 +54,10 @@ class TaskRouter:
 
             # Error handling
             except Exception as e:
+                # Decrement on FAILURE
+                agent_stats = self.shared_memory.get("agent_stats", {})
+                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
+                self.shared_memory.set("agent_stats", agent_stats)
                 logger.exception(f"Agent '{agent_name}' failed...")
                 self._record_failure(agent_name)
                 
