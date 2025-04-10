@@ -1,5 +1,5 @@
-from registry import AgentRegistry
-from task_router import TaskRouter
+from src.collaborative.registry import AgentRegistry
+from src.collaborative.task_router import TaskRouter
 
 class CollaborationManager:
     """
@@ -7,16 +7,17 @@ class CollaborationManager:
     using intelligent routing via TaskRouter and capability tracking in AgentRegistry.
     """
 
-    def __init__(self, shared_memory=None):
+    def __init__(self, shared_memory):
         """
         Initialize the collaboration manager with a registry and a task router.
 
         Args:
             shared_memory (dict, optional): Shared in-memory structure for tracking stats.
         """
-        self.shared_memory = shared_memory or {}
-        self.registry = AgentRegistry()
+        self.shared_memory = shared_memory
+        self.registry = AgentRegistry(shared_memory=self.shared_memory)
         self.router = TaskRouter(self.registry, shared_memory=self.shared_memory)
+        self.registry.discover_agents()
 
     def register_agent(self, agent_name, agent_class, capabilities):
         """
@@ -33,9 +34,7 @@ class CollaborationManager:
         """
         Route the task to the best-fit agent based on capabilities and context.
         """
-        agent = self.router.route(task_type, task_data)
-        agent_instance = self.registry.get_agent_class(agent)  # <-- FIX: Get actual object
-        return agent_instance.execute(task_data)
+        return self.router.route(task_type, task_data)
 
 
     def list_agents(self):
