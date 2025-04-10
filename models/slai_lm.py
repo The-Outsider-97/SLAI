@@ -42,7 +42,8 @@ class SLAILM:
                  # --- Custom Configuration Dictionary ---
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
-        self.knowledge_agent = KnowledgeAgent(shared_memory=shared_memory)
+        self.shared_memory = shared_memory
+        self.knowledge_agent = KnowledgeAgent(shared_memory=self.shared_memory)
         self.conversation_history = []
         self.sentiment_lexicon = self.load_sentiment_lexicon()
         """
@@ -95,7 +96,7 @@ class SLAILM:
         else:
             # Initialize KB, potentially loading from path
             try:
-                self.knowledge = KnowledgeAgent()
+                self.knowledge = KnowledgeAgent(shared_memory=self.shared_memory)
                 logging.info(f"Initialized KnowledgeAgent (path: {knowledge_agent_path}).")
             except Exception as e:
                 logging.error(f"Failed to initialize KnowledgeAgent: {e}")
@@ -639,4 +640,3 @@ class SLAILM:
             
     def handle_general_prompt(self, prompt: str) -> str:
         return self.generate_response(prompt)
-
