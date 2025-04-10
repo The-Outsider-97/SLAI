@@ -98,8 +98,9 @@ class StatusIndicator(QLabel):
         painter.drawEllipse(center, radius, radius)
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, CollaborativeAgent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
+    def __init__(self, collaborative_agent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
         super().__init__()
+        self.collaborative_agent = collaborative_agent
         self.shared_memory = shared_memory
         self.log_queue = log_queue or []
         self.metric_queue = metric_queue or []
@@ -115,21 +116,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         factory = AgentFactory(shared_resources=shared_resources, optimizer=optimizer)
 
-        self.agent = CollaborativeAgent(
-            agent_factory=factory,
-            config_path="config.yaml",
-            agent_network={
-                'LanguageAgent': {
-                    'type': 'nlp',
-                    'capabilities': ['text_generation'],
-                    'components': ['language_model']
-                }
-            },
-            risk_threshold=0.35
-        )
+        self.agent = self.collaborative_agent
         self.setWindowTitle("SLAI Launcher")
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "..", "frontend", "assets", "logo1.ico")))
-        self.setGeometry(100, 100, 2000, 800)
+
+        # Geometry fix for large DPI / screen
+        screen_geometry = QtWidgets.QDesktopWidget().availableGeometry()
+        safe_width = min(screen_geometry.width(), 1920)
+        safe_height = min(screen_geometry.height(), 1080)
+        self.setGeometry(100, 100, safe_width, safe_height)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: black;
@@ -657,16 +652,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.input_field.clear() # Clear input after sending
             self.show_status_message("Sending prompt to SLAI...", 2000)
 
-            # Direct agent call instead of subprocess
-            QtCore.QTimer.singleShot(100, lambda: self.call_slai_pipeline(text))
+            # Create task_data with default context
+            task_data = {"context": "default", "prompt": text}
+            QtCore.QTimer.singleShot(100, lambda: self.call_slai_pipeline(task_data, text))
 
-    def call_slai_pipeline(self, prompt: str):
+    def call_slai_pipeline(self, task_data: dict, prompt: str):
         try:
             # Start response timer
             self.current_response_start = datetime.now()
 
             # Call the generate method of the imported CollaborativeAgent instance
-            slai_response = self.agent.generate(prompt)
+            slai_response = self.agent.generate(prompt, task_data)
             
             # Calculate response time
             response_time = (datetime.now() - self.current_response_start).total_seconds()
