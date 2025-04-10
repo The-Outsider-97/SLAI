@@ -33,7 +33,12 @@ class SystemOptimizer:
     
     def __init__(self, 
                  stability_margin: float = 0.15,
-                 control_interval: int = 5):
+                 control_interval: int = 5,
+                 resource_weights=None,
+                 safety_thresholds=None,
+                 ):
+        self.resource_weights = resource_weights or {}
+        self.safety_thresholds = safety_thresholds or {}
         """
         Args:
             stability_margin: Safety buffer for resource limits (per NIST SP 1500-204)
