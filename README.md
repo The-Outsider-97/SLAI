@@ -132,6 +132,7 @@ Note: If you see an error about execution policy:
    pip install spacy
    pip install transformers
    pip install tenacity
+   pip install rollback
    ```
 
 5. Run Model:
