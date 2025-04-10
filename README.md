@@ -131,6 +131,7 @@ Note: If you see an error about execution policy:
    pip install pyarrow
    pip install spacy
    pip install transformers
+   pip install tenacity
    ```
 
 5. Run Model:
