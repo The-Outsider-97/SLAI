@@ -1,4 +1,9 @@
-from shared_memory import SharedMemory
+import importlib
+import pkgutil
+import inspect
+import logging
+from pathlib import Path
+from src.agents.collaborative_agent import CollaborativeAgent
 
 class AgentRegistry:
     """
@@ -6,15 +11,33 @@ class AgentRegistry:
     Also integrates with SharedMemory for distributed coordination.
     """
 
-    def __init__(self, shared_memory: SharedMemory = None):
+    def __init__(self, shared_memory):
         """
         Args:
             shared_memory (SharedMemory): Optional shared memory instance.
         """
         self._agents = {}
-        self.shared_memory = shared_memory or SharedMemory()
+        self.shared_memory = shared_memory
 
-    def register(self, name, agent_class, capabilities):
+    def discover_agents(self, agents_package='src.agents'):
+        """
+        Dynamically discover and register all agent classes in the specified package.
+        """
+        package = importlib.import_module(Path)
+        for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+            module = importlib.import_module(module_name)
+            for attr_name in dir(module):
+                if attr_name.endswith("Agent"):
+                    AgentClass = getattr(module, attr_name)
+                    if callable(AgentClass):
+                        try:
+                            inst = AgentClass()
+                            caps = getattr(inst, "capabilities", [])
+                            self.register(attr_name, inst, caps)
+                        except Exception as e:
+                            logging.error(f"Failed to load agent {attr_name}: {e}")
+
+    def register(self, name, agent_class, agent_instance, capabilities):
         """
         Register a new agent and update shared memory.
 
@@ -23,6 +46,11 @@ class AgentRegistry:
             agent_class (object): Agent instance or class with an `execute()` method.
             capabilities (list[str]): Task types this agent can perform.
         """
+        agent_name = agent_instance.__class__.__name__
+        if agent_name in self.agents:
+            raise ValueError(f"Agent '{agent_name}' is already registered.")
+        self.agents[agent_name] = agent_instance
+
         if name in self._agents:
             raise ValueError(f"Agent '{name}' is already registered.")
         if not hasattr(agent_class, "execute") or not callable(agent_class.execute):
