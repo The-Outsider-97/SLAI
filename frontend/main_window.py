@@ -98,8 +98,9 @@ class StatusIndicator(QLabel):
         painter.drawEllipse(center, radius, radius)
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
+    def __init__(self, CollaborativeAgent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
         super().__init__()
+        self.shared_memory = shared_memory
         self.log_queue = log_queue or []
         self.metric_queue = metric_queue or []
         self.session_start_time = datetime.now()
