@@ -71,7 +71,7 @@ class AgentFactory:
             from src.agents.language_agent import DialogueContext
             from src.agents.language.grammar_processor import GrammarProcessor
 
-            slailm_instance = SLAILM()
+            slailm_instance = SLAILM(shared_memory=self.shared_resources.get("shared_memory"))
             grammar = GrammarProcessor(
                 structured_wordlist=slailm_instance.structured_wordlist,
                 wordlist=slailm_instance.wordlist,
