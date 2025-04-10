@@ -21,7 +21,7 @@ class SLAILM:
     Self-Contained Language and Interaction Logic Module that aims to minimize external dependencies, relying on
     custom GrammarProcessor, wordlists, and context management.
     """
-    def __init__(self, structured_wordlist_path="src/agents/language/structured_wordlist_en.json",
+    def __init__(self, shared_memory, structured_wordlist_path="src/agents/language/structured_wordlist_en.json",
                  simple_wordlist_path="src/agents/language/wordlist_en.json",
                  grammar_rules_path: Optional[Union[str, Path]] = None,
                  knowledge_agent_path: Optional[Union[str, Path]] = None,
@@ -42,6 +42,7 @@ class SLAILM:
                  # --- Custom Configuration Dictionary ---
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
+        self.knowledge_agent = KnowledgeAgent(shared_memory=shared_memory)
         self.conversation_history = []
         self.sentiment_lexicon = self.load_sentiment_lexicon()
         """
@@ -638,3 +639,4 @@ class SLAILM:
             
     def handle_general_prompt(self, prompt: str) -> str:
         return self.generate_response(prompt)
+
