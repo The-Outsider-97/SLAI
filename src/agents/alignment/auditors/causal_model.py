@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
+from statsmodels.regression.linear_model import RegressionResultsWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class CausalModel:
         else:
             raise ValueError(f"Unknown estimation method: {method}")
 
-    def _estimate_structural_equations(self) -> Dict[str, smf.OLSResultsWrapper]:
+    def _estimate_structural_equations(self) -> Dict[str, RegressionResultsWrapper]:
         """Precompute structural equations for each variable with parents."""
         equations = {}
         for var in nx.topological_sort(self.graph):
