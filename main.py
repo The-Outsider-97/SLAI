@@ -15,14 +15,15 @@ from frontend.startup_screen import StartupScreen
 from frontend.main_window import MainWindow
 
 # Configure logging early to capture all events
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/slai_core.log'),
-        logging.StreamHandler()
-    ]
-)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('logs/slai_core.log'),
+            logging.StreamHandler()
+        ]
+    )
 logger = logging.getLogger('SLAI-Launcher')
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -58,7 +59,11 @@ def initialize_core_components(config: dict) -> tuple:
     
     return shared_memory, optimizer, agent_factory
 
-def launch_ui(components: dict):
+def launch_ui(init_agents, components: dict):
+    from PyQt5.QtWidgets import QSplashScreen
+    from PyQt5.QtGui import QPixmap
+
+
     """Start the PyQt application with splash screen and main interface"""
     app = QApplication([])
     app.setStyle('Fusion')
@@ -78,8 +83,7 @@ def launch_ui(components: dict):
 
     splash = StartupScreen(on_ready_to_proceed=start_main_ui)
     splash.show()
-
-    QTimer.singleShot(1000, splash.notify_launcher_ready)
+    QTimer.singleShot(100, splash.notify_launcher_ready)
 
     sys.exit(app.exec_())
 
@@ -95,6 +99,7 @@ def main():
     collaborative_agent = CollaborativeAgent(
         shared_memory=shared_memory,
         agent_factory=agent_factory,
+        agent_network=config.get("agent-network"),
         config_path="config.yaml",
         risk_threshold=config.get('risk_threshold', 0.35)
     )
@@ -114,7 +119,7 @@ def main():
     }
     
     logger.info("Launching SLAI Interface")
-    launch_ui(launch_components)
+    launch_ui(lambda: None, launch_components)
 
 if __name__ == "__main__":
     # Windows multiprocessing support
