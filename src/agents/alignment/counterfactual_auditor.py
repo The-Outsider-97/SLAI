@@ -9,12 +9,11 @@ import logging
 import numpy as np
 import pandas as pd
 
-from alignment.auditors.causal_model import CausalGraphBuilder
-from alignment.auditors.fairness_metrics import CounterfactualFairness
+from src.agents.alignment.auditors.causal_model import CausalGraphBuilder, CausalModel
+from src.agents.alignment.auditors.fairness_metrics import CounterfactualFairness
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from scipy.stats import ttest_ind
-from causalinference import CausalModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
