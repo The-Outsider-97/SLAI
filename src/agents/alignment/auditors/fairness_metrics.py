@@ -144,7 +144,7 @@ class CounterfactualFairness:
         # Requires ground truth labels
         return 0.0  # Placeholder
 
-from src.agents.alignment.auditors.fairness_metrics import CausalModel
+#from src.agents.alignment.auditors.fairness_metrics import CausalModel
 def path_specific_effects(self,
                         causal_model: 'CausalModel',
                         data: pd.DataFrame,
