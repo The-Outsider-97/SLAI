@@ -8,6 +8,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from src.utils.data_loader import DataLoader
 
+
 start = time.time()
 
 dummy_paths = [f"data/batch_{i}.json" for i in range(1)]
@@ -19,7 +20,11 @@ except FileNotFoundError:
 
 end = time.time()
 
-samples_per_sec = (10 * 1) / (end - start)
+# Calculate duration safely
+duration = end - start
+if duration == 0:
+    duration = 1e-9
+samples_per_sec = (10 * 1) / duration
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
