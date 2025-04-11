@@ -79,7 +79,7 @@ def increment_version(version: str, level: str = "patch") -> str:
     return f"v{major}.{minor}.{patch}"
 
 
-def create_tag(version: str, message: str = "Release"):
+def create_and_push_tag(version: str, message: str = "Release"):
     """Create and push annotated Git tag."""
     run_git_command(["tag", "-a", version, "-m", message])
     run_git_command(["push", "origin", version])
