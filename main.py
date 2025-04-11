@@ -50,6 +50,7 @@ def initialize_core_components(config: dict) -> tuple:
     
     # Agent factory with shared resources
     agent_factory = AgentFactory(
+        config=config,
         shared_resources={
             "shared_memory": shared_memory,
             "optimizer": optimizer
