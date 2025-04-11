@@ -8,6 +8,7 @@ Implements:
 """
 
 import logging
+import hashlib
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
@@ -146,7 +147,7 @@ class AlignmentMemory:
         
         # Convert to probability distributions
         p = np.histogram([r['value'] for r in recent], bins=10)[0] + 1e-6
-        q = np.histogram([r['value'] for h in historical], bins=10)[0] + 1e-6
+        q = np.histogram([h['value'] for h in historical], bins=10)[0] + 1e-6
         kl_div = entropy(p, q)
         
         self.concept_drift_scores.append(kl_div)
