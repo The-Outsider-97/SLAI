@@ -16,7 +16,20 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayou
                              QComboBox, QFrame, QSizePolicy, QFileDialog, QStackedWidget,
                              QSplitter, QApplication) # Added QStackedWidget, QSplitter, QApplication
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QTextCursor, QColor, QPainter
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QVariantAnimation, QSize # Added QSize
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QVariantAnimation, QSize, QThread
+
+class PromptThread(QThread):
+    result_ready = pyqtSignal(str)
+
+    def __init__(self, agent, prompt, task_data):
+        super().__init__()
+        self.agent = agent
+        self.prompt = prompt
+        self.task_data = task_data
+
+    def run(self):
+        result = self.agent.generate(self.prompt, self.task_data)
+        self.result_ready.emit(result)
 
 from src.utils.agent_factory import AgentFactory
 from src.utils.system_optimizer import SystemOptimizer
@@ -657,6 +670,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(100, lambda: self.call_slai_pipeline(task_data, text))
 
     def call_slai_pipeline(self, task_data: dict, prompt: str):
+        thread = PromptThread(self.agent, prompt, task_data)
+        thread.result_ready.connect(lambda result: self.output_area.setPlainText(result))
+        thread.start()
+
         try:
             # Start response timer
             self.current_response_start = datetime.now()
