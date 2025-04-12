@@ -24,12 +24,17 @@ Academic References:
 import random
 import math
 import numpy as np
+import statsmodels.formula.api as smf
+
 from collections import defaultdict, deque
 import logging
 import time
 
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
 
 class AdaptiveAgent:
     """
@@ -37,11 +42,12 @@ class AdaptiveAgent:
     Continuously improves from feedback, success/failure, and demonstrations.
     """
     
-    def __init__(self, shared_memory, learning_params=None):
+    def __init__(self, shared_memory, agent_factory, learning_params=None, args=(), kwargs={}):
         """
         Initialize the adaptive agent with learning and memory systems.
         """
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.episodic_memory = deque(maxlen=1000)  # Recent experiences
         self.semantic_memory = defaultdict(dict)   # Conceptual knowledge
         self.learning_params = {
