@@ -137,6 +137,7 @@ Note: If you see an error about execution policy:
    pip install numpy scipy scikit-learn
    pip install scikit-optimize
    pip install shap
+   pip install nltk
    ```
 
 5. Run Model:
