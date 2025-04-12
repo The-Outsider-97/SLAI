@@ -10,8 +10,17 @@ from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List
 from src.utils.system_optimizer import SystemOptimizer
-from src.agents.language_agent import LanguageAgent
-
+from src.agents.adaptive_agent import AdaptiveAgent
+from src.agents.alignment_agent import AlignmentAgent
+from src.agents.evaluation_agent import EvaluationAgent
+from src.agents.execution_agent import ExecutionAgent
+from src.agents.knowledge_agent import KnowledgeAgent
+from src.agents.language_agent import LanguageAgent, DialogueContext
+from src.agents.learning_agent import LearningAgent
+from src.agents.perception_agent import PerceptionAgent
+from src.agents.planning_agent import PlanningAgent
+from src.agents.reasoning_agent import ReasoningAgent
+from src.agents.safety_agent import SafeAI_Agent
 
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
@@ -23,7 +32,7 @@ class AgentMetaData:
         self.required_params = required_params
 
 class AgentFactory:
-    def __init__(self, shared_resources: Optional[Dict[str, Any]] = None, optimizer: 'SystemOptimizer' = None):
+    def __init__(self, config, shared_resources: Optional[Dict[str, Any]] = None, optimizer: 'SystemOptimizer' = None):
         self.agent_registry: Dict[str, AgentMetaData] = {}
         self.shared_resources = shared_resources or {}
         self._memorized_agents: Dict[str, Any] = {}
@@ -32,7 +41,56 @@ class AgentFactory:
         self.registry = {}
         self.metrics_adapter = MetricsAdapter()
         self.optimizer = optimizer
-        
+        self.register("adaptive", lambda config: AdaptiveAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("alignment", lambda config: AlignmentAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("evaluation", lambda config: EvaluationAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("execution", lambda config: ExecutionAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("knowledge", lambda config: KnowledgeAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("learning", lambda config: LearningAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("perception", lambda config: PerceptionAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("planning", lambda config: PlanningAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("reasoning", lambda config: ReasoningAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
+        self.register("safety", lambda config: SafeAI_Agent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            **config.get("init_args", {})
+        ))
 
     def create(self, agent_type: str, config: dict, system_metrics: dict = None):
         if not isinstance(config, dict):
@@ -47,28 +105,48 @@ class AgentFactory:
             )
 
         build_config_fn = getattr(self, f"_build_{agent_type}_config", None)
-
+    
         if agent_type in self.registry:
             agent_cls = self.registry[agent_type]
             final_config = build_config_fn(config) if build_config_fn else config
 
-            # === Validate config before instantiation ===
+            # === Modified validation ===
             init_sig = inspect.signature(agent_cls.__init__)
             missing_args = []
             for name, param in init_sig.parameters.items():
-                if name == "self":
+                if name == "self" or \
+                param.kind in (inspect.Parameter.VAR_POSITIONAL, 
+                                inspect.Parameter.VAR_KEYWORD):
                     continue
                 if param.default == inspect.Parameter.empty and name not in final_config:
                     missing_args.append(name)
-            
+                    
             if missing_args:
                 raise ValueError(f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}")
+    
+            if agent_type in self.registry:
+                agent_cls = self.registry[agent_type]
+                final_config = build_config_fn(config) if build_config_fn else config
 
-            return agent_cls(**final_config)
+                # === Validate config before instantiation ===
+                init_sig = inspect.signature(agent_cls.__init__)
+                missing_args = []
+                for name, param in init_sig.parameters.items():
+                    if name == "self":
+                        continue
+                    if param.default == inspect.Parameter.empty and name not in final_config:
+                        missing_args.append(name)
+                
+                if missing_args:
+                    raise ValueError(f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}")
+
+
+            init_args = final_config.get("init_args", {})
+            return agent_cls(**init_args)
         
         if agent_type.lower() == "language":
             from models.slai_lm import SLAILM
-            from src.agents.language_agent import DialogueContext
+            self.register("language", LanguageAgent)
             from src.agents.language.grammar_processor import GrammarProcessor
 
             slailm_instance = SLAILM(shared_memory=self.shared_resources.get("shared_memory"))
@@ -249,7 +327,7 @@ class AgentFactory:
                 enable_summarization=config.get("enable_summarization", True),
                 summarizer=config.get("summarizer", None)
             )
-
+        clean_config = {k: v for k, v in config.items() if k != "class" and k != "path"}
         return agent_class(**config)
 
     def _agent_specific_config(self, agent_class: type, config: Dict) -> Dict:
@@ -262,14 +340,51 @@ class AgentFactory:
         
         return config_builder(config)
 
+    def _build_adaptive_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other necessary parameters
+        }
+
+    def _build_alignment_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other parameters
+        }
+
+    def _build_evaluation_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other necessary parameters
+        }
+
+    def _build_execution_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other parameters
+        }
+
+    def _build_knowledge_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other necessary parameters
+        }
+
     def _build_language_config(self, config: dict) -> dict:
         from models.slai_lm import SLAILM
-        from src.agents.language_agent import DialogueContext
+        self.register("language", LanguageAgent)
         llm_instance = config.get("llm", SLAILM())
         dialogue_context = DialogueContext(llm=llm_instance)
 
         return {
             "llm": llm_instance,
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
             "config": {
                 "history": config.get("history", []),
                 "summary": config.get("summary", None),
@@ -280,6 +395,7 @@ class AgentFactory:
                 "nlg_templates": config.get("nlg_templates", "src/agents/learning/nlg_templates_en.json"),
                 "cache_size": config.get("cache_size", 1000)
             }
+
         }
     
     def _build_learning_config(self, config: Dict) -> Dict:
@@ -295,8 +411,31 @@ class AgentFactory:
 
     def _build_perception_config(self, config: Dict) -> Dict:
         return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
             'audio_encoder': self._init_audio_encoder(config),
             'vision_encoder': self._init_vision_encoder(config)
+        }
+
+    def _build_planning_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other necessary parameters
+        }
+
+    def _build_reasoning_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other parameters
+        }
+
+    def _build_safety_config(self, config: dict) -> dict:
+        return {
+            "args": config.get("args", ()),
+            "kwargs": config.get("kwargs", {}),
+            # Add other parameters
         }
 
     def _check_text_deps(self) -> bool:
