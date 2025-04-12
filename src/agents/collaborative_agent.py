@@ -30,6 +30,8 @@ from datetime import datetime
 from src.utils.agent_factory import AgentFactory
 from src.agents.language.grammar_processor import GrammarProcessor
 
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.WARNING)
 
 # Scientific computing import with error handling
 try:
@@ -209,9 +211,10 @@ class DeadlineAwareScheduler(TaskScheduler):
 class CollaborativeAgent:
     """Main collaborative agent implementation"""
     
-    def __init__(self, shared_memory, agent_factory: AgentFactory, config: Optional[Dict] = None,
-                risk_threshold=0.2, agent_network: Optional[Dict] = None,
-                config_path: Optional[str] = None):
+    def __init__(self, shared_memory, agent_factory: AgentFactory,
+                 config: Optional[Dict] = None,
+                 risk_threshold=0.2, agent_network: Optional[Dict] = None,
+                 config_path: Optional[str] = None):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.risk_threshold = max(0.0, min(1.0, risk_threshold))
@@ -220,16 +223,9 @@ class CollaborativeAgent:
             "shared_memory": shared_memory,
             "task_router": {}
         }
-        self.factory = AgentFactory(shared_resources=self.shared_resources)
 
-        try:
-            # Force-create and attach language agent
-            lang_agent = self.factory.create("language", {})
-            self.agents["language"] = lang_agent
-            logger.info("CollaborativeAgent: LanguageAgent added successfully.")
-        except Exception as e:
-            logger.error(f"CollaborativeAgent failed to attach LanguageAgent: {e}")
-
+        config = config or {}
+        
         # Load config if needed
         if config_path and not agent_network:
             self.agent_network = self._load_config(config_path)
@@ -237,7 +233,7 @@ class CollaborativeAgent:
             self.agent_network = agent_network or {}
 
         # Prefer manual config if valid
-        if isinstance(config, dict) and "agents" in config:
+        if isinstance(config, dict) and ("agents" in config or "agent-network" in config):
             for agent_type, agent_cfg in config["agents"].items():
                 try:
                     agent = self.factory.create(agent_type, agent_cfg)
@@ -263,7 +259,7 @@ class CollaborativeAgent:
             "shared_memory": {},  # Use actual shared components if needed
             "task_router": {}
         }
-        self.factory = AgentFactory(shared_resources=self.shared_resources)
+        self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
         from src.agents.learning_agent import LearningAgent, SLAIEnv
         self.factory.register("learning",
                               lambda **kwargs: LearningAgent(
@@ -814,7 +810,10 @@ class CollaborativeAgent:
             return RiskLevel.CRITICAL
 
     def generate(self, shared_memory, task_data: Union[str, dict]) -> str:
-        from models.slai_lm import SLAILM
+        from models.slai_lm import SLAILM, get_shared_slailm
+
+        llm = get_shared_slailm(shared_memory)
+        agent = self.factory.create("language", {"llm": llm})
 
         try:
             if isinstance(task_data, str):
@@ -826,26 +825,27 @@ class CollaborativeAgent:
             if not prompt:
                 raise ValueError("Empty input")
 
-            # Always create language agent
-            lang_agent = self.factory.create(
-                "language", {
-                    "llm": SLAILM(shared_memory),
-                    "history": [],
-                    "summary": "",
-                    "memory_limit": 1000,
-                    "enable_summarization": True,
-                    "summarizer": None
-                }
-            )
+            if "language" not in self.agents:
+                llm = SLAILM(shared_memory)
+                self.agents["language"] = self.factory.create(
+                    "language", {
+                        "llm": llm,
+                        "history": [],
+                        "summary": "",
+                        "memory_limit": 1000,
+                        "enable_summarization": True,
+                        "summarizer": None
+                    }
+                )
 
-            # Add to context
+            lang_agent = self.agents["language"]
             lang_agent.dialogue_context.add(prompt)
 
-            # Handle training request
             intent = lang_agent.parse_intent(prompt) or {"type": "unknown"}
             if not isinstance(intent, dict):
                 logger.warning("Intent is not a dict; applying fallback.")
                 intent = {"type": str(intent), "confidence": 0.5}
+
             if intent.get("type", "").lower() in ["train", "learning", "learn"]:
                 agent_config = self._build_learning_config(intent)
                 agent = self.factory.create("learning", agent_config)
@@ -858,7 +858,6 @@ class CollaborativeAgent:
                 }
                 return self.grammar.compose_sentence(raw_facts)
 
-            # Normal generation
             return lang_agent.generate(prompt)
 
         except Exception as e:
