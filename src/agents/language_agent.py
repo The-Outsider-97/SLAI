@@ -1711,9 +1711,12 @@ class SafetyGuard:
             
         return text
 
+
 class LanguageAgent:
-    def __init__(self, llm=None, grammar_processor=None, dialogue_context=None, config=None):
+    def __init__(self, shared_memory, agent_factory, llm=None, grammar_processor=None, dialogue_context=None, config=None, args=(), kwargs={}):
         self.llm = llm
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.grammar_processor = grammar_processor
         self.dialogue_context = dialogue_context
         self.config = config or {}
@@ -1760,6 +1763,10 @@ class LanguageAgent:
         self.responses = self.config.get("responses", {
             "default": ["I am processing your input."]
         })
+
+    def perform_task(self, input_data):
+        if isinstance(input_data, str):
+            input_data = {"text": input_data}
 
     def generate(self, prompt: str) -> str:
         """Wrapper to route generation through the LLM"""
