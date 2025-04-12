@@ -18,8 +18,9 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 from pathlib import Path
 import numpy as np
 
+
 class ReasoningAgent:
-    def __init__(self, shared_memory, storage_path: str = "src/agents/knowledge/knowledge_db.json"):
+    def __init__(self, shared_memory, agent_factory, storage_path: str = "src/agents/knowledge/knowledge_db.json", args=(), kwargs={}):
         """
         Initialize the Reasoning Agent with learning capabilities.
         
@@ -27,8 +28,8 @@ class ReasoningAgent:
             storage_path: Path to persist knowledge base and learned models
         """
         # Knowledge representation with confidence scores
-        self.reasoning_agent = ReasoningAgent
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.knowledge_base: Dict[Tuple, float] = defaultdict(float)
         self.rules: List[Tuple[str, Callable, float]] = []  # (name, rule, weight)
         self.rule_weights: Dict[str, float] = defaultdict(float)
