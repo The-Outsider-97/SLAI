@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class LearningAgent:
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
     
-    def __init__(self, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
+    def __init__(self, agent_factory, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
         """
         Initialize learning subsystems with environment context
         
@@ -43,8 +43,8 @@ class LearningAgent:
         """
         self.env = env
         self.config = config or {}
-        self.learning_agent = LearningAgent
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.rl_algorithm = self.config.get("rl_algorithm", None)
         self.strategy_weights = np.ones(4)  # [RL, DQN, MAML, RSI]
         self.performance_history = deque(maxlen=1000)
