@@ -200,18 +200,20 @@ CostProfile = Tuple[float, float]  # (current_cost, heuristic_estimate)
 TemporalRelation = Tuple[Task, Task, str]  # (task_a, task_b, relation)
 MemoKey = Tuple[MethodSignature, WorldState]
 
+
 class PlanningAgent:
     """Enhanced planner with alternative search strategies"""
-    def __init__(self, shared_memory):
-        self_planning_agent = PlanningAgent
+    def __init__(self, shared_memory, agent_factory, args=(), kwargs={}):
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.task_library: Dict[str, Task] = {}
         self.current_plan: List[Task] = []
         self.world_state: Dict[str, any] = {}
         self.execution_history = []
         self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0})
 
-    WorldState = Tuple[Tuple[str, Any], ...]
+    from typing import Tuple, Any
+    StateTuple = Tuple[Tuple[str, Any], ...]
 
     def execute(self, task_data):
         # Retrieve past errors from shared memory
@@ -528,6 +530,9 @@ class PlanningAgent:
         task.status = TaskStatus.SUCCESS
 
 class HTNPlanner(PlanningAgent):
+
+    StateTuple = Tuple[Tuple[str, Any], ...]
+
     """Implements Algorithm 1 from Nau et al. (JAIR 2003)"""
     def _ordered_decomposition(self, task: Task) -> Optional[List[Task]]:
         # Tuple-based state representation
@@ -697,8 +702,16 @@ class AStarPlanner(PlanningAgent):
     """Implements AO* cost propagation (Martelli & Montanari 1973)"""
     def _optimize_plan(self, plan: List[Task]) -> List[Task]:
         # Tuple-based cost representation (current, heuristic)
-        CostPair = Tuple[float, float]
-        
+        for task in plan:
+            if task.type == TaskType.ABSTRACT:
+                and_or_graph[task] = {
+                    'methods': [
+                        (method, sum(self._task_cost(t) for t in method))
+                        for method in task.methods
+                    ],
+                    'best_cost': (float('inf'), float('inf'))
+                }
+                
         and_or_graph = {
             task: {
                 'methods': [
@@ -736,7 +749,7 @@ class AStarPlanner(PlanningAgent):
 
         return self._extract_optimal_plan(and_or_graph)
 
-    def _task_cost(self, task: Task) -> CostPair:
+    def _task_cost(self, task: Task) -> CostProfile:
         """Academic cost model from HSP (Bonet & Geffner 2001)"""
         base = len(self.decompose_task(task))
         heuristic = self._hsp_heuristic(task)
