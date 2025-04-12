@@ -5,38 +5,55 @@
 
 model:
   name: SLAI-Agent
-  version: v1.6.0
+  version: v1.6.2
 
 run:
   id_prefix: "run"
   output_dir: "logs/"
   plots_dir: "plots/"
 
-language:  
-  llm: SLAILM()  
-  history: []  
-  summary: null  
-  memory_limit: 1000  
-  enable_summarization: true  
-  summarizer: null
+agent-network:
+  language:  
+    class: LanguageAgent
+    path: src.agents.language_agent
+    init_args: {}
+    llm: SLAILM()  
+    history: []  
+    summary: null  
+    memory_limit: 1000  
+    enable_summarization: true  
+    summarizer: null
 
-agents:
-  dqn:
-    type: dqn
-    state_dim: 4
-    action_dim: 2
-    hidden_size: 128
+  knowledge:
+    class: KnowledgeAgent
+    path: src.agents.knowledge_agent
+    init_args: {}
+
+  learning:
+    class: LearningAgent
+    path: src.agents.learning_agent
+    init_args:
+      algorithm: dqn
+      state_dim: 4
+      action_dim: 2
+      hidden_size: 128
+      learning_rate: 0.001
+      gamma: 0.99
+      epsilon: 1.0
+      epsilon_decay: 0.995
+      epsilon_min: 0.01
+      buffer_size: 10000
+      batch_size: 64
+      target_update_frequency: 100
+    epsilon: 0.1
+    discount: 0.95
+    memory_limit: 50000
     learning_rate: 0.001
-    gamma: 0.99
-    epsilon: 1.0
-    epsilon_decay: 0.995
-    epsilon_min: 0.01
-    buffer_size: 10000
-    batch_size: 64
-    target_update_frequency: 100
 
   maml:
     type: maml
+    class: MAMLAgent
+    path: src.agents.learning.maml_rl
     state_size: 52
     action_size: 3
     hidden_size: 64
@@ -46,6 +63,8 @@ agents:
 
   rsi:
     type: rsi
+    calss: RSI_Agent
+    path: src.agents.learning.rsi
     target_update_frequency: 100
     state_size: 52
     action_size: 3
@@ -53,16 +72,50 @@ agents:
 
   rl:
     type: rl
+    class: RLAgent
+    path: src.agents.learning.rl_agent
     learning_rate: 0.01
     discount_factor: 0.99
     epsilon: 0.1
 
-  eval:
-    type: eval
+  evaluation:
+    class: EvaluationAgent
+    path: src.agents.evaluation_agent
+    init_args: {}
 
-  safe_ai:
-    type: safe_ai
+  safety:
+    class: SafeAI_Agent
+    path: src.agents.safety_agent
+    init_args: {}
     risk_threshold: 0.2
+
+  adaptive:
+    class: AdaptiveAgent
+    path: src.agents.adaptive_agent
+    learning_rate: 0.02
+    exploration_rate: 0.2
+    memory_capacity: 500
+
+  alignment:
+    class: AlignmentAgent
+    path: src.agents.alignment_agent
+    learning_rate: 0.01
+    momentum: 0.9
+
+  perception:
+    class: PerceptionAgent
+    path: src.agents.perception_agent
+    init_args: {}
+
+  planning:
+    class: PlanningAgent
+    path: src.agents.planning_agent
+    init_args: {}
+
+  reasoning:
+    class: Reasoninggent
+    path: src.agents.reasoning_agent
+    init_args: {}
 
 training:
   num_samples: 500
@@ -125,8 +178,8 @@ tuning:
   n_random_starts: 5         # used for Bayesian
 
 configs:
-  bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
-  grid_config: "hyperparam_tuning/example_grid_config.json"
+  bayesian_config: "src/tuning/configs/bayesian_config.json"
+  grid_config: "src/tuning/configs/grid_config.json"
 
 # ==========================
 # Thresholds and Alignment
@@ -169,8 +222,8 @@ security:
 # Data Autit
 # ==========================
 
-dataset_path: "datasets/dataset.csv"
-config_path: "config.yaml"
+dataset_path: "data/dataset.csv"
+config_path: "configs/config.yaml"
 logs_path: "logs/"
 audit_output_dir: "audits/"
 processed_output_path: "data/processed_dataset.csv"
@@ -223,4 +276,4 @@ monitoring:
       bias_increase: 0.05
 
 paths:
-  data_source: "datasets/sample_dataset.csv"
+  data_source: "data/sample_dataset.csv"

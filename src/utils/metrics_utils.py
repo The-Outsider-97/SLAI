@@ -16,14 +16,22 @@ logger.setLevel(logging.INFO)
 
 class MetricBridge:
     """New class to handle feedback routing"""
-    def __init__(self, agent_factory: AgentFactory):
+    def __init__(self, agent_factory: AgentFactory, optimizer: SystemOptimizer):
         self.factory = agent_factory
         self.history = []
-        
+        self.optimizer = optimizer
+
     def submit_metrics(self, metrics: Dict[str, Any]) -> None:
         """Implements experience replay prioritization from Hindsight ER (Andrychowicz 2017)"""
         self.history.append(metrics)
-        
+        self._check_fairness(metrics)
+
+        # Resource optimization
+        resource_recs = self.optimizer.optimize_throughput(
+            current_metrics=metrics['system']
+        )
+        self.agent_factory.apply_optimizations(resource_recs)
+
         # Calculate moving averages
         window_size = min(10, len(self.history))
         recent_metrics = self.history[-window_size:]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 import yaml
@@ -7,11 +9,14 @@ import logging
 import warnings
 import pandas as pd
 import pyarrow.parquet as pq
+import numpy as np
+import re
+
 from typing import Any, Dict, List, Optional, Callable, Union
 from functools import lru_cache
 from pathlib import Path
-import numpy as np
-import re
+
+SUPPORTED_FORMATS = ["json", "yaml", "csv", "parquet", "pickle"]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SafeDataLoader")
@@ -195,7 +200,6 @@ class SafeDataLoader:
     def _encode_categorical(self, data: pd.DataFrame) -> pd.DataFrame:
         """Safe one-hot encoding implementation"""
         return pd.get_dummies(data, drop_first=True)
-
 # ============================================
 # Flexible Data Loader Class
 # ============================================
@@ -205,10 +209,13 @@ class FlexibleDataLoader:
     Provides optional schema validation, preprocessing, caching, and batch loading.
     """
 
-    def __init__(self, validation_schema: Optional[Dict[str, type]] = None):
+    def __init__(self, validation_schema=None, optimizer: SystemOptimizer = None):
         self.validation_schema = validation_schema or {}
         logger.info(f"FlexibleDataLoader initialized with schema: {self.validation_schema}")
 
+        self.optimizer = optimizer
+        self.adaptive_batch_size = None
+       
     def load(self, file_path: str, preprocess_fn: Optional[Callable[[Any], Any]] = None) -> Any:
         if not os.path.exists(file_path):
             logger.error(f"File not found: {file_path}")
@@ -216,7 +223,13 @@ class FlexibleDataLoader:
 
         ext = os.path.splitext(file_path)[1][1:].lower()
         logger.info(f"Loading file '{file_path}' with extension '{ext}'")
-
+        
+        if self.optimizer and system_metrics:
+            self.adaptive_batch_size = self.optimizer.dynamic_batch_calculator(
+                model_size_mb=self._estimate_model_size(data),
+                current_metrics=system_metrics
+            )
+            
         if ext not in SUPPORTED_FORMATS:
             logger.error(f"Unsupported file format: {ext}")
             raise ValueError(f"Unsupported file format: {ext}")
@@ -232,6 +245,32 @@ class FlexibleDataLoader:
             data = preprocess_fn(data)
 
         logger.info(f"File '{file_path}' loaded successfully.")
+        return self._process_data(data, preprocess_fn)
+    
+    def _process_data(self, data: Any, preprocess_fn: Optional[Callable[[Any], Any]] = None) -> Any:
+        logger.info("Running final post-processing stage...")
+
+        # Convert DataFrame to list of dicts if needed (standard output format)
+        if isinstance(data, pd.DataFrame):
+            data = data.to_dict(orient="records")
+            logger.debug("Converted DataFrame to list of records.")
+
+        # Optional: Inject audit tag (timestamp, source path, etc.)
+        audit_tag = {"processed_at": pd.Timestamp.now().isoformat()}
+        if isinstance(data, list):
+            for row in data:
+                if isinstance(row, dict):
+                    row.update(audit_tag)
+
+        # Apply optional postprocessing function
+        if preprocess_fn:
+            try:
+                logger.debug("Applying user-defined post-processing function...")
+                data = preprocess_fn(data)
+            except Exception as e:
+                logger.warning(f"Post-processing function raised error: {e}")
+
+        logger.info("Post-processing complete.")
         return data
 
     @staticmethod
@@ -326,3 +365,4 @@ if __name__ == "__main__":
         preprocessors=["fill_na", "encode_categorical"]
     )
     print("Sanitized data:", data.head())
+    

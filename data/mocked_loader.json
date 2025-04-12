@@ -1,7 +1,8 @@
 {
-  "id": 1,
-  "name": "Sample User",
-  "age": 30,
-  "email": "sample@example.com",
+  "id": "User_id",
+  "name": "User_name",
+  "surname": "User_surname",
+  "age": "User_age",
+  "email": "User_email",
   "is_active": true
 }

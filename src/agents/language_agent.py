@@ -1,22 +1,23 @@
 import os, sys
 import re
+import nltk
 import json
 import time
-import datetime
 import math
 import pickle
 import hashlib
 import logging
+import datetime
 import ply.lex as lex
+import multiprocessing as mp
 
 from textstat import textstat
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union
 from dataclasses import dataclass, field
 from collections import deque, defaultdict, OrderedDict
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from models.slai_lm import SLAILM
+from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
+from functools import partial
+from src.agents.language.grammar_processor import GrammarProcessor
 
 class DialogueContext:
     def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None):
@@ -66,18 +67,25 @@ class DialogueContext:
         self.summary = None
 
     def default_summarizer(self, messages: list, existing_summary: str = None) -> str:
-        """Basic summarizer using LLM if provided."""
+        """Basic summarizer using SLAILM."""
         context = ""
         if existing_summary:
             context += f"Previous summary:\n{existing_summary}\n\n"
         context += "Recent messages:\n" + "\n".join(messages)
         
         if self.llm:
-            prompt = f"Summarize the following conversation:\n\n{context}"
-            return self.llm.generate(prompt)
-        else:
-            # Fallback simple summarization
-            return "Summary: " + " | ".join(messages[-3:])  # crude fallback
+            # Lazy import to avoid circular dependency
+            try:
+                from models.slai_lm import SLAILM
+            except ImportError:
+                SLAILM = None
+
+            if isinstance(self.llm, SLAILM) and hasattr(self.llm, "generate"):
+                prompt = f"Summarize the following conversation:\n\n{context}"
+                return self.llm.generate(prompt)
+        
+        # Fallback summary
+        return "Summary: " + " | ".join(messages[-3:])
 
 @dataclass 
 class LinguisticFrame:
@@ -94,7 +102,9 @@ class LinguisticFrame:
 class Wordlist:
     """Advanced linguistic processor with phonetics, morphology, and semantic analysis"""
     
-    def __init__(self, path: Union[str, Path] = "src/agents/learning/structured_wordlist_en.json"):
+    def __init__(self, n: int = 3, path: Union[str, Path] = "src/agents/language/structured_wordlist_en.json"):
+        self.n = n
+        self.segmented_ngram_models = {}
         self.path = Path(path)
         with open(self.path, "r") as f:
             responses = json.load(f)
@@ -114,7 +124,7 @@ class Wordlist:
         
         # Language model parameters
         self.ngram_model = defaultdict(lambda: defaultdict(int))
-        self._build_ngram_model()
+        # self.segmented_ngram_models()
         
         # Keyboard proximity costs, using a QWERTY keyboard
         self.keyboard_layout = {
@@ -210,6 +220,8 @@ class Wordlist:
 
         self.keyboard_layout.update(reverse_mapping)
 
+        self.typo_handler = TypoHandler(self)
+
     def _load(self) -> None:
         """Robust data loading with validation"""
         if not self.path.exists():
@@ -265,11 +277,81 @@ class Wordlist:
                 self.ngram_index[(word_lc[0], word_lc[2])].add(word)  # 1-skip
                 self.ngram_index[(word_lc[1], word_lc[3])].add(word)
 
-    def _build_ngram_model(self) -> None:
-        """Build basic n-gram frequency model"""
-        for word in self.data:
-            for i in range(len(word)-1):
-                self.ngram_model[word[i]][word[i+1]] += 1
+    def _process_segment(self, label: str, word_iterable: Iterable[str]) -> Dict[int, defaultdict[Tuple[str, ...], int]]:
+        """
+        Processes a single segment to count n-grams.
+        """
+        ngram_counts = [defaultdict(int) for _ in range(self.n)]
+        for word in word_iterable:
+            tokens = word.split()
+            for ngram_len in range(1, self.n + 1):
+                for i in range(len(tokens) - ngram_len + 1):
+                    ngram = tuple(tokens[i : i + ngram_len])
+                    ngram_counts[ngram_len - 1][ngram] += 1
+        return {label: ngram_counts}
+
+    def _witten_bell_smoothing(self, order_counts: defaultdict[Tuple[str, ...], int],
+                                lower_order_counts: defaultdict[Tuple[str, ...], int] = None) -> defaultdict[Tuple[str, ...], float]:
+        """
+        Applies Witten-Bell smoothing to n-gram counts.
+        """
+        smoothed_probs = defaultdict(float)
+        total_count = sum(order_counts.values())
+        unique_continuations = len(set(ngram[:-1] for ngram in order_counts))
+
+        for ngram, count in order_counts.items():
+            context = ngram[:-1]
+            if total_count > 0:
+                smoothed_probs[ngram] = (count / (total_count + unique_continuations))
+            else:
+                smoothed_probs[ngram] = 1.0 / (unique_continuations + 1) # Handle cases with no counts
+
+        # Incorporate lower-order probabilities
+        if lower_order_counts is not None:
+            total_lower_count = sum(lower_order_counts.values())
+            unique_lower_continuations = len(set(ngram[:-1] for ngram in lower_order_counts)) if lower_order_counts else 0
+            unseen_prob_mass = unique_continuations / (total_count + unique_continuations) if total_count > 0 else 1.0
+
+            for ngram, prob in smoothed_probs.items():
+                lower_order_token = ngram[1:]
+                lower_order_prob = 0.0
+                if lower_order_counts and lower_order_token in lower_order_counts:
+                    lower_order_prob = lower_order_counts.get(lower_order_token, 0) / (total_lower_count + unique_lower_continuations) if total_lower_count > 0 else 1.0 / (unique_lower_continuations + 1)
+
+                smoothed_probs[ngram] = prob + unseen_prob_mass * lower_order_prob
+
+        return smoothed_probs
+
+    def build_segmented_ngram_models_streaming(self, segments: Dict[str, Iterable[str]], n: int = 3, num_processes: int = None) -> None:
+        """
+        Build separate n-gram models for different wordlist segments using streaming
+        and parallel processing with Witten-Bell smoothing.
+        `segments` is a dict of label -> iterable of words.
+        """
+        self.n = n
+        self.segmented_ngram_models = {}
+        if num_processes is None:
+            num_processes = mp.cpu_count()
+
+        pool = mp.Pool(processes=num_processes)
+        partial_process_segment = partial(self._process_segment, n=self.n)
+        results = pool.starmap(partial_process_segment, segments.items())
+        pool.close()
+        pool.join()
+
+        # Merge counts from parallel processing
+        raw_ngram_counts = {}
+        for res in results:
+            raw_ngram_counts.update(res)
+
+        # Apply Witten-Bell smoothing
+        self.segmented_ngram_models = {}
+        for label, counts_list in raw_ngram_counts.items():
+            smoothed_models = []
+            for i in range(self.n):
+                lower_order_counts = counts_list[i - 1] if i > 0 else None
+                smoothed_models.append(self._witten_bell_smoothing(counts_list[i], lower_order_counts))
+            self.segmented_ngram_models[label] = smoothed_models
 
     # PHONETIC ALGORITHMS ------------------------------------------------------
     
@@ -661,24 +743,88 @@ class Wordlist:
     
     def _cosine_similarity(self, vec1: Dict, vec2: Dict) -> float:
         """Calculate cosine similarity between vectors"""
-        # Mathematical implementation...
+        dot_product = sum(vec1.get(k, 0) * vec2.get(k, 0) for k in set(vec1) | set(vec2))
+        norm_a = math.sqrt(sum(v**2 for v in vec1.values())) or 1e-5
+        norm_b = math.sqrt(sum(v**2 for v in vec2.values())) or 1e-5
+        return dot_product / (norm_a * norm_b)
     
     # LANGUAGE MODELING ---------------------------------------------------------
     
-    def word_probability(self, word: str) -> float:
-        """Calculate relative frequency probability"""
-        total_words = self.metadata.get('word_count', 1)
-        return self.data[word].get('frequency', 1) / total_words
+    def word_probability(self, word: str, context: List[str] = None) -> float:
+        """Calculate relative frequency probability with backoff smoothing"""
+        if not context or len(context) < self.ngram_order-1:
+            # Fallback to unigram probability
+            return self.ngram_counts[0].get((word,), 1) / sum(self.ngram_counts[0].values())
+        
+        # Try highest order n-gram first
+        for order in range(min(self.ngram_order, len(context)+1), 0, -1):
+            ngram = tuple(context[-(order-1):] + [word])
+            count = self.ngram_counts[order-1].get(ngram, 0)
+            
+            if count > 0:
+                denominator = sum(
+                    self.ngram_counts[order-1][tuple(context[-(order-1):] + [w])] 
+                    for w in self.vocabulary
+                )
+                return count / denominator
+                
+        # Absolute backoff to unigram
+        return self.ngram_counts[0].get((word,), 1) / sum(self.ngram_counts[0].values())
+
+    def context_suggestions(self, previous_words: List[str], limit: int = 5) -> List[Tuple[str, float]]:
+        """Predict next words using n-gram probabilities with backoff"""
+        suggestions = defaultdict(float)
+        max_order = min(self.ngram_order, len(previous_words)+1)
+        
+        # Calculate interpolated probability
+        for order in range(max_order, 0, -1):
+            context = previous_words[-(order-1):] if order > 1 else []
+            lambda_weight = 0.4 ** (max_order - order)  # Weighting scheme
+            
+            # Get possible next words
+            possible_ngrams = [k for k in self.ngram_counts[order-1] 
+                             if k[:-1] == tuple(context)]
+            
+            total = sum(self.ngram_counts[order-1][gram] for gram in possible_ngrams)
+            
+            for gram in possible_ngrams:
+                word = gram[-1]
+                prob = self.ngram_counts[order-1][gram] / total
+                suggestions[word] += lambda_weight * prob
+                
+        # Normalize and sort
+        total_prob = sum(suggestions.values())
+        normalized = [(w, p/total_prob) for w, p in suggestions.items()]
+        
+        return sorted(normalized, key=lambda x: -x[1])[:limit]
+
+    # Helper methods
+    @property
+    def vocabulary(self):
+        return list(self.data.keys())
     
-    def context_suggestions(self, previous_words: List[str], limit: int = 5) -> List[str]:
-        """Predict next word using n-gram model"""
-        # Implementation using n-gram probabilities...
+    @property
+    def words(self):
+        return list(self.data.keys())
     
     # SYLLABLE ANALYSIS ---------------------------------------------------------
     
     def syllable_count(self, word: str) -> int:
-        """Mathematical syllable estimation algorithm"""
-        # Implementation based on vowel counting and exceptions...
+        """Mathematical syllable estimation"""
+        word = word.lower().strip()
+        if not word:
+            return 0
+        count = 0
+        vowels = 'aeiouy'
+        prev_vowel = False
+        for char in word:
+            if char in vowels:
+                if not prev_vowel:
+                    count += 1
+                prev_vowel = True
+            else:
+                prev_vowel = False
+        return max(1, count - 1 if word.endswith('e') else count)
     
     # CACHE MANAGEMENT ----------------------------------------------------------
     
@@ -712,8 +858,43 @@ class Wordlist:
                 self.graph[syn.lower()].add(word)
     
     def synonym_path(self, start: str, end: str) -> Optional[List[str]]:
-        """Find shortest path through synonym relationships"""
-        # BFS implementation for graph traversal...
+        """
+        Find the shortest path between words through synonym relationships using BFS.
+        
+        Args:
+            start: Starting word
+            end: Target word
+            
+        Returns:
+            List of words forming the shortest path, or None if no path exists
+        """
+        start = start.lower()
+        end = end.lower()
+        
+        if start not in self.graph or end not in self.graph:
+            return None
+        
+        if start == end:
+            return [start]
+        
+        queue = deque()
+        queue.append((start, [start]))
+        visited = set([start])
+        
+        while queue:
+            current_word, path = queue.popleft()
+            
+            for neighbor in self.graph[current_word]:
+                neighbor_lower = neighbor.lower()
+                
+                if neighbor_lower == end:
+                    return path + [neighbor_lower]
+                
+                if neighbor_lower not in visited:
+                    visited.add(neighbor_lower)
+                    queue.append((neighbor_lower, path + [neighbor_lower]))
+        
+        return None
     
     # VALIDATION AND ERROR HANDLING ---------------------------------------------
     
@@ -724,14 +905,336 @@ class Wordlist:
             self._check_morphology(word) and
             self._check_phonotactics(word)
         )
-    
+
+    def correct_typo(self, word: str) -> Tuple[str, float]:
+        """Main interface for typo correction"""
+        if word in self.data:
+            return (word, 1.0)  # Already correct
+            
+        suggestions = self.typo_handler.suggest_corrections(word)
+        return suggestions[0] if suggestions else (word, 0.0)
+
+    def _check_orthography(self, word: str) -> bool:
+        """Advanced orthographic validation using multiple strategies"""
+        # Direct lexicon lookup
+        if word in self.data:
+            return True
+        
+        # Phonetic fallback check
+        phonetic_matches = self.phonetic_candidates(word)
+        if any(match in self.data for match in phonetic_matches):
+            return True
+        
+        # Edit distance to known words
+        candidates = self.phonetic_candidates(word)
+        if candidates:
+            closest = min(candidates, key=lambda x: self.weighted_edit_distance(word, x))
+            if self.weighted_edit_distance(word, closest) < 2.0:
+                if closest and self.weighted_edit_distance(word, closest) < 2.0:
+                    return True
+        
+            correction, confidence = self.correct_typo(word)
+            return confidence > 0.7
+
+            # Grapheme-to-phoneme alignment
+        return self._validate_grapheme_phoneme(word)
+
+    def _check_morphology(self, word: str) -> bool:
+        """Morphological validation using language-specific rules"""
+        lang = self.metadata.get('language', 'en')
+        rules = MORPHOLOGY_RULES.get(lang, {})
+        
+        # Character level validation
+        if not re.fullmatch(rules.get('valid_chars', r'^\p{L}+$'), word, re.IGNORECASE):
+            return False
+
+        # Special handling for contractions (Spanish/Papiamento)
+        if "'" in word or "’" in word:
+            return self._validate_contractions(word, lang)
+        
+        # Affix validation
+        if not self._validate_affixes(word, rules['allowed_affixes']):
+            return False
+        
+        # Compound word validation
+        if '-' in word:
+            return self._validate_compounds(word, rules['compound_patterns'])
+        
+        # Syllable constraints
+        if self.syllable_count(word) > rules['max_syllables']:
+            return False
+        
+        # Language-specific additional checks
+        if lang == 'es':
+            return self._validate_spanish_morphology(word)
+        elif lang == 'pap':
+            return self._validate_papiamento_morphology(word)
+
+        # Affix validation
+        affix_rules = rules.get('allowed_affixes', {})
+        for affix_type, prefixes in affix_rules.items():
+            if affix_type == 'pre':
+                if any(word.startswith(p) for p in prefixes) and not self._validate_prefix(word):
+                    return False
+            elif affix_type == 'suf':
+                if any(word.endswith(s) for s in prefixes) and not self._validate_suffix(word):
+                    return False
+        
+        # Compound word validation
+        if '-' in word:
+            if not any(re.fullmatch(p, word) for p in rules.get('compound_patterns', [])):
+                return False
+            return all(self.validate_word(part) for part in word.split('-'))
+        
+        # Syllable constraints
+        if 'max_syllables' in rules:
+            return self.syllable_count(word) <= rules['max_syllables']
+        
+        return True
+
+    def _validate_spanish_morphology(self, word: str) -> bool:
+        """Spanish-specific morphological checks"""
+        # Check for required vowels in every syllable
+        if not re.search(r'[aeiouáéíóúü]', word.lower()):
+            return False
+        
+        # Validate consonant clusters
+        for cluster in ['tl', 'dl', 'tn']:  # Invalid in Spanish
+            if cluster in word.lower():
+                return False
+        
+        # Check verb endings
+        if len(word) > 2:
+            ending = word[-2:].lower()
+            if ending in {'ar', 'er', 'ir'}:
+                stem = word[:-2]
+                return stem in self.data or self._validate_spanish_stem(stem)
+        
+        return True
+
+    def _validate_papiamento_morphology(self, word: str) -> bool:
+        """Papiamento-specific morphological checks"""
+        # Check for common particles
+        rules = self._get_morphology_rules('pap')
+        if any(word.startswith(p) for p in rules['common_particles']):
+            return True
+        
+        # Validate verb constructions
+        if any(word.startswith(vm) for vm in rules['verb_markers']):
+            verb_part = word[2:] if word.startswith(('ta','lo')) else word[1:]
+            return self.validate_word(verb_part)
+        
+        # Check for characteristic affixes
+        if word.endswith('nan'):  # Plural marker
+            return self.validate_word(word[:-3])
+        
+        return True
+
+    def _validate_contractions(self, word: str, lang: str) -> bool:
+        """Handle language-specific contractions"""
+        if lang == 'es':
+            # Spanish contractions (al, del)
+            if word.lower() in {'al', 'del'}:
+                return True
+        elif lang == 'pap':
+            # Papiamento contractions (d', p', etc.)
+            if "'" in word and len(word) > 1:
+                parts = word.split("'")
+                return all(self.validate_word(part) for part in parts if part)
+        
+        return False
+    def _validate_affixes(self, word: str, affix_rules: dict) -> bool:
+        """Generic affix validation for all languages"""
+        for affix_type, affixes in affix_rules.items():
+            if affix_type == 'pre':
+                if any(word.startswith(p) for p in affixes):
+                    stem = next(word[len(p):] for p in affixes if word.startswith(p))
+                    if not self._validate_stem(stem):
+                        return False
+            elif affix_type == 'suf':
+                if any(word.endswith(s) for s in affixes):
+                    stem = next(word[:-len(s)] for s in affixes if word.endswith(s))
+                    if not self._validate_stem(stem):
+                        return False
+        return True
+
+
+    def _validate_stem(self, stem: str) -> bool:
+        """Validate word stems after affix removal"""
+        if not stem:
+            return False
+        return stem in self.data or self.stem(stem) in self.data
+
+    def _validate_prefix(self, word: str) -> bool:
+        """Prefix-stripping validation"""
+        stem = self.stem(word)
+        return stem != word and stem in self.data
+
+    def _validate_suffix(self, word: str) -> bool:
+        """Suffix-stripping validation"""
+        base = word
+        while base[-1] in {'s', 'd', 'g'} and len(base) > 2:
+            base = base[:-1]
+            if base in self.data:
+                return True
+        return False
+
+    def _validate_compounds(self, word: str, patterns: list) -> bool:
+        """Validate compound words against language patterns"""
+        if not any(re.fullmatch(p, word) for p in patterns):
+            return False
+        
+        # Check each component word
+        parts = re.split(r'[-]', word)
+        return all(self.validate_word(part) for part in parts)
+
+    def _validate_grapheme_phoneme(self, word: str) -> bool:
+        """Phonetic plausibility check"""
+        phonetic = self._metaphone(word)
+        return any(
+            self._metaphone(known) == phonetic 
+            for known in self.data.keys()
+        )
+
     def _check_phonotactics(self, word: str) -> bool:
         """Validate word structure against language phonotactic rules"""
         # Implementation of phonotactic constraints...
 
+class TypoHandler:
+    """Comprehensive typo handling with multiple correction strategies"""
+    
+    def __init__(self, wordlist: Wordlist):
+        self.wordlist = wordlist
+        self.max_edit_distance = 2
+        self.phonetic_weight = 0.4
+        self.frequency_weight = 0.3
+        self.keyboard_weight = 0.3
+
+    def suggest_corrections(self, word: str, max_suggestions: int = 5) -> List[Tuple[str, float]]:
+        """Generate ranked spelling corrections using hybrid approach"""
+        candidates = self._generate_candidates(word.lower())
+        valid_words = [w for w in candidates if w in self.wordlist.data]
+        
+        # If exact match exists with different case
+        if not valid_words and word.lower() in self.wordlist.data:
+            return [(word.lower(), 1.0)]
+        
+        # Score candidates using multiple features
+        scored = []
+        for candidate in valid_words:
+            score = self._calculate_confidence(word, candidate)
+            scored.append((candidate, score))
+        
+        # Sort by descending confidence and frequency
+        scored.sort(key=lambda x: (-x[1], -self.wordlist.word_probability(x[0])))
+        return scored[:max_suggestions]
+
+    def _generate_candidates(self, word: str) -> Set[str]:
+        """Generate possible corrections using multiple strategies"""
+        candidates = set()
+        
+        # Strategy 1: Edit distance variants
+        candidates.update(self._edit_distance_candidates(word))
+        
+        # Strategy 2: Phonetic matches
+        candidates.update(self.wordlist.phonetic_candidates(word))
+        
+        # Strategy 3: Common mistyping patterns
+        candidates.update(self._common_mistype_patterns(word))
+        
+        return candidates
+
+    def _edit_distance_candidates(self, word: str) -> Set[str]:
+        """Generate all edits within max edit distance"""
+        candidates = set()
+        for i in range(1, self.max_edit_distance + 1):
+            if i == 1:
+                new_candidates = self._edits1(word)
+            else:
+                new_candidates = set(e2 for e1 in candidates 
+                                   for e2 in self._edits1(e1))
+            candidates.update(new_candidates)
+        return candidates
+
+    def _edits1(self, word: str) -> Set[str]:
+        """Generate all edits that are one edit away"""
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
+        inserts = [L + c + R for L, R in splits for c in letters]
+        
+        return set(deletes + transposes + replaces + inserts)
+
+    def _common_mistype_patterns(self, word: str) -> Set[str]:
+        """Correct common mistyping patterns using rules"""
+        patterns = [
+            (r'ie$', 'ei'),  # recieve -> receive
+            (r'([aeiou])\1', r'\1'),  # occured -> occurred
+            (r'([a-z])\1+', r'\1'),  # happpy -> happy
+            (r'^[aeiou]', ''),  # about -> bout
+            (r'(.)\1(.)\2', r'\1\2'),  # committe -> committee
+        ]
+        
+        variants = set()
+        for pattern, replacement in patterns:
+            variants.add(re.sub(pattern, replacement, word))
+            variants.add(re.sub(replacement, pattern, word))
+        
+        return variants
+
+    def _calculate_confidence(self, original: str, candidate: str) -> float:
+        """Calculate combined confidence score using multiple features"""
+        edit_dist = self._weighted_edit_distance(original, candidate)
+        phonetic_sim = self._phonetic_similarity(original, candidate)
+        freq_score = self.wordlist.word_probability(candidate)
+        keyboard_sim = self._keyboard_similarity(original, candidate)
+        
+        # Normalize scores
+        edit_score = 1 / (1 + edit_dist)
+        phonetic_score = phonetic_sim / 4  # Max metaphone code length is 4
+        keyboard_score = 1 / (1 + keyboard_sim)
+        
+        # Weighted combination
+        confidence = (
+            edit_score * (1 - self.phonetic_weight - self.keyboard_weight) +
+            phonetic_score * self.phonetic_weight +
+            keyboard_score * self.keyboard_weight +
+            freq_score * self.frequency_weight
+        )
+        return min(max(confidence, 0), 1)
+
+    def _phonetic_similarity(self, w1: str, w2: str) -> float:
+        """Calculate phonetic code similarity"""
+        codes1 = {
+            self.wordlist._soundex(w1),
+            self.wordlist._metaphone(w1)
+        }
+        codes2 = {
+            self.wordlist._soundex(w2),
+            self.wordlist._metaphone(w2)
+        }
+        return len(codes1 & codes2) / max(len(codes1 | codes2), 1)
+
+    def _keyboard_similarity(self, w1: str, w2: str) -> float:
+        """Calculate average keyboard distance between characters"""
+        total = 0
+        min_len = min(len(w1), len(w2))
+        
+        for c1, c2 in zip(w1[:min_len], w2[:min_len]):
+            total += self.wordlist.keyboard_layout.get(c1, {}).get(c2, 2.0)
+            
+        return total / min_len if min_len > 0 else 0
+
+    def _weighted_edit_distance(self, a: str, b: str) -> float:
+        """Use Wordlist's keyboard-aware edit distance"""
+        return self.wordlist.weighted_edit_distance(a, b)
+
 class NLUEngine:
     """Rule-based semantic parser with fallback patterns"""
-    def __init__(self, wordlist_path: str = "src/agents/learning/structured_wordlist_en.json"):
+    def __init__(self, wordlist_path: str = "src/agents/language/structured_wordlist_en.json"):
         # Hierarchical intent recognition system with pattern clusters
         self.intent_weights = {
             'information_request': {
@@ -1070,7 +1573,7 @@ class ShallowDependencyParser:
 # --------------------------
 class NLGEngine:
     """Controlled text generation with style management"""
-    def __init__(self, templates_path: str = "src/agents/learning/nlg_templates_en.json"):
+    def __init__(self, templates_path: str = "src/agents/language/nlg_templates_en.json"):
 
 
         self.templates = self._load_templates(templates_path)
@@ -1208,25 +1711,76 @@ class SafetyGuard:
             
         return text
 
+
 class LanguageAgent:
-    def __init__(self, llm: SLAILM, config: Dict):
+    def __init__(self, shared_memory, agent_factory, llm=None, grammar_processor=None, dialogue_context=None, config=None, args=(), kwargs={}):
         self.llm = llm
-        self.nlu = NLUEngine()
-        self.cache = KnowledgeCache(max_size=config.get('cache_size', 1000))
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
+        self.grammar_processor = grammar_processor
+        self.dialogue_context = dialogue_context
+        self.config = config or {}
+        if not llm:
+            raise ValueError("LanguageAgent requires an LLM instance.")
+
+        # GrammarProcessor setup
+        if grammar_processor:
+            self.grammar_processor = grammar_processor
+        else:
+            from src.agents.language.grammar_processor import GrammarProcessor
+            self.grammar_processor = GrammarProcessor()
+
+        # NLU and Wordlist
+        wordlist_path = self.config.get("wordlist_path")
+        self.wordlist = Wordlist(path=wordlist_path) if wordlist_path else Wordlist()
+        self.nlu = NLUEngine(wordlist_path)
+
+        # NLG Engine
+        nlg_path = self.config.get("nlg_templates_en", "src/agents/language/nlg_templates_en.json")
+        self.nlg = NLGEngine(nlg_path)
+
+        # Safety and Caching
         self.safety = SafetyGuard()
-        allowed_keys = {'history', 'environment_state', 'user_preferences', 'attention_weights'}
-        context_args = {k: v for k, v in config.items() if k in allowed_keys}
-        self.context = DialogueContext(
-            llm=llm,
-            history=config.get("history", []),
-            summary=config.get("summary"),
-            memory_limit=config.get("memory_limit", 1000),
-            enable_summarization=config.get("enable_summarization", True),
-            summarizer=config.get("summarizer"))
+        self.cache = KnowledgeCache(max_size=self.config.get('cache_size', 1000))
+
+        # Dialogue Context
+        if dialogue_context:
+            self.dialogue_context = dialogue_context
+        else:
+            self.dialogue_context = DialogueContext(
+                llm=self.llm,
+                history=self.config.get("history", []),
+                summary=self.config.get("summary"),
+                memory_limit=self.config.get("memory_limit", 1000),
+                enable_summarization=self.config.get("enable_summarization", True),
+                summarizer=self.config.get("summarizer")
+            )
+
+        # Dialogue policy (if any)
         self.dialogue_policy = self._load_dialogue_policy()
-        self.wordlist = Wordlist()
-        self.nlu = NLUEngine(config.get('wordlist_path'))
-        self.nlg = NLGEngine(config.get('nlg_templates_en', 'src/agents/learning/nlg_templates_en.json'))
+
+        # Fallback responses
+        self.responses = self.config.get("responses", {
+            "default": ["I am processing your input."]
+        })
+
+    def perform_task(self, input_data):
+        if isinstance(input_data, str):
+            input_data = {"text": input_data}
+
+    def generate(self, prompt: str) -> str:
+        """Wrapper to route generation through the LLM"""
+        if not prompt or not isinstance(prompt, str):
+            return "[Invalid input]"
+
+        try:
+            self.dialogue_context.add(prompt)
+            result = self.llm.forward_pass(prompt)
+            response = result.get("text", str(result))
+            return response
+        except Exception as e:
+            logging.error(f"LanguageAgent failed to generate response: {e}")
+            return "[Error generating response]"
 
     def parse_intent(self, user_input: str) -> str:
         """Match user input against known triggers per intent."""
@@ -1238,13 +1792,26 @@ class LanguageAgent:
                     return intent
         return "default"
 
-    def preprocess_input(self, text: str) -> str:
+    def preprocess_input(self, user_input, text: str) -> str:
+        intent = self.llm.parse_intent(user_input)
+        if not isinstance(intent, dict):
+            intent = {"type": str(intent), "confidence": 0.5}
+
         words = text.split()
         corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
                      for w in words]
-        return " ".join(corrected)
-
-    def process_input(self, user_input: str) -> Tuple[str, LinguisticFrame]:
+        
+        # Analyze user input and generate a linguistic frame
+        linguistic_frame = self.analyze_input(user_input)
+        
+        # Generate raw response using SLAILM
+        raw_response = self.slailm.generate(linguistic_frame)
+        
+        # Process the raw response with GrammarProcessor
+        structured_response = self.grammar_processor.process(linguistic_frame, raw_response)
+        return structured_response.join(corrected)
+    
+    def process_input(self, safe_response, user_input: str) -> Tuple[str, LinguisticFrame]:
         """Full processing pipeline with academic-inspired components"""
         # Stage 1: Input sanitization
         clean_input = self.safety.sanitize(user_input)
@@ -1255,15 +1822,15 @@ class LanguageAgent:
         
         # Stage 3: Context-aware response generation
         cache_key = self.cache.hash_query(clean_input)
-        
-            
-        prompt = self._construct_prompt(clean_input, frame)
-        raw_response = self.llm.generate(prompt)
-        refined_response = self.nlg.generate(frame, self.context)
-        safe_response = self.safety.sanitize(refined_response)
+
+        prompt = self.generate_prompt(clean_input)
+        response = self.llm.generate(prompt)
+        self.context.add(f"User: {clean_input}")
+        self.context.add(f"SLAI: {response}")
         
         # Stage 4: Context update
-        self._update_context(clean_input, safe_response, frame)
+        self.context.add(f"User: {clean_input}")
+        self.context.add(f"SLAI: {safe_response}")
         self.cache.set(cache_key, safe_response)
 
         if cached := self.cache.get(self.cache.hash_query(clean_input)):
@@ -1439,3 +2006,34 @@ class LanguageAgent:
             prompt += "Dialogue History:\n" + "\n".join([f"User: {u}\nBot: {r}" for u, r in self.context.history])
         prompt += "\nAssistant:"
         return prompt
+
+    def execute(self, prompt: str) -> str:
+        analysis = self.process_input(prompt)
+        intent = analysis.get("intent", "unknown")
+
+        if intent == "question":
+            return self.answer_question(prompt)
+        elif intent == "summarization":
+            return self.summarize_text(prompt)
+        else:
+            return self.handle_general_prompt(prompt)
+    
+# if __name__ == "__main__":
+#     wordlist = Wordlist()
+#     wordlist._build_ngram_model(3)
+#     wordlist.build_synonym_graph()
+
+# Get next word suggestions
+# context = ["artificial", "intelligence"]
+# suggestions = wordlist.context_suggestions(context, 5)
+# print("Next word predictions:", suggestions)
+
+# Calculate conditional probability
+# prob = wordlist.word_probability("systems", context)
+# print(f"P(systems|{' '.join(context)}) = {prob:.4f}")
+
+# Assuming synonyms:
+# happy → joyful → delighted
+# happy → glad → pleased
+# path = wordlist.synonym_path("Happy", "pleased")
+# Returns: ['happy', 'glad', 'pleased']

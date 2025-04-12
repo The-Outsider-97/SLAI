@@ -214,23 +214,258 @@ class TextEncoder:
             for j in range(self._tokens.shape[1]):
                 self.embedding.grad[self._tokens[i, j]] += d_embed[i, j]
 
+class AudioEncoder:
+    def __init__(self, audio_length=16000, patch_size=400, embed_dim=512):
+        self.patch_size = patch_size
+        self.num_patches = audio_length // patch_size
+        self.in_channels = 1  # Mono audio input
+        
+        # Convolutional projection initialization (1D equivalent)
+        self.projection = Parameter(
+            TensorOps.he_init((patch_size * self.in_channels, embed_dim), 
+            patch_size * self.in_channels)
+        )
+        self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
+        self.position_embed = Parameter(
+            np.random.randn(1, self.num_patches + 1, embed_dim) * 0.02
+        )
+        self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
+        
+        self._cache = {}
+
+    def extract_patches(self, x):
+        """Convert waveform to patched representation"""
+        # x shape: (batch, channels, length)
+        batch, channels, length = x.shape
+        assert length == self.num_patches * self.patch_size, \
+            "Input length must be divisible by patch size"
+        
+        # Reshape into non-overlapping patches
+        x = x.reshape(batch, channels, self.num_patches, self.patch_size)
+        return x.transpose(0, 2, 1, 3).reshape(batch, self.num_patches, -1)
+
+    def load_pretrained(self, weights):
+        """Load pretrained weights in audio transformer format"""
+        # Handle 1D convolutional projection conversion
+        if 'conv_proj' in weights:
+            # Convert (embed_dim, in_channels, kernel_size) to linear projection
+            self.projection.data = weights['conv_proj'].squeeze().T
+        
+        # Load standard parameters
+        self.cls_token.data = weights.get('cls_token', self.cls_token.data)
+        self.position_embed.data = weights.get('pos_embed', self.position_embed.data)
+        
+        # Load transformer weights
+        if any(k.startswith('transformer_') for k in weights):
+            self.transformer.load_pretrained({
+                k.split('transformer_')[-1]: v 
+                for k, v in weights.items() 
+                if k.startswith('transformer_')
+            })
+
+    def forward(self, x):
+        """Process audio input through encoder"""
+        # Patch extraction and projection
+        x = self.extract_patches(x)
+        self._cache['input_shape'] = x.shape
+        x = np.matmul(x, self.projection.data)
+        
+        # Add classification token
+        cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
+        x = np.concatenate((cls_tokens, x), axis=1)
+        
+        # Add positional embeddings
+        x += self.position_embed.data[:, :x.shape[1]]
+        
+        # Transformer processing
+        x = self.transformer.forward(x)
+        self._cache['pre_projection'] = x
+        return x
+
+    def backward(self, dout):
+        """Backpropagate gradients through audio encoder"""
+        # Backward through transformer
+        d_x = self.transformer.backward(dout)
+        
+        # Remove CLS token gradient
+        d_x = d_x[:, 1:, :]
+        
+        # Gradient for projection matrix
+        input_patches = self._cache['input_shape'][0]
+        d_proj = np.matmul(
+            self._cache['input_shape'].transpose(0, 2, 1), 
+            d_x.reshape(-1, d_x.shape[-1])
+        )
+        self.projection.grad += d_proj
+        
+        # Gradient for input (not used but maintained for completeness)
+        d_input = np.matmul(d_x, self.projection.data.T)
+        return d_input.reshape(self._cache['input_shape'])
+
+
 class PerceptionAgent:
-    def __init__(self, config):
+    def __init__(self, config, shared_memory, agent_factory, audio_encoder=None, args=(), kwargs={}):
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.config = config
         self.modalities = config['modalities']
         self.encoders = OrderedDict()
+
         
         if 'vision' in self.modalities:
             self.encoders['vision'] = VisionEncoder()
         if 'text' in self.modalities:
             self.encoders['text'] = TextEncoder()
-        
+        if 'audio' in self.modalities:
+            self.encoders['audio'] = AudioEncoder()
+
+        # Pretrained loading would work similarly:
+        audio_weights = {
+            'conv_proj': np.random.randn(512, 1, 400),  # (embed_dim, in_ch, kernel_size)
+            'cls_token': np.random.randn(1, 1, 512),
+            'pos_embed': np.random.randn(1, 41, 512),    # 40 patches + 1 cls token
+            'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
+            # ... other transformer weights
+        }
+        agent.load_pretrained('audio', audio_weights)
+
         self.fusion = MultimodalFusion(embed_dim=config['embed_dim'])
         self.projection = Parameter(
             TensorOps.he_init((config['embed_dim'], config['projection_dim']), config['embed_dim']))
         
         # Initialize gradients
         self.params = self._collect_parameters()
+
+    def execute(self, task_data):
+        # Retrieve past errors from shared memory
+        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
+        for err in failures:
+            if self.is_similar(task_data, err["data"]):
+                self.logger.info("Recognized a known problematic case, applying workaround.")
+                return self.alternative_execute(task_data)
+
+        errors = self.shared_memory.get(f"errors:{self.name}", [])
+
+        # Check if current task_data has caused errors before
+        for error in errors:
+            if self.is_similar(task_data, error['task_data']):
+                self.handle_known_issue(task_data, error)
+                return
+
+        # Proceed with normal execution
+        try:
+            result = self.perform_task(task_data)
+            self.shared_memory.set(f"results:{self.name}", result)
+        except Exception as e:
+            # Log the failure in shared memory
+            error_entry = {'task_data': task_data, 'error': str(e)}
+            errors.append(error_entry)
+            self.shared_memory.set(f"errors:{self.name}", errors)
+            raise
+
+        pass
+
+    def alternative_execute(self, task_data):
+        """
+        Fallback logic when normal execution fails or matches a known failure pattern.
+        Attempts to simplify, sanitize, or reroute the input for safer processing.
+        """
+        try:
+            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
+            if isinstance(task_data, str):
+                clean_data = task_data.strip().lower().replace('\n', ' ')
+            elif isinstance(task_data, dict) and "text" in task_data:
+                clean_data = task_data["text"].strip().lower()
+            else:
+                clean_data = str(task_data).strip()
+
+            # Step 2: Apply a safer, simplified prompt or fallback logic
+            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
+            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
+                return self.llm.generate(fallback_prompt)
+
+            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
+            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
+                facts = {"event": "fallback", "value": clean_data}
+                return self.grammar.compose_sentence(facts)
+
+            # Step 4: Otherwise just echo the cleaned input as confirmation
+            return f"[Fallback response] I rephrased your input: {clean_data}"
+
+        except Exception as e:
+            # Final fallback — very safe and generic
+            return "[Fallback failure] Unable to process your request at this time."
+    
+    def is_similar(self, task_data, past_task_data):
+        """
+        Compares current task with past task to detect similarity.
+        Uses key overlap and value resemblance heuristics.
+        """
+        if type(task_data) != type(past_task_data):
+            return False
+    
+        # Handle simple text-based tasks
+        if isinstance(task_data, str) and isinstance(past_task_data, str):
+            return task_data.strip().lower() == past_task_data.strip().lower()
+    
+        # Handle dict-based structured tasks
+        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
+            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
+            similarity_score = 0
+            for key in shared_keys:
+                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
+                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
+                        similarity_score += 1
+            # Consider similar if 50% or more keys match closely
+            return similarity_score >= (len(shared_keys) / 2)
+    
+        return False
+    
+    def handle_known_issue(self, task_data, error):
+        """
+        Attempt to recover from known failure patterns.
+        Could apply input transformation or fallback logic.
+        """
+        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
+    
+        # Fallback strategy #1: remove problematic characters
+        if isinstance(task_data, str):
+            cleaned = task_data.replace("🧠", "").replace("🔥", "")
+            self.logger.info(f"Retrying with cleaned input: {cleaned}")
+            return self.perform_task(cleaned)
+    
+        # Fallback strategy #2: modify specific fields in structured input
+        if isinstance(task_data, dict):
+            cleaned_data = task_data.copy()
+            for key, val in cleaned_data.items():
+                if isinstance(val, str) and "emoji" in error.get("error", ""):
+                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
+            self.logger.info("Retrying task with cleaned structured data.")
+            return self.perform_task(cleaned_data)
+    
+        # Fallback strategy #3: return a graceful degradation response
+        self.logger.warning("Returning fallback response for unresolvable input.")
+        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
+    
+    def perform_task(self, task_data):
+        """
+        Simulated execution method — replace with actual agent logic.
+        This is where core functionality would happen.
+        """
+        self.logger.info(f"Executing task with data: {task_data}")
+    
+        if isinstance(task_data, str) and "fail" in task_data.lower():
+            raise ValueError("Simulated failure due to blacklisted word.")
+    
+        if isinstance(task_data, dict):
+            # Simulate failure on missing required keys
+            required_keys = ["input", "context"]
+            for key in required_keys:
+                if key not in task_data:
+                    raise KeyError(f"Missing required key: {key}")
+    
+        # Simulate result
+        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def _collect_parameters(self):
         params = []
@@ -296,53 +531,53 @@ class MultimodalFusion:
         return {k: np.repeat(d_fused[:, None, :], self._shapes[k][1], axis=1) for k in self._shapes}
 
 # Complete Example Usage
-if __name__ == "__main__":
-    config = {
-        'modalities': ['vision', 'text'],
-        'embed_dim': 512,
-        'projection_dim': 256
-    }
+#if __name__ == "__main__":
+#    config = {
+#        'modalities': ['vision', 'text'],
+#        'embed_dim': 512,
+#        'projection_dim': 256
+#    }
     
     # Initialize agent with batch processing support
-    agent = PerceptionAgent(config)
+#    agent = PerceptionAgent(config)
     
     # Example pretrained weights (ViT-Base compatible)
-    pretrained_weights = {
-        'conv_proj': np.random.randn(16, 16, 3, 512),  # (patch, patch, in_chans, embed_dim)
-        'cls_token': np.random.randn(1, 1, 512),
-        'pos_embed': np.random.randn(1, 197, 512),     # 14x14 patches + 1 cls token
-        'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
+#    pretrained_weights = {
+#        'conv_proj': np.random.randn(16, 16, 3, 512),  # (patch, patch, in_chans, embed_dim)
+#        'cls_token': np.random.randn(1, 1, 512),
+#        'pos_embed': np.random.randn(1, 197, 512),     # 14x14 patches + 1 cls token
+#        'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
         # ... other transformer weights
-    }
+#    }
     
     # Load vision encoder pretrained weights
-    agent.load_pretrained('vision', pretrained_weights)
+#    agent.load_pretrained('vision', pretrained_weights)
     
     # Create batch of inputs
-    batch = {
-        'vision': np.random.randn(8, 3, 224, 224),  # 8 RGB images
-        'text': np.random.randint(0, 50257, (8, 77)) # 8 text sequences
-    }
+#    batch = {
+#        'vision': np.random.randn(8, 3, 224, 224),  # 8 RGB images
+#        'text': np.random.randint(0, 50257, (8, 77)) # 8 text sequences
+#    }
     
     # Forward pass
-    latent = agent.forward(batch)
+#    latent = agent.forward(batch)
     
     # Compute dummy loss (MSE for example)
-    target = np.random.randn(*latent.shape)
-    loss = np.mean((latent - target) ** 2)
-    print(f"Initial loss: {loss:.4f}")
+#    target = np.random.randn(*latent.shape)
+#    loss = np.mean((latent - target) ** 2)
+#    print(f"Initial loss: {loss:.4f}")
     
     # Backward pass
-    dout = 2 * (latent - target) / latent.size
-    agent.backward(dout)
+#    dout = 2 * (latent - target) / latent.size
+#    agent.backward(dout)
     
     # Parameter update (SGD)
-    learning_rate = 1e-3
-    for param in agent.params:
-        param.data -= learning_rate * param.grad
-        param.grad.fill(0)  # Reset gradients
+#    learning_rate = 1e-3
+#    for param in agent.params:
+#        param.data -= learning_rate * param.grad
+#        param.grad.fill(0)  # Reset gradients
     
     # Verify updated forward pass
-    updated_latent = agent.forward(batch)
-    updated_loss = np.mean((updated_latent - target) ** 2)
-    print(f"Updated loss: {updated_loss:.4f}")
+#    updated_latent = agent.forward(batch)
+#    updated_loss = np.mean((updated_latent - target) ** 2)
+#    print(f"Updated loss: {updated_loss:.4f}")

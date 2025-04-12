@@ -1,28 +1,21 @@
 """
-shared_memory.py
-
 Provides a thread-safe, in-memory shared storage mechanism with features
 tailored for AI model coordination or data sharing within a single process.
-
-Features:
-- Versioned data storage with timestamps.
-- Access pattern tracking (last access time).
-- Data expiration (Time-To-Live).
-- Priority-based queuing for associated tasks/keys.
-- Basic conflict resolution via locking (Last Write Wins for data).
 """
 
 import time
 import heapq
 import logging
 import time as current_time
+import time
 import datetime
 import threading
+
+from multiprocessing import Manager
 from typing import Tuple, Type
 from collections import namedtuple, defaultdict, deque
 
 
-# Define a structure for stored items to hold data and metadata
 # Using deque for versions allows efficient append and potentially limiting version history size
 VersionedItem = namedtuple('VersionedItem', ['timestamp', 'value'])
 
@@ -40,18 +33,24 @@ class SharedMemory:
     like Redis or Memcached.
     """
 
-    def __init__(self, default_ttl=None, max_versions=None, network_latency=None):
-        # Core data storage: key -> deque[(timestamp, value), ...]
+    def __init__(self, default_ttl=None, max_versions=None, network_latency=0.5):
+        from src.collaborative.registry import AgentRegistry
+        from src.collaborative.task_router import TaskRouter
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
+        self.data = {}
+        self.lock = threading.Lock()
+        self.subscribers = {}
+        self.registry = AgentRegistry(shared_memory=self)
+        self.router = TaskRouter(self.registry, shared_memory=self)
         try:
             self._max_versions = int(max_versions) if max_versions is not None else None
         except (TypeError, ValueError):
             logging.warning(f"Invalid max_versions: {max_versions}. Defaulting to None.")
             self._max_versions = None
 
-        self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
-        self._network_latency = 0.5
+        self._data = defaultdict(lambda: deque(maxlen=self._validate_max_versions(max_versions)))
+        self._priority_queue = []
 
         """
         Initializes the SharedMemory instance.
@@ -62,15 +61,12 @@ class SharedMemory:
             max_versions (int, optional): Maximum number of versions to keep per key.
                                           Older versions are discarded. Defaults to None (keep all).
         """
-
         # Tracking last access time: key -> timestamp
         self._access_log = {}
 
         # Expiration time: key -> expiration_timestamp (absolute time)
         self._expiration = {}
 
-        # Priority queue: Stores (-priority, timestamp, key) tuples.
-        # heapq implements a min-heap, so negate priority for max-heap behavior.
         # Timestamp is used as a tie-breaker (FIFO for same priority).
         self._priority_queue = []
 
@@ -78,12 +74,45 @@ class SharedMemory:
         self._lock = threading.Lock()
 
         # Default time-to-live
-        self._default_ttl = default_ttl
+        self._default_ttl = self._validate_ttl(default_ttl)
+        self._network_latency = self._validate_network_latency(network_latency)
 
-        # Conflict resolution strategy is implicitly "Last Write Wins" due to locking
-        # and timestamping. More complex strategies would require custom logic.
+    def _validate_max_versions(self, value):
+        """Ensure max_versions is a positive integer or None."""
+        if value is None or (isinstance(value, int) and value > 0):
+            return value
+        logging.warning(f"Invalid max_versions: {value}. Defaulting to None.")
+        return None
+
+    def _validate_ttl(self, value):
+        """Validate TTL input (supports int/float/timedelta)."""
+        if isinstance(value, datetime.timedelta):
+            return value.total_seconds()
+        if value is not None and value <= 0:
+            raise ValueError("TTL must be positive or None.")
+        return value
+
+    def _validate_network_latency(self, value):
+        """Ensure network latency is a non-negative float."""
+        try:
+            latency = float(value)
+            return max(0.0, min(latency, 5.0))  # Clamp between 0 and 5 seconds
+        except (TypeError, ValueError):
+            logging.warning(f"Invalid network_latency: {value}. Using 0.5s default.")
+            return 0.5
+
+    def subscribe(self, key, callback):
+        if key not in self.subscribers:
+            self.subscribers[key] = []
+        self.subscribers[key].append(callback)
+
+    def notify(self, key, value):
+        if key in self.subscribers:
+            for callback in self.subscribers[key]:
+                callback(value)
 
     def _simulate_network(self):
+        time.sleep(self.network_latency)
         try:
             delay = float(self._network_latency)
             time.sleep(min(delay, 0.5))  # Cap max delay to avoid hangs
@@ -95,6 +124,9 @@ class SharedMemory:
         self._simulate_network()
 
         with self._lock:
+            version = self.data[key]['version'] + 1 if key in self.data else 1
+            expire_at = time.time() + ttl if ttl else None
+            self.data[key] = {'value': value, 'version': version, 'expire_at': expire_at}
             new_version = VersionedItem(timestamp=time.time(), value=value)
             self._data[key].append(new_version)
 
@@ -365,13 +397,20 @@ class SharedMemory:
             return self._access_log.get(key, None)
 
     def __len__(self):
-        """ Returns the number of non-expired keys currently in memory. """
-        # This could be slightly inaccurate if cleanup hasn't run,
-        # but provides a reasonable estimate without forcing a full cleanup.
+        """Returns the exact count of non-expired keys, with live expiration checks."""
         with self._lock:
-            # A more accurate len would require iterating and checking expiration.
-            # Let's count only keys present in _data for simplicity.
-            # A truly accurate count might need a cleanup first.
+            current_time = time.time()
+            expired_keys = []
+            
+            # Identify expired keys
+            for key in self._data:
+                if self._is_expired(key, current_time):
+                    expired_keys.append(key)
+            
+            # Remove expired entries
+            for key in expired_keys:
+                self._remove_key(key)
+                
             return len(self._data)
 
     def __contains__(self, key):
@@ -384,88 +423,3 @@ class SharedMemory:
             if key in self._data and self._is_expired(key, current_time):
                  self._remove_key(key)
             return False
-
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    # Example: Simple cache usage with expiration and priority
-    cache = SharedMemory(default_ttl=5, max_versions=3) # Default 5s TTL, keep last 3 versions
-
-    print("--- Basic Put/Get ---")
-    t1 = cache.put("user:123", {"name": "Alice", "visits": 1}, priority=10) # High priority
-    time.sleep(0.1)
-    t2 = cache.put("user:123", {"name": "Alice", "visits": 2}) # Update, default TTL, no priority change from first put
-    time.sleep(0.1)
-    t3 = cache.put("config", {"theme": "dark"}, ttl=10, priority=5) # Lower priority, longer TTL
-    t4 = cache.put("user:123", {"name": "Alice", "visits": 3}) # 3rd version
-    t5 = cache.put("user:123", {"name": "Alice", "visits": 4}) # 4th version, oldest (t1) should be gone if max_versions=3
-
-    print(f"Current value for user:123: {cache.get('user:123')}")
-    print(f"Value for user:123 at time t2: {cache.get('user:123', version_timestamp=t2)}")
-    print(f"Value for user:123 at time t1 (should be None if max_versions=3): {cache.get('user:123', version_timestamp=t1)}")
-    print(f"All versions for user:123: {cache.get_all_versions('user:123')}")
-    print(f"Config value: {cache.get('config')}")
-    print(f"Last access time for user:123: {cache.get_access_time('user:123')}")
-    print(f"Memory contains 'config'? {'config' in cache}")
-    print(f"Current item count: {len(cache)}")
-
-    print("\n--- Priority Queue ---")
-    # Priority queue holds (-priority, timestamp, key)
-    print(f"Raw Priority Queue (internal): {cache._priority_queue}")
-    item1 = cache.get_next_prioritized_item()
-    print(f"Got highest priority item: {item1}") # Should be user:123 (priority 10)
-    item2 = cache.get_next_prioritized_item()
-    print(f"Got next priority item: {item2}") # Should be config (priority 5)
-    item3 = cache.get_next_prioritized_item()
-    print(f"Got next priority item: {item3}") # Should be None
-
-    print("\n--- Expiration ---")
-    print(f"Config value before expiration: {cache.get('config')}")
-    print("Waiting for default TTL (5s) + buffer...")
-    time.sleep(5.5)
-    print(f"Current value for user:123 after 5.5s: {cache.get('user:123')}") # Should be None (expired)
-    print(f"Memory contains 'user:123'? {'user:123' in cache}")
-    print(f"Config value after 5.5s (TTL was 10s): {cache.get('config')}") # Should still exist
-
-    print("Running explicit cleanup...")
-    removed_count = cache.cleanup_expired()
-    print(f"Explicit cleanup removed {removed_count} items.")
-    print(f"Config value after cleanup (still < 10s): {cache.get('config')}")
-
-    print("Waiting for config TTL (10s total) + buffer...")
-    time.sleep(5)
-    print(f"Config value after > 10s: {cache.get('config')}") # Should be None now
-    print(f"Memory contains 'config'? {'config' in cache}")
-    print(f"Current item count: {len(cache)}")
-
-    print("\n--- Thread Safety Example ---")
-    shared_mem = SharedMemory()
-    counter_key = "thread_counter"
-    shared_mem.put(counter_key, 0)
-
-    num_threads = 5
-    increments_per_thread = 100
-
-    def worker_task():
-        for _ in range(increments_per_thread):
-            # Critical section: get, increment, put must be atomic
-            with shared_mem._lock: # Use the internal lock directly or wrap in methods
-                 current_value = shared_mem.get(counter_key, update_access=False)
-                 if current_value is None: current_value = 0 # Should not happen here
-                 shared_mem.put(counter_key, current_value + 1)
-            time.sleep(0.001) # Small delay to encourage thread interleaving
-
-    threads = []
-    for _ in range(num_threads):
-        thread = threading.Thread(target=worker_task)
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    final_value = shared_mem.get(counter_key)
-    print(f"Final counter value after {num_threads} threads * {increments_per_thread} increments: {final_value}")
-    expected_value = num_threads * increments_per_thread
-    print(f"Expected value: {expected_value}")
-    print(f"Result matches expected: {final_value == expected_value}")

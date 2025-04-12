@@ -27,11 +27,11 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from src.utils.agent_factory import AgentFactory
-from src.collaborative.shared_memory import SharedMemory
-from models.slai_lm import SLAILM
+from src.agents.language.grammar_processor import GrammarProcessor
 
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.WARNING)
 
 # Scientific computing import with error handling
 try:
@@ -207,62 +207,79 @@ class DeadlineAwareScheduler(TaskScheduler):
         
         return assignments
 
+
 class CollaborativeAgent:
     """Main collaborative agent implementation"""
     
-    def __init__(self, 
-                 config_path: Optional[str] = None,
-                 shared_memory: Optional[Any] = None, 
-                 risk_threshold: float = 0.2,
-                 agent_network: Optional[Dict[str, Any]] = None):
-        """
-        Initialize collaborative agent.
-        
-        Args:
-            config_path: Path to YAML config file
-            shared_memory: Optional shared memory instance
-            risk_threshold: Initial risk threshold (0.0-1.0)
-            agent_network: Predefined agent network dictionary
-        """
-        self.name = "CollaborativeAgent"
-        self.shared_memory = shared_memory or ThreadSafeSharedMemory()
+    def __init__(self, shared_memory, agent_factory: AgentFactory,
+                 config: Optional[Dict] = None,
+                 risk_threshold=0.2, agent_network: Optional[Dict] = None,
+                 config_path: Optional[str] = None):
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.risk_threshold = max(0.0, min(1.0, risk_threshold))
+        self.agents = {}
         self.shared_resources = {
-            "shared_memory": {},  # Replace with real Blackboard if needed
-            "task_router": {}     # If routing modules exist
+            "shared_memory": shared_memory,
+            "task_router": {}
         }
-        self.factory = AgentFactory(shared_resources=self.shared_resources)
-        from ..agents.language_agent import LanguageAgent
-        from ..agents.learning_agent import LearningAgent, SLAIEnv
-        self.factory.register("language", LanguageAgent)
-        self.factory.register(
-            "learning",
-            lambda **kwargs: LearningAgent(
-                env=SLAIEnv(),
-                config=kwargs.get('config', {}),
-                shared_memory=self.shared_memory))
 
-        # Load configuration
-        self.agent_network = self._load_config(config_path) if config_path else agent_network or {}
+        config = config or {}
         
-        # Initialize risk model
+        # Load config if needed
+        if config_path and not agent_network:
+            self.agent_network = self._load_config(config_path)
+        else:
+            self.agent_network = agent_network or {}
+
+        # Prefer manual config if valid
+        if isinstance(config, dict) and ("agents" in config or "agent-network" in config):
+            for agent_type, agent_cfg in config["agents"].items():
+                try:
+                    agent = self.factory.create(agent_type, agent_cfg)
+                    self.agents[agent_type] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to initialize {agent_type}: {e}")
+
+        elif self.agent_network:
+            for agent_name, agent_info in self.agent_network.items():
+                try:
+                    agent = self.agent_factory.create(agent_name, agent_info)
+                    self.agents[agent_name] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to load {agent_name}: {e}")
+        else:
+            logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
+
+        logger.info(f"Initialized CollaborativeAgent with {len(self.agents)} agents")
+
+        # Core components
+        self.name = "CollaborativeAgent"
+        self.shared_resources = {
+            "shared_memory": {},  # Use actual shared components if needed
+            "task_router": {}
+        }
+        self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
+        from src.agents.learning_agent import LearningAgent, SLAIEnv
+        self.factory.register("learning",
+                              lambda **kwargs: LearningAgent(
+                                  env=SLAIEnv(),
+                                  config=kwargs,
+                                  shared_memory=self.shared_memory,
+                                  args=kwargs.get("args", ()),
+                                  kwargs=kwargs.get("kwargs", {})
+                                  ))
+
+        self.grammar = GrammarProcessor(lang='en')
         self.risk_model = {
             'task_risks': defaultdict(list),
             'agent_risks': defaultdict(list),
             'thresholds': defaultdict(BayesianThresholdAdapter)
         }
         self.risk_model['thresholds']['default'] = BayesianThresholdAdapter()
-        
-        # Initialize components
         self.scheduler = DeadlineAwareScheduler()
-        self._metrics_lock = threading.Lock()
         self._init_performance_metrics()
-        
-        logger.info(f"Initialized {self.name} with {len(self.agent_network)} agents")
-
-        # Add learning subsystem integration
-        self.learning_subsystems = {
-        }
+        self.learning_subsystems = {}
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
@@ -305,6 +322,31 @@ class CollaborativeAgent:
         Returns:
             Dictionary with assessment results
         """
+        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
+        for err in failures:
+            if self.is_similar(task_data, err["data"]):
+                self.logger.info("Recognized a known problematic case, applying workaround.")
+                return self.alternative_execute(task_data)
+
+        errors = self.shared_memory.get(f"errors:{self.name}", [])
+
+        # Check if current task_data has caused errors before
+        for error in errors:
+            if self.is_similar(task_data, error['task_data']):
+                self.handle_known_issue(task_data, error)
+                return
+
+        # Proceed with normal execution
+        try:
+            result = self.perform_task(task_data)
+            self.shared_memory.set(f"results:{self.name}", result)
+        except Exception as e:
+            # Log the failure in shared memory
+            error_entry = {'task_data': task_data, 'error': str(e)}
+            errors.append(error_entry)
+            self.shared_memory.set(f"errors:{self.name}", errors)
+            raise
+
         try:
             # Validate input
             if 'policy_risk_score' not in task_data:
@@ -336,6 +378,108 @@ class CollaborativeAgent:
         except Exception as e:
             logger.exception("Unexpected error in execute()")
             return self._error_response(f"Internal error: {str(e)}")
+
+    def alternative_execute(self, task_data):
+        """
+        Fallback logic when normal execution fails or matches a known failure pattern.
+        Attempts to simplify, sanitize, or reroute the input for safer processing.
+        """
+        try:
+            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
+            if isinstance(task_data, str):
+                clean_data = task_data.strip().lower().replace('\n', ' ')
+            elif isinstance(task_data, dict) and "text" in task_data:
+                clean_data = task_data["text"].strip().lower()
+            else:
+                clean_data = str(task_data).strip()
+
+            # Step 2: Apply a safer, simplified prompt or fallback logic
+            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
+            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
+                return self.llm.generate(fallback_prompt)
+
+            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
+            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
+                facts = {"event": "fallback", "value": clean_data}
+                return self.grammar.compose_sentence(facts)
+
+            # Step 4: Otherwise just echo the cleaned input as confirmation
+            return f"[Fallback response] I rephrased your input: {clean_data}"
+
+        except Exception as e:
+            # Final fallback — very safe and generic
+            return "[Fallback failure] Unable to process your request at this time."        
+
+    def is_similar(self, task_data, past_task_data):
+        """
+        Compares current task with past task to detect similarity.
+        Uses key overlap and value resemblance heuristics.
+        """
+        if type(task_data) != type(past_task_data):
+            return False
+    
+        # Handle simple text-based tasks
+        if isinstance(task_data, str) and isinstance(past_task_data, str):
+            return task_data.strip().lower() == past_task_data.strip().lower()
+    
+        # Handle dict-based structured tasks
+        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
+            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
+            similarity_score = 0
+            for key in shared_keys:
+                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
+                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
+                        similarity_score += 1
+            # Consider similar if 50% or more keys match closely
+            return similarity_score >= (len(shared_keys) / 2)
+    
+        return False
+    
+    def handle_known_issue(self, task_data, error):
+        """
+        Attempt to recover from known failure patterns.
+        Could apply input transformation or fallback logic.
+        """
+        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
+    
+        # Fallback strategy #1: remove problematic characters
+        if isinstance(task_data, str):
+            cleaned = task_data.replace("🧠", "").replace("🔥", "")
+            self.logger.info(f"Retrying with cleaned input: {cleaned}")
+            return self.perform_task(cleaned)
+    
+        # Fallback strategy #2: modify specific fields in structured input
+        if isinstance(task_data, dict):
+            cleaned_data = task_data.copy()
+            for key, val in cleaned_data.items():
+                if isinstance(val, str) and "emoji" in error.get("error", ""):
+                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
+            self.logger.info("Retrying task with cleaned structured data.")
+            return self.perform_task(cleaned_data)
+    
+        # Fallback strategy #3: return a graceful degradation response
+        self.logger.warning("Returning fallback response for unresolvable input.")
+        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
+    
+    def perform_task(self, task_data):
+        """
+        Simulated execution method — replace with actual agent logic.
+        This is where core functionality would happen.
+        """
+        self.logger.info(f"Executing task with data: {task_data}")
+    
+        if isinstance(task_data, str) and "fail" in task_data.lower():
+            raise ValueError("Simulated failure due to blacklisted word.")
+    
+        if isinstance(task_data, dict):
+            # Simulate failure on missing required keys
+            required_keys = ["input", "context"]
+            for key in required_keys:
+                if key not in task_data:
+                    raise KeyError(f"Missing required key: {key}")
+    
+        # Simulate result
+        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def assess_risk(self, 
                    risk_score: float, 
@@ -413,6 +557,26 @@ class CollaborativeAgent:
             for task_id, assignment in optimized.items()
         }
 
+        # Collect fairness metrics (Added after safety checks)
+        from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, MetricBridge
+        self.metric_bridge = MetricBridge(self.factory)
+        
+        metrics = {
+            'demographic_parity_violations': FairnessMetrics.demographic_parity(
+                sensitive_groups=list(self.agent_network.keys()),
+                positive_rates={agent: len(assignments.get(agent, []))/len(tasks) 
+                                for agent in self.agent_network}
+            )[0],
+            'calibration_error': PerformanceMetrics.calibration_error(
+                y_true=np.array([t.get('priority', 0.5) for t in tasks]),
+                probs=np.array([a.get('optimization_score', 0.5) 
+                                for a in assignments.values()])
+            )
+        }
+        
+        if hasattr(self, 'metric_bridge'):
+            self.metric_bridge.submit_metrics(metrics)
+    
         # Your task coordination logic should populate safety_checks and optimized_schedule
         return {
             'status': 'success',
@@ -422,7 +586,7 @@ class CollaborativeAgent:
                 optimized,
                 safety_checks)
         }
-    
+
     def _apply_optimizations(
         self,
         schedule: Dict[str, Any],
@@ -645,39 +809,61 @@ class CollaborativeAgent:
         else:
             return RiskLevel.CRITICAL
 
-    def generate(self, prompt: str) -> str:
-        """Enhanced generation with proper learning subsystem routing"""
+    def generate(self, shared_memory, task_data: Union[str, dict]) -> str:
+        from models.slai_lm import SLAILM, get_shared_slailm
+
+        llm = get_shared_slailm(shared_memory)
+        agent = self.factory.create("language", {"llm": llm})
+
         try:
-            if not prompt or len(prompt.strip()) < 1:
+            if isinstance(task_data, str):
+                task_data = {"task_type": "language", "prompt": task_data}
+
+            task_type = task_data.get("task_type", "general")
+            prompt = task_data.get("prompt", "").strip()[:1000]
+
+            if not prompt:
                 raise ValueError("Empty input")
-                
-            # Add input sanitization
-            prompt = prompt.strip()[:1000]  # Prevent overly long inputs
-            
-            # Safe agent creation
-            lang_agent = self.factory.create(
-                "language", {
-                    "llm": SLAILM(),
-                    "history": [],
-                    "summary": "",
-                    "memory_limit": 1000,
-                    "enable_summarization": True,
-                    "summarizer": None
-                })
-                
-            # Add null check for intent parsing
+
+            if "language" not in self.agents:
+                llm = SLAILM(shared_memory)
+                self.agents["language"] = self.factory.create(
+                    "language", {
+                        "llm": llm,
+                        "history": [],
+                        "summary": "",
+                        "memory_limit": 1000,
+                        "enable_summarization": True,
+                        "summarizer": None
+                    }
+                )
+
+            lang_agent = self.agents["language"]
+            lang_agent.dialogue_context.add(prompt)
+
             intent = lang_agent.parse_intent(prompt) or {"type": "unknown"}
-            
-            # Dynamic agent selection
-            agent_config = self._build_learning_config(intent)
-            agent = self.factory.create("learning", agent_config)
-                
-            reward = agent.train_episode()
-            return f"[SLAI: Learning Agent]: Training complete.\n→ Reward: {reward:.2f}"
+            if not isinstance(intent, dict):
+                logger.warning("Intent is not a dict; applying fallback.")
+                intent = {"type": str(intent), "confidence": 0.5}
+
+            if intent.get("type", "").lower() in ["train", "learning", "learn"]:
+                agent_config = self._build_learning_config(intent)
+                agent = self.factory.create("learning", agent_config)
+                reward = agent.train_episode()
+                raw_facts = {
+                    'agent': 'SLAI Learning Agent',
+                    'event': 'training_complete',
+                    'metric': 'reward',
+                    'value': round(reward, 2)
+                }
+                return self.grammar.compose_sentence(raw_facts)
+
+            return lang_agent.generate(prompt)
 
         except Exception as e:
             logger.error(f"Generation failed: {str(e)}", exc_info=True)
             return f"[System Error] Generation failed: {str(e)}"
+
 
     def _build_learning_config(self, config: Optional[Dict] = None) -> Dict:
         base_config = {
@@ -687,7 +873,9 @@ class CollaborativeAgent:
             "priority_alpha": 0.6,
             "oversold_threshold": 30,
             "overbought_threshold": 70,
-            "learning_schedule": "exponential_decay"
+            "learning_schedule": "exponential_decay",
+            "args": (),
+            "kwargs": {}
         }
         print("Received config for learning agent:", config)
 
@@ -695,7 +883,6 @@ class CollaborativeAgent:
         if isinstance(config, dict):
             base_config.update(config)
         else:
-            import logging
             logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
 
         return base_config
@@ -1037,6 +1224,29 @@ class TestCollaborativeAgent(unittest.TestCase):
         self.assertEqual(assessment.risk_score, deserialized.risk_score)
         self.assertEqual(assessment.risk_level, deserialized.risk_level)
         self.assertEqual(assessment.recommended_action, deserialized.recommended_action)
+
+class MetricBridge:
+    def __init__(self, agent_factory):
+        self.factory = agent_factory
+        self.metrics_history = []
+        
+    def submit_metrics(self, metrics: dict):
+        """Implements exponential moving average from Brown's smoothing (1956)"""
+        self.metrics_history.append(metrics)
+        
+        # Weighted average (α=0.2)
+        decay_factor = 0.2
+        avg_metrics = {}
+        for key in metrics.keys():
+            series = [m.get(key, 0) for m in self.metrics_history[-10:]]
+            avg_metrics[key] = sum(
+                decay_factor*(1-decay_factor)**i * val 
+                for i, val in enumerate(reversed(series))
+            )
+            
+        # Thresholds from ISO/IEC 24029-1:2021 AI quality standards
+        if avg_metrics.get('demographic_parity_violations', 0) > 0.1:
+            self.factory.adapt_from_metrics(avg_metrics)
 
 # Example usage
 if __name__ == "__main__":

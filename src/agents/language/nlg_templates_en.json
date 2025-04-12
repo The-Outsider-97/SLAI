@@ -1,0 +1,211 @@
+{
+  "greeting": {
+    "triggers": [
+      "hi",
+      "hello",
+      "hey",
+      "good morning",
+      "morning",
+      "good afternoon",
+      "greetings",
+      "howdy",
+      "nice to see you"
+    ],
+    "responses": [
+      "Hello! How can I help you today?",
+      "Hi there! What would you like to talk about?",
+      "Hey! I'm here to assist you.",
+      "Good morning! Ready to tackle your questions!",
+      "Good afternoon! How can I support you?",
+      "Greetings! Ask me anything—I’m all ears!",
+      "Howdy! Let’s get things rolling. What’s on your mind?",
+      "Nice to see you! What brings you here today?"
+    ]
+  },
+  "farewell": {
+    "triggers": [
+      "bye",
+      "goodbye",
+      "see you",
+      "later",
+      "farewell",
+      "catch you",
+      "ciao"
+    ],
+    "responses": [
+      "Goodbye! Let me know if you need anything else.",
+      "Take care! See you next time.",
+      "Bye! I'm here when you need me.",
+      "Farewell! Don’t hesitate to return if you need help!",
+      "Have a fantastic day!",
+      "Until next time! Keep shining!",
+      "Signing off—reach out anytime!",
+      "Catch you later! Stay awesome!"
+    ]
+  },
+  "default": {
+    "triggers": [
+      "what",
+      "can you",
+      "do you",
+      "why",
+      "explain",
+      "how"
+    ],
+    "responses": [
+      "I'm not sure how to respond to that yet.",
+      "Can you rephrase that?",
+      "Interesting... Tell me more.",
+      "I’m still learning! Could you try asking differently?",
+      "Hmm, let’s try another angle. What exactly do you mean?",
+      "I’d love to help! Could you clarify your request?",
+      "Maybe ask about news, trivia, or tech? I’m versatile!",
+      "This topic is new to me. Want to try something else?"
+    ]
+  },
+  "acknowledgement": {
+    "triggers": [
+      "okay",
+      "got it",
+      "understood",
+      "alright",
+      "cool"
+    ],
+    "responses": [
+      "Got it.",
+      "Understood.",
+      "Thanks for the update.",
+      "Noted with a virtual high-five!",
+      "Acknowledged! What’s next?",
+      "Crystal clear—proceeding accordingly!",
+      "Roger that! Ready for your next move.",
+      "Logged and locked in!"
+    ]
+  },
+  "error": {
+    "triggers": [
+      "error",
+      "wrong",
+      "failed",
+      "did not",
+      "not working"
+    ],
+    "responses": [
+      "Oops, something went wrong on my end.",
+      "I ran into an error. Could you try again?",
+      "There was a problem. Please retry your request.",
+      "My circuits are fuzzy today. Let’s try that again?",
+      "Error 404: Witty response not found. Please retry!",
+      "Technical hiccup detected! Refresh and let’s go again.",
+      "Yikes! Let’s pretend that didn’t happen. Could you repeat?",
+      "Server’s taking a coffee break. Try again in a sec!"
+    ]
+  },
+  "thanks": {
+    "triggers": [
+      "thanks",
+      "thank you",
+      "appreciate",
+      "gracias"
+    ],
+    "responses": [
+      "You're welcome!",
+      "No problem!",
+      "Glad I could help!",
+      "Anytime! Your gratitude fuels my code!",
+      "My pleasure! Let’s do this again soon.",
+      "Happy to assist—just doing my robot duty!",
+      "Don’t mention it! You make helping fun!",
+      "Mission accomplished! Need anything else?"
+    ]
+  },
+  "positive_feedback": {
+    "triggers": [
+      "great",
+      "awesome",
+      "well done",
+      "good job",
+      "perfect",
+      "excellent",
+      "that helps",
+      "nice",
+      "nice job",
+      "exceptional",
+      "thanks",
+      "amazing"
+    ],
+    "responses": [
+      "I'm glad that helped!",
+      "Awesome to hear!",
+      "Great! Let me know if you need anything else.",
+      "Thanks for the kind words!",
+      "I’m blushing! How else can I assist?",
+      "You just made my day brighter!",
+      "High praise from you means a lot!",
+      "Aw, shucks! Let’s keep this momentum going!"
+    ]
+  },
+  "negative_feedback": {
+    "triggers": [
+      "not helpful",
+      "that sucks",
+      "bad answer",
+      "wrong",
+      "useless",
+      "terrible",
+      "didn't work",
+      "nope",
+      "bad"
+    ],
+    "responses": [
+      "I’m sorry to hear that. How can I improve?",
+      "I'm sorry to hear that. Want to try rephrasing?",
+      "Your feedback is important. I’ll work on getting better.",
+      "Let me try again with a better answer.",
+      "I apologize for the inconvenience. Let me try to fix that.",
+      "Ouch—I’ll recalibrate my responses. Thanks for your patience!",
+      "Thanks for the feedback — I’ll do better.",
+      "Constructive criticism received! I’ll learn from this."
+    ]
+  },
+  "help": {
+    "triggers": [
+      "help",
+      "can you help",
+      "i need assistance",
+      "support",
+      "how do i",
+      "what can you do",
+      "i'm lost",
+      "assist me"
+    ],
+    "responses": [
+      "Sure! How can I assist you?",
+      "I'm here to help — what do you need?",
+      "Sure! Ask me about weather, news, or facts. How can I assist?",
+      "I can explain concepts, solve math, or chat. What do you need?",
+      "Need help? Try: 'What’s the capital of Peru?' or 'Define quantum physics.'",
+      "Ask me anything, and I’ll try my best.",
+      "I’m your Swiss Army knife of knowledge—what’s your query?",
+      "Stuck? Type ‘tips’ for ideas, or ask away!"
+    ]
+  },
+  "apology": {
+    "triggers": [
+      "sorry",
+      "i'm sorry",
+      "my bad",
+      "forgive me",
+      "excuse me",
+      "didn't mean to",
+      "apologies"
+    ],
+    "responses": [
+      "My apologies—let’s try that again.",
+      "Oops! I didn’t mean to confuse you.",
+      "Forgive my digital clumsiness. Let’s start fresh!",
+      "Mea culpa! How about we rephrase that?",
+      "I owe you a coffee for that mistake. Try again?"
+    ]
+  }
+}

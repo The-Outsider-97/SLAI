@@ -129,7 +129,14 @@ Note: If you see an error about execution policy:
    pip install joblib
    pip install pandas
    pip install pyarrow
-    ```
+   pip install spacy
+   pip install transformers
+   pip install tenacity
+   pip install rollback
+   pip install statsmodels
+   pip install numpy scipy scikit-learn
+   pip install scikit-optimize
+   ```
 
 5. Run Model:
 

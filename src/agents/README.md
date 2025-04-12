@@ -40,6 +40,25 @@ Learns a meta-policy that can adapt quickly to new tasks with minimal data.
 
 ---
 
+### `knowledge_agent.py`
+```mermaid
+graph TD
+    SLAI -->|is| IntelligentAgent
+    IntelligentAgent -->|has| ReasoningCapabilities
+    ReasoningAgent -->|uses| Rules
+    ReasoningAgent -->|uses| Facts
+    RuleBasedReasoning -->|is| Deductive
+    ProbabilisticReasoning -->|is| Uncertain
+    LanguageModel -->|is| NeuralNetwork
+    SLAI -->|includes| LanguageModel
+    SLAI -->|supports| MultiAgentCommunication
+    MultiAgentSystem -->|requires| Collaboration
+    SafeAI -->|monitors| RiskTriggers
+
+```
+
+---
+
 ### `rsi_agent.py`
 **Reinforcement Self-Improving Agent (RSI)**  
 Focuses on continuous policy refinement by leveraging shared memory.
@@ -65,6 +84,20 @@ Delegates tasks to the most suitable registered agent based on task type and con
 - Uses shared memory and a task router.
 - Integrates and manages multi-agent collaboration at runtime.
 
+---
+### `Rule Chain Map`
+```mermaid
+flowchart LR
+    A1["SLAI → is → IntelligentAgent"]
+    A2["IntelligentAgent → has → ReasoningCapabilities"]
+    A1 & A2 --> R1["Rule: Deductive_Reasoning_Chain"]
+    R1 --> I1["Inference: SLAI → has → ReasoningCapabilities"]
+
+    B1["SafeAI → monitors → RiskTriggers"]
+    B2["SLAI → includes → SafeAI"]
+    B1 & B2 --> R2["Rule: SafeAI_Monitoring"]
+    R2 --> I2["Inference: SLAI → monitors → RiskTriggers"]
+```
 ---
 
 ## Agent Integration

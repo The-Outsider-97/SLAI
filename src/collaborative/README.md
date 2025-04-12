@@ -6,37 +6,178 @@ The `collaborative/` folder in SLAI helps different smart components ("agents") 
 
 ## What's in this folder?
 
-### `shared_memory.py`
-This file creates a shared memory where all parts of the system can save and read information. That way, they can communicate with each other easily.
 
-**What it does:**
-- Shares data between modules.
-- Stores timestamps for tracking.
-- Works like a network memory simulation.
+1.  **`shared_memory.py`**:
+    * Implements a thread-safe, in-memory storage mechanism (`SharedMemory` class) tailored for data sharing and coordination among agents within the same process.
+    * Provides features like versioned storage, time-to-live (TTL) expiration for data, access tracking, priority queuing for tasks/data, and basic locking for conflict resolution.
+    * **Note:** This is designed for single-process, multi-threaded environments and is not suitable for inter-process communication (IPC).
 
-### `collaborative_router.py`
-This is the "router" that decides which part of the system does what. For example, first audit the data, then train the model, then evaluate.
+2.  **`registry.py`**:
+    * Defines the `AgentRegistry` class, acting as a central directory for all active agents within the SLAI framework.
+    * Handles dynamic discovery, registration, and unregistration of agents.
+    * Tracks agent capabilities (the types of tasks they can perform) and their status (e.g., 'active', 'busy'), storing this information in the `SharedMemory` for system-wide visibility.
+    * Allows querying for agents based on the tasks they support.
 
-**What it does:**
-- Assigns tasks to agents.
-- Runs tasks in order.
-- Collects and logs results.
+```mermaid
+flowchart TD
+    subgraph "System Initializer"
+        A(Start CollaborationManager)
+        B(Trigger Agent Discovery)
+        CM(Initialize)
+    end
 
-### `task_protocol.py`
-This file makes sure tasks are passed in the same format. Think of it like a rulebook for how agents talk to each other.
+    subgraph "Agent Registry"
+        AR(discover_agents)
+        C(Scan Packages)
+        D(Identify Agent Classes)
+        E{Loop: For Each Agent Class}
+        F(Instantiate Agent)
+        G(Get Capabilities)
+        H(Validate Agent)
+        I(Register Internally)
+        J(Update Shared Memory)
+        K[Log Error]
+        L(Discovery Complete)
+    end
 
-**What it does:**
-- Defines task structure.
-- Avoids task errors or conflicts.
-- Has backup plans if something fails.
+    subgraph "Shared Memory"
+        SM(Store Agent Info\nStatus, Capabilities)
+    end
 
-### `context_manager.py`
-This part remembers useful information during a session. For example: user settings or risks that were already found.
+    subgraph "Agent Code Modules"
+        ACM(Agents in src/agents/)
+    end
 
-**What it does:**
-- Remembers who, what, and where.
-- Helps agents understand what happened earlier.
-- Supports long-term learning.
+    A --> CM;
+    CM --> B;
+    B --> AR;
+    AR --> C;
+    C -- Reads --> ACM;
+    C --> D;
+    D --> E;
+    E -- Found Class --> F;
+    F --> G;
+    G --> H;
+    H -- Valid --> I;
+    I --> J;
+    J -- Updates --> SM;
+    J --> E;
+    H -- Invalid --> K;
+    K --> E;
+    F -- Instantiation Fails --> K;
+    E -- No More Classes --> L;
+```
+
+3.  **`task_router.py`**:
+    * Contains the `TaskRouter` class, responsible for intelligently assigning incoming tasks to the most appropriate agent.
+    * Selects agents based on their registered capabilities (from `AgentRegistry`) and performance metrics (like success rate and current load, tracked via `SharedMemory`).
+    * Implements logic for handling agent failures and attempting fallback strategies or sub-tasks if an agent fails.
+    * Records task success and failure statistics for each agent in `SharedMemory`.
+
+```mermaid
+flowchart TD
+    subgraph "External System"
+        A[Task Submitted- type, data]
+    end
+
+    subgraph "Collaboration Manager"
+        B(run_task)
+        C{Check System Load}
+        D[Raise OverloadError]
+        E(Delegate to Router)
+    end
+
+    subgraph "Task Router"
+        F(route)
+        G{Agents Found?}
+        H[Raise No Agents Error]
+        I(Rank Agents)
+        J{Try Agent Loop}
+        K(Execute Task on Agent)
+        L{Execution Succeeded?}
+        M(Record Success)
+        N(Return Result)
+        O(Record Failure)
+        P{Fallback Plan Exists?}
+        Q(Attempt Fallback Sub-tasks) -- Recursively calls route --> F
+        R{Fallback Succeeded?}
+        S[Raise All Agents Failed Error]
+    end
+
+    subgraph "Agent Registry"
+        AR[Get Agents by Task]
+    end
+
+    subgraph "Shared Memory"
+        SM1[Get Agent Stats - Load]
+        SM2[Get Agent Stats - Ranking]
+        SM3[Update Active Tasks +1]
+        SM4[Update Active Tasks -1]
+        SM5[Record Success Stat]
+        SM6[Record Failure Stat]
+    end
+
+    subgraph "Selected Agent"
+        AGT(agent.execute)
+    end
+
+    A --> B;
+    B --> C;
+    C -- Uses --> SM1;
+    C -- Load OK --> E;
+    C -- Load Too High --> D;
+    E --> F;
+    F --> G;
+    G -- Uses --> AR;
+    G -- Yes --> I;
+    G -- No --> H;
+    I -- Uses --> SM2;
+    I --> J;
+    J -- Next Agent --> K;
+    K -- Updates --> SM3;
+    K -- Calls --> AGT;
+    AGT --> L;
+    L -- Yes --> M;
+    M -- Updates --> SM4;
+    M -- Updates --> SM5;
+    M --> N;
+    L -- No --> O;
+    O -- Updates --> SM4;
+    O -- Updates --> SM6;
+    O --> P;
+    P -- Yes --> Q;
+    Q --> R;
+    R -- Yes --> M;
+    R -- No --> J;
+    P -- No --> J;
+
+    J -- All Agents Tried --> S;
+```
+
+4.  **`collaboration_manager.py`**:
+    * Provides the `CollaborationManager` class, the central orchestrator for the collaborative components.
+    * Initializes and integrates the `AgentRegistry` and `TaskRouter`.
+    * Exposes methods to register agents and run tasks (which are then routed by the `TaskRouter`).
+    * Monitors overall system load and agent health/availability.
+    * Provides access to agent performance statistics stored in `SharedMemory`.
+
+5.  **`__init__.py`**:
+    * Makes key components like `SharedMemory` easily importable from the `src.collaborative` package.
+
+## How it Works
+
+1.  **Initialization**: The `CollaborationManager` starts, initializing the `AgentRegistry` and `TaskRouter`, both linked to a shared `SharedMemory` instance. The registry can dynamically discover agents.
+2.  **Agent Registration**: Agents (defined in agent_factory) are registered with the `CollaborationManager`/`AgentRegistry`, specifying their capabilities. Their details and status are stored in `SharedMemory`.
+3.  **Task Arrival**: A new task, defined by its type and data, is submitted to the `CollaborationManager`.
+4.  **Routing**: The `CollaborationManager` delegates routing to the `TaskRouter`. The `TaskRouter` queries the `AgentRegistry` for agents capable of handling the task type.
+5.  **Agent Selection**: The `TaskRouter` ranks eligible agents based on factors like historical success rate, priority, and current load (data retrieved from `SharedMemory`).
+6.  **Execution Attempt**: The task is dispatched to the highest-ranked available agent. Agent load (`active_tasks`) is updated in `SharedMemory`.
+7.  **Outcome**:
+    * **Success**: The result is returned, and the agent's success stats are updated in `SharedMemory`. Active task count is decremented.
+    * **Failure**: The failure is logged, stats are updated, and the `TaskRouter` may attempt a fallback plan or try the next-best agent. Active task count is decremented.
+8.  **Coordination**: Throughout the process, agents can potentially read from or write to `SharedMemory` (using its `get`/`put` methods) to coordinate or share intermediate results, although the primary coordination mechanism shown here is via the router and registry.
+
+This module enables the SLAI framework to distribute workloads effectively across specialized agents, manage shared state, and handle tasks collaboratively and robustly.
 
 ---
 

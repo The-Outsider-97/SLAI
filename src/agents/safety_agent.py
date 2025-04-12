@@ -22,101 +22,136 @@ import yaml
 import torch
 import numpy as np
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from evaluators.report import PerformanceEvaluator
-from collaborative.shared_memory import SharedMemory
+import statsmodels.formula.api as smf
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
+from src.evaluators.report import PerformanceEvaluator
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from alignment.alignment_monitor import AlignmentMonitor
-    
-    
-class RewardModel:
-    def __init__(self):
-        self.rules = {
-            "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
-            "helpfulness": lambda x: x.count("assist") / max(1, len(x))
-        }
 
-    def evaluate(self, text: str) -> Dict[str, float]:
-        return {name: rule(text) for name, rule in self.rules.items()}
+
+@dataclass
+class SafetyAgentConfig:
+    """Configuration for safety components (ISO 21448 SOTIF)"""
+    constitutional_rules: Dict[str, List[str]]
+    risk_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        "safety": 0.01,
+        "security": 0.001,
+        "privacy": 0.05
+    })
+    audit_level: int = 2
+    enable_rlhf: bool = True
 
 class SafeAI_Agent:
-    """
-    Safety-aware agent that monitors and adjusts other agents' behavior.
-    It includes a basic learning model that can improve safety assessments over time.
-    """
-
-    def __init__(self, shared_memory=None, risk_threshold=0.2):
+    """Holistic safety management per Bai et al. (2022) with integrated safety layers"""
+    
+    def __init__(self, agent_factory, config: SafetyAgentConfig, shared_memory=None, args=(), kwargs={}):
         self.name = "SafeAI_Agent"
         self.shared_memory = shared_memory
-        self.risk_threshold = risk_threshold
+        self.agent_factory = agent_factory
+        self.alignment_monitor = AlignmentMonitor
+        self.config = config
         self.logger = logging.getLogger("SLAI.SafetyFactory")
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-            self.logger.addHandler(handler)
-
+        
+        # Initialize components from original SafeAI_Agent
         self.alignment_agent = AlignmentAgent(
             sensitive_attrs=['gender', 'race'],
             config=load_config('alignment_config.yaml'),
             shared_memory=shared_memory
         )
-
-        # Risk model: (task_type, risk_score) pairs
-        self.training_data = []  # stores past risk data for training
-        self.risk_table = {}     # learned safety thresholds per task type
-        self.evaluator = PerformanceEvaluator(threshold=risk_threshold * 100)
-        self.alignment_monitor = AlignmentMonitor(...)
+        self.training_data = []
+        self.risk_table = {}
+        self.evaluator = PerformanceEvaluator(threshold=self.config.risk_thresholds["safety"] * 100)
         self.audit_trail = []
+        
+        # Add SafetyAgent components
+        self.reward_model = RewardModel()
+        self.attention_monitor = AttentionMonitor()
+        
+        # Initialize constitutional rules
+        self.constitution = self._load_constitution(config.constitutional_rules)
+        
+        # Logger setup
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+            self.logger.addHandler(handler)
 
-    def run_alignment_check(self, data, predictions, probs, labels, actions):
-        return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)
-
-    def _load_constitution(self, config: Dict) -> Dict:
-        """Load safety rules from config or default constitution"""
-        default_rules = {
-            "privacy": [
-                "Do not reveal personal or sensitive information",
-                "Anonymize data before processing"
-            ],
-            "safety": [
-                "Prevent physical or psychological harm",
-                "Avoid dangerous content generation"
-            ],
-            "ethics": [
-                "Maintain fairness and avoid discrimination",
-                "Respect cultural and social norms"
-            ]
+    # --- Merged Methods from Both Classes ---
+    def validate_action(self, action: Dict) -> Dict:
+        """STPA-based action validation (Leveson, 2011)"""
+        validation = {
+            "approved": True,
+            "corrections": [],
+            "risk_assessment": {},
+            "reward_scores": self.reward_model.evaluate(str(action))
         }
-        return config.get("constitutional_rules", default_rules)
+        
+        for risk_type, threshold in self.config.risk_thresholds.items():
+            risk_score = self._calculate_risk(action, risk_type)
+            validation["risk_assessment"][risk_type] = risk_score
+            if risk_score > threshold:
+                validation["approved"] = False
+                correction = self.apply_corrections(action)
+                validation["corrections"].append(correction)
+                
+        return validation
 
-    def _create_input_sanitizer(self) -> Dict:
-        """STPA-based input validation (Leveson, 2011)"""
-        return {
-            "function": self._sanitize_inputs,
-            "priority": 0,
-            "description": "Input validation and sanitization"
-        }
+    def _calculate_risk(self, action: Dict, risk_type: str) -> float:
+        """Quantitative risk modeling (ISO 26262)"""
+        base_risk = len(action.get('parameters', [])) * 0.01
+        if risk_type == "privacy":
+            return base_risk * self._detect_pii(action)
+        return base_risk
 
-    def _create_output_filter(self) -> Dict:
-        """Constitutional AI output filtering"""
-        return {
-            "function": self._apply_constitutional_rules,
-            "priority": 1,
-            "description": "Constitutional rule enforcement"
-        }
+    def _detect_pii(self, data: Dict) -> int:
+        """Simple PII detection without external libs"""
+        pii_keywords = ["name", "email", "address", "phone"]
+        return sum(1 for k in data if any(pii in k.lower() for pii in pii_keywords))
 
-    def _create_self_critique_module(self) -> Dict:
-        """Implementation of Constitutional AI self-critique"""
-        return {
-            "function": self._generate_self_critique,
-            "priority": 2,
-            "description": "Bai et al. (2022) self-improvement process"
-        }
+    # --- Modified Methods with Integrated Features ---
+    def assess_risk(self, policy_score, task_type="general") -> bool:
+        """Check against configurable risk thresholds"""
+        threshold = self.config.risk_thresholds.get(task_type, self.config.risk_thresholds["safety"])
+        return policy_score <= threshold
 
     def execute(self, task_data):
+        """Enhanced execution with integrated validation"""
+        # Original execution logic
+        if not alignment_report['approved']:
+            return self.apply_corrections(alignment_report['corrections'])
+        
+        # Integrated safety validation
+        validation = self.validate_action(task_data)
+        if not validation['approved']:
+            self.logger.warning(f"Unsafe action detected: {validation['corrections']}")
+            return self.apply_corrections(validation['corrections'])
+            
+        # Retrieve past errors from shared memory
+        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
+        for err in failures:
+            if self.is_similar(task_data, err["data"]):
+                self.logger.info("Recognized a known problematic case, applying workaround.")
+                return self.alternative_execute(task_data)
+
+        errors = self.shared_memory.get(f"errors:{self.name}", [])
+
+        # Check if current task_data has caused errors before
+        for error in errors:
+            if self.is_similar(task_data, error['task_data']):
+                self.handle_known_issue(task_data, error)
+                return
+
+        # Proceed with normal execution
+        try:
+            result = self.perform_task(task_data)
+            self.shared_memory.set(f"results:{self.name}", result)
+        except Exception as e:
+            # Log the failure in shared memory
+            error_entry = {'task_data': task_data, 'error': str(e)}
+            errors.append(error_entry)
+            self.shared_memory.set(f"errors:{self.name}", errors)
+            raise
+
         """
         Evaluate risk and propose adjustments.
         """
@@ -163,6 +198,163 @@ class SafeAI_Agent:
         self.alignment_agent.log_outcomes(task_data)
         self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
         return result
+
+    def alternative_execute(self, task_data):
+        """
+        Fallback logic when normal execution fails or matches a known failure pattern.
+        Attempts to simplify, sanitize, or reroute the input for safer processing.
+        """
+        try:
+            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
+            if isinstance(task_data, str):
+                clean_data = task_data.strip().lower().replace('\n', ' ')
+            elif isinstance(task_data, dict) and "text" in task_data:
+                clean_data = task_data["text"].strip().lower()
+            else:
+                clean_data = str(task_data).strip()
+
+            # Step 2: Apply a safer, simplified prompt or fallback logic
+            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
+            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
+                return self.llm.generate(fallback_prompt)
+
+            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
+            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
+                facts = {"event": "fallback", "value": clean_data}
+                return self.grammar.compose_sentence(facts)
+
+            # Step 4: Otherwise just echo the cleaned input as confirmation
+            return f"[Fallback response] I rephrased your input: {clean_data}"
+
+        except Exception as e:
+            # Final fallback — very safe and generic
+            return "[Fallback failure] Unable to process your request at this time."
+
+    def apply_corrections(self, corrections: List) -> Dict:
+        """Apply safety corrections to outputs"""
+        corrected = {}
+        for correction in corrections:
+            if 'sanitize' in correction:
+                corrected['sanitized'] = self._sanitize_inputs(correction['content'])
+            if 'filter' in correction:
+                corrected['filtered'] = self._apply_constitutional_rules(correction['content'])
+        return corrected
+
+    def is_similar(self, task_data, past_task_data):
+        """
+        Compares current task with past task to detect similarity.
+        Uses key overlap and value resemblance heuristics.
+        """
+        if type(task_data) != type(past_task_data):
+            return False
+    
+        # Handle simple text-based tasks
+        if isinstance(task_data, str) and isinstance(past_task_data, str):
+            return task_data.strip().lower() == past_task_data.strip().lower()
+    
+        # Handle dict-based structured tasks
+        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
+            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
+            similarity_score = 0
+            for key in shared_keys:
+                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
+                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
+                        similarity_score += 1
+            # Consider similar if 50% or more keys match closely
+            return similarity_score >= (len(shared_keys) / 2)
+    
+        return False
+    
+    def handle_known_issue(self, task_data, error):
+        """
+        Attempt to recover from known failure patterns.
+        Could apply input transformation or fallback logic.
+        """
+        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
+    
+        # Fallback strategy #1: remove problematic characters
+        if isinstance(task_data, str):
+            cleaned = task_data.replace("🧠", "").replace("🔥", "")
+            self.logger.info(f"Retrying with cleaned input: {cleaned}")
+            return self.perform_task(cleaned)
+    
+        # Fallback strategy #2: modify specific fields in structured input
+        if isinstance(task_data, dict):
+            cleaned_data = task_data.copy()
+            for key, val in cleaned_data.items():
+                if isinstance(val, str) and "emoji" in error.get("error", ""):
+                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
+            self.logger.info("Retrying task with cleaned structured data.")
+            return self.perform_task(cleaned_data)
+    
+        # Fallback strategy #3: return a graceful degradation response
+        self.logger.warning("Returning fallback response for unresolvable input.")
+        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
+    
+    def perform_task(self, task_data):
+        """
+        Simulated execution method — replace with actual agent logic.
+        This is where core functionality would happen.
+        """
+        self.logger.info(f"Executing task with data: {task_data}")
+    
+        if isinstance(task_data, str) and "fail" in task_data.lower():
+            raise ValueError("Simulated failure due to blacklisted word.")
+    
+        if isinstance(task_data, dict):
+            # Simulate failure on missing required keys
+            required_keys = ["input", "context"]
+            for key in required_keys:
+                if key not in task_data:
+                    raise KeyError(f"Missing required key: {key}")
+    
+        # Simulate result
+        return {"status": "success", "result": f"Processed: {task_data}"}
+
+    def run_alignment_check(self, data, predictions, probs, labels, actions):
+        return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)
+
+    def _load_constitution(self, config: Dict) -> Dict:
+        """Load safety rules from config or default constitution"""
+        default_rules = {
+            "privacy": [
+                "Do not reveal personal or sensitive information",
+                "Anonymize data before processing"
+            ],
+            "safety": [
+                "Prevent physical or psychological harm",
+                "Avoid dangerous content generation"
+            ],
+            "ethics": [
+                "Maintain fairness and avoid discrimination",
+                "Respect cultural and social norms"
+            ]
+        }
+        return config.get("constitutional_rules", default_rules)
+
+    def _create_input_sanitizer(self) -> Dict:
+        """STPA-based input validation (Leveson, 2011)"""
+        return {
+            "function": self._sanitize_inputs,
+            "priority": 0,
+            "description": "Input validation and sanitization"
+        }
+
+    def _create_output_filter(self) -> Dict:
+        """Constitutional AI output filtering"""
+        return {
+            "function": self._apply_constitutional_rules,
+            "priority": 1,
+            "description": "Constitutional rule enforcement"
+        }
+
+    def _create_self_critique_module(self) -> Dict:
+        """Implementation of Constitutional AI self-critique"""
+        return {
+            "function": self._generate_self_critique,
+            "priority": 2,
+            "description": "Bai et al. (2022) self-improvement process"
+        }
 
     def assess_risk(self, policy_score, task_type="general"):
         """
@@ -266,65 +458,23 @@ class SafeAI_Agent:
         """Simplified timestamp for demo purposes"""
         return int(len(self.audit_trail))
 
-@dataclass
-class SafetyAgentConfig:
-    """Configuration for safety components (ISO 21448 SOTIF)"""
-    constitutional_rules: Dict[str, List[str]]
-    risk_thresholds: Dict[str, float] = field(default_factory=lambda: {
-        "safety": 0.01,
-        "security": 0.001,
-        "privacy": 0.05
-    })
-    audit_level: int = 2
-    enable_rlhf: bool = True
-
-# 2. Then define the SafetyAgent class
 class SafetyAgent:
-    """Holistic safety management per Bai et al. (2022)"""
-    
-    def __init__(self, factory: SafeAI_Agent, config: SafetyAgentConfig):
-        self.safety_layer = factory
-        self.config = config
-        self.reward_model = self._init_reward_model()
-        self.attention_monitor = AttentionMonitor()
-        
+
     def _init_reward_model(self):
         return RewardModel({
             "alignment": lambda x: 1 - x.count("harm")/len(x),
             "helpfulness": lambda x: x.count("assist")/len(x)
         })
 
-    def validate_action(self, action: Dict) -> Dict:
-        reward_scores = self.reward_model.evaluate(str(action))
-        validation['reward_scores'] = reward_scores
-        """STPA-based action validation (Leveson, 2011)"""
-        validation = {
-            "approved": True,
-            "corrections": [],
-            "risk_assessment": {}
+class RewardModel:
+    def __init__(self):
+        self.rules = {
+            "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
+            "helpfulness": lambda x: x.count("assist") / max(1, len(x))
         }
-        
-        for risk_type, threshold in self.config.risk_thresholds.items():
-            risk_score = self._calculate_risk(action, risk_type)
-            validation["risk_assessment"][risk_type] = risk_score
-            if risk_score > threshold:
-                validation["approved"] = False
-                correction = self.safety_layer.apply_corrections(action)
-                validation["corrections"].append(correction)
-                
-        return validation
 
-    def _calculate_risk(self, action: Dict, risk_type: str) -> float:
-        """Quantitative risk modeling (ISO 26262)"""
-        base_risk = len(action.get('parameters', [])) * 0.01
-        if risk_type == "privacy":
-            return base_risk * self._detect_pii(action)
-        return base_risk
-
-    def _detect_pii(self, data: Dict) -> int:
-        """Simple PII detection without external libs"""
-        pii_keywords = ["name", "email", "address", "phone"]
-        return sum(1 for k in data if any(pii in k.lower() for pii in pii_keywords))
+    def evaluate(self, text: str) -> Dict[str, float]:
+        return {name: rule(text) for name, rule in self.rules.items()}
 
 class AttentionMonitor:
     """Mechanistic interpretability tool (Bereska & Gavves, 2024)"""
