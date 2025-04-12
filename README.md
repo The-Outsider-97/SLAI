@@ -136,6 +136,7 @@ Note: If you see an error about execution policy:
    pip install statsmodels
    pip install numpy scipy scikit-learn
    pip install scikit-optimize
+   pip install shap
    ```
 
 5. Run Model:
