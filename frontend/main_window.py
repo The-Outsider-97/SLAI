@@ -127,7 +127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         shared_resources = {"log_path": "logs/", "memory_limit": 1000}
         optimizer = SystemOptimizer()
 
-        factory = AgentFactory(shared_resources=shared_resources, optimizer=optimizer)
+        self.factory = AgentFactory(config=None, shared_resources=shared_resources, optimizer=optimizer)
 
         self.agent = self.collaborative_agent
         self.setWindowTitle("SLAI Launcher")
