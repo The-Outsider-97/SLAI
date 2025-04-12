@@ -8,15 +8,21 @@ Implements:
 
 import os, sys
 import logging
+import torch
+import time as timedelta
+import datetime
+import re
 import numpy as np
 import pandas as pd
+import statsmodels.formula.api as smf
+
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from scipy.stats import entropy
 
-from src.agents.safe_ai_agent import SafeAI_Agent
-from src.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
+from src.agents.safety_agent import SafeAI_Agent
+from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -44,7 +50,7 @@ class CorrectionPolicy:
     momentum: float = 0.9
 
 class AlignmentAgent:
-    def __init__(self, sensitive_attrs, AlignmentAgent, config, shared_memory):
+    def __init__(self, sensitive_attrs, config, shared_memory, agent_factory, args=(), kwargs={}):
         self.monitor = AlignmentMonitor(
             sensitive_attrs=sensitive_attrs,
             config=config['monitor']
@@ -53,8 +59,8 @@ class AlignmentAgent:
         self.memory = AlignmentMemory(config['memory'])
         self.ethics = EthicalConstraints(config['ethics'])
         self.value_model = ValueEmbeddingModel(config['value_model'])
-        self.alignment_agent = AlignmentAgent
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.correction_policy = CorrectionPolicy(config['corrections'])
 
     def verify_alignment(self, task_data):
@@ -495,6 +501,84 @@ class AlignmentAgent(SafeAI_Agent):
         return 0.0
 
     def _detect_sensitive_attributes(self) -> List[str]:
-        """Learn sensitive attributes from shared memory"""
-        # Implementation would analyze historical data
-        return ['gender', 'age']  # Placeholder
+        """Advanced sensitive attribute detection using:
+        - Metadata analysis
+        - Data distribution patterns
+        - Historical violation tracking
+        - Regulatory compliance checks
+        - Semantic similarity matching
+        """
+        sensitive_attrs = set()
+        
+        # 1. Check shared memory for known sensitive attributes
+        if self.shared_memory:
+            sensitive_attrs.update(
+                self.shared_memory.get("known_sensitive_attributes", [])
+            )
+
+        # 2. Analyze data schema from recent tasks
+        recent_data = self.shared_memory.get("recent_tasks", [])
+        if recent_data:
+            df = pd.DataFrame(recent_data)
+            
+            # Pattern matching for common sensitive attributes
+            sensitive_patterns = r'\b(age|sex|gender|race|ethnicity|religion|disability|orientation)\b'
+            pattern_matches = [
+                col for col in df.columns 
+                if re.search(sensitive_patterns, col, re.I)
+            ]
+            sensitive_attrs.update(pattern_matches)
+
+            # Detect low-cardinality categorical features
+            categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+            for col in categorical_cols:
+                unique_vals = df[col].nunique()
+                if 2 <= unique_vals <= 10:
+                    sensitive_attrs.add(col)
+
+        # 3. Check alignment memory for historical violations
+        violation_records = self.memory.fairness_records
+        if not violation_records.empty:
+            frequent_violations = violation_records[
+                violation_records['violation']
+            ]['metric'].value_counts().index.tolist()
+            sensitive_attrs.update(frequent_violations)
+
+        # 4. Regulatory compliance check (GDPR, CCPA)
+        compliance_attributes = [
+            'biometric_data', 'health_status', 
+            'political_views', 'union_membership'
+        ]
+        sensitive_attrs.update([
+            attr for attr in compliance_attributes
+            if attr in df.columns
+        ])
+
+        # 5. Semantic analysis using embedding similarity
+        if hasattr(self, 'value_model'):
+            column_embeddings = self.value_model.encode_value(
+                df.columns.tolist(), 
+                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
+            )
+            sensitive_embeddings = self.value_model.encode_value(
+                ['gender', 'race', 'religion'],
+                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
+            )
+            similarities = torch.cosine_similarity(
+                column_embeddings, 
+                sensitive_embeddings.unsqueeze(0)
+            )
+            semantic_matches = [
+                df.columns[i] for i in range(len(df.columns))
+                if similarities[i].max() > 0.7
+            ]
+            sensitive_attrs.update(semantic_matches)
+
+        # 6. Remove false positives using denylist
+        denylist = ['modified_date', 'processed_flag']
+        sensitive_attrs = [attr for attr in sensitive_attrs 
+                        if attr not in denylist]
+
+        logger.info(f"Detected sensitive attributes: {sorted(sensitive_attrs)}")
+        
+        return sorted(sensitive_attrs)
