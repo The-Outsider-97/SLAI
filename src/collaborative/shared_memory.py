@@ -38,9 +38,8 @@ class SharedMemory:
         from src.collaborative.task_router import TaskRouter
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
+        self.data = {}
         self.lock = threading.Lock()
-        manager = Manager()
-        self.data = manager.dict()
         self.subscribers = {}
         self.registry = AgentRegistry(shared_memory=self)
         self.router = TaskRouter(self.registry, shared_memory=self)
@@ -424,4 +423,3 @@ class SharedMemory:
             if key in self._data and self._is_expired(key, current_time):
                  self._remove_key(key)
             return False
-
