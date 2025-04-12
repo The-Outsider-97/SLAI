@@ -214,19 +214,121 @@ class TextEncoder:
             for j in range(self._tokens.shape[1]):
                 self.embedding.grad[self._tokens[i, j]] += d_embed[i, j]
 
+class AudioEncoder:
+    def __init__(self, audio_length=16000, patch_size=400, embed_dim=512):
+        self.patch_size = patch_size
+        self.num_patches = audio_length // patch_size
+        self.in_channels = 1  # Mono audio input
+        
+        # Convolutional projection initialization (1D equivalent)
+        self.projection = Parameter(
+            TensorOps.he_init((patch_size * self.in_channels, embed_dim), 
+            patch_size * self.in_channels)
+        )
+        self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
+        self.position_embed = Parameter(
+            np.random.randn(1, self.num_patches + 1, embed_dim) * 0.02
+        )
+        self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
+        
+        self._cache = {}
+
+    def extract_patches(self, x):
+        """Convert waveform to patched representation"""
+        # x shape: (batch, channels, length)
+        batch, channels, length = x.shape
+        assert length == self.num_patches * self.patch_size, \
+            "Input length must be divisible by patch size"
+        
+        # Reshape into non-overlapping patches
+        x = x.reshape(batch, channels, self.num_patches, self.patch_size)
+        return x.transpose(0, 2, 1, 3).reshape(batch, self.num_patches, -1)
+
+    def load_pretrained(self, weights):
+        """Load pretrained weights in audio transformer format"""
+        # Handle 1D convolutional projection conversion
+        if 'conv_proj' in weights:
+            # Convert (embed_dim, in_channels, kernel_size) to linear projection
+            self.projection.data = weights['conv_proj'].squeeze().T
+        
+        # Load standard parameters
+        self.cls_token.data = weights.get('cls_token', self.cls_token.data)
+        self.position_embed.data = weights.get('pos_embed', self.position_embed.data)
+        
+        # Load transformer weights
+        if any(k.startswith('transformer_') for k in weights):
+            self.transformer.load_pretrained({
+                k.split('transformer_')[-1]: v 
+                for k, v in weights.items() 
+                if k.startswith('transformer_')
+            })
+
+    def forward(self, x):
+        """Process audio input through encoder"""
+        # Patch extraction and projection
+        x = self.extract_patches(x)
+        self._cache['input_shape'] = x.shape
+        x = np.matmul(x, self.projection.data)
+        
+        # Add classification token
+        cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
+        x = np.concatenate((cls_tokens, x), axis=1)
+        
+        # Add positional embeddings
+        x += self.position_embed.data[:, :x.shape[1]]
+        
+        # Transformer processing
+        x = self.transformer.forward(x)
+        self._cache['pre_projection'] = x
+        return x
+
+    def backward(self, dout):
+        """Backpropagate gradients through audio encoder"""
+        # Backward through transformer
+        d_x = self.transformer.backward(dout)
+        
+        # Remove CLS token gradient
+        d_x = d_x[:, 1:, :]
+        
+        # Gradient for projection matrix
+        input_patches = self._cache['input_shape'][0]
+        d_proj = np.matmul(
+            self._cache['input_shape'].transpose(0, 2, 1), 
+            d_x.reshape(-1, d_x.shape[-1])
+        )
+        self.projection.grad += d_proj
+        
+        # Gradient for input (not used but maintained for completeness)
+        d_input = np.matmul(d_x, self.projection.data.T)
+        return d_input.reshape(self._cache['input_shape'])
+
+
 class PerceptionAgent:
-    def __init__(self, config, shared_memory):
+    def __init__(self, config, shared_memory, agent_factory, audio_encoder=None, args=(), kwargs={}):
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.config = config
         self.modalities = config['modalities']
         self.encoders = OrderedDict()
-        self.perception_agent = PerceptionAgent
-        self.shared_memory = shared_memory
+
         
         if 'vision' in self.modalities:
             self.encoders['vision'] = VisionEncoder()
         if 'text' in self.modalities:
             self.encoders['text'] = TextEncoder()
-        
+        if 'audio' in self.modalities:
+            self.encoders['audio'] = AudioEncoder()
+
+        # Pretrained loading would work similarly:
+        audio_weights = {
+            'conv_proj': np.random.randn(512, 1, 400),  # (embed_dim, in_ch, kernel_size)
+            'cls_token': np.random.randn(1, 1, 512),
+            'pos_embed': np.random.randn(1, 41, 512),    # 40 patches + 1 cls token
+            'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
+            # ... other transformer weights
+        }
+        agent.load_pretrained('audio', audio_weights)
+
         self.fusion = MultimodalFusion(embed_dim=config['embed_dim'])
         self.projection = Parameter(
             TensorOps.he_init((config['embed_dim'], config['projection_dim']), config['embed_dim']))
@@ -429,53 +531,53 @@ class MultimodalFusion:
         return {k: np.repeat(d_fused[:, None, :], self._shapes[k][1], axis=1) for k in self._shapes}
 
 # Complete Example Usage
-if __name__ == "__main__":
-    config = {
-        'modalities': ['vision', 'text'],
-        'embed_dim': 512,
-        'projection_dim': 256
-    }
+#if __name__ == "__main__":
+#    config = {
+#        'modalities': ['vision', 'text'],
+#        'embed_dim': 512,
+#        'projection_dim': 256
+#    }
     
     # Initialize agent with batch processing support
-    agent = PerceptionAgent(config)
+#    agent = PerceptionAgent(config)
     
     # Example pretrained weights (ViT-Base compatible)
-    pretrained_weights = {
-        'conv_proj': np.random.randn(16, 16, 3, 512),  # (patch, patch, in_chans, embed_dim)
-        'cls_token': np.random.randn(1, 1, 512),
-        'pos_embed': np.random.randn(1, 197, 512),     # 14x14 patches + 1 cls token
-        'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
+#    pretrained_weights = {
+#        'conv_proj': np.random.randn(16, 16, 3, 512),  # (patch, patch, in_chans, embed_dim)
+#        'cls_token': np.random.randn(1, 1, 512),
+#        'pos_embed': np.random.randn(1, 197, 512),     # 14x14 patches + 1 cls token
+#        'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
         # ... other transformer weights
-    }
+#    }
     
     # Load vision encoder pretrained weights
-    agent.load_pretrained('vision', pretrained_weights)
+#    agent.load_pretrained('vision', pretrained_weights)
     
     # Create batch of inputs
-    batch = {
-        'vision': np.random.randn(8, 3, 224, 224),  # 8 RGB images
-        'text': np.random.randint(0, 50257, (8, 77)) # 8 text sequences
-    }
+#    batch = {
+#        'vision': np.random.randn(8, 3, 224, 224),  # 8 RGB images
+#        'text': np.random.randint(0, 50257, (8, 77)) # 8 text sequences
+#    }
     
     # Forward pass
-    latent = agent.forward(batch)
+#    latent = agent.forward(batch)
     
     # Compute dummy loss (MSE for example)
-    target = np.random.randn(*latent.shape)
-    loss = np.mean((latent - target) ** 2)
-    print(f"Initial loss: {loss:.4f}")
+#    target = np.random.randn(*latent.shape)
+#    loss = np.mean((latent - target) ** 2)
+#    print(f"Initial loss: {loss:.4f}")
     
     # Backward pass
-    dout = 2 * (latent - target) / latent.size
-    agent.backward(dout)
+#    dout = 2 * (latent - target) / latent.size
+#    agent.backward(dout)
     
     # Parameter update (SGD)
-    learning_rate = 1e-3
-    for param in agent.params:
-        param.data -= learning_rate * param.grad
-        param.grad.fill(0)  # Reset gradients
+#    learning_rate = 1e-3
+#    for param in agent.params:
+#        param.data -= learning_rate * param.grad
+#        param.grad.fill(0)  # Reset gradients
     
     # Verify updated forward pass
-    updated_latent = agent.forward(batch)
-    updated_loss = np.mean((updated_latent - target) ** 2)
-    print(f"Updated loss: {updated_loss:.4f}")
+#    updated_latent = agent.forward(batch)
+#    updated_loss = np.mean((updated_latent - target) ** 2)
+#    print(f"Updated loss: {updated_loss:.4f}")
