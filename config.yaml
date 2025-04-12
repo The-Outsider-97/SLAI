@@ -81,10 +81,12 @@ agent-network:
   evaluation:
     class: EvaluationAgent
     path: src.agents.evaluation_agent
+    init_args: {}
 
   safety:
     class: SafeAI_Agent
     path: src.agents.safety_agent
+    init_args: {}
     risk_threshold: 0.2
 
   adaptive:
@@ -103,14 +105,17 @@ agent-network:
   perception:
     class: PerceptionAgent
     path: src.agents.perception_agent
+    init_args: {}
 
   planning:
     class: PlanningAgent
     path: src.agents.planning_agent
+    init_args: {}
 
   reasoning:
     class: Reasoninggent
     path: src.agents.reasoning_agent
+    init_args: {}
 
 training:
   num_samples: 500
