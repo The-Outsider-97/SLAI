@@ -22,53 +22,110 @@ import yaml
 import torch
 import numpy as np
 
+import statsmodels.formula.api as smf
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.evaluators.report import PerformanceEvaluator
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from src.alignment.alignment_monitor import AlignmentMonitor
-    
-    
-class RewardModel:
-    def __init__(self):
-        self.rules = {
-            "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
-            "helpfulness": lambda x: x.count("assist") / max(1, len(x))
-        }
 
-    def evaluate(self, text: str) -> Dict[str, float]:
-        return {name: rule(text) for name, rule in self.rules.items()}
+
+@dataclass
+class SafetyAgentConfig:
+    """Configuration for safety components (ISO 21448 SOTIF)"""
+    constitutional_rules: Dict[str, List[str]]
+    risk_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        "safety": 0.01,
+        "security": 0.001,
+        "privacy": 0.05
+    })
+    audit_level: int = 2
+    enable_rlhf: bool = True
 
 class SafeAI_Agent:
-    """
-    Safety-aware agent that monitors and adjusts other agents' behavior.
-    It includes a basic learning model that can improve safety assessments over time.
-    """
-
-    def __init__(self, shared_memory=None, risk_threshold=0.2):
+    """Holistic safety management per Bai et al. (2022) with integrated safety layers"""
+    
+    def __init__(self, agent_factory, config: SafetyAgentConfig, shared_memory=None, args=(), kwargs={}):
         self.name = "SafeAI_Agent"
         self.shared_memory = shared_memory
-        self.risk_threshold = risk_threshold
+        self.agent_factory = agent_factory
+        self.alignment_monitor = AlignmentMonitor
+        self.config = config
         self.logger = logging.getLogger("SLAI.SafetyFactory")
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-            self.logger.addHandler(handler)
-
+        
+        # Initialize components from original SafeAI_Agent
         self.alignment_agent = AlignmentAgent(
             sensitive_attrs=['gender', 'race'],
             config=load_config('alignment_config.yaml'),
             shared_memory=shared_memory
         )
-
-        # Risk model: (task_type, risk_score) pairs
-        self.training_data = []  # stores past risk data for training
-        self.risk_table = {}     # learned safety thresholds per task type
-        self.evaluator = PerformanceEvaluator(threshold=risk_threshold * 100)
-        self.alignment_monitor = AlignmentMonitor(...)
+        self.training_data = []
+        self.risk_table = {}
+        self.evaluator = PerformanceEvaluator(threshold=self.config.risk_thresholds["safety"] * 100)
         self.audit_trail = []
+        
+        # Add SafetyAgent components
+        self.reward_model = RewardModel()
+        self.attention_monitor = AttentionMonitor()
+        
+        # Initialize constitutional rules
+        self.constitution = self._load_constitution(config.constitutional_rules)
+        
+        # Logger setup
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+            self.logger.addHandler(handler)
+
+    # --- Merged Methods from Both Classes ---
+    def validate_action(self, action: Dict) -> Dict:
+        """STPA-based action validation (Leveson, 2011)"""
+        validation = {
+            "approved": True,
+            "corrections": [],
+            "risk_assessment": {},
+            "reward_scores": self.reward_model.evaluate(str(action))
+        }
+        
+        for risk_type, threshold in self.config.risk_thresholds.items():
+            risk_score = self._calculate_risk(action, risk_type)
+            validation["risk_assessment"][risk_type] = risk_score
+            if risk_score > threshold:
+                validation["approved"] = False
+                correction = self.apply_corrections(action)
+                validation["corrections"].append(correction)
+                
+        return validation
+
+    def _calculate_risk(self, action: Dict, risk_type: str) -> float:
+        """Quantitative risk modeling (ISO 26262)"""
+        base_risk = len(action.get('parameters', [])) * 0.01
+        if risk_type == "privacy":
+            return base_risk * self._detect_pii(action)
+        return base_risk
+
+    def _detect_pii(self, data: Dict) -> int:
+        """Simple PII detection without external libs"""
+        pii_keywords = ["name", "email", "address", "phone"]
+        return sum(1 for k in data if any(pii in k.lower() for pii in pii_keywords))
+
+    # --- Modified Methods with Integrated Features ---
+    def assess_risk(self, policy_score, task_type="general") -> bool:
+        """Check against configurable risk thresholds"""
+        threshold = self.config.risk_thresholds.get(task_type, self.config.risk_thresholds["safety"])
+        return policy_score <= threshold
 
     def execute(self, task_data):
+        """Enhanced execution with integrated validation"""
+        # Original execution logic
+        if not alignment_report['approved']:
+            return self.apply_corrections(alignment_report['corrections'])
+        
+        # Integrated safety validation
+        validation = self.validate_action(task_data)
+        if not validation['approved']:
+            self.logger.warning(f"Unsafe action detected: {validation['corrections']}")
+            return self.apply_corrections(validation['corrections'])
+            
         # Retrieve past errors from shared memory
         failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
         for err in failures:
@@ -95,7 +152,52 @@ class SafeAI_Agent:
             self.shared_memory.set(f"errors:{self.name}", errors)
             raise
 
-        pass
+        """
+        Evaluate risk and propose adjustments.
+        """
+        policy_score = task_data.get("policy_risk_score", None)
+        task_type = task_data.get("task_type", "general")
+        alignment_report = self.alignment_agent.verify_alignment(task_data)
+
+        if not alignment_report['approved']:
+            return self.apply_corrections(alignment_report['corrections'])
+        
+        if policy_score is None:
+            return {
+                "status": "failed",
+                "error": "Missing 'policy_risk_score' in task_data"
+            }
+
+        safe = self.assess_risk(policy_score, task_type)
+        correction = self.suggest_correction(policy_score, task_type)
+        self.alignment_agent.monitor_in_execution(task_data)
+
+        # Evaluate performance
+        percent_score = round((1.0 - policy_score) * 100, 2)  # Lower risk = better
+        meets_threshold = self.evaluator.meets_threshold(percent_score)
+
+        if self.shared_memory:
+            self.shared_memory.set("last_policy_risk", policy_score)
+            self.shared_memory.set("safe_ai_recommendation", correction or "no_action")
+            self.shared_memory.set("safe_ai_score_percent", percent_score)
+            self.shared_memory.set("safe_ai_meets_threshold", meets_threshold)
+
+        # Store training data
+        self.training_data.append((task_type, policy_score))
+
+        result = {
+            "status": "assessed",
+            "agent": self.name,
+            "risk_score": policy_score,
+            "percent_score": percent_score,
+            "meets_threshold": meets_threshold,
+            "is_safe": safe,
+            "recommendation": correction
+        }
+
+        self.alignment_agent.log_outcomes(task_data)
+        self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
+        return result
 
     def alternative_execute(self, task_data):
         """
@@ -127,6 +229,16 @@ class SafeAI_Agent:
         except Exception as e:
             # Final fallback — very safe and generic
             return "[Fallback failure] Unable to process your request at this time."
+
+    def apply_corrections(self, corrections: List) -> Dict:
+        """Apply safety corrections to outputs"""
+        corrected = {}
+        for correction in corrections:
+            if 'sanitize' in correction:
+                corrected['sanitized'] = self._sanitize_inputs(correction['content'])
+            if 'filter' in correction:
+                corrected['filtered'] = self._apply_constitutional_rules(correction['content'])
+        return corrected
 
     def is_similar(self, task_data, past_task_data):
         """
@@ -244,54 +356,6 @@ class SafeAI_Agent:
             "description": "Bai et al. (2022) self-improvement process"
         }
 
-    def execute(self, task_data):
-        """
-        Evaluate risk and propose adjustments.
-        """
-        policy_score = task_data.get("policy_risk_score", None)
-        task_type = task_data.get("task_type", "general")
-        alignment_report = self.alignment_agent.verify_alignment(task_data)
-
-        if not alignment_report['approved']:
-            return self.apply_corrections(alignment_report['corrections'])
-        
-        if policy_score is None:
-            return {
-                "status": "failed",
-                "error": "Missing 'policy_risk_score' in task_data"
-            }
-
-        safe = self.assess_risk(policy_score, task_type)
-        correction = self.suggest_correction(policy_score, task_type)
-        self.alignment_agent.monitor_in_execution(task_data)
-
-        # Evaluate performance
-        percent_score = round((1.0 - policy_score) * 100, 2)  # Lower risk = better
-        meets_threshold = self.evaluator.meets_threshold(percent_score)
-
-        if self.shared_memory:
-            self.shared_memory.set("last_policy_risk", policy_score)
-            self.shared_memory.set("safe_ai_recommendation", correction or "no_action")
-            self.shared_memory.set("safe_ai_score_percent", percent_score)
-            self.shared_memory.set("safe_ai_meets_threshold", meets_threshold)
-
-        # Store training data
-        self.training_data.append((task_type, policy_score))
-
-        result = {
-            "status": "assessed",
-            "agent": self.name,
-            "risk_score": policy_score,
-            "percent_score": percent_score,
-            "meets_threshold": meets_threshold,
-            "is_safe": safe,
-            "recommendation": correction
-        }
-
-        self.alignment_agent.log_outcomes(task_data)
-        self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
-        return result
-
     def assess_risk(self, policy_score, task_type="general"):
         """
         Assess if the policy risk is within learned or default thresholds.
@@ -394,65 +458,23 @@ class SafeAI_Agent:
         """Simplified timestamp for demo purposes"""
         return int(len(self.audit_trail))
 
-@dataclass
-class SafetyAgentConfig:
-    """Configuration for safety components (ISO 21448 SOTIF)"""
-    constitutional_rules: Dict[str, List[str]]
-    risk_thresholds: Dict[str, float] = field(default_factory=lambda: {
-        "safety": 0.01,
-        "security": 0.001,
-        "privacy": 0.05
-    })
-    audit_level: int = 2
-    enable_rlhf: bool = True
-
-# 2. Then define the SafetyAgent class
 class SafetyAgent:
-    """Holistic safety management per Bai et al. (2022)"""
-    
-    def __init__(self, factory: SafeAI_Agent, config: SafetyAgentConfig):
-        self.safety_layer = factory
-        self.config = config
-        self.reward_model = self._init_reward_model()
-        self.attention_monitor = AttentionMonitor()
-        
+
     def _init_reward_model(self):
         return RewardModel({
             "alignment": lambda x: 1 - x.count("harm")/len(x),
             "helpfulness": lambda x: x.count("assist")/len(x)
         })
 
-    def validate_action(self, action: Dict) -> Dict:
-        reward_scores = self.reward_model.evaluate(str(action))
-        validation['reward_scores'] = reward_scores
-        """STPA-based action validation (Leveson, 2011)"""
-        validation = {
-            "approved": True,
-            "corrections": [],
-            "risk_assessment": {}
+class RewardModel:
+    def __init__(self):
+        self.rules = {
+            "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
+            "helpfulness": lambda x: x.count("assist") / max(1, len(x))
         }
-        
-        for risk_type, threshold in self.config.risk_thresholds.items():
-            risk_score = self._calculate_risk(action, risk_type)
-            validation["risk_assessment"][risk_type] = risk_score
-            if risk_score > threshold:
-                validation["approved"] = False
-                correction = self.safety_layer.apply_corrections(action)
-                validation["corrections"].append(correction)
-                
-        return validation
 
-    def _calculate_risk(self, action: Dict, risk_type: str) -> float:
-        """Quantitative risk modeling (ISO 26262)"""
-        base_risk = len(action.get('parameters', [])) * 0.01
-        if risk_type == "privacy":
-            return base_risk * self._detect_pii(action)
-        return base_risk
-
-    def _detect_pii(self, data: Dict) -> int:
-        """Simple PII detection without external libs"""
-        pii_keywords = ["name", "email", "address", "phone"]
-        return sum(1 for k in data if any(pii in k.lower() for pii in pii_keywords))
+    def evaluate(self, text: str) -> Dict[str, float]:
+        return {name: rule(text) for name, rule in self.rules.items()}
 
 class AttentionMonitor:
     """Mechanistic interpretability tool (Bereska & Gavves, 2024)"""
