@@ -333,9 +333,17 @@ class AgentFactory:
     def _agent_specific_config(self, agent_class: type, config: Dict) -> Dict:
         agent_type = agent_class.__name__.lower()
         config_builder = {
+            'adaptive': self._build_adaptive_config,
+            'alignment': self._build_alignment_config,
+            'evaluation': self._build_evaluation_config,
+            'execution': self._build_execution_config,
+            'knowledge': self._build_knowledge_config,
             'language': self._build_language_config,
             'learning': self._build_learning_config,
-            'perception': self._build_perception_config
+            'perception': self._build_perception_config,
+            'planning': self._build_planning_config,
+            'reasoning': self._build_reasoning_config,
+            'safety': self._build_safety_config
         }.get(agent_type.split('agent')[0], lambda _: {})
         
         return config_builder(config)
