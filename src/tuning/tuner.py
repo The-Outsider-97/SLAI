@@ -9,7 +9,7 @@ from src.tuning.grid_search import GridSearch
 from src.tuning.bayesian_search import BayesianSearch
 from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
 
-from src.agents.evaluation_agent import EvaluationAgent
+# from src.agents.evaluation_agent import EvaluationAgent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
