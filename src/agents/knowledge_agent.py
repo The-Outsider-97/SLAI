@@ -7,21 +7,29 @@ import os
 import json
 import math
 import re
+import numpy as np
 from collections import defaultdict
 from heapq import nlargest
 
+def cosine_sim(v1, v2):
+    v1, v2 = np.array(v1), np.array(v2)
+    dot = np.dot(v1, v2)
+    return dot / (np.linalg.norm(v1) * np.linalg.norm(v2))
+
+
 class KnowledgeAgent:
-    def __init__(self, shared_memory, knowledge_agent_dir=None, persist_file: str = None):
+    def __init__(self, shared_memory, agent_factory, knowledge_agent_dir=None, persist_file: str = None, args=(), kwargs={}):
+        self.knowledge_agent = []
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.cache = {}
         self.cache_size = 1000
-        self.knowledge_agent = []
         self.vocabulary = set()
         self.document_frequency = defaultdict(int)
         self.total_documents = 0
-        self.knowledge_agent = KnowledgeAgent
         self.persist_file = persist_file
         self.memory = defaultdict(dict)
+        self.doc_vectors = {}
         self.stopwords = set([
             'a', 'an', 'the', 'and', 'or', 'in', 'on', 'at', 'to', 'of',
             'for', 'with', 'as', 'by', 'that', 'this', 'it', 'is', 'are',
@@ -193,35 +201,33 @@ class KnowledgeAgent:
         cache_key = hash(query)
         if cache_key in self.cache:
             return self.cache[cache_key]
-    
-        """Retrieve relevant documents using TF-IDF cosine similarity"""
+
+        # Preprocess and validate
         query_tokens = self._preprocess(query)
         if not query_tokens or not self.knowledge_agent:
             return []
 
-        # Calculate TF-IDF vectors
+        # Calculate query vector
         query_vector = self._calculate_tfidf(query_tokens, is_query=True)
-        document_vectors = [
-            (doc, self._calculate_tfidf(doc['tokens']))
-            for doc in self.knowledge_agent
-        ]
 
-        # Calculate cosine similarities
+        # Calculate document vectors and similarities
         similarities = []
-        for doc, doc_vector in document_vectors:
+        for doc in self.knowledge_agent:
+            doc_vector = self._calculate_tfidf(doc['tokens'])
             similarity = self._cosine_similarity(query_vector, doc_vector)
             if similarity >= similarity_threshold:
                 similarities.append((similarity, doc))
 
+        # Cache results
+        results = nlargest(k, similarities, key=lambda x: x[0])
         if len(self.cache) > self.cache_size:
             self.cache.popitem()
-            self.cache[cache_key] = results
-            return results
-    
-        # Return top k results with similarity scores
-        return nlargest(k, similarities, key=lambda x: x[0])
+        self.cache[cache_key] = results
 
-    def add_document(self, text, metadata=None):
+        return results
+
+    def add_document(self, text, doc_id, doc_text, metadata=None):
+        self.doc_vectors[doc_id] = self._compute_vector(doc_text)
         if not isinstance(text, str) or len(text.strip()) < 3:
             raise ValueError("Document text must be non-empty string")
 
@@ -300,23 +306,23 @@ class KnowledgeAgent:
         return references
 
 # Example usage
-if __name__ == "__main__":
-    agent = KnowledgeAgent()
+#if __name__ == "__main__":
+#    agent = KnowledgeAgent()
     
     # Populate knowledge agent
-    documents = [
-        "Reinforcement learning uses rewards to train agents",
-        "Neural networks are computational models inspired by biological brains",
-        "Transformer models use attention mechanisms for sequence processing",
-        "Knowledge graphs represent information as entity-relationship triples"
-    ]
-    for doc in documents:
-        agent.add_document(doc)
+#    documents = [
+#        "Reinforcement learning uses rewards to train agents",
+#        "Neural networks are computational models inspired by biological brains",
+#        "Transformer models use attention mechanisms for sequence processing",
+#        "Knowledge graphs represent information as entity-relationship triples"
+#    ]
+#    for doc in documents:
+#        agent.add_document(doc)
     
     # Perform query
-    query = "What models are inspired by biological systems?"
-    results = agent.retrieve(query)
+#    query = "What models are inspired by biological systems?"
+#    results = agent.retrieve(query)
     
-    print(f"Results for query: '{query}'")
-    for score, doc in results:
-        print(f"[Score: {score:.4f}] {doc['text']}")
+#    print(f"Results for query: '{query}'")
+#    for score, doc in results:
+#        print(f"[Score: {score:.4f}] {doc['text']}")
