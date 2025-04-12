@@ -17,7 +17,8 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
-from src.deployment.git.rollback_handler import RollbackHandler
+from deployment.git_ops.version_ops import create_and_push_tag
+from deployment.rollback.model_rollback import rollback_model
 from src.evaluators.performance_evaluator import PerformanceEvaluator
 from src.evaluators.efficiency_evaluator import EfficiencyEvaluator
 from src.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
@@ -27,9 +28,9 @@ from src.evaluators.documentation import AuditTrail
 from src.tuning.tuner import HyperparamTuner
 
 class EvaluationAgent:
-    def __init__(self, EvaluationAgent, shared_memory):
-        self.evaluation_agent = EvaluationAgent
+    def __init__(self, shared_memory, agent_factory, args=(), kwargs={}):
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.risk_model = RiskAdaptation(
             params=RiskModelParameters(
                 initial_hazard_rates={
@@ -190,7 +191,7 @@ class EvaluationAgent:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-class RollbackHandler:
+class Rollback:
     """Implements model version control with atomic rollbacks"""
     def rollback_model(self):
         logger.info("Rolling back to last stable model version")
