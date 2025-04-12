@@ -117,7 +117,7 @@ class SafeEnvironment:
             raise SecurityError(f"Restricted file path: {path}")
 
 class ExecutionAgent:
-    def __init__(self, ExecutionAgent, shared_memory, config=None):
+    def __init__(self, agent_factory, shared_memory, config=None, args=(), kwargs={}):
         """
         Initialize with comprehensive configuration
         
@@ -131,6 +131,7 @@ class ExecutionAgent:
         """
         self.execute_safe_action = ExecutionAgent
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         config = config or {}
         self.timeout = config.get('timeout', 10)
         self.user_agent = config.get('user_agent', "EnhancedExecutionAgent/2.0")
@@ -649,13 +650,13 @@ class SecurityError(Exception):
     pass
 
 # Example usage
-if __name__ == "__main__":
-    agent = ExecutionAgent(config={
-        'cache_dir': '.slaicache',
-        'rate_limit': 3
-    })
+#if __name__ == "__main__":
+#    agent = ExecutionAgent(config={
+#        'cache_dir': '.slaicache',
+#        'rate_limit': 3
+#    })
     
-    result = agent.generate_react_loop(
-        "Find recent papers about AI safety from trusted sources"
-    )
-    print(result)
+#    result = agent.generate_react_loop(
+#        "Find recent papers about AI safety from trusted sources"
+#    )
+#    print(result)
