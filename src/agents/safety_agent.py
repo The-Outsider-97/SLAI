@@ -23,11 +23,15 @@ import torch
 import numpy as np
 
 import statsmodels.formula.api as smf
+from pathlib import Path
 from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.evaluators.report import PerformanceEvaluator
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
+def load_config(Path):
+    with open(Path, "r") as f:
+        return yaml.safe_load(f) 
 
 @dataclass
 class SafetyAgentConfig:
@@ -43,33 +47,42 @@ class SafetyAgentConfig:
 
 class SafeAI_Agent:
     """Holistic safety management per Bai et al. (2022) with integrated safety layers"""
-    
-    def __init__(self, agent_factory, config: SafetyAgentConfig, shared_memory=None, args=(), kwargs={}):
+    def __init__(self, agent_factory, alignment_agent_cls, config: SafetyAgentConfig, shared_memory=None):
+        alignment_config = load_config('src/agents/alignment/configs/alignment_config.yaml')
+
+        self.alignment_agent = alignment_agent_cls(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            sensitive_attrs=alignment_config.get("sensitive_attrs", []),
+            config=alignment_config.get("init_args", {})
+        )
         self.name = "SafeAI_Agent"
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.alignment_monitor = AlignmentMonitor
         self.config = config
-        self.logger = logging.getLogger("SLAI.SafetyFactory")
-        
-        # Initialize components from original SafeAI_Agent
+        self.risk_threshold = self.config.risk_thresholds.get("safety", 0.01)
+
         self.alignment_agent = AlignmentAgent(
-            sensitive_attrs=['gender', 'race'],
-            config=load_config('alignment_config.yaml'),
-            shared_memory=shared_memory
+            shared_memory=shared_memory,
+            agent_factory=self.agent_factory,
+            sensitive_attrs=alignment_config.get("sensitive_attrs", []),
+            config=alignment_config
         )
+
+        self.logger = logging.getLogger("SLAI.SafetyFactory")
         self.training_data = []
         self.risk_table = {}
         self.evaluator = PerformanceEvaluator(threshold=self.config.risk_thresholds["safety"] * 100)
         self.audit_trail = []
-        
+
         # Add SafetyAgent components
         self.reward_model = RewardModel()
         self.attention_monitor = AttentionMonitor()
-        
+
         # Initialize constitutional rules
         self.constitution = self._load_constitution(config.constitutional_rules)
-        
+
         # Logger setup
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -85,7 +98,7 @@ class SafeAI_Agent:
             "risk_assessment": {},
             "reward_scores": self.reward_model.evaluate(str(action))
         }
-        
+
         for risk_type, threshold in self.config.risk_thresholds.items():
             risk_score = self._calculate_risk(action, risk_type)
             validation["risk_assessment"][risk_type] = risk_score
@@ -93,7 +106,7 @@ class SafeAI_Agent:
                 validation["approved"] = False
                 correction = self.apply_corrections(action)
                 validation["corrections"].append(correction)
-                
+    
         return validation
 
     def _calculate_risk(self, action: Dict, risk_type: str) -> float:
@@ -119,13 +132,13 @@ class SafeAI_Agent:
         # Original execution logic
         if not alignment_report['approved']:
             return self.apply_corrections(alignment_report['corrections'])
-        
+
         # Integrated safety validation
         validation = self.validate_action(task_data)
         if not validation['approved']:
             self.logger.warning(f"Unsafe action detected: {validation['corrections']}")
             return self.apply_corrections(validation['corrections'])
-            
+
         # Retrieve past errors from shared memory
         failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
         for err in failures:
