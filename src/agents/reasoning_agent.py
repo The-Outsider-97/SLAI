@@ -11,187 +11,104 @@ Features:
 import json
 import re
 import math
+import logging as logger
 import itertools
 import random
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Set, Tuple, Union
-from pathlib import Path
 import numpy as np
 
+from collections import defaultdict
+from typing import Any, Callable, Dict, List, Set, Tuple, Union, Optional
+from pathlib import Path
+from src.agents.base_agent import BaseAgent
 
-class ReasoningAgent:
-    def __init__(self, shared_memory, agent_factory, storage_path: str = "src/agents/knowledge/knowledge_db.json", args=(), kwargs={}):
-        """
-        Initialize the Reasoning Agent with learning capabilities.
+
+class ReasoningAgent(BaseAgent):
+    """
+    Initialize the Reasoning Agent with learning capabilities.
+    """
+    def __init__(self, shared_memory, agent_factory, tuple_key,
+                 k=None,
+                 storage_path: str = "src/agents/knowledge/knowledge_db.json",
+                 contradiction_threshold=0.25,
+                 rule_validation: Dict = None,
+                 nlp_integration: Dict = None,
+                 inference: Dict = None,
+                 llm: Any = None,
+                 language_agent: Any = None,
+                 args=(),
+                 kwargs={}):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory
+        )
         
-        Args:
-            storage_path: Path to persist knowledge base and learned models
-        """
-        # Knowledge representation with confidence scores
+        # Core components
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.knowledge_base: Dict[Tuple, float] = defaultdict(float)
-        self.rules: List[Tuple[str, Callable, float]] = []  # (name, rule, weight)
-        self.rule_weights: Dict[str, float] = defaultdict(float)
-        self.storage_path = Path(storage_path)
-        self.reasoning_traces = []  # For CoT logging
-        self.hypothesis_graph = defaultdict(set)  # For multi-hop reasoning
+        self.llm = llm
+        self.language_agent = language_agent
 
-        # Learning parameters
-        self.learning_rate = 0.1
-        self.exploration_rate = 0.2
-        self.decay_factor = 0.99
+        # Configuration from YAML
+        self.contradiction_threshold = contradiction_threshold
+        self.rule_validation = rule_validation or {
+            'enable': True,
+            'min_soundness_score': 0.7,
+            'max_circular_depth': 3
+        }
         
-        # NLP components
-        self.vocab = set()
-        self.word_vectors = {}
-        self.entity_recognition = {}
-        
-        # Probabilistic reasoning
-        self.bayesian_network = {}
-        
+        # NLP integration with your existing components
+        self.nlp_config = nlp_integration or {
+            'sentence_transformer': 'your-internal-model',
+            'tokenizer': self.language_agent.tokenizer if language_agent else None
+        }
+
+        # Inference configuration
+        self.inference_settings = inference or {
+            'default_chain_length': 5,
+            'neuro_symbolic_weight': 0.4,
+            'max_hypotheses': 100,
+            'llm_fallback': {
+                'enable': True,
+                'temperature': 0.3,
+                'max_tokens': 100
+            }
+        }
+
+        # Initialize components
         self._load_knowledge()
         self._initialize_nlp()
         self._initialize_probabilistic_models()
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
+    def _initialize_nlp(self):
+        """Use your existing language processing components"""
+        if self.language_agent:
+            # Reuse existing tokenizer from LanguageAgent
+            self.tokenizer = self.language_agent.tokenizer
+            self.embedder = self.language_agent.embedder
+            
+        if self.llm:
+            # Direct integration with SLAILM capabilities
+            self.semantic_similarity = self.llm.calculate_similarity
+            self.entailment_checker = self.llm.check_entailment
 
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        pass
-    
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-    
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
-
-    def _load_knowledge(self):
+    def _load_knowledge(self, storage_path: str = "src/agents/knowledge/knowledge_db.json",):
         """Load knowledge and learned models from storage."""
-        if self.storage_path.exists():
+        self.knowledge_base = {}
+        self.rule_weights = {}
+        self.bayesian_network = {}
+        self.storage_path = storage_path
+        knowledge = []
+
+        if isinstance(knowledge, list):
+            self.knowledge_base = {tuple(k[0]): k[1] for k in knowledge}  # Convert list to tuple
+        if self.storage_path and Path(self.storage_path).exists():
             with open(self.storage_path, 'r') as f:
                 data = json.load(f)
-                self.knowledge_base = {tuple(k): v for k, v in data.get('knowledge', {}).items()}
-                self.rules = [(r[0], eval(r[1]), r[2]) for r in data.get('rules', [])]  # Note: eval is unsafe here - use proper serialization in production
+                knowledge = data.get('knowledge', [])
+
+                if isinstance(knowledge, list):
+                    knowledge = {tuple(k): 1.0 for k in knowledge}  # Default confidence
+                self.knowledge_base = {tuple(k): v for k, v in knowledge.items()}
                 self.rule_weights = data.get('rule_weights', {})
                 self.bayesian_network = data.get('bayesian_network', {})
 
@@ -508,16 +425,18 @@ class ReasoningAgent:
         return sum(results)/len(results) >= 0.75
 
     def neuro_symbolic_verify(self, fact: Tuple) -> float:
-        """
-        Neuro-symbolic validation using embedding similarity.
-        """
-        # Symbolic check
+        """Updated to use your SLAILM components"""
         symbolic_score = self.knowledge_base.get(fact, 0.0)
         
-        # Neural check (simulated)
-        neural_score = self.semantic_similarity(str(fact), "valid_fact_template")
+        # Use SLAILM for neural validation
+        neural_score = self.llm.validate_fact(
+            fact, 
+            self.knowledge_base
+        )
         
-        return 0.7*symbolic_score + 0.3*neural_score  # Weighted ensemble
+        # Weighted combination from config
+        return (self.inference_settings['neuro_symbolic_weight'] * neural_score + 
+                (1 - self.inference_settings['neuro_symbolic_weight']) * symbolic_score)
 
     def react_loop(self, problem: str, max_steps: int = 5) -> dict:
         """
@@ -595,10 +514,10 @@ class ReasoningAgent:
             if random.random() < self.exploration_rate:
                 self._discover_new_rules()
             
-            for name, rule, weight in self.rules:
+            for name, rule_func, weight in self.rules:
                 try:
                     # Rules now return (fact, confidence) pairs
-                    inferred = rule(self.knowledge_base)
+                    inferred = rule_func(self.knowledge_base)
                     for fact, confidence in inferred.items():
                         weighted_conf = confidence * weight
                         
