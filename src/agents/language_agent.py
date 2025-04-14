@@ -93,9 +93,13 @@ class LinguisticFrame:
     intent: str
     entities: Dict[str, str]
     sentiment: float  # Range [-1, 1]
-    modality: str  # e.g., "query", "command", "clarification"
+    modality: str  # From Nuyts (2005) modality taxonomy
     confidence: float  # [0, 1]
 
+    # Validation
+    def __post_init__(self):
+        self.confidence = min(1.0, max(0.0, self.confidence))
+        self.sentiment = min(1.0, max(-1.0, self.sentiment))
 # --------------------------
 # Independent Modules
 # --------------------------
@@ -1412,11 +1416,11 @@ class NLUEngine:
         )
 
         # Intent detection
-        for intent, patterns in self.intent_patterns.items():
-            for pattern in patterns:
+        for intent, intent_data in self.intent_weights.items():
+            for pattern, weight in intent_data.get("patterns", []):
                 if re.search(pattern, text, re.IGNORECASE):
                     frame.intent = intent
-                    frame.confidence += 0.3  # Simple confidence scoring
+                    frame.confidence += weight * 0.1 
 
         # Entity extraction
         entities = {}
@@ -1764,11 +1768,110 @@ class LanguageAgent:
             "default": ["I am processing your input."]
         })
 
+    def build_frame(self, text: str) -> LinguisticFrame:
+        """Constructs a LinguisticFrame through full NLP pipeline processing.
+        
+        Implements:
+        - Input validation and sanitization
+        - Tokenization using LLM's method or regex fallback
+        - Intent recognition, entity extraction, and sentiment analysis
+        - Comprehensive error handling with fallback frames
+        """
+        
+        # Input validation
+        if not isinstance(text, str) or len(text.strip()) < 2:
+            return self._create_fallback_frame(text)
+        
+        # Phase 1: Text Preprocessing
+        clean_text = self.safety.sanitize(text)
+        tokens = self._tokenize(clean_text)
+        
+        # Phase 2: Core NLP Analysis
+        try:
+            # Parse with enhanced NLU
+            frame = self.nlu.parse(clean_text)
+            
+            # Enrich with additional features
+            frame.sentiment = self._calculate_sentiment(tokens)
+            frame.modality = self._detect_modality(tokens)
+            frame.confidence = self._calculate_confidence(tokens, frame)
+            
+            # Entity validation against wordlist
+            frame.entities = {
+                k: [e for e in v if self.wordlist.query(e)]
+                for k, v in frame.entities.items()
+            }
+            
+        except Exception as e:
+            logging.error(f"Frame construction failed: {str(e)}", exc_info=True)
+            return self._create_fallback_frame(clean_text)
+        
+        return frame
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Delegate tokenization to the SLAILM instance with fallback"""
+        if self.llm and hasattr(self.llm, '_tokenize'):
+            return self.llm._tokenize(text)
+        # Fallback tokenization
+        return re.findall(r'\w+|[^\w\s]', text)
+
+    def _calculate_sentiment(self, tokens: list) -> float:
+        """Hybrid sentiment scoring using lexicon and syntactic patterns"""
+        # Lexicon-based scoring
+        valence = sum(
+            self.sentiment_lexicon.get(token.lower(), 0)
+            for token in tokens
+        )
+        
+        # Syntax modifiers
+        negation = any(t.lower() in {"not", "no", "never"} for t in tokens)
+        intensifiers = sum(
+            1.5 for t in tokens if t.lower() in {"very", "extremely"}
+        )
+        
+        # Normalization
+        score = valence * (-1 if negation else 1) * (1 + intensifiers)
+        return max(-1.0, min(1.0, score / (len(tokens) or 1)))
+
+    def _detect_modality(self, tokens: list) -> str:
+        """Modality classification using lexical markers"""
+        markers = {
+            'interrogative': {"what", "why", "how", "?"},
+            'imperative': {"please", "must", "should"},
+            'conditional': {"if", "unless", "provided"}
+        }
+        
+        for mod_type, mod_markers in markers.items():
+            if any(m in tokens for m in mod_markers):
+                return mod_type
+        return "declarative"
+
+    def _calculate_confidence(self, tokens: list, frame: LinguisticFrame) -> float:
+        """Composite confidence scoring using multiple features"""
+        factors = {
+            'lexical_coverage': len([t for t in tokens if t in self.wordlist])/len(tokens),
+            'entity_density': len(frame.entities)/10,
+            'sentiment_magnitude': abs(frame.sentiment),
+            'intent_match': 0.7 if frame.intent != "unknown" else 0.2
+        }
+        
+        return min(1.0, max(0.0, sum(factors.values())/len(factors)))
+
+    def _create_fallback_frame(self, text: str) -> LinguisticFrame:
+        """Creates emergency frame when analysis fails"""
+        return LinguisticFrame(
+            intent="fallback",
+            entities={"text": [text]},
+            sentiment=0.0,
+            modality="declarative",
+            confidence=0.1
+        )
+
     def perform_task(self, input_data):
         if isinstance(input_data, str):
             input_data = {"text": input_data}
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, frame, context, prompt: str) -> str:
         """Wrapper to route generation through the LLM"""
         if not prompt or not isinstance(prompt, str):
             return "[Invalid input]"
@@ -1792,25 +1895,6 @@ class LanguageAgent:
                     return intent
         return "default"
 
-    def preprocess_input(self, user_input, text: str) -> str:
-        intent = self.llm.parse_intent(user_input)
-        if not isinstance(intent, dict):
-            intent = {"type": str(intent), "confidence": 0.5}
-
-        words = text.split()
-        corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
-                     for w in words]
-        
-        # Analyze user input and generate a linguistic frame
-        linguistic_frame = self.analyze_input(user_input)
-        
-        # Generate raw response using SLAILM
-        raw_response = self.slailm.generate(linguistic_frame)
-        
-        # Process the raw response with GrammarProcessor
-        structured_response = self.grammar_processor.process(linguistic_frame, raw_response)
-        return structured_response.join(corrected)
-    
     def process_input(self, safe_response, user_input: str) -> Tuple[str, LinguisticFrame]:
         """Full processing pipeline with academic-inspired components"""
         # Stage 1: Input sanitization
@@ -1835,7 +1919,28 @@ class LanguageAgent:
 
         if cached := self.cache.get(self.cache.hash_query(clean_input)):
             return safe_response, frame
+        
+        return self.generate_response(frame)
 
+    def preprocess_input(self, user_input, text: str) -> str:
+        intent = self.llm.parse_intent(user_input)
+        if not isinstance(intent, dict):
+            intent = {"type": str(intent), "confidence": 0.5}
+
+        words = text.split()
+        corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
+                     for w in words]
+        
+        # Analyze user input and generate a linguistic frame
+        linguistic_frame = self.analyze_input(user_input)
+        
+        # Generate raw response using SLAILM
+        raw_response = self.slailm.generate(linguistic_frame)
+        
+        # Process the raw response with GrammarProcessor
+        structured_response = self.grammar_processor.process(linguistic_frame, raw_response)
+        return structured_response.join(corrected)
+    
     def expand_query(self, query: str) -> str:
         words = query.split()
         expanded = []
