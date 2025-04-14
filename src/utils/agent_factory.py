@@ -16,11 +16,12 @@ from src.agents.evaluation_agent import EvaluationAgent
 from src.agents.execution_agent import ExecutionAgent
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.language_agent import LanguageAgent, DialogueContext
-from src.agents.learning_agent import LearningAgent
+from src.agents.learning_agent import LearningAgent, SLAIEnv
 from src.agents.perception_agent import PerceptionAgent
 from src.agents.planning_agent import PlanningAgent
 from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.safety_agent import SafeAI_Agent
+from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
+from models.slai_lm import SLAILM
 
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
@@ -32,7 +33,7 @@ class AgentMetaData:
         self.required_params = required_params
 
 class AgentFactory:
-    def __init__(self, config, shared_resources: Optional[Dict[str, Any]] = None, optimizer: 'SystemOptimizer' = None):
+    def __init__(self, shared_resources: Optional[Dict[str, Any]] = None, optimizer: 'SystemOptimizer' = None, **config):
         self.agent_registry: Dict[str, AgentMetaData] = {}
         self.shared_resources = shared_resources or {}
         self._memorized_agents: Dict[str, Any] = {}
@@ -41,6 +42,11 @@ class AgentFactory:
         self.registry = {}
         self.metrics_adapter = MetricsAdapter()
         self.optimizer = optimizer
+
+        slailm_instance = SLAILM(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self
+        )
         self.register("adaptive", lambda config: AdaptiveAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
@@ -49,7 +55,10 @@ class AgentFactory:
         self.register("alignment", lambda config: AlignmentAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
-            **config.get("init_args", {})
+            sensitive_attrs=config.get("init_args", {}).get("sensitive_attrs", []),            
+            config=config.get("init_args", {}),
+            monitor_config=config.get("monitor_config"),
+            correction_policy=config.get("correction_policy")
         ))
         self.register("evaluation", lambda config: EvaluationAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
@@ -67,14 +76,26 @@ class AgentFactory:
             **config.get("init_args", {})
         ))
         self.register("learning", lambda config: LearningAgent(
-            shared_memory=self.shared_resources.get("shared_memory"),
+            SLAILM=slailm_instance,
             agent_factory=self,
-            **config.get("init_args", {})
+            env=SLAIEnv(
+                shared_memory=self.shared_resources.get("shared_memory"),
+                SLAILM=slailm_instance,
+                agent_factory=self
+            ),
+            config={
+                'dqn': config.get("dqn", {}),
+                'maml': config.get("maml", {}),
+                'rsi': config.get("rsi", {}),
+                'rl': config.get("rl", {}),
+                'main': config.get("init_args", {})
+            },
+            shared_memory=self.shared_resources.get("shared_memory")
         ))
         self.register("perception", lambda config: PerceptionAgent(
+            config=config.get("init_args", {}),
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
-            **config.get("init_args", {})
         ))
         self.register("planning", lambda config: PlanningAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
@@ -84,12 +105,29 @@ class AgentFactory:
         self.register("reasoning", lambda config: ReasoningAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
-            **config.get("init_args", {})
+            tuple_key=tuple(config.get("init_args", {}).get("tuple_key", "subject|predicate|object").split("|")
+            if isinstance(config.get("init_args", {}).get("tuple_key", "subject|predicate|object"), str)
+            else config.get("init_args", {}).get("tuple_key", ["subject", "predicate", "object"])
+                ),
+            storage_path=config.get("init_args", {}).get("storage_path", "src/agents/knowledge/knowledge_db.json"),
+            contradiction_threshold=config.get("init_args", {}).get("contradiction_threshold", 0.25),
+            rule_validation=config.get("init_args", {}).get("rule_validation", {}),
+            nlp_integration=config.get("init_args", {}).get("nlp_integration", {}),
+            llm=self.shared_resources.get("llm"),
+            language_agent=self._memorized_agents.get("language")
         ))
         self.register("safety", lambda config: SafeAI_Agent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
-            **config.get("init_args", {})
+            alignment_agent_cls=AlignmentAgent,
+            config=SafetyAgentConfig(
+                constitutional_rules=config.get("init_args", {}).get("constitutional_rules", {}),
+                risk_thresholds=config.get("init_args", {}).get("risk_thresholds", {
+                    "safety": 0.01, "security": 0.001, "privacy": 0.05
+                }),
+                audit_level=config.get("init_args", {}).get("audit_level", 2),
+                enable_rlhf=config.get("init_args", {}).get("enable_rlhf", True)
+            )
         ))
 
     def create(self, agent_type: str, config: dict, system_metrics: dict = None):
@@ -107,8 +145,8 @@ class AgentFactory:
         build_config_fn = getattr(self, f"_build_{agent_type}_config", None)
     
         if agent_type in self.registry:
-            agent_cls = self.registry[agent_type]
-            final_config = build_config_fn(config) if build_config_fn else config
+            if callable(self.registry[agent_type]):
+                return self.registry[agent_type](config)
 
             # === Modified validation ===
             init_sig = inspect.signature(agent_cls.__init__)
@@ -125,8 +163,8 @@ class AgentFactory:
                 raise ValueError(f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}")
     
             if agent_type in self.registry:
-                agent_cls = self.registry[agent_type]
-                final_config = build_config_fn(config) if build_config_fn else config
+                if callable(self.registry[agent_type]):
+                    return self.registry[agent_type](config)
 
                 # === Validate config before instantiation ===
                 init_sig = inspect.signature(agent_cls.__init__)
@@ -136,20 +174,27 @@ class AgentFactory:
                         continue
                     if param.default == inspect.Parameter.empty and name not in final_config:
                         missing_args.append(name)
-                
+                    if agent_type == "perception":
+                        assert "modalities" in config, "PerceptionAgent requires 'modalities' in config"
                 if missing_args:
                     raise ValueError(f"[AgentFactory] Missing required arguments for agent '{agent_type}': {missing_args}")
 
 
             init_args = final_config.get("init_args", {})
-            return agent_cls(**init_args)
+            return agent_cls(
+                shared_memory=self.shared_resources.get("shared_memory"),
+                agent_factory=self,
+                **init_args
+                )
         
         if agent_type.lower() == "language":
             from models.slai_lm import SLAILM
-            self.register("language", LanguageAgent)
             from src.agents.language.grammar_processor import GrammarProcessor
 
-            slailm_instance = SLAILM(shared_memory=self.shared_resources.get("shared_memory"))
+            slailm_instance = SLAILM(
+                shared_memory=self.shared_resources.get("shared_memory"),
+                agent_factory=self
+            )
             grammar = GrammarProcessor(
                 structured_wordlist=slailm_instance.structured_wordlist,
                 wordlist=slailm_instance.wordlist,
@@ -157,12 +202,16 @@ class AgentFactory:
             )
             context = DialogueContext(llm=slailm_instance)
 
-            return LanguageAgent(
+            self.register("language", lambda config: LanguageAgent(
+                shared_memory=self.shared_resources.get("shared_memory"),
+                agent_factory=self,
                 llm=slailm_instance,
                 grammar_processor=grammar,
                 dialogue_context=context,
                 config=config
-            )
+            ))
+
+            return self.registry["language"](config)
 
         logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
         return self._create_fallback_agent(agent_type, config)
@@ -200,10 +249,53 @@ class AgentFactory:
             )
             
     def _calculate_risk_adjustment(self, violations: int, base_threshold: float) -> float:
-        """Control-theoretic adjustment from Åström (1995)"""
-        Kp = 0.05  # Proportional gain
-        Ki = 0.01   # Integral gain
-        return base_threshold + Kp * violations + Ki * self._integral_term(violations)
+        """Control-theoretic adjustment using PI (Proportional-Integral) control.
+        
+        Implements the formula:
+        adjusted_threshold = base_threshold + Kp * violations + Ki * integral_term
+        
+        Where:
+        - Kp: Proportional gain (immediate response to current violations)
+        - Ki: Integral gain (response to accumulated past violations)
+        - integral_term: Sum of all past violations (discrete integration)
+        
+        Reference: Åström, K. J., & Hägglund, T. (1995). PID Controllers: Theory, Design, and Tuning.
+        
+        Args:
+            violations: Number of current fairness violations detected
+            base_threshold: Initial risk threshold before adjustment
+            
+        Returns:
+            Adjusted risk threshold based on control law
+        """
+        Kp = 0.05  # Proportional gain (immediate response)
+        Ki = 0.01   # Integral gain (historical accumulation)
+
+        integral = self._integral_term(violations) # Calculate integral term using accumulated violations
+        adjusted_threshold = base_threshold + (Kp * violations) + (Ki * integral) # PI control formula
+        return max(0.1, min(0.5, adjusted_threshold)) # Clamp values to prevent extreme adjustments
+
+    def _integral_term(self, violations: int) -> float:
+        """Maintains and updates the integral of historical violations.
+        
+        Implements discrete-time integration using accumulation:
+        integral += current_violations
+        
+        Includes anti-windup protection by enforcing maximum bounds
+        
+        Returns:
+            Accumulated integral value (sum of all past violations)
+        """
+        # Initialize integral storage if not exists
+        if not hasattr(self, '_risk_integral'):
+            self._risk_integral = 0.0
+
+        self._risk_integral += violations # Update integral with current violations
+        
+        # Anti-windup: Prevent excessive integral accumulation
+        self._risk_integral = min(self._risk_integral, 1000)  # Max 1000 violation-history
+        
+        return self._risk_integral
 
     def _create_fallback_map(self) -> Dict[str, Tuple[str, str]]:
         return {
@@ -421,8 +513,11 @@ class AgentFactory:
         return {
             "args": config.get("args", ()),
             "kwargs": config.get("kwargs", {}),
+            "modalities": config.get("modalities", ["vision", "text", "audio"]),
+            "embed_dim": config.get("embed_dim", 512),
+            "projection_dim": config.get("projection_dim", 256),
             'audio_encoder': self._init_audio_encoder(config),
-            'vision_encoder': self._init_vision_encoder(config)
+            'vision_encoder': self._init_vision_encoder(config),
         }
 
     def _build_planning_config(self, config: dict) -> dict:
@@ -461,23 +556,23 @@ class AgentFactory:
             return AutoModelForCausalLM.from_pretrained(model_id)
         return None
 
-    def _init_rl_algorithm(self, config: Dict) -> Any:
-        algorithm = config.get("algorithm", "rl").lower()
-        try:
-            if algorithm == "maml":
-                from src.agents.learning import maml_rl
-                return maml_rl.MAMLTrainer(config)
-            elif algorithm == "rsi":
-                from src.agents.learning import rsi
-                return rsi.RSITrainer(config)
-            elif algorithm == "dqn":
-                from src.agents.learning import dqn
-                return dqn.DQNAgent(config)
-            else:
-                from src.agents.learning import rl_agent
-                return rl_agent.RLAgent(config)
-        except ImportError as e:
-            raise RuntimeError(f"RL component import failed: {str(e)}")
+#    def _init_rl_algorithm(self, config: Dict) -> Any:
+#        algorithm = config.get("algorithm", "rl").lower()
+#        try:
+#            if algorithm == "maml":
+#                from src.agents.learning import maml_rl
+#                return maml_rl.MAMLTrainer(config)
+#            elif algorithm == "rsi":
+#                from src.agents.learning import rsi
+#                return rsi.RSITrainer(config)
+#            elif algorithm == "dqn":
+#                from src.agents.learning import dqn
+#                return dqn.DQNAgent(config)
+#            else:
+#                from src.agents.learning import rl_agent
+#                return rl_agent.RLAgent(config)
+#        except ImportError as e:
+#            raise RuntimeError(f"RL component import failed: {str(e)}")
 
     def _init_audio_encoder(self, config: Dict) -> Any:
         """
