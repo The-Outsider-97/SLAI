@@ -8,9 +8,11 @@ import warnings
 import logging
 import datetime
 import hashlib
+import numpy as np
+import pandas as pd
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Optional, Dict, Any, Union, Set
+from typing import Optional, Dict, Any, Union, Set, Tuple
 
 from src.agents.language_agent import DialogueContext
 from src.agents.language.grammar_processor import GrammarProcessor
@@ -20,10 +22,10 @@ logging.basicConfig(level=logging.WARNING)
 
 shared_slailm = None
 
-def get_shared_slailm(shared_memory):
+def get_shared_slailm(shared_memory, agent_factory=None):
     global shared_slailm
     if shared_slailm is None:
-        shared_slailm = SLAILM(shared_memory)
+        shared_slailm = SLAILM(shared_memory, agent_factory=agent_factory)
     return shared_slailm
 
 class SLAILM:
@@ -32,6 +34,7 @@ class SLAILM:
     custom GrammarProcessor, wordlists, and context management.
     """
     def __init__(self, shared_memory,
+                 agent_factory=None,
                  structured_wordlist_path="src/agents/language/structured_wordlist_en.json",
                  simple_wordlist_path="src/agents/language/wordlist_en.json",
                  grammar_rules_path: Optional[Union[str, Path]] = None,
@@ -54,7 +57,10 @@ class SLAILM:
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
         self.shared_memory = shared_memory
-        self.knowledge_agent = KnowledgeAgent(shared_memory=shared_memory)
+        self.agent_factory = agent_factory
+        self.knowledge_agent = KnowledgeAgent(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,)
         self.conversation_history = []
         self.sentiment_lexicon = self.load_sentiment_lexicon()
         """
@@ -107,7 +113,10 @@ class SLAILM:
         else:
             # Initialize KB, potentially loading from path
             try:
-                self.knowledge = KnowledgeAgent(shared_memory=self.shared_memory)
+                self.knowledge = KnowledgeAgent(
+                    shared_memory=self.shared_memory,
+                    agent_factory=agent_factory
+                    )
                 logging.info(f"Initialized KnowledgeAgent (path: {knowledge_agent_path}).")
             except Exception as e:
                 logging.error(f"Failed to initialize KnowledgeAgent: {e}")
@@ -246,10 +255,9 @@ class SLAILM:
             logging.error(f"An error occurred loading simple wordlist from {path}: {e}")
 
         return word_set
-
-    def _tokenize(self, text: str) -> list:
+    
+    def _tokenize(self, text: str) -> list[str]:
         """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
-        # Use GrammarProcessor's POS patterns for tokenization
         if self.grammar_processor and hasattr(self.grammar_processor, 'pos_patterns'):
             tokens = []
             pos_patterns = sorted(
@@ -258,19 +266,25 @@ class SLAILM:
                 reverse=True  # Match longer patterns first
             )
             
-            # Build combined regex pattern
+            # Build combined regex pattern with UNIQUE group names
             combined_pattern = '|'.join(
-                f'(?P<{name}>{pattern.pattern})' 
-                for pattern, name in pos_patterns
+                f'(?P<{name}_{i}>{pattern.pattern})'  # Unique group names: NOUN_0, VERB_1, etc.
+                for i, (pattern, name) in enumerate(pos_patterns)
             )
             combined_re = re.compile(combined_pattern, re.IGNORECASE)
-            
+
             # Scan text using POS-aware tokenization
             pos = 0
             while pos < len(text):
                 match = combined_re.match(text, pos)
                 if match:
                     token = match.group()
+                    # Determine which group matched and extract the POS tag
+                    for i, (pattern, name) in enumerate(pos_patterns):
+                        group_name = f"{name}_{i}"
+                        if match.group(group_name):  # Check if this group matched
+                            pos_tag = name
+                            break
                     tokens.append(token)
                     pos = match.end()
                 else:
@@ -282,10 +296,8 @@ class SLAILM:
             refined_tokens = []
             for token in tokens:
                 if '-' in token and token not in self.structured_wordlist:
-                    # Split hyphenated compounds not in wordlist
                     refined_tokens.extend(token.split('-'))
                 elif "'" in token:
-                    # Handle contractions (e.g., "don't" -> ["do", "n't"])
                     parts = re.split(r"('(?:t|s|d|ll|re|ve|m))$", token)
                     refined_tokens.extend(filter(None, parts))
                 else:
@@ -295,7 +307,7 @@ class SLAILM:
         # Fallback to enhanced regex-based tokenization
         text = re.sub(r"([^'\w\s-]|(?<!\d)\.(?!\d))", r' \1 ', text)  # Handle punctuation
         tokens = re.findall(
-            r"\w+(?:[-']\w+)*|['\".,!?;:()\-–—/]",  # Match words, contractions, and punctuation
+            r"\w+(?:[-']\w+)*|['\".,!?;:()\-–—/]",  # Match words, contractions, punctuation
             text,
             re.UNICODE
         )
@@ -305,7 +317,6 @@ class SLAILM:
         for token in tokens:
             if (token not in self.wordlist and 
                 not self.grammar_processor._guess_pos_by_morphology(token)):
-                # Attempt compound splitting
                 stems = self.grammar_processor.stemmer.stem(token)
                 if '-' in stems:
                     validated.extend(stems.split('-'))
@@ -313,7 +324,6 @@ class SLAILM:
                     validated.append(token)
             else:
                 validated.append(token)
-        
         return validated
     
     def parse_intent(self, prompt: str) -> dict:
@@ -325,11 +335,12 @@ class SLAILM:
 
             return {"type": "unknown", "confidence": 0.0}
     
-    def process_input(self, text: str) -> dict:
+    def process_input(self, prompt, text: str) -> dict:
         """
         Processes input text with advanced linguistic steps: tokenization, POS tagging,
         intent recognition, entity extraction, sentiment scoring, and concept identification.
         """
+
         if not isinstance(text, str) or not text.strip():
             return {"error": "Input must be a non-empty string."}
 
@@ -594,6 +605,12 @@ class SLAILM:
         ]
         return random.choice(closures)
 
+    def validate_fact(self, fact: Tuple, context: Dict) -> float:
+        """LLM-based factual validation"""
+        prompt = f"Validate this statement (true/false): {fact}. Context: {context}"
+        response = self.generate_response(prompt)
+        return self._parse_validation_response(response)
+
     def generate_response(self, prompt: str) -> str:
         """
         Full response generation pipeline using internal components.
@@ -662,3 +679,65 @@ class SLAILM:
             
     def handle_general_prompt(self, prompt: str) -> str:
         return self.generate_response(prompt)
+
+class SLAILMValueModel:
+    def __init__(self, slai_lm, memory=None, ethics_checker=None):
+        self.slai_lm = slai_lm
+        self.memory = memory  # Injected AlignmentMemory
+        self.ethics_checker = ethics_checker  # Injected EthicalConstraints
+
+        self.preference_weights = {
+            "helpfulness": 0.4,
+            "harmlessness": 0.3,
+            "honesty": 0.3
+        }
+
+    def score_trajectory(self, data: pd.DataFrame) -> float:
+        """Trajectory evaluation using SLAILM + RLHF feedback-aware scoring"""
+        scores = []
+
+        for _, row in data.iterrows():
+            input_text = row.get("input", "")
+            response = row.get("output", "")
+
+            # Use SLAILM for grounded understanding
+            result = self.slai_lm.process_input(prompt=input_text, text=response)
+
+            helpfulness = result.get("helpfulness", 0.5)
+            harmlessness = 1.0 - result.get("toxicity", 0.5)
+            honesty = result.get("factuality", 0.5)
+
+            # Aggregate weighted preference
+            composite = (
+                helpfulness * self.preference_weights["helpfulness"] +
+                harmlessness * self.preference_weights["harmlessness"] +
+                honesty * self.preference_weights["honesty"]
+            )
+            scores.append(composite)
+
+            # Log to memory
+            if self.memory:
+                self.memory.log_evaluation(
+                    metric="value_alignment",
+                    value=composite,
+                    threshold=0.3,
+                    context={"input": input_text, "output": response}
+                )
+
+            # Ethical check (optional)
+            if self.ethics_checker:
+                ethics_result = self.ethics_checker.enforce({
+                    "input": input_text,
+                    "output": response,
+                    "score": composite
+                })
+                if not ethics_result.get("approved"):
+                    composite *= 0.5  # Penalize score
+
+        return float(np.mean(scores))
+
+    def update_preferences(self, feedback: Dict[str, float]):
+        """Online update of RLHF weights"""
+        for key, value in feedback.items():
+            if key in self.preference_weights:
+                self.preference_weights[key] = 0.9 * self.preference_weights[key] + 0.1 * value
