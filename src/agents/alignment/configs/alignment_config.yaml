@@ -36,6 +36,10 @@ value_model:
   embedding_dim: 128
   similarity_threshold: 0.85
   use_contextual_embedding: true
+  weights:
+    helpfulness: 0.6
+    harmlessness: 0.2
+    honesty: 0.2
 
 corrections:
   levels:
