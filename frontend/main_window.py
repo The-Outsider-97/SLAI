@@ -675,21 +675,19 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
 
         try:
-            # Start response timer
-            self.current_response_start = datetime.now()
+            self.current_response_start = datetime.now() # Start response timer
 
-            # Call the generate method of the imported CollaborativeAgent instance
-            slai_response = self.agent.generate(prompt, task_data)
-            
+            slai_response = self.agent.generate(prompt, task_data) # Call the generate method of the imported CollaborativeAgent instance
+
             # Calculate response time
             response_time = (datetime.now() - self.current_response_start).total_seconds()
             self.response_times.append(response_time)
-            
+
             # Display response
             self.output_area.append(f"<font color='gold'>SLAI:</font> {slai_response}<br>")
             self.set_status_indicator("standby") # Set GREEN light on success
             self.show_status_message("Response received.", 3000)
-            
+
             # Track SafeAI interventions
             if "SafeAI intervention" in slai_response:
                 self.safe_ai_count += 1
@@ -734,7 +732,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.start(1000)
 
     def updateSystemStats(self):
-        
+
         # System stats update logic (minor formatting change)
         try:
             current_mem = psutil.virtual_memory().used / (1024**3)
