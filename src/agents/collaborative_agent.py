@@ -262,12 +262,11 @@ class CollaborativeAgent:
         self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
         from src.agents.learning_agent import LearningAgent, SLAIEnv
         self.factory.register("learning",
-                              lambda **kwargs: LearningAgent(
-                                  env=SLAIEnv(),
-                                  config=kwargs,
+                              lambda config: LearningAgent(
+                                  agent_factory=self.factory,
+                                  env=SLAIEnv(shared_memory=self.shared_memory),
+                                  config=config,
                                   shared_memory=self.shared_memory,
-                                  args=kwargs.get("args", ()),
-                                  kwargs=kwargs.get("kwargs", {})
                                   ))
 
         self.grammar = GrammarProcessor(lang='en')
@@ -812,7 +811,7 @@ class CollaborativeAgent:
     def generate(self, shared_memory, task_data: Union[str, dict]) -> str:
         from models.slai_lm import SLAILM, get_shared_slailm
 
-        llm = get_shared_slailm(shared_memory)
+        llm = get_shared_slailm(shared_memory, agent_factory=self.factory)
         agent = self.factory.create("language", {"llm": llm})
 
         try:
@@ -858,12 +857,13 @@ class CollaborativeAgent:
                 }
                 return self.grammar.compose_sentence(raw_facts)
 
-            return lang_agent.generate(prompt)
+            frame = lang_agent.build_frame(prompt)
+            context = lang_agent.dialogue_context            
+            return lang_agent.generate(frame, prompt, context)
 
         except Exception as e:
             logger.error(f"Generation failed: {str(e)}", exc_info=True)
             return f"[System Error] Generation failed: {str(e)}"
-
 
     def _build_learning_config(self, config: Optional[Dict] = None) -> Dict:
         base_config = {
