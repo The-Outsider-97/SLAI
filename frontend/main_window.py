@@ -5,7 +5,7 @@ import torch
 import logging
 import subprocess
 import json
-import random   
+import random
 import getpass
 import queue
 from datetime import datetime
@@ -17,6 +17,22 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayou
                              QSplitter, QApplication) # Added QStackedWidget, QSplitter, QApplication
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QTextCursor, QColor, QPainter
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QVariantAnimation, QSize, QThread
+
+REFERENCE_QUERIES = [
+    "What is the capital of France?",
+    "Explain Newton's second law.",
+    "Describe the process of photosynthesis."
+]
+
+def encode_sentence(text):
+    import hashlib
+    # Simulated embedding using a deterministic hash to tensor conversion
+    hash_val = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (10**8)
+    torch.manual_seed(hash_val)
+    return torch.rand(1, 768)
+
+REFERENCE_EMBEDDINGS = torch.stack([encode_sentence(q) for q in REFERENCE_QUERIES])  
+
 
 class PromptThread(QThread):
     result_ready = pyqtSignal(str)
@@ -109,6 +125,7 @@ class StatusIndicator(QLabel):
         center = rect.center()
         radius = min(rect.width(), rect.height()) // 2 - 1 # Small padding
         painter.drawEllipse(center, radius, radius)
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, collaborative_agent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
@@ -344,6 +361,10 @@ class MainWindow(QtWidgets.QMainWindow):
         status_indicator_layout.addWidget(self.indicator_green)
         self.right_panel_layout.addLayout(status_indicator_layout)
 
+        self.indicator_heartbeat = StatusIndicator("grey")
+        self.indicator_heartbeat.setToolTip("System Heartbeat")
+        status_indicator_layout.addWidget(self.indicator_heartbeat)
+
         # --- Switchable Panels ---
         self.right_tab_widget = QStackedWidget()
         self.right_panel_layout.addWidget(self.right_tab_widget, 1) # Takes expanding space
@@ -367,6 +388,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.media_panel.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
         self.right_tab_widget.addWidget(self.media_panel)
 
+        # Panel 3: Media Panel
+        self.monitor_panel = QWidget()
+        self.monitor_panel.setLayout(QVBoxLayout())
+        self.right_tab_widget.addWidget(self.monitor_panel)
+
         # --- Footer (System Stats) ---
         self.footer = QtWidgets.QLabel("System Stats Initializing...")
         self.footer.setObjectName("footerLabel") # For styling
@@ -384,12 +410,15 @@ class MainWindow(QtWidgets.QMainWindow):
         log_btn = QPushButton("Logs")
         graph_btn = QPushButton("Graph")
         media_btn = QPushButton("Media")
+        monitor_btn = QPushButton("Monitoring")
         log_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(0))
         graph_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(1))
         media_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(2))
+        monitor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(3))
         switcher_layout.addWidget(log_btn)
         switcher_layout.addWidget(graph_btn)
         switcher_layout.addWidget(media_btn)
+        switcher_layout.addWidget(monitor_btn)
         switcher_layout.addStretch()
         self.right_panel_layout.insertLayout(1, switcher_layout) # Insert above the stack
 
@@ -450,6 +479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_message.show()
             QTimer.singleShot(3000, self.status_message.hide)
 
+  
     def handle_response(self, text):
         self.stop_loading_animation()
         current_output = self.tabs[self.tab_stack.currentIndex()]
@@ -470,10 +500,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(3000, self.status_message.hide)
 
         self.input_field.clear()
-
-    def encode_sentence(text):
-        # needs to expanded upon
-            return
 
     def save_logs(self):
         chat_text = self.output_area.toHtml() # Save rich text if needed
@@ -770,14 +796,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.footer.setText(text)
 
     def update_log_panel(self):
-        """ Placeholder to update log panel """
-        # In a real app, you'd fetch logs from a queue or source
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        # Append vs SetText: Append keeps history
-        self.log_panel.append(f"[{timestamp}] System heartbeat...")
-        # Auto-scroll to bottom
-        self.log_panel.moveCursor(QTextCursor.End)
+        """Update heartbeat visual and heartbeat count display"""
+        if not hasattr(self, "heartbeat_count"):
+            self.heartbeat_count = 0
+            self.heartbeat_flash = False
 
+        self.heartbeat_count += 1
+        self.heartbeat_flash = not self.heartbeat_flash
+
+        # Toggle between green and grey
+        target_color = "#00bf63" if self.heartbeat_flash else "grey"
+        self.indicator_heartbeat.set_status(target_color)
+
+        # Format uptime
+        session_duration = datetime.now() - self.session_start_time
+        total_seconds = int(session_duration.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        formatted_time = f"{hours:02}:{minutes:02}:{seconds:02}"
+
+        # Compose heartbeat log (live-updating)
+        line = f"System Heartbeat | Active: {formatted_time} | Beats: {self.heartbeat_count}"
+
+        # Overwrite last line
+        cursor = self.log_panel.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.select(QTextCursor.BlockUnderCursor)
+        cursor.removeSelectedText()
+        cursor.insertText(line)
+        self.log_panel.moveCursor(QTextCursor.End)
+    
     def show_status_message(self, message, duration_ms):
         """ Displays a status message for a specified duration """
         self.status_message.setText(message)
