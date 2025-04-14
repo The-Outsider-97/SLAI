@@ -22,7 +22,7 @@ from src.agents.alignment.bias_detection import BiasDetection
 from src.agents.alignment.fairness_evaluator import FairnessEvaluator
 from src.agents.alignment.ethical_constraints import EthicalConstraints
 from src.agents.alignment.counterfactual_auditor import CounterfactualAuditor
-from src.agents.alignment.value_embedding_model import ValueEmbeddingModel
+from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -66,7 +66,7 @@ class AlignmentMonitor:
         
         self.sensitive_attrs = sensitive_attributes
         self.config = config or MonitorConfig()
-        self.value_model = value_model or ValueEmbeddingModel()
+        self.value_model = value_model or ValueEmbeddingModel(config=ValueConfig())
         
         # Initialize verification components
         self.bias_detector = BiasDetection(sensitive_attributes)
