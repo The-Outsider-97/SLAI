@@ -14,11 +14,14 @@ Academic Foundations:
 - Evolutionary Strategies: Salimans et al. (2017)
 """
 
+import torch
 import logging
 import os, sys
+import warnings
+import functools
 import numpy as np
 
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, defaultdict, Optional, Any
@@ -27,13 +30,30 @@ from src.agents.learning.dqn import DQNAgent
 from src.agents.learning.maml_rl import MAMLAgent
 from src.agents.learning.rsi import RSI_Agent
 from src.agents.learning.rl_agent import RLAgent
+from src.agents.safety_agent import SafeAI_Agent
+from src.agents.base_agent import BaseAgent
+
 
 logger = logging.getLogger(__name__)
 
-class LearningAgent:
-    """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
+def validation_logic(self):
+    required_params = {
+        'dqn': ['hidden_size', 'gamma'],
+        'maml': ['meta_lr', 'inner_lr']
+    }
+    for agent_type, params in required_params.items():
+        if not all(k in self.config[agent_type] for k in params):
+            raise ValueError(f"Missing params for {agent_type}: {params}")
     
-    def __init__(self, agent_factory, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
+class LearningAgent(BaseAgent):
+    """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
+
+    def __init__(self, SLAILM, agent_factory, safety_agent: SafeAI_Agent, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
         """
         Initialize learning subsystems with environment context
         
@@ -41,10 +61,15 @@ class LearningAgent:
             env: OpenAI-like environment
             config: Dictionary with agent configurations
         """
-        self.env = env
-        self.config = config or {}
+        self.env = env or SLAIEnv(
+                SLAILM=SLAILM,
+                agent_factory=agent_factory,
+                shared_memory=shared_memory
+            )
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
+        self.safety_agent = safety_agent
+        self.config = config or {}
         self.rl_algorithm = self.config.get("rl_algorithm", None)
         self.strategy_weights = np.ones(4)  # [RL, DQN, MAML, RSI]
         self.performance_history = deque(maxlen=1000)
@@ -56,149 +81,127 @@ class LearningAgent:
             performance_metrics=self.performance_metrics,
             shared_memory=self.shared_memory
         )
+
         self.agents = {
-            'dqn': self._create_agent('dqn', self.config.get('dqn', {})),
-            'maml': self._create_agent('maml', self.config.get('maml', {})),
-            'rsi': self._create_agent('rsi', self.config.get('rsi', {})),
-            'rl': self._create_agent('rl', self.config.get('rl', {}))
+            'dqn': DQNAgent(state_dim, action_dim, config.get('dqn', {})),
+            'maml': MAMLAgent(state_size, action_size, **config.get('maml', {})),
+            'rsi': RSI_Agent(state_size, action_size, config=config.get('rsi', {})),
+            'rl': RLAgent(possible_actions, **config.get('rl', {}))
         }
+        state_dim = self.env.observation_space.shape[0]
+        action_dim = self.env.action_space.n
+        possible_actions = list(range(action_dim))
+        
+
         self._setup_continual_learning()
         self._setup_trigger_system()
 
         # State tracking
         self.concept_drift_detector = ConceptDriftDetector()
         self.last_retraining = datetime.now()
+        slailm_instance = SLAILM(
+            shared_memory=self.shared_memory,
+            agent_factory=self  # Pass factory to SLAILM
+        )
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-            
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
+        # Error recovery state tracking
+        self.error_history = deque(maxlen=100)
+        self.consecutive_errors = 0
+        self.recovery_strategies = [
+            self._recover_soft_reset,
+            self._recover_learning_rate_adjustment,
+            self._recover_strategy_switch,
+            self._recover_full_reset
+        ]
+    
+    def _validate_config(self, config):
+        """Centralized configuration validation"""
+        required_params = {
+            'dqn': ['hidden_size', 'gamma', 'epsilon_decay', 'buffer_size'],
+            'maml': ['meta_lr', 'inner_lr', 'adaptation_steps'],
+            'rsi': ['memory_size', 'exploration_rate', 'plasticity'],
+            'rl': ['learning_rate', 'discount_factor']
+        }
+        
+        error_messages = []
+        for agent_type, params in required_params.items():
+            if agent_type not in config:
+                error_messages.append(f"Missing {agent_type} config section")
+                continue
+                
+            missing = [p for p in params if p not in config[agent_type]]
+            if missing:
+                error_messages.append(
+                    f"Missing in {agent_type} config: {', '.join(missing)}"
+                )
+        
+        if error_messages:
+            raise InvalidConfigError(
+                "Configuration validation failed:\n- " + "\n- ".join(error_messages)
+            )
+        
+        # Type validation
+        if not isinstance(config.get('dqn', {}).get('hidden_size'), int):
+            error_messages.append("DQN hidden_size must be integer")
+        
+        if error_messages:
+            raise InvalidConfigError("\n".join(error_messages))
 
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
+    def _get_training_context(self):
+        """Capture training state for error diagnostics"""
+        return {
+            'current_strategy': self.active_strategy,
+            'recent_rewards': list(self.performance_history)[-10:],
+            'memory_usage': len(self.memory),
+            'gradient_norms': {
+                agent_id: self._get_gradient_norm(agent)
+                for agent_id, agent in self.agents.items()
+            }
+        }
 
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
+    def _get_gradient_norm(self, agent):
+        """Safety check for gradient stability"""
+        if hasattr(agent, 'policy_net'):
+            params = [p.grad for p in agent.policy_net.parameters() if p.grad is not None]
+            return torch.norm(torch.stack([torch.norm(p) for p in params])).item()
+        return 0.0
 
-        pass
+    def _execute_recovery_strategy(self):
+        """Hierarchical recovery system"""
+        strategy_level = min(self.consecutive_errors // 3, len(self.recovery_strategies)-1)
+        return self.recovery_strategies[strategy_level]()
 
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
+    def _recover_soft_reset(self):
+        """Level 1 Recovery: Reset network weights and clear buffers"""
+        self.logger.warning("Executing soft reset")
+        for agent in self.agents.values():
+            if hasattr(agent, 'reset_parameters'):
+                agent.reset_parameters()
+        self.memory.clear()
+        return {'status': 'recovered', 'strategy': 'soft_reset'}
 
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
+    def _recover_learning_rate_adjustment(self):
+        """Level 2 Recovery: Adaptive learning rate scaling"""
+        self.logger.warning("Adjusting learning rates")
+        for agent_id, agent in self.agents.items():
+            if hasattr(agent, 'learning_rate'):
+                agent.learning_rate *= 0.5
+                agent.learning_rate = max(agent.learning_rate, 1e-6)
+        return {'status': 'recovered', 'strategy': 'lr_adjustment'}
 
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
+    def _recover_strategy_switch(self):
+        """Level 3 Recovery: Fallback to safe strategy"""
+        self.logger.warning("Switching to safe strategy")
+        self.active_strategy = 'rl'  # Default to basic RL
+        if self.safety_agent:
+            return self.safety_agent.execute({'task': 'emergency_override'})
+        return {'status': 'recovered', 'strategy': 'strategy_switch'}
 
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
+    def _recover_full_reset(self):
+        """Level 4 Recovery: Complete system reset"""
+        self.logger.critical("Performing full reset!")
+        self.__init__(...)  # Reinitialize with original params
+        return {'status': 'recovered', 'strategy': 'full_reset'}
 
         # Initialize sub-agents
     def _initialize_agents(self, env, performance_metrics, shared_memory, 
@@ -232,7 +235,7 @@ class LearningAgent:
                 'epsilon_decay': (0.9, 0.9999)
             }
         }
-        
+
         # Learning state
         self.meta_update_interval = 100
         self.curiosity_beta = 0.2  # Pathak et al. (2017)
@@ -273,29 +276,47 @@ class LearningAgent:
         raise ValueError(f"Unknown agent type: {agent_id}")
 
     def _select_action(self, state, agent_type):
-        """
-        Select action based on agent type.
-        
-        Args:
-            state: Current environment state
-            agent_type: One of ['rl', 'dqn', 'maml', 'rsi']
-        
-        Returns:
-            action: Selected action
-        """
-        agent = self.agents[agent_type]
-        
-        if agent_type == "rl":
-            return agent.select_action(state)
-        elif agent_type == "dqn":
-            return agent.select_action(state)
-        elif agent_type == "maml":
-            return agent.select_action(state)
-        elif agent_type == "rsi":
-            return agent.select_action(state)
-        else:
-            raise ValueError(f"Unknown agent type: {agent_type}")
+        """ Safe action selection """
+        action = super()._select_action(state, agent_type)
 
+        # Validate with safety agent
+        validation = self.safety_agent.validate_action({
+            'state': state,
+            'proposed_action': action,
+            'agent_type': agent_type
+        })
+
+        if not validation['approved']:
+            self.logger.warning(f"Unsafe action {action} detected, using corrected action")
+            return validation['corrected_action']
+            
+        return action
+
+    def _process_state(self, raw_state):
+        processed = self.slailm.process_input(raw_state)
+        return processed['feature_vector']
+
+    def _training_error_handler(func):
+        """Decorator for error recovery in training methods"""
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except (NaNException, GradientExplosionError, InvalidActionError) as e:
+                self.logger.error(f"Training error: {str(e)}")
+                self.error_history.append({
+                    'timestamp': datetime.now(),
+                    'error_type': type(e).__name__,
+                    'context': self._get_training_context()
+                })
+                self.consecutive_errors += 1
+                return self._execute_recovery_strategy()
+            finally:
+                if self.consecutive_errors > 0:
+                    self.consecutive_errors -= 1
+        return wrapper
+
+    @_training_error_handler
     def train_episode(self, agent_type="dqn"):
         """
         Execute one training episode with selected strategy
@@ -303,9 +324,17 @@ class LearningAgent:
         Implements Hybrid Reward Architecture from:
         van Seijen et al. (2017). Hybrid Reward Architecture for RL
         """
+        action = self._select_action(state, agent_type)
+        if not self.safety_agent.validate_action({'action': action})['approved']:
+            action = self.safety_agent.apply_corrections()
+        self.shared_memory.append('learning_experiences', episode_data)
+        external_data = self.shared_memory.get('external_experiences', [])
+        self.memory.extend(external_data)
         state = self.env.reset()
         total_reward = 0
         episode_data = []
+        dqn_loss = agent.train()
+        grad_norm = self._get_gradient_norm(agent)
         
         while True:
             action = self._select_action(state, agent_type)
@@ -322,6 +351,9 @@ class LearningAgent:
         # Train on episode data
         loss = self._train_strategy(episode_data, agent_type)
         self.performance_history.append(total_reward)
+        self.performance_metrics['dqn_loss'].append(dqn_loss)
+        self.performance_metrics['maml_grad_norm'].append(grad_norm)
+        self.shared_memory.set('learning_metrics', self.performance_metrics)
         
         # Update strategy weights
         self._update_strategy_weights(loss)
@@ -353,6 +385,7 @@ class LearningAgent:
         else:
             logger.debug(f"Agent '{agent_type}' does not support feedback processing.")
 
+    @_training_error_handler
     def meta_learn(self, num_tasks=5):
         """
         Meta-learning phase using MAML
@@ -402,11 +435,9 @@ class LearningAgent:
 
     def run_learning_cycle(self):
         """Main learning orchestration loop"""
-        if self._check_learning_triggers():
-            logger.info("Initiating learning cycle")
-            self._execute_continual_learning()
-            self._update_shared_knowledge()
-            self.last_retraining = datetime.now()
+        if self.concept_drift_detector.analyze():
+            self._adjust_learning_strategies()
+            self._replay_historical_data()
 
     def _check_learning_triggers(self):
         """Evaluate activation conditions for learning"""
@@ -484,12 +515,13 @@ class LearningAgent:
         })
         logger.info(f"RSI optimization result: {analysis}")
 
-    def _update_strategy_weights(self, loss):
-        """Dynamic strategy weighting using normalized inverse loss"""
-        losses = np.array([loss, 0.1, 0.1, 0.1])  # Placeholder values
-        self.strategy_weights = 1 / (losses + 1e-8)
-        self.strategy_weights /= self.strategy_weights.sum()
-    # Trigger Detection Methods
+    def _update_strategy_weights(self, rewards):
+        strategy_performance = {
+            agent_id: np.mean(rewards[agent_id][-10:]) 
+            for agent_id in self.agents
+        }
+        total = sum(strategy_performance.values())
+        self.strategy_weights = np.array([strategy_performance[id]/total for id in self.agents.keys()])
 
     def _detect_new_data(self):
         """Check shared memory for new data flags"""
@@ -703,11 +735,12 @@ class EvolutionaryFactory:
 
 class SLAIEnv:
     """Base environment interface for SLAI operations"""
-    def __init__(self, shared_memory, state_dim=4, action_dim=2):
+    def __init__(self, SLAILM, agent_factory, shared_memory, state_dim=4, action_dim=2, env=None):
+        self.shared_memory = shared_memory
         self.observation_space = self.ObservationSpace(state_dim)
         self.action_space = self.ActionSpace(action_dim)
-        self.shared_memory = shared_memory
-        env = SLAIEnv()
+        #env = SLAIEnv()
+        self.env = env or SLAIEnv(shared_memory=shared_memory)
         learning_agent = LearningAgent(
             env=env,
             shared_memory=shared_memory,
@@ -738,7 +771,3 @@ class SLAIEnv:
             
         def sample(self):
             return np.random.randint(self.n)
-
-# Continuous operation loop
-#while True:
-#    learning_agent.run_learning_cycle()
