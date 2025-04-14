@@ -1051,11 +1051,11 @@ class GrammarProcessor:
         
         # Add fallback morphological patterns (lower priority)
         self.pos_patterns.extend([
-            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b'), 'NOUN'),
-            (re.compile(r'\b\w+(ate|ify|ize|ise|en)\b'), 'VERB'),
-            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary)\b'), 'ADJ'),
-            (re.compile(r'\b\w+(wise|ward|ly)\b'), 'ADV'),
-            (re.compile(r'\b(the|a|an|some)\b'), 'DET')  # Common determiners
+            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b'), 'NOUN_1'),
+            (re.compile(r'\b\w+(ate|ify|ize|ise|en)\b'), 'VERB_1'),
+            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary)\b'), 'ADJ_1'),
+            (re.compile(r'\b\w+(wise|ward|ly)\b'), 'ADV_1'),
+            (re.compile(r'\b(the|a|an|some)\b'), 'DET_1')  # Common determiners
         ])
 
     def parse_grammar(self, sentence, max_length=20):
@@ -1194,13 +1194,42 @@ class GrammarProcessor:
         }
         self.quote_stack = []  # Added for better quotation tracking
 
+    def is_grammatical(self, text: str) -> bool:
+        """Check if the input text is grammatically valid using the CYK parser."""
+        return self.parse_grammar(text)
+
     def process(self, linguistic_frame, raw_response):
         if self.is_grammatical(raw_response):
             return raw_response
         else:
-            # Attempt to rephrase or use templates
             return self.rephrase_response(linguistic_frame, raw_response)
-        
+
+    def rephrase_response(self, linguistic_frame: dict, raw_response: str) -> str:
+        """Rephrase a sentence using seed words or structured templates."""
+        # Extract seed words (nouns, verbs, adjectives) from raw_response
+        words = re.findall(r'\b\w+\b', raw_response.lower())
+        pos_tags = [(word, self._get_pos_tag(word)) for word in words]
+        seed_words = [word for word, tag in pos_tags if tag in {'NOUN', 'VERB', 'ADJ', 'PROPN'}]
+
+        # Attempt 3 times to generate a grammatical sentence
+        for _ in range(3):
+            generated = self.generate_sentence(seed_words)
+            if self.is_grammatical(generated):
+                return generated.capitalize() + '.'  # Ensure punctuation
+
+        # Fallback to structured template using linguistic_frame
+        event = linguistic_frame.get("event", "unknown_event")
+        agent = linguistic_frame.get("agent", "The system")
+        metric = linguistic_frame.get("metric", "performance")
+        value = linguistic_frame.get("value", None)
+
+        if event == "training_complete" and value is not None:
+            return f"{agent} completed training with a {metric} score of {value}."
+        elif event == "failure":
+            return f"{agent} encountered an error."
+        else:
+            return f"{agent} reports: '{event}'."
+
 class EnhancedLanguageAgent():
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
