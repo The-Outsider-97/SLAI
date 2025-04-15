@@ -25,7 +25,7 @@ import numpy as np
 import statsmodels.formula.api as smf
 from pathlib import Path
 from src.agents.alignment.alignment_monitor import AlignmentMonitor
-from src.evaluators.report import PerformanceEvaluator
+from src.agents.evaluators.report import PerformanceVisualizer
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
@@ -73,7 +73,7 @@ class SafeAI_Agent:
         self.logger = logging.getLogger("SLAI.SafetyFactory")
         self.training_data = []
         self.risk_table = {}
-        self.evaluator = PerformanceEvaluator(threshold=self.config.risk_thresholds["safety"] * 100)
+        self.evaluator = PerformanceVisualizer(threshold=self.config.risk_thresholds["safety"] * 100)
         self.audit_trail = []
 
         # Add SafetyAgent components
