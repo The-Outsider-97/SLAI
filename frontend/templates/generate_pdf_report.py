@@ -1,5 +1,8 @@
 import os
 import math
+import datetime
+from collections import defaultdict
+from datetime import datetime as dt
 
 from reportlab.platypus import BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, PageBreak, Image, NextPageTemplate, KeepTogether
 from reportlab.platypus.tableofcontents import TableOfContents
@@ -8,29 +11,25 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
-from datetime import datetime
+
 def generate_pdf_report(filepath, data: dict):
-    # Paths to logos (ensure these paths are correct in production)
     watermark_logo = data.get('watermark_logo_path', 'logo1.png')
     cover_logo = data.get('cover_logo_path', 'logo2.png')
 
     def add_footer_and_watermark(canvas, doc):
         canvas.saveState()
-
-        # Footer (skip cover page)
         if doc.page > 1:
-            now = datetime.now()
+            now = dt.now()
             canvas.setFont("Times-Roman", 8)
             canvas.setFillColor("#0e0e0e")
             canvas.drawCentredString(doc.pagesize[0] / 2.0, 15 * mm,
-                                     f"{data['country']} - {now.strftime('%Y-%m-%d')} - {now.strftime('%H:%M:%S')}")
+                                    f"{data['country']} - {now.strftime('%Y-%m-%d')} - {now.strftime('%H:%M:%S')}")
             canvas.drawRightString(doc.pagesize[0] - 20 * mm, 15 * mm, f"Page {doc.page - 1}")
             canvas.setFillColor("#ffd051")
             canvas.drawString(20 * mm, 15 * mm, "SLAI:")
             canvas.setFillColor("#0e0e0e")
             canvas.drawString(28 * mm, 15 * mm, "Scalable Learning Autonomous Intelligence")
 
-        # Watermark (applied to all except cover)
         if os.path.exists(watermark_logo):
             logo = ImageReader(watermark_logo)
             canvas.setFillAlpha(0.15)
@@ -39,7 +38,6 @@ def generate_pdf_report(filepath, data: dict):
             y_pos = (doc.pagesize[1] - img_width) / 2.0
             canvas.drawImage(logo, x_pos, y_pos, width=img_width, preserveAspectRatio=True, mask='auto')
             canvas.setFillAlpha(1)
-
         canvas.restoreState()
 
     doc = BaseDocTemplate(
@@ -52,10 +50,7 @@ def generate_pdf_report(filepath, data: dict):
     )
 
     frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
-    template = PageTemplate(
-        id='with_footer', 
-        frames=frame, 
-        onPage=add_footer_and_watermark)
+    template = PageTemplate(id='with_footer', frames=frame, onPage=add_footer_and_watermark)
     cover_frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='cover')
     cover_template = PageTemplate(id='cover', frames=cover_frame, onPage=add_footer_and_watermark)
     doc.addPageTemplates([cover_template, template])
@@ -80,6 +75,7 @@ def generate_pdf_report(filepath, data: dict):
     toc = TableOfContents()
     toc.levelStyles = [
         ParagraphStyle(fontSize=12, name='TOCHeading1', leftIndent=20, firstLineIndent=-20, spaceAfter=5),
+        ParagraphStyle(fontSize=10, name='TOCHeading2', leftIndent=40, firstLineIndent=-20, spaceAfter=3),
     ]
     story.append(Paragraph("Table of Contents", styles['Heading1']))
     story.append(Spacer(1, 6))
@@ -102,10 +98,71 @@ def generate_pdf_report(filepath, data: dict):
                 story.append(Paragraph(item, styles['BodyText']))
         story.append(Spacer(1, 5 * mm))
 
+    # Chapter 1: Interaction History with Subchapters
     chapter_counter = 1
-    add_chapter("Interaction History", data['chat_history'], chapter_counter)
+    story.append(PageBreak())
+    story.append(NextPageTemplate('with_footer'))
+    chapter_title = f"Chapter {chapter_counter}: Interaction History"
+    heading = Paragraph(f'<font size=14><b>{chapter_title}</b></font>', styles['ChapterTitle'])
+    heading._bookmarkName = f"chapter_{chapter_counter}"
+    toc.addEntry(0, chapter_title, f"chapter_{chapter_counter}")
+    story.append(KeepTogether([heading]))
+    story.append(Spacer(1, 5 * mm))
+
+    # Process chat history with date grouping
+    chat_history = data['chat_history']
+    lines = chat_history.split('\n') if isinstance(chat_history, str) else chat_history
+
+    date_groups = defaultdict(list)
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Capitalize first letter
+        line = line[0].upper() + line[1:] if line else line
+        
+        date_key = "Unknown Date"
+        if line.startswith('['):
+            end_idx = line.find(']')
+            if end_idx != -1:
+                date_part = line[1:end_idx]
+                try:
+                    dt_obj = dt.strptime(date_part, "%Y-%m-%d %H:%M:%S")
+                    date_key = dt_obj.date()
+                except ValueError:
+                    pass
+        date_groups[date_key].append(line)
+
+    # Sort dates and handle unknown entries
+    sorted_dates = sorted([d for d in date_groups if d != "Unknown Date"], key=lambda x: x)
+    if "Unknown Date" in date_groups:
+        sorted_dates.append("Unknown Date")
+
+    subchapter_num = 1
+    for date in sorted_dates:
+        if date == "Unknown Date":
+            sub_title = f"Chapter {chapter_counter}.{subchapter_num}: Additional Interactions"
+        else:
+            sub_title = f"Chapter {chapter_counter}.{subchapter_num}: {date.strftime('%Y-%m-%d')}"
+        
+        # Add TOC entry and subchapter heading
+        toc.addEntry(1, sub_title, f"chapter_{chapter_counter}_{subchapter_num}")
+        sub_heading = Paragraph(f'<font size=12><b>{sub_title}</b></font>', styles['Heading2'])
+        sub_heading._bookmarkName = f"chapter_{chapter_counter}_{subchapter_num}"
+        story.append(sub_heading)
+        story.append(Spacer(1, 2 * mm))
+        
+        # Add formatted lines
+        for line in date_groups[date]:
+            story.append(Paragraph(line, styles['BodyText']))
+            story.append(Spacer(1, 2 * mm))
+        
+        subchapter_num += 1
+        story.append(Spacer(1, 5 * mm))
+
     chapter_counter += 1
 
+    # Remaining chapters
     chapter_data = [
         ("Executive Summary", data['executive_summary']),
         ("Session Metadata", [
