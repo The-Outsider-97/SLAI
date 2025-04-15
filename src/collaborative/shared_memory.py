@@ -12,7 +12,7 @@ import datetime
 import threading
 
 from multiprocessing import Manager
-from typing import Tuple, Type
+from typing import Tuple, Type, Any
 from collections import namedtuple, defaultdict, deque
 
 
@@ -39,6 +39,7 @@ class SharedMemory:
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
         self.data = {}
+        self.callbacks = defaultdict(list)
         self.lock = threading.Lock()
         self.subscribers = {}
         self.registry = AgentRegistry(shared_memory=self)
@@ -73,6 +74,25 @@ class SharedMemory:
 
         # Start background cleanup thread
         self._start_expiration_cleaner()
+
+    def register_callback(self, key: str, callback: callable):
+        """Register a callback for specific key updates"""
+        with self.lock:
+            self.callbacks[key].append(callback)
+
+    def append(self, key: str, value: Any):
+        """Store data and trigger callbacks"""
+        with self.lock:
+            if key not in self.data:
+                self.data[key] = []
+            self.data[key].append(value)
+            
+            # Trigger registered callbacks
+            for cb in self.callbacks.get(key, []):
+                try:
+                    cb(value)
+                except Exception as e:
+                    logging.error(f"Callback error for {key}: {str(e)}")
 
     def configure(self, default_ttl=None, max_versions=None):
         if default_ttl is not None:
