@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, Union, Set, Tuple
 from src.agents.language_agent import DialogueContext
 from src.agents.language.grammar_processor import GrammarProcessor
 from src.agents.knowledge_agent import KnowledgeAgent
+from src.agents.language.resource_loader import ResourceLoader
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -56,6 +57,7 @@ class SLAILM:
                  # --- Custom Configuration Dictionary ---
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
+        start = time.time()
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.knowledge_agent = KnowledgeAgent(
@@ -99,11 +101,10 @@ class SLAILM:
         self.context_memory = deque(maxlen=context_memory_limit)
 
         # --- Load Resources (Wordlist) ---
-        self.structured_wordlist = self._load_json_resource(structured_wordlist_path, "Structured Wordlist")
-        if isinstance(self.structured_wordlist, dict) and 'words' in self.structured_wordlist:
-            self.structured_wordlist = self.structured_wordlist['words']
-        
-        self.wordlist = self._load_simple_wordlist(simple_wordlist_path)
+        self.structured_wordlist = ResourceLoader.get_structured_wordlist(structured_wordlist_path)
+        self.wordlist = ResourceLoader.get_simple_wordlist(simple_wordlist_path)
+        self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
+        self.responses = ResourceLoader.get_nlg_templates()
 
         # --- Initialize Components (using instances or loading) ---
         # Knowledge Agent (Initialize first if other components depend on it)
@@ -165,16 +166,16 @@ class SLAILM:
                 logging.error(f"Failed to initialize DialogueContext: {e}")
                 self.dialogue_context = None # Fallback
 
-        self.responses = {}
+        # self.responses = {}
 
         self.custom_config = custom_config or {}
         self.context_memory = deque(maxlen=context_memory_limit)
 
-        try:
-            with open("src/agents/language/nlg_templates_en.json", "r") as f:
-                self.responses.update(json.load(f))
-        except Exception as e:
-            logging.warning("Could not load NLG templates: %s", e)
+        #try:
+        #    with open("src/agents/language/nlg_templates_en.json", "r") as f:
+        #        self.responses.update(json.load(f))
+        #except Exception as e:
+        #    logging.warning("Could not load NLG templates: %s", e)
 
         # --- Final Checks and Setup ---
         if self.grammar_processor is None or self.dialogue_context is None:
@@ -190,7 +191,7 @@ class SLAILM:
             ]
         })
 
-        logging.info(f"SLAILM instance {self.node_id} initialization complete.")
+        logging.info(f"[SLAILM INIT] Finished in {time.time() - start:.2f}s")
 
     def _setup_logging(self, level: int, log_file: Optional[Union[str, Path]]):
         """Configures logging for the SLAILM instance."""
@@ -369,10 +370,13 @@ class SLAILM:
         # Intent recognition using regex patterns or Wordlist
         try:
             intent = self.grammar_processor.detect_intent(text)
-            analysis["intent"] = intent if isinstance(intent, dict) else {"type": "unknown", "confidence": 0.0}
+            #analysis["intent"] = intent if isinstance(intent, dict) else {"type": "unknown", "confidence": 0.0}
+            if not isinstance(intent, dict):
+                intent = {"type": "unknown", "confidence": 0.0}
         except Exception as e:
             logging.warning(f"Intent recognition failed: {e}")
             analysis["intent"] = "unknown"
+            
 
         # If question detected by NLU:
         if intent.get("type") == "question":
