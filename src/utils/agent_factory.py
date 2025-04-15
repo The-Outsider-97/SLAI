@@ -1,15 +1,18 @@
-import os, sys
 import ast
-import yaml
 import math
 import inspect
+import pickle
 import importlib
+import tracemalloc
 import numpy as np
 import logging as logger, logging
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List
+from profiling_utils import memory_profile, time_profile, start_memory_tracing, display_top_memory_sources
 from src.utils.system_optimizer import SystemOptimizer
+from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.language.resource_loader import ResourceLoader
 from src.agents.adaptive_agent import AdaptiveAgent
 from src.agents.alignment_agent import AlignmentAgent
 from src.agents.evaluation_agent import EvaluationAgent
@@ -21,7 +24,7 @@ from src.agents.perception_agent import PerceptionAgent
 from src.agents.planning_agent import PlanningAgent
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
-from models.slai_lm import SLAILM
+from models.slai_lm_registry import SLAILMManager
 
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
@@ -42,11 +45,15 @@ class AgentFactory:
         self.registry = {}
         self.metrics_adapter = MetricsAdapter()
         self.optimizer = optimizer
+        self.lazy_registry = {}
 
-        slailm_instance = SLAILM(
-            shared_memory=self.shared_resources.get("shared_memory"),
-            agent_factory=self
-        )
+        if not tracemalloc.is_tracing():
+            start_memory_tracing()
+        
+        slailm_instance = SLAILMManager.get_instance("default",
+                                                     shared_memory=self.shared_resources.get("shared_memory"),
+                                                     agent_factory=self)
+
         self.register("adaptive", lambda config: AdaptiveAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
@@ -60,11 +67,8 @@ class AgentFactory:
             monitor_config=config.get("monitor_config"),
             correction_policy=config.get("correction_policy")
         ))
-        self.register("evaluation", lambda config: EvaluationAgent(
-            shared_memory=self.shared_resources.get("shared_memory"),
-            agent_factory=self,
-            **config.get("init_args", {})
-        ))
+        self.register("evaluation", lambda config: self._safe_create_evaluation_agent(config))
+
         self.register("execution", lambda config: ExecutionAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
@@ -74,6 +78,19 @@ class AgentFactory:
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
             **config.get("init_args", {})
+        ))
+        self.register("language", lambda config: LanguageAgent(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self,
+            grammar=GrammarProcessor(
+                structured_wordlist=ResourceLoader.get_structured_wordlist(),
+                wordlist=ResourceLoader.get_simple_wordlist(),
+                nlg_templates=ResourceLoader.get_ngl_templates(),
+                knowledge_agent=self._memorized_agents.get("knowledge")
+            ),
+            context=DialogueContext(llm=slailm_instance),
+            slai_lm=slailm_instance,
+            config=config.get("init_args", {})
         ))
         self.register("learning", lambda config: LearningAgent(
             SLAILM=slailm_instance,
@@ -130,7 +147,26 @@ class AgentFactory:
             )
         ))
 
+    def _safe_create_evaluation_agent(self, config):
+        try:
+            init_args = config.get("init_args", {})
+            return EvaluationAgent(
+                shared_memory=self.shared_resources.get("shared_memory"),
+                agent_factory=self,
+                **init_args
+            )
+        except Exception as e:
+            logging.warning(f"Failed to instantiate EvaluationAgent: {e}")
+            return None
+
+    @memory_profile
+    @time_profile
     def create(self, agent_type: str, config: dict, system_metrics: dict = None):
+        if agent_type in self.lazy_registry and not self.lazy_registry[agent_type][1]:
+            init_fn, _ = self.lazy_registry[agent_type]
+            init_fn()
+            self.lazy_registry[agent_type] = (init_fn, True)
+
         if not isinstance(config, dict):
             raise TypeError(f"[AgentFactory] Config must be a dict, got {type(config)} with value: {config}")
         """Optimized agent creation"""
@@ -186,32 +222,6 @@ class AgentFactory:
                 agent_factory=self,
                 **init_args
                 )
-        
-        if agent_type.lower() == "language":
-            from models.slai_lm import SLAILM
-            from src.agents.language.grammar_processor import GrammarProcessor
-
-            slailm_instance = SLAILM(
-                shared_memory=self.shared_resources.get("shared_memory"),
-                agent_factory=self
-            )
-            grammar = GrammarProcessor(
-                structured_wordlist=slailm_instance.structured_wordlist,
-                wordlist=slailm_instance.wordlist,
-                knowledge_agent=slailm_instance.knowledge
-            )
-            context = DialogueContext(llm=slailm_instance)
-
-            self.register("language", lambda config: LanguageAgent(
-                shared_memory=self.shared_resources.get("shared_memory"),
-                agent_factory=self,
-                llm=slailm_instance,
-                grammar_processor=grammar,
-                dialogue_context=context,
-                config=config
-            ))
-
-            return self.registry["language"](config)
 
         logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
         return self._create_fallback_agent(agent_type, config)
@@ -308,6 +318,10 @@ class AgentFactory:
         }
 
     def _discover_agents(self) -> None:
+        cache_path = Path("agent_discovery.cache")
+        if cache_path.exists():
+            self.agent_registry = pickle.load(cache_path.open('rb'))
+            return
         base_dir = Path(__file__).parent.parent / "agents"
         for agent_file in base_dir.glob("*_agent.py"):
             try:
@@ -333,6 +347,8 @@ class AgentFactory:
                     
             except Exception as e:
                 logging.warning(f"Agent discovery failed for {agent_file}: {str(e)}")
+        
+        pickle.dump(self.agent_registry, cache_path.open('wb'))
 
     def _parse_init_params(self, class_def: ast.ClassDef) -> Tuple[str]:
         init_method = next(
@@ -454,11 +470,12 @@ class AgentFactory:
             # Add other parameters
         }
 
-    def _build_evaluation_config(self, config: dict) -> dict:
+    def _build_evaluation_config(self, config):
         return {
-            "args": config.get("args", ()),
-            "kwargs": config.get("kwargs", {}),
-            # Add other necessary parameters
+            "init_args": {
+                "evaluation_type": "standard",
+                "output_path": "logs/eval.jsonl"
+            }
         }
 
     def _build_execution_config(self, config: dict) -> dict:
@@ -477,7 +494,6 @@ class AgentFactory:
 
     def _build_language_config(self, config: dict) -> dict:
         from models.slai_lm import SLAILM
-        self.register("language", LanguageAgent)
         llm_instance = config.get("llm", SLAILM())
         dialogue_context = DialogueContext(llm=llm_instance)
 
@@ -491,8 +507,6 @@ class AgentFactory:
                 "memory_limit": config.get("memory_limit", 1000),
                 "enable_summarization": config.get("enable_summarization", True),
                 "summarizer": config.get("summarizer", None),
-                "wordlist_path": config.get("wordlist_path", "src/agents/learning/structured_wordlist_en.json"),
-                "nlg_templates": config.get("nlg_templates", "src/agents/learning/nlg_templates_en.json"),
                 "cache_size": config.get("cache_size", 1000)
             }
 
@@ -759,6 +773,10 @@ class AgentFactory:
                 return np.concatenate(pooled)
 
         return VisionFeatureExtractor(config)
+
+    def report_memory_usage(self, limit: int = 10):
+        """Display top memory-consuming components"""
+        display_top_memory_sources(limit)
 
 class MetricsAdapter:
     """
