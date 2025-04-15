@@ -1,5 +1,8 @@
 import logging
 import os, sys
+import time
+import difflib
+import traceback
 
 class BaseAgent:
     def __init__(self, shared_memory, agent_factory, config=None):
@@ -9,34 +12,68 @@ class BaseAgent:
             self.logger = logging.getLogger(self.__class__.__name__)
             self.name = self.__class__.__name__
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
+    def execute(self, input_data):
         try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
+            self.logger.info(f"[{self.name}] Executing task...")
+            result = self.perform_task(input_data)
+            self.logger.info(f"[{self.name}] Task execution completed.")
+            
+            # Log successful stats
+            self.shared_memory.set(f"agent_stats:{self.name}", {
+                "last_run": time.time(),
+                "success": True,
+                "result_summary": str(result)[:200]
+            })
 
-        pass
+            return result
+
+        except Exception as e:
+            error_entry = {
+                "timestamp": time.time(),
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+
+            # Retrieve and trim old errors
+            error_key = f"errors:{self.name}"
+            MAX_ERRORS = 50
+            errors = self.shared_memory.get(error_key) or []
+            errors.append(error_entry)
+            if len(errors) > MAX_ERRORS:
+                errors = errors[-MAX_ERRORS:]
+            self.shared_memory.set(error_key, errors)
+
+            # Log failure stats
+            self.shared_memory.set(f"agent_stats:{self.name}", {
+                "last_run": time.time(),
+                "success": False,
+                "error": str(e)
+            })
+
+            self.logger.error(f"[{self.name}] Task failed with error: {e}")
+            self.logger.debug(traceback.format_exc())
+
+            # Match against recent errors for similarity
+            SIMILARITY_THRESHOLD = 0.75
+            new_error = str(e)
+            new_type = type(e).__name__
+
+            for past in reversed(errors[:-1]):
+                past_error = past.get("error", "")
+                past_type = past_error.split(":")[0] if ":" in past_error else ""
+
+                # Match exception type first (e.g., ValueError vs TypeError)
+                if past_type == new_type:
+                    # Check textual similarity
+                    similarity = difflib.SequenceMatcher(None, new_error, past_error).ratio()
+                    if similarity >= SIMILARITY_THRESHOLD:
+                        self.logger.warning(
+                            f"[{self.name}] A similar {new_type} occurred before "
+                            f"(similarity: {similarity:.2f})"
+                        )
+                        break
+
+            return {"status": "failed", "error": str(e)}
     
     def alternative_execute(self, task_data):
         """
