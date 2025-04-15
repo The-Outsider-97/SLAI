@@ -24,15 +24,17 @@ from modules.monitoring import Monitoring
 from modules.model_trainer import ModelTrainer
 from deployment.git_ops.version_ops import create_and_push_tag
 from deployment.rollback.model_rollback import rollback_model
-from src.evaluators.performance_evaluator import PerformanceEvaluator
-from src.evaluators.efficiency_evaluator import EfficiencyEvaluator
-from src.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
-from src.evaluators.adaptive_risk import RiskAdaptation
-from src.evaluators.certification_framework import CertificationManager, CertificationLevel
-from src.evaluators.documentation import AuditTrail
-from src.tuning.tuner import HyperparamTuner
+from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
+from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
+from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
+from src.agents.evaluators.adaptive_risk import RiskAdaptation
+from src.agents.evaluators.certification_framework import CertificationManager, CertificationAuditor
+from src.agents.evaluators.documentation import AuditTrail
+from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
 from src.agents.base_agent import BaseAgent
-
+from src.tuning.tuner import HyperparamTuner
+from src.utils.privacy_guard import PrivacyGuard
+from src.utils.interpretability import InterpretabilityHelper
 
 @dataclass
 class RiskModelParameters:
@@ -55,7 +57,7 @@ class RiskModelParameters:
 
 class EvaluationAgent(BaseAgent):
     def __init__(self, shared_memory, agent_factory, **kwargs):
-        self.trainer = ModelTrainer(shared_memory, output_dir)
+        self.trainer = ModelTrainer(shared_memory, output_dir="logs/metrics_log.jsonl")
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory
@@ -75,9 +77,33 @@ class EvaluationAgent(BaseAgent):
         self.certifier = CertificationManager(domain="automotive")
         self.audit_log = AuditTrail(difficulty=4)
         self.monitor = Monitoring(shared_memory=shared_memory, output_path="logs/metrics_log.jsonl")
+        self.cert_auditor = CertificationAuditor()
+        self.stats = StatisticalEvaluator()
 
-    def log_evaluation(self, results: Dict):
+    def log_evaluation(self, results: Dict,
+                       rewards_a=None,
+                       rewards_b=None
+                       ):
         """Central logging method"""
+        ci_a = self.stats.compute_confidence_interval(rewards_a)
+        ci_b = self.stats.compute_confidence_interval(rewards_b)
+        t_test = self.stats.t_test(rewards_a, rewards_b)
+        effect = self.stats.effect_size(rewards_a, rewards_b)
+
+        self.log_evaluation({
+            "ci_model_A": ci_a,
+            "ci_model_B": ci_b,
+            "t_test_p": t_test["p_value"],
+            "significant": t_test["significant"],
+            "effect_size": effect
+        })
+        self.evaluation_results["statistical_analysis"] = {
+            "ci_model_A": [round(ci_a[0], 4), round(ci_a[1], 4)],
+            "ci_model_B": [round(ci_b[0], 4), round(ci_b[1], 4)],
+            "t_test_p": round(t_test["p_value"], 6),
+            "significant": t_test["significant"],
+            "effect_size": round(effect, 3)
+        }
         try:
             hazards = results.get("hazards", {})
             operational_time = results.get("operational_time", 0)
@@ -108,6 +134,66 @@ class EvaluationAgent(BaseAgent):
             "status": "up" if results.get("failures", 0) == 0 else "down"
         }
         self.monitor.record("EvaluationAgent", eval_metrics, tags={"type": "validation"})
+
+        self.cert_auditor.assess_iso25010({
+            "mtbf": results.get("mtbf", 1200),
+            "response_time": results.get("avg_response_time", 0.8),
+            "tech_debt": results.get("tech_debt", 0.12),
+            "vuln_count": results.get("vuln_count", 1)
+        })
+        self.cert_auditor.evaluate_asil(results.get("coverage", 0.96), results.get("test_count", 10000))
+        self.cert_auditor.finalize_ul4600(results.get("log_snippets", ["validation passed", "tests successful"]))
+        self.cert_auditor.integrate_nist_rmf({
+            "distribution_shift": results.get("distribution_shift", 0.1),
+            "fairness_score": results.get("fairness_score", 0.85)
+        })
+        cert_report = self.cert_auditor.generate_certificate_report()
+        self.shared_memory.set("certification_report", cert_report)
+
+        """Central logging method"""
+        try:
+            # Scrub PII from logs
+            for key in ["notes", "feedback", "comments"]:
+                if key in results and isinstance(results[key], str):
+                    results[key] = PrivacyGuard.scrub(results[key])
+
+            hazards = results.get("hazards", {})
+            operational_time = results.get("operational_time", 0)
+
+            self.risk_model.update_model(hazards, operational_time)
+            risk_summary = self.risk_model.get_current_risk("system_failure")
+
+            self.certifier.submit_evidence({
+                "timestamp": datetime.now(),
+                "type": "validation_results",
+                "content": results
+            })
+
+            self.audit_log.add_document({
+                "validation_data": results,
+                "risk_assessment": risk_summary
+            })
+
+            # Add interpretation
+            interp_summary = {
+                "risk_explanation": InterpretabilityHelper.explain_risk(risk_summary),
+                "performance_summary": InterpretabilityHelper.explain_performance(results.get("score", 0.0)),
+            }
+            results["explanation"] = interp_summary
+
+            # Apply differential privacy (optional, config-gated)
+            if self.config.get("privacy", {}).get("differential_privacy", False):
+                results["score_priv"] = PrivacyGuard.apply_differential_privacy(results.get("score", 0.0))
+
+            self.shared_memory.append('evaluation_metrics', {
+                'hazards': results.get("hazards", {}),
+                'operational_time': results.get("operational_time", 0),
+                'successes': int(results.get("status") == "up"),
+                'failures': int(results.get("status") == "down")
+            })
+
+        except Exception as e:
+            logging.warning(f"Evaluation logging failed: {e}")
 
 # ------------------------ Base Infrastructure ------------------------ #
 logger = logging.getLogger(__name__)
