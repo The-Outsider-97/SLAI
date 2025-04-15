@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Any, Tuple
+from modules.monitoring import Monitoring
+from modules.model_trainer import ModelTrainer
 from deployment.git_ops.version_ops import create_and_push_tag
 from deployment.rollback.model_rollback import rollback_model
 from src.evaluators.performance_evaluator import PerformanceEvaluator
@@ -30,6 +32,7 @@ from src.evaluators.certification_framework import CertificationManager, Certifi
 from src.evaluators.documentation import AuditTrail
 from src.tuning.tuner import HyperparamTuner
 from src.agents.base_agent import BaseAgent
+
 
 @dataclass
 class RiskModelParameters:
@@ -51,11 +54,13 @@ class RiskModelParameters:
     })
 
 class EvaluationAgent(BaseAgent):
-    def __init__(self, shared_memory, agent_factory, args=(), kwargs={}):
+    def __init__(self, shared_memory, agent_factory, **kwargs):
+        self.trainer = ModelTrainer(shared_memory, output_dir)
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory
         )
+        self.config = kwargs
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.risk_model = RiskAdaptation(
@@ -69,19 +74,40 @@ class EvaluationAgent(BaseAgent):
         )
         self.certifier = CertificationManager(domain="automotive")
         self.audit_log = AuditTrail(difficulty=4)
+        self.monitor = Monitoring(shared_memory=shared_memory, output_path="logs/metrics_log.jsonl")
 
     def log_evaluation(self, results: Dict):
         """Central logging method"""
-        self.risk_model.update_model(results["hazards"], results["operational_time"])
-        self.certifier.submit_evidence({
-            "timestamp": datetime.now(),
-            "type": "validation_results",
-            "content": results
-        })
+        try:
+            hazards = results.get("hazards", {})
+            operational_time = results.get("operational_time", 0)
+
+            if not isinstance(hazards, dict) or not isinstance(operational_time, (int, float)):
+                raise ValueError("Malformed evaluation results")
+
+            self.risk_model.update_model(hazards, operational_time)
+
+            self.certifier.submit_evidence({
+                "timestamp": datetime.now(),
+                "type": "validation_results",
+                "content": results
+            })
+        except Exception as e:
+            logging.warning(f"Evaluation logging failed: {e}")
+
         self.audit_log.add_document({
             "validation_data": results,
             "risk_assessment": self.risk_model.get_current_risk("system_failure")
         })
+
+        # Manual logging
+        eval_metrics = {
+            "hazard_rate": results.get("hazards", {}).get("system_failure", 0.0),
+            "operational_time": results.get("operational_time", 0),
+            "error_count": results.get("failures", 0),
+            "status": "up" if results.get("failures", 0) == 0 else "down"
+        }
+        self.monitor.record("EvaluationAgent", eval_metrics, tags={"type": "validation"})
 
 # ------------------------ Base Infrastructure ------------------------ #
 logger = logging.getLogger(__name__)
