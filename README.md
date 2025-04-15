@@ -138,6 +138,7 @@ Note: If you see an error about execution policy:
    pip install shap
    pip install nltk
    pip install gymnasium
+   pip install beautifulsoup4
    ```
 
 5. Run Model:
