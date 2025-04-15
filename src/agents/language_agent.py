@@ -18,6 +18,8 @@ from collections import deque, defaultdict, OrderedDict
 from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
 from functools import partial
 from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.base_agent import BaseAgent
+from src.utils.slailm_loader import get_slailm
 
 class DialogueContext:
     def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None):
@@ -1106,7 +1108,7 @@ class Wordlist:
 
 class TypoHandler:
     """Comprehensive typo handling with multiple correction strategies"""
-    
+
     def __init__(self, wordlist: Wordlist):
         self.wordlist = wordlist
         self.max_edit_distance = 2
@@ -1114,38 +1116,70 @@ class TypoHandler:
         self.frequency_weight = 0.3
         self.keyboard_weight = 0.3
 
-    def suggest_corrections(self, word: str, max_suggestions: int = 5) -> List[Tuple[str, float]]:
+    def suggest_corrections(self, word: str, context: Optional[str] = None, max_suggestions: int = 5) -> List[Tuple[str, float]]:
         """Generate ranked spelling corrections using hybrid approach"""
-        candidates = self._generate_candidates(word.lower())
+        score = self._calculate_confidence(word, candidate)
+
+        # Contextual check (optional bonus validation)
+        if context and self.wordlist.grammar_processor:
+            # POS comparison: is original a preposition? noun? etc.
+            expected_pos = self.wordlist.grammar_processor._get_pos_tag(word)
+            candidate_pos = self.wordlist.grammar_processor._get_pos_tag(candidate)
+
+            # Penalize mismatch (e.g., you expected a preposition, but “bout” is a noun)
+            if candidate_pos != expected_pos:
+                score *= 0.75  # Penalize lightly
+
+        scored.append((candidate, score))
+
+        # Immediate return for exact match with original casing
+        if word in self.wordlist.data:
+            return [(word, 1.0)]
+
+        lower_word = word.lower()
+        candidates = self._generate_candidates(lower_word)
         valid_words = [w for w in candidates if w in self.wordlist.data]
-        
-        # If exact match exists with different case
-        if not valid_words and word.lower() in self.wordlist.data:
-            return [(word.lower(), 1.0)]
-        
-        # Score candidates using multiple features
+
+        # Check if lowercase version exists (different casing in wordlist)
+        if lower_word in self.wordlist.data:
+            valid_words.append(lower_word)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_valid = []
+        for w in valid_words:
+            if w not in seen:
+                seen.add(w)
+                unique_valid.append(w)
+        valid_words = unique_valid
+
+        # Handle cases where lower_word is the only valid candidate
+        if not valid_words and lower_word in self.wordlist.data:
+            return [(lower_word, 1.0)]
+
+        # Score remaining candidates
         scored = []
         for candidate in valid_words:
             score = self._calculate_confidence(word, candidate)
             scored.append((candidate, score))
-        
-        # Sort by descending confidence and frequency
+
+        # Sort by confidence and frequency
         scored.sort(key=lambda x: (-x[1], -self.wordlist.word_probability(x[0])))
         return scored[:max_suggestions]
 
     def _generate_candidates(self, word: str) -> Set[str]:
         """Generate possible corrections using multiple strategies"""
         candidates = set()
-        
+
         # Strategy 1: Edit distance variants
         candidates.update(self._edit_distance_candidates(word))
-        
+
         # Strategy 2: Phonetic matches
         candidates.update(self.wordlist.phonetic_candidates(word))
-        
+
         # Strategy 3: Common mistyping patterns
         candidates.update(self._common_mistype_patterns(word))
-        
+
         return candidates
 
     def _edit_distance_candidates(self, word: str) -> Set[str]:
@@ -1164,30 +1198,56 @@ class TypoHandler:
         """Generate all edits that are one edit away"""
         letters = 'abcdefghijklmnopqrstuvwxyz'
         splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
-        
+
         deletes = [L + R[1:] for L, R in splits if R]
         transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
         replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
         inserts = [L + c + R for L, R in splits for c in letters]
-        
+
         return set(deletes + transposes + replaces + inserts)
 
     def _common_mistype_patterns(self, word: str) -> Set[str]:
         """Correct common mistyping patterns using rules"""
         patterns = [
-            (r'ie$', 'ei'),  # recieve -> receive
-            (r'([aeiou])\1', r'\1'),  # occured -> occurred
-            (r'([a-z])\1+', r'\1'),  # happpy -> happy
-            (r'^[aeiou]', ''),  # about -> bout
-            (r'(.)\1(.)\2', r'\1\2'),  # committe -> committee
+            # Original patterns
+            (r'ie$', 'ei'), (r'ei$', 'ie'),  # receive, their
+            (r'ou$', 'uo'), (r'uo$', 'ou'),  # guard vs gurad
+            (r'([aeiou])\1', r'\1'),  # repeated vowels: aa -> a
+            (r'([a-z])\1+', r'\1'),   # happpy -> happy
+            (r'^[aeiou]', ''),         # about -> bout (edge case)
+            (r'(.)\1(.)\2', r'\1\2'), # committee -> commite
+            (r'ph', 'f'), (r'f(?!e)', 'ph'),  # phone <-> fone
+            (r'(\w)(ie|ei)(\w)', r'\1\3\2'),  # transposes ei/ie in middle
+            (r'c([ei])', r's\1'),    # receive -> seive (then validated)
+            (r'(\w)or$', r'\1er'), (r'(\w)er$', r'\1or'),  # color <-> colour
+            (r're$', 'er'), (r'er$', 're'),  # centre <-> center
+            (r'able$', 'ible'), (r'ible$', 'able'),  # convertible
+            (r'ance$', 'ence'), (r'ence$', 'ance'),  # persistence
+            (r'ary$', 'ery'), (r'ery$', 'ary'),      # stationary vs stationery
+            (r'gh', ''),          # though -> thou (but validate via wordlist)
+            (r'([td])h$', r'\1'), # with -> wit (edge cases)
+            (r'll$', 'l'), (r'l$', 'll'),  # full vs ful
+            (r'([aeiou])([^aeiou])$', r'\1\2e'),  # lov -> love
+            (r'([^e])e$', r'\1'),  # have -> hav (validate)
+            (r'([^c])ie$', r'\1y'),  # tidy -> tidie (reverse)
+            (r'([cs])h$', r'\1'), # tech -> tec
+            (r'([aeiou])r([e$])', r'\1er'),  # centre -> center
         ]
-        
+
         variants = set()
         for pattern, replacement in patterns:
+            # Apply pattern in both directions
             variants.add(re.sub(pattern, replacement, word))
             variants.add(re.sub(replacement, pattern, word))
+
+        # Handle case variations for generated candidates
+        case_variants = set()
+        for v in variants:
+            case_variants.add(v.lower())
+            if len(v) > 0:
+                case_variants.add(v[0].upper() + v[1:])
         
-        return variants
+        return case_variants
 
     def _calculate_confidence(self, original: str, candidate: str) -> float:
         """Calculate combined confidence score using multiple features"""
@@ -1716,8 +1776,10 @@ class SafetyGuard:
         return text
 
 
-class LanguageAgent:
+class LanguageAgent(BaseAgent):
     def __init__(self, shared_memory, agent_factory, llm=None, grammar_processor=None, dialogue_context=None, config=None, args=(), kwargs={}):
+        super().__init__("LanguageAgent", shared_memory)
+        self.slailm = get_slailm(shared_memory, agent_factory)
         self.llm = llm
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -1867,9 +1929,17 @@ class LanguageAgent:
             confidence=0.1
         )
 
-    def perform_task(self, input_data):
-        if isinstance(input_data, str):
-            input_data = {"text": input_data}
+    def perform_task(self, task, input_data):
+        prompt = task.get("prompt", "")
+        if not prompt:
+            return {"error": "No prompt provided"}
+        
+        response = self.slailm.generate_response(prompt)
+        return {
+            "text": response,
+            "confidence": 1.0,
+            "source": "SLAILM"
+        }
 
     def generate(self, frame, context, prompt: str) -> str:
         """Wrapper to route generation through the LLM"""
