@@ -4,15 +4,19 @@ import sys
 import logging
 import yaml
 import queue
+import concurrent
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
+from shared_memory_cleaner import SharedMemoryCleaner
 from src.collaborative.shared_memory import SharedMemory
 from src.utils.agent_factory import AgentFactory
 from src.utils.system_optimizer import SystemOptimizer
 from src.agents.collaborative_agent import CollaborativeAgent
 from frontend.startup_screen import StartupScreen
 from frontend.main_window import MainWindow
+
+
 
 # Configure logging early to capture all events
 if not logging.getLogger().hasHandlers():
@@ -26,29 +30,29 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger('SLAI-Launcher')
 
+_config_cache = None
+
 def load_config(config_path: str = "config.yaml") -> dict:
-    """Load and validate configuration file"""
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-            logger.info(f"Loaded configuration from {config_path}")
-            return config
-    except Exception as e:
-        logger.critical(f"Failed to load configuration: {str(e)}")
-        sys.exit(1)
+    global _config_cache
+    if _config_cache is None:
+        try:
+            with open(config_path) as f:
+                _config_cache = yaml.safe_load(f)
+                logger.info(f"Loaded configuration from {config_path}")
+        except Exception as e:
+            logger.critical(f"Failed to load configuration: {str(e)}")
+            sys.exit(1)
+    return _config_cache
 
 def initialize_core_components(config: dict) -> tuple:
     """Initialize fundamental system components"""
-    # Shared memory for inter-agent communication
-    shared_memory = SharedMemory(
+    shared_memory = SharedMemory()
+    shared_memory.configure(
         default_ttl=config.get('memory_ttl', 3600),
         max_versions=config.get('max_versions', 10)
     )
-    
-    # System optimization engine
     optimizer = SystemOptimizer()
     
-    # Agent factory with shared resources
     agent_factory = AgentFactory(
         config=config,
         shared_resources={
@@ -91,11 +95,20 @@ def launch_ui(init_agents, components: dict):
 def main():
     """Core application entry point"""
     logger.info("Starting SLAI Core System")
-    
-    # Load configuration and initialize components
     config = load_config()
+
+    # Parallelize memory and factory creation
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        shared_future = executor.submit(SharedMemory)
+        optimizer_future = executor.submit(SystemOptimizer)
+        
+        shared_memory = shared_future.result()
+        optimizer = optimizer_future.result()
+
+    # Load configuration and initialize components
     shared_memory, optimizer, agent_factory = initialize_core_components(config)
-    
+    cleaner = SharedMemoryCleaner(shared_memory, interval=120)
+    cleaner.start()    
     # Create collaborative agent (system coordinator)
     collaborative_agent = CollaborativeAgent(
         shared_memory=shared_memory,
