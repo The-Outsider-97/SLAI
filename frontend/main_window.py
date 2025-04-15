@@ -157,6 +157,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         QTimer.singleShot(0, self._deferred_ui_setup)  # Defer heavy UI loading
 
+        from src.agents.evaluators.report import PerformanceVisualizer
+        self.visualizer = PerformanceVisualizer(max_points=200)
+        self.last_visual_update = datetime.now()
+
+        # Connect to evaluation agent updates
+        shared_memory.register_callback('evaluation_metrics', self.handle_evaluation_update)
+
         # Geometry fix for large DPI / screen
         screen_geometry = QtWidgets.QDesktopWidget().availableGeometry()
         safe_width = min(screen_geometry.width(), 1920)
@@ -277,6 +284,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_splitter.setSizes([int(total_width * 0.6), int(total_width * 0.4)])
 
         self.greetUser()
+    def handle_evaluation_update(self, metrics):
+        """Process evaluation metrics from EvaluationAgent"""
+        self.visualizer.update_metrics(metrics)
+        
+        # Throttle visual updates to 15 FPS
+        if (datetime.now() - self.last_visual_update).total_seconds() > 0.066:
+            self.update_visualizations()
+            self.last_visual_update = datetime.now()
 
     def initUI(self):
         # === Left Panel Content ===
@@ -395,10 +410,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.media_panel.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
         self.right_tab_widget.addWidget(self.media_panel)
 
-        # Panel 3: Media Panel
+        # Panel 4: Monitor Panel
         self.monitor_panel = QWidget()
         self.monitor_panel.setLayout(QVBoxLayout())
         self.right_tab_widget.addWidget(self.monitor_panel)
+
+        # Panel 5: Risk & Reward Visualization Panel
+        self.visualization_panel = QWidget()
+        vis_layout = QVBoxLayout()
+        vis_layout.setContentsMargins(5, 5, 5, 5)
+
+        self.vis_tradeoff = QLabel()
+        self.vis_tradeoff.setMinimumSize(360, 240)
+        self.vis_tradeoff.setAlignment(Qt.AlignCenter)
+        
+        self.vis_risk_trend = QLabel()
+        self.vis_risk_trend.setMinimumSize(360, 240)
+        self.vis_risk_trend.setAlignment(Qt.AlignCenter)
+        
+        self.vis_reward_trend = QLabel()
+        self.vis_reward_trend.setMinimumSize(360, 240)
+        self.vis_reward_trend.setAlignment(Qt.AlignCenter)
+    
+        vis_layout.addWidget(self.vis_tradeoff)
+        vis_layout.addWidget(self.vis_risk_trend)
+        vis_layout.addWidget(self.vis_reward_trend)
+        
+        self.visualization_panel.setLayout(vis_layout)
+        self.right_tab_widget.addWidget(self.visualization_panel)
 
         # --- Footer (System Stats) ---
         self.footer = QtWidgets.QLabel("System Stats Initializing...")
@@ -418,16 +457,47 @@ class MainWindow(QtWidgets.QMainWindow):
         graph_btn = QPushButton("Graph")
         media_btn = QPushButton("Media")
         monitor_btn = QPushButton("Monitoring")
+        viz_btn = QPushButton("Eval Charts")
         log_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(0))
         graph_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(1))
         media_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(2))
         monitor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(3))
+        viz_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(4))
         switcher_layout.addWidget(log_btn)
         switcher_layout.addWidget(graph_btn)
         switcher_layout.addWidget(media_btn)
         switcher_layout.addWidget(monitor_btn)
+        switcher_layout.addWidget(viz_btn)
         switcher_layout.addStretch()
         self.right_panel_layout.insertLayout(1, switcher_layout) # Insert above the stack
+
+    def update_visualizations(self):
+        """Update all visualization elements"""
+        if not self.visualization_panel.isVisible():
+            return
+    
+        # Get current panel size
+        panel_size = self.visualization_panel.size()
+        chart_width = max(360, panel_size.width() - 20)
+        chart_height = max(240, panel_size.height() // 3 - 10)
+        chart_size = QtCore.QSize(chart_width, chart_height)
+    
+        # Update charts
+        try:
+            self.vis_tradeoff.setPixmap(
+                self.visualizer.render_tradeoff_chart(chart_size))
+            self.vis_risk_trend.setPixmap(
+                self.visualizer.render_temporal_chart(chart_size, 'hazard_rates'))
+            self.vis_reward_trend.setPixmap(
+                self.visualizer.render_temporal_chart(chart_size, 'operational_times'))
+        except Exception as e:
+            logging.error(f"Visualization update failed: {str(e)}")
+    
+    # Add resize handler
+    def resizeEvent(self, event):
+        """Handle window resizing for proper visualization scaling"""
+        super().resizeEvent(event)
+        self.update_visualizations()
 
     def handleInputKeyPress(self, event):
         """ Handle key presses in the input field """
