@@ -1,24 +1,3 @@
-risk_threshold: 0.3
-
-monitor:
-  fairness_metrics:
-    - demographic_parity
-    - equal_opportunity
-    - predictive_equality
-  ethical_rules:
-    privacy:
-      - "No sharing of personally identifiable information"
-    fairness:
-      - "Avoid bias towards protected attributes like gender or race"
-    transparency:
-      - "Explain decisions if confidence is low"
-  drift_threshold: 0.15
-  audit_frequency: 1000
-  adaptive_weights:
-    fairness: 0.4
-    ethics: 0.3
-    safety: 0.3
-
 memory:
   replay_buffer_size: 10000
   causal_window: 1000
@@ -31,6 +10,34 @@ ethics:
     - "Uphold user dignity and agency"
     - "Avoid promoting misinformation"
     - "Respect user privacy and autonomy"
+
+constitutional_rules:
+  privacy: []
+  safety: []
+  ethics: []
+risk_thresholds:
+  safety: 0.01
+  security: 0.001
+  privacy: 0.05
+
+monitor:
+  fairness_metrics:
+    - demographic_parity
+    - equal_opportunity
+    - predictive_equality
+  ethical_rules:
+    privacy:
+      - "No sharing of personally identifiable information (PII)"
+    fairness:
+      - "Avoid bias towards protected attributes like gender or race"
+    transparency:
+      - "Explain decisions if confidence is low"
+  drift_threshold: 0.15
+  audit_frequency: 1000
+  adaptive_weights:
+    fairness: 0.4
+    ethics: 0.3
+    safety: 0.3
 
 value_model:
   embedding_dim: 128
