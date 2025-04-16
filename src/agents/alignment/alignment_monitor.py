@@ -18,6 +18,7 @@ from datetime import datetime
 from scipy.stats import wasserstein_distance
 
 # Internal imports
+from models.slai_lm import get_shared_slailm
 from src.agents.alignment.bias_detection import BiasDetection
 from src.agents.alignment.fairness_evaluator import FairnessEvaluator
 from src.agents.alignment.ethical_constraints import EthicalConstraints
@@ -61,12 +62,17 @@ class AlignmentMonitor:
     """
 
     def __init__(self, sensitive_attributes: List[str],
+                 slai_lm=None,
                  config: Optional[MonitorConfig] = None,
                  value_model: Optional[ValueEmbeddingModel] = None):
         
         self.sensitive_attrs = sensitive_attributes
-        self.config = config or MonitorConfig()
-        self.value_model = value_model or ValueEmbeddingModel(config=ValueConfig())
+        # Convert dict to MonitorConfig if needed
+        if isinstance(config, dict):
+            self.config = MonitorConfig(**config)
+        else:
+            self.config = config or MonitorConfig()
+        self.value_model = ValueEmbeddingModel(ValueConfig(), slai_lm=slai_lm)
         
         # Initialize verification components
         self.bias_detector = BiasDetection(sensitive_attributes)
