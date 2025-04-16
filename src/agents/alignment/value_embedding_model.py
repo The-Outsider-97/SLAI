@@ -47,7 +47,7 @@ class ValueEmbeddingModel(nn.Module):
     4. Alignment Scorer: Cross-attention value-policy matching
     """
 
-    def __init__(self, config: ValueConfig, slai_lm):
+    def __init__(self, config, slai_lm=None):
         super().__init__()
         self.config = config
         self.slai_lm = slai_lm
