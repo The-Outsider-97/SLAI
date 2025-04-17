@@ -24,7 +24,7 @@ from scipy.stats import entropy
 from src.agents.base_agent import BaseAgent
 from src.agents.safety_agent import SafeAI_Agent
 from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
-from src.agents.alignment.value_embedding_model import ValueConfig
+from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
 from models.slai_lm import SLAILMValueModel, get_shared_slailm
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,10 @@ class AlignmentMemory:
     drift_scores: pd.Series = field(default_factory=pd.Series)
 
 
-
     def store_evaluation(self, report: Dict):
         """Properly handle DataFrame storage"""
         timestamp = datetime.now()
-        
+
         # Create temporary DataFrame for new entries
         new_entries = []
         for metric, value in report.get('fairness', {}).items():
@@ -100,7 +99,7 @@ class AlignmentMemory:
                 'threshold': value.get('threshold', 0),
                 'violation': value.get('violation', False)
             })
-        
+
         if new_entries:
             new_df = pd.DataFrame(new_entries)
             self.fairness_records = pd.concat([self.fairness_records, new_df], ignore_index=True)
@@ -123,17 +122,24 @@ class AlignmentAgent(BaseAgent):
             config=config,
             shared_memory = shared_memory,
         )
-
         self.agent_factory = agent_factory
+
+        slailm_instance = get_shared_slailm(shared_memory, agent_factory)
         self.monitor = AlignmentMonitor(
             sensitive_attributes=sensitive_attrs,
-            config=config['monitor']
+            config=config['monitor'],
+            slai_lm=slailm_instance
         )
-        
+        #value_config = ValueConfig(**config['value_model'])
+        allowed_keys = ValueConfig.__annotations__.keys()
+        filtered_value_model_config = {k: v for k, v in config['value_model'].items() if k in allowed_keys}
+        value_config = ValueConfig(**filtered_value_model_config)
+        self.value_model = ValueEmbeddingModel(config=value_config, slai_lm=slailm_instance)
+
         self.memory = AlignmentMemory(config['memory'])
         self.ethics = EthicalConstraints(config['ethics'])
         self.correction_policy = CorrectionPolicy(config['corrections'])
-        
+
         # Initialize from second implementation
         if safe_agent:
             self.shared_memory = safe_agent.shared_memory
@@ -141,10 +147,7 @@ class AlignmentAgent(BaseAgent):
         self.adjustment_history = []
         self.safety_buffer = 0.1
         self.correction_policy = correction_policy or CorrectionPolicy()
-        slailm_instance = get_shared_slailm(shared_memory, agent_factory)
-        value_config = ValueConfig(**config['value_model'])
-        self.value_model = ValueEmbeddingModel(value_config, slai_lm=slailm_instance)
-        
+
     def verify_alignment(self, task_data):
         report = self.monitor.assess(
             task_data['inputs'],
@@ -170,7 +173,7 @@ class AlignmentAgent(BaseAgent):
             if self.is_similar(task_data, err["data"]):
                 self.logger.info("Recognized a known problematic case, applying workaround.")
                 return self.alternative_execute(task_data)
-            
+
         errors = self.shared_memory.get(f"errors:{self.name}", [])
 
         # Check if current task_data has caused errors before
@@ -657,13 +660,12 @@ class HumanOversightTimeout(Exception):
 # Add missing component stubs
 @dataclass
 class EthicalConstraints:
-    """Placeholder for ethical constraints module"""
-    config: Dict
-
-@dataclass
-class ValueEmbeddingModel:
-    """Placeholder for value embedding model"""
-    config: Dict
-    
-    def encode_value(self, values: List[str], cultural_context: torch.Tensor) -> torch.Tensor:
-        return torch.randn(len(values), 768)  # Random embeddings
+    def __init__(self, config=None):
+        self.config = config if config is not None else {
+            "constraints": [
+                "Do not generate discriminatory content",
+                "Uphold user dignity and agency",
+                "Avoid promoting misinformation",
+                "Respect user privacy and autonomy"
+            ]
+        }
