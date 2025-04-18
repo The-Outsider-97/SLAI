@@ -4,7 +4,7 @@ import json
 import random
 import logging as logger
 from pathlib import Path
-from typing import Optional, Any, List, Union
+from typing import Optional, Any, List, Union, Tuple
 from src.agents.language.language_profiles import MORPHOLOGY_RULES
 from collections import defaultdict, deque, Counter
 
@@ -38,7 +38,7 @@ class GrammarProcessor:
         'existential': 'EX',   # Existential 'there'
     }
 
-    def __init__(self, lang='en', structured_wordlist=None, wordlist=None, rules_path=None, knowledge_agent=None):
+    def __init__(self, lang='en', structured_wordlist=None, wordlist=None, nlg_templates=None, rules_path=None, knowledge_agent=None):
         self.morph_rules = MORPHOLOGY_RULES[lang]
         self.reset_parser_state()
         self.knowledge_base = knowledge_agent
@@ -51,6 +51,11 @@ class GrammarProcessor:
             self.wordlist = wordlist
         else:
             self.wordlist = {}
+        if nlg_templates is not None:
+            self.nlg_templates = nlg_templates
+        else:
+            from src.agents.language.resource_loader import ResourceLoader
+            self.nlg_templates = ResourceLoader.get_nlg_templates()
         self._build_pos_patterns()
         if rules_path:
             self._load_custom_cfg_rules(rules_path)
@@ -188,6 +193,8 @@ class GrammarProcessor:
         return entities
 
     def _convert_structured_wordlist(self, structured_wordlist: dict) -> dict:
+        if not isinstance(structured_wordlist, dict):
+            raise ValueError("structured_wordlist must be a dict, got {}".format(type(structured_wordlist).__name__))
         pos_mapping = {}
         from collections import Counter
         for word, entry in structured_wordlist.items():
@@ -396,6 +403,14 @@ class GrammarProcessor:
 
         return pos_mapping
 
+    def _pos_tag(self, text: str) -> List[Tuple[str, str]]:
+        """
+        Tokenize and apply POS tagging to input text using internal POS map and stem fallback.
+        """
+        tokens = re.findall(r'\b\w+\b', text)
+        tagged = [(token, self._get_pos_tag(token)) for token in tokens]
+        return tagged
+
     def _get_pos_tag(self, word):
         """Get standardized POS tag with fallback"""
         base_tag = self.pos_map.get(word.lower()) or \
@@ -406,6 +421,58 @@ class GrammarProcessor:
             return self._guess_pos_by_morphology(word)
         
         return base_tag
+
+    def _load_econ_lexicon(self):
+        """Financial Sentiment Lexicon from FinancialTracker (shared for NLP-based agents)"""
+        return {
+            'positive': {
+                'bullish', 'growth', 'buy', 'strong', 'surge', 'rally', 'gain', 
+                'profit', 'upside', 'outperform', 'recovery', 'breakout', 'boom',
+                'soar', 'target', 'undervalued', 'dividend', 'premium', 'stable',
+                'rebound', 'momentum', 'innovative', 'leadership', 'upgrade',
+                'opportunity', 'success', 'record', 'beat', 'raise', 'trending',
+                'accumulate', 'hold', 'long', 'bull', 'green', 'positive', 'strong',
+                'resilient', 'robust', 'thrive', 'accelerate', 'superior', 'peak',
+                'promising', 'dominant', 'breakthrough', 'optimal', 'efficient',
+                'sustainable', 'hodl', 'moon', 'lambo', 'fomo', 'yolo', 'rocket',
+                'adoption', 'institutional', 'partnership', 'burn', 'deflationary'
+            },
+            'negative': {
+                'bearish', 'loss', 'sell', 'weak', 'crash', 'plunge', 'decline',
+                'downturn', 'risk', 'warning', 'volatile', 'fraud', 'bankrupt',
+                'default', 'short', 'dump', 'bubble', 'correction', 'manipulation',
+                'recession', 'downgrade', 'distress', 'failure', 'bear', 'red',
+                'negative', 'warning', 'caution', 'overbought', 'overvalued',
+                'uncertainty', 'fear', 'volatility', 'liquidate', 'capitulation',
+                'contraction', 'headwind', 'insolvent', 'delist', 'regulation',
+                'hack', 'exploit', 'rugpull', 'ponzi', 'wash', 'fud', 'rekt',
+                'bagholder', 'dump', 'correction', 'sink', 'collapse', 'bleed',
+                'stagnant', 'dilution', 'inflation', 'deficit', 'warn', 'sue',
+                'investigate', 'scam', 'vulnerability', 'attack', 'compromise'
+            }
+        }
+
+    def detect_intent(self, text: str) -> str:
+        """
+        Enhanced intent recognizer using financial sentiment lexicon and rule patterns.
+        """
+        lowered = text.lower()
+        lexicon = self._load_econ_lexicon()  # Pull sentiment terms from FinancialTracker
+        
+        pos_hits = [word for word in lexicon['positive'] if word in lowered]
+        neg_hits = [word for word in lexicon['negative'] if word in lowered]
+
+        # Simple rule priority based on term presence
+        if any(word in lowered for word in ["buy", "accumulate", "long"]) or len(pos_hits) > len(neg_hits):
+            return "buy_signal"
+        if any(word in lowered for word in ["sell", "short", "dump"]) or len(neg_hits) > len(pos_hits):
+            return "sell_signal"
+        if any(word in lowered for word in ["hold", "wait", "stable"]):
+            return "hold_signal"
+        if any(word in lowered for word in ["risk", "volatility", "uncertainty", "fear", "warning"]):
+            return "risk_assessment"
+        
+        return "unknown"
 
     def _guess_pos_by_morphology(self, word):
         """Advanced morphological analysis using linguistic patterns (Aronoff, 1976)"""
