@@ -19,7 +19,8 @@ from src.agents.evaluation_agent import EvaluationAgent
 from src.agents.execution_agent import ExecutionAgent
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.language_agent import LanguageAgent, DialogueContext
-from src.agents.learning_agent import LearningAgent, SLAIEnv
+from src.agents.learning_agent import LearningAgent
+from src.agents.learning.slaienv import SLAIEnv
 from src.agents.perception_agent import PerceptionAgent
 from src.agents.planning_agent import PlanningAgent
 from src.agents.reasoning_agent import ReasoningAgent
@@ -53,6 +54,19 @@ class AgentFactory:
         slailm_instance = SLAILMManager.get_instance("default",
                                                      shared_memory=self.shared_resources.get("shared_memory"),
                                                      agent_factory=self)
+        safety_agent = self._memorized_agents.get("safety")
+        if not safety_agent:
+            safety_agent = SafeAI_Agent(
+                agent_factory=self,
+                shared_memory=self.shared_resources.get("shared_memory"),
+                alignment_agent_cls=AlignmentAgent,
+                config=SafetyAgentConfig(
+                    constitutional_rules={},
+                    risk_thresholds={"safety": 0.01, "security": 0.001, "privacy": 0.05}
+                )
+            )
+            self._memorized_agents["safety"] = safety_agent
+        
 
         self.register("adaptive", lambda config: AdaptiveAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
@@ -79,34 +93,25 @@ class AgentFactory:
             agent_factory=self,
             **config.get("init_args", {})
         ))
+        slailm_instance = SLAILMManager.get_instance("default",
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self
+        )
         self.register("language", lambda config: LanguageAgent(
             shared_memory=self.shared_resources.get("shared_memory"),
             agent_factory=self,
-            grammar=GrammarProcessor(
-                structured_wordlist=ResourceLoader.get_structured_wordlist(),
-                wordlist=ResourceLoader.get_simple_wordlist(),
-                nlg_templates=ResourceLoader.get_ngl_templates(),
-                knowledge_agent=self._memorized_agents.get("knowledge")
-            ),
-            context=DialogueContext(llm=slailm_instance),
+            grammar=slailm_instance.grammar_processor,
+            context=slailm_instance.dialogue_context,
             slai_lm=slailm_instance,
             config=config.get("init_args", {})
         ))
+
         self.register("learning", lambda config: LearningAgent(
-            SLAILM=slailm_instance,
+            slai_lm=slailm_instance,
             agent_factory=self,
-            env=SLAIEnv(
-                shared_memory=self.shared_resources.get("shared_memory"),
-                SLAILM=slailm_instance,
-                agent_factory=self
-            ),
-            config={
-                'dqn': config.get("dqn", {}),
-                'maml': config.get("maml", {}),
-                'rsi': config.get("rsi", {}),
-                'rl': config.get("rl", {}),
-                'main': config.get("init_args", {})
-            },
+            safety_agent=self.get("safety"),
+            env=self.shared_resources.get("env"),
+            config=config.get("init_args", {}),
             shared_memory=self.shared_resources.get("shared_memory")
         ))
         self.register("perception", lambda config: PerceptionAgent(
