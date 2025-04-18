@@ -270,7 +270,8 @@ class CollaborativeAgent(BaseAgent):
             "task_router": {}
         }
         self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
-        from src.agents.learning_agent import LearningAgent, SLAIEnv
+        from src.agents.learning_agent import LearningAgent
+        from src.agents.learning.slaienv import SLAIEnv
         self.factory.register("learning",
                               lambda config: LearningAgent(
                                   agent_factory=self.factory,
