@@ -170,6 +170,35 @@ class GrammarProcessor:
             'entities': deque(maxlen=15)  # Increased buffer size
         }
 
+        self.pos_patterns = [
+            # Proper nouns (must come first to prevent substring matches)
+            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),
+            
+            # Core POS patterns with descending specificity
+            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
+            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
+            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
+            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
+            
+            # Closed class words
+            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
+            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
+            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
+            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
+            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
+            
+            # Special categories
+            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
+            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
+            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
+            
+            # Auxiliaries and modals
+            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
+            
+            # Fallback patterns (lower priority)
+            (re.compile(r'\b\w+\b'), 'NOUN')  # Default catch-all
+        ]
+
     def extract_entities(self, text, pos_tags):
         """
         Extracts basic named entities using noun/proper noun clusters.
@@ -1109,20 +1138,38 @@ class GrammarProcessor:
         
         # Create regex patterns for each POS group
         self.pos_patterns = []
-        for pos, words in pos_groups.items():
-            if words:  # Only create patterns for non-empty groups
-                # Sort by word length descending to match longer words first
-                words_sorted = sorted(words, key=len, reverse=True)
-                pattern = r'\b(' + '|'.join(words_sorted) + r')\b'
-                self.pos_patterns.append((re.compile(pattern, re.IGNORECASE), pos))
-        
+
         # Add fallback morphological patterns (lower priority)
         self.pos_patterns.extend([
-            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b'), 'NOUN_1'),
-            (re.compile(r'\b\w+(ate|ify|ize|ise|en)\b'), 'VERB_1'),
-            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary)\b'), 'ADJ_1'),
-            (re.compile(r'\b\w+(wise|ward|ly)\b'), 'ADV_1'),
-            (re.compile(r'\b(the|a|an|some)\b'), 'DET_1')  # Common determiners
+            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),  # Proper nouns
+            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
+            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
+            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
+            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
+            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
+            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
+            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
+            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
+            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
+            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
+            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
+            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
+            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
+        ])
+
+        # Add patterns from structured wordlist groups
+        for pos, words in pos_groups.items():
+            if words:
+                # Sort to prioritize longer words
+                words_sorted = sorted(words, key=len, reverse=True)
+                pattern = r'\b(' + '|'.join(words_sorted) + r')\b'
+                self.pos_patterns.append(
+                    (re.compile(pattern, re.IGNORECASE), pos)
+                )
+        
+        # Add fallback patterns (lower priority)
+        self.pos_patterns.extend([
+            (re.compile(r'\b\w+\b'), 'NOUN')  # Catch-all
         ])
 
     def parse_grammar(self, sentence, max_length=20):
