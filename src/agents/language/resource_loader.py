@@ -7,8 +7,10 @@ class ResourceLoader:
     _structured_wordlist: Optional[Dict] = None
     _simple_wordlist: Optional[Dict] = None
     _sentiment_lexicon: Optional[Dict] = None
+    _modality_markers: Optional[Dict] = None
     _nlg_templates: Optional[Dict] = None
     _loughran_mcdonald_lexicon: Optional[Dict] = None
+    _gender_list: Optional[Dict] = None
 
     @classmethod
     def get_structured_wordlist(cls, path="src/agents/language/structured_wordlist_en.json") -> Dict:
@@ -22,6 +24,13 @@ class ResourceLoader:
                 else:
                     raise TypeError("Expected a dict in structured_wordlist, got {}".format(type(data).__name__))
         return cls._structured_wordlist
+
+    @classmethod
+    def get_gender_list(cls, path="src/agents/language/gender_list.json") -> Dict:
+        if cls._gender_list is None:
+            with open(Path(path), "r", encoding="utf-8") as f:
+                cls._gender_list = json.load(f)
+        return cls._gender_list
 
     @classmethod
     def get_simple_wordlist(cls, path="src/agents/language/wordlist_en.json") -> Dict:
@@ -38,10 +47,24 @@ class ResourceLoader:
                     cls._sentiment_lexicon = json.load(f)
             except Exception:
                 cls._sentiment_lexicon = {
-                    "positive": {}, "negative": {},
+                    "positive": {}, "negative": {}, "moderate": {},
                     "intensifiers": {}, "negators": []
                 }
         return cls._sentiment_lexicon
+
+    @classmethod
+    def get_modality_markers(cls, path="src/agents/language/modality_markers.json") -> Dict:
+        if cls._modality_markers is None:
+            try:
+                with open(Path(path), "r", encoding="utf-8") as f:
+                    cls._modality_markers = json.load(f)
+            except Exception:
+                cls._modality_markers = {
+                    "epistemic": {}, "deontic": {}, "dynamic": {},
+                    "alethic": {}, "interrogative": {}, "imperative": {},
+                    "conditional": {}
+                }
+        return cls._modality_markers
 
     @classmethod
     def get_nlg_templates(cls, path="src/agents/language/nlg_templates_en.json") -> Dict:
