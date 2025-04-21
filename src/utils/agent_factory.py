@@ -2,6 +2,7 @@ import ast
 import math
 import inspect
 import pickle
+import psutil
 import importlib
 import tracemalloc
 import numpy as np
@@ -109,7 +110,7 @@ class AgentFactory:
         self.register("learning", lambda config: LearningAgent(
             slai_lm=slailm_instance,
             agent_factory=self,
-            safety_agent=self.get("safety"),
+            safety_agent=self.registry.get("safety", lambda _: None)({}),
             env=self.shared_resources.get("env"),
             config=config.get("init_args", {}),
             shared_memory=self.shared_resources.get("shared_memory")
@@ -176,12 +177,15 @@ class AgentFactory:
             raise TypeError(f"[AgentFactory] Config must be a dict, got {type(config)} with value: {config}")
         """Optimized agent creation"""
         if self.optimizer and system_metrics:
-            config.update(
-                self.optimizer.recommend_agent_params(
-                    agent_type=agent_type,
-                    system_status=system_metrics
-                )
-            )
+            system_metrics = {
+                "cpu_usage": psutil.cpu_percent(),
+                "model_size": 512,  # Approx. MB usage
+                "latency_slo": 0.15,
+                "throughput": 5,
+                "alloc_history": [psutil.virtual_memory().used / 1e6] * 5
+            }
+            recommendations = self.optimizer.optimize_throughput(system_metrics)
+            config["init_args"]["batch_size"] = recommendations["max_batch_size"]
 
         build_config_fn = getattr(self, f"_build_{agent_type}_config", None)
     
@@ -499,7 +503,10 @@ class AgentFactory:
 
     def _build_language_config(self, config: dict) -> dict:
         from models.slai_lm import SLAILM
-        llm_instance = config.get("llm", SLAILM())
+        llm_instance = config.get("llm", SLAILM(
+            shared_memory=self.shared_resources.get("shared_memory"),
+            agent_factory=self
+        ))
         dialogue_context = DialogueContext(llm=llm_instance)
 
         return {
