@@ -2,7 +2,7 @@ import re
 import logging
 from pathlib import Path
 from dataclasses import dataclass
-from collections import namedtuple, deque
+from collections import namedtuple, deque, defaultdict
 from typing import List, Dict, Tuple, Optional, Any
 
 from src.agents.language.grammar_processor import GrammarProcessor
@@ -305,52 +305,113 @@ class ShallowDependencyParser:
         'punct', 'root', 'dep'                            # Other
     ]
 
-    def __init__(self):
-        # Load linguistic resources if needed (e.g., lexicons, rules)
-        pass
+    def __init__(self, lang='en'):
+        # Initialize grammar and linguistic resources
+        self.lang = lang
+        self.structured_wordlist = ResourceLoader.get_structured_wordlist()
+        self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
+        self.gender_lexicon = ResourceLoader.get_gender_list()
+        self.modality_markers = ResourceLoader.get_modality_markers()
+        self.grammar = GrammarProcessor(lang=self.lang, structured_wordlist=self.structured_wordlist)
+        self.coref_resolver = CoreferenceResolver()
+
+        # Initialize dependency patterns (subject → verb → object)
+        self.dependency_rules = [
+            ('NOUN', 'VERB', 'NOUN'),
+            ('PRON', 'VERB', 'NOUN'),
+            ('PROPN', 'VERB', 'NOUN'),
+            ('NOUN', 'AUX', 'VERB'),
+            ('PRON', 'AUX', 'VERB'),
+            ('DET', 'NOUN', 'VERB'),
+        ]
+
+        # Part-of-speech clusters for simplified dependency roles
+        self.pos_clusters = {
+            'SUBJECT': {'PRON', 'NOUN', 'PROPN'},
+            'VERB': {'VERB', 'AUX'},
+            'OBJECT': {'NOUN', 'PROPN', 'PRON'},
+            'MODALITY': set(self.modality_markers['epistemic'] + 
+                            self.modality_markers['deontic'] +
+                            self.modality_markers['dynamic']),
+            'SENTIMENT': set(self.sentiment_lexicon['positive'].keys()) |
+                         set(self.sentiment_lexicon['negative'].keys()) |
+                         set(self.sentiment_lexicon['moderate'].keys()),
+        }
+
+        # Syntactic relation types (used for dependency labeling)
+        self.relations = ['nsubj', 'dobj', 'aux', 'mod', 'det', 'advmod', 'neg', 'prep']
+
+        # Entity buffer for context-aware parsing (used in coherence and resolution)
+        self.entity_buffer = defaultdict(list)
+
+        # Diagnostic flags
+        self.enable_logging = False
+        self.strict_mode = False
 
     def _tokenize_pos_tag(self, text: str) -> List[Dict[str, Any]]:
         """
-        Placeholder for tokenization and POS tagging.
-        Should return a list of tokens, each represented as a dictionary
-        with keys like 'id', 'text', 'lemma', 'upos', 'xpos', 'feats'.
+        Tokenize and assign UPOS tags using a rule-based approach from grammar_processor.
+
+        Returns:
+            List of token dictionaries with keys:
+            - id
+            - text
+            - lemma
+            - upos
+            - xpos (optional, left as default)
+            - feats (optional morphological features)
         """
-        # Simplified: Split by space, assign basic info
+
+        grammar = GrammarProcessor()
+        words = re.findall(r"\\w+|[.,!?;]", text)
         tokens = []
-        words = text.split()
-        for i, word in enumerate(words):
-            tokens.append({
-                'id': i + 1,
-                'text': word,
-                'lemma': word.lower(), # Simplistic lemmatization
-                'upos': 'NOUN' if word[0].isupper() else 'VERB' if i==1 else 'PROPN' if i==0 else 'PUNCT' if word=='.' else 'PART', # Very basic POS
-                'xpos': None,
-                'feats': None,
-                'head': 0, # Placeholder, to be filled
-                'deprel': '_', # Placeholder, to be filled
-            })
+
+        for i, word in enumerate(words, start=1):
+            lower = word.lower()
+            upos = "X"
+            lemma = lower
+            feats = {}
+
+            # POS heuristics based on suffixes and word shape
+            if re.fullmatch(r"[.,!?;]", word): upos = "PUNCT"
+            elif lower in {"i", "you", "he", "she", "they", "we", "it"}: upos = "PRON"
+            elif lower in {"is", "are", "was", "were", "be", "am"}: upos = "AUX"
+            elif lower.endswith("ing") or lower in {"have", "has", "had"}: upos = "VERB"
+            elif lower.endswith("ly"): upos = "ADV"
+            elif lower in {"the", "a", "an", "some"}: upos = "DET"
+            elif lower in grammar._UPOS_MAP: upos = grammar._UPOS_MAP[lower]
+            elif lower[0].isupper() and i == 1: upos = "PROPN"
+            elif lower.endswith("ed"): upos = "VERB"
+            elif lower in {"and", "or", "but"}: upos = "CCONJ"
+            elif lower in {"in", "on", "at", "with", "from", "to"}: upos = "ADP"
+            elif lower.isdigit(): upos = "NUM"
+            else: upos = "NOUN"  # default fallback
+
+            tokens.append({"id": i,"text": word,"lemma": lemma,"upos": upos,"xpos": None,"feats": feats})
+
         return tokens
 
     def _apply_rules(self, tokens: List[Dict[str, Any]]) -> List[DependencyRelation]:
         """
         Placeholder for applying grammatical rules or patterns to find dependencies.
         This is the core logic and the most complex part.
+        Example Simplified Rules (highly inadequate for real parsing):
         """
         relations = []
-        # Example Simplified Rules (highly inadequate for real parsing):
         # 1. Find a potential root (often the main verb)
         root_candidate = -1
         for i, token in enumerate(tokens):
             if token['upos'] == 'VERB':
                  root_candidate = i
-                 relations.append(DependencyRelation(head="ROOT",
-                                                     head_index=0,
+                 relations.append(DependencyRelation(head="ROOT", head_index=0,
                                                      relation="root",
                                                      dependent=token['text'],
                                                      dependent_index=token['id']))
                  break # Assume first verb is root
 
         if root_candidate != -1:
+            root = tokens[root_candidate]
+
             # 2. Find nominal subject (nsubj) - often a NOUN before the root verb
             for i in range(root_candidate):
                  if tokens[i]['upos'] in ['NOUN', 'PROPN', 'PRON']:
@@ -369,45 +430,255 @@ class ShallowDependencyParser:
                                                          dependent_index=tokens[i]['id']))
                      break # Assume first following noun is object
 
-        # 4. Punctuation (attach to preceding word or root) - simplified
-        for i, token in enumerate(tokens):
-            if token['upos'] == 'PUNCT':
-                 attach_to = root_candidate if root_candidate != -1 else len(tokens) - 2 # Fallback
-                 if i > 0: attach_to = i - 1 # Attach to previous token usually
-                 if attach_to >= 0:
-                      relations.append(DependencyRelation(head=tokens[attach_to]['text'],
-                                                          head_index=tokens[attach_to]['id'],
-                                                          relation="punct", dependent=token['text'],
-                                                          dependent_index=token['id']))
+            # 4. Punctuation (attach to preceding word or root) - simplified
+            for i, token in enumerate(tokens):
+                if token['upos'] == 'PUNCT':
+                    attach_to = root_candidate if root_candidate != -1 else len(tokens) - 2 # Fallback
+                    if i > 0: attach_to = i - 1 # Attach to previous token usually
+                    if attach_to >= 0:
+                        relations.append(DependencyRelation(head=tokens[attach_to]['text'],
+                                                            head_index=tokens[attach_to]['id'],
+                                                            relation="punct", dependent=token['text'],
+                                                            dependent_index=token['id']))
+                            
+            # 5. amod - adjectival modifier
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] in ['NOUN', 'PROPN'] and tokens[i-1]['upos'] == 'ADJ':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="amod", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+
+            # 6. advmod - adverb modifying verb
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] == 'VERB' and tokens[i-1]['upos'] == 'ADV':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="advmod", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+
+            # 7. aux - auxiliary verb before main verb
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] == 'VERB' and tokens[i-1]['upos'] == 'AUX':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="aux", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+
+            # 8. case - prepositions before nouns
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] == 'NOUN' and tokens[i-1]['upos'] == 'ADP':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="case", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+
+            # 9. punct - punctuation
+            for i, token in enumerate(tokens):
+                if token['upos'] == 'PUNCT':
+                    attach_to = i - 1 if i > 0 else root_candidate
+                    if attach_to >= 0:
+                        relations.append(DependencyRelation(head=tokens[attach_to]['text'],
+                                                            head_index=tokens[attach_to]['id'],
+                                                            relation="punct", dependent=token['text'],
+                                                            dependent_index=token['id']))
+
+            # 10. conj - coordinated noun/verb/adjective phrases
+            for i in range(1, len(tokens) - 1):
+                if tokens[i]['upos'] == 'CCONJ':
+                    if tokens[i-1]['upos'] == tokens[i+1]['upos'] and tokens[i-1]['upos'] in ['NOUN', 'VERB', 'ADJ']:
+                        relations.append(DependencyRelation(head=tokens[i-1]['text'],
+                                                            head_index=tokens[i-1]['id'],
+                                                            relation="conj", dependent=tokens[i+1]['text'],
+                                                            dependent_index=tokens[i+1]['id']))
+            
+            # 11. nmod - noun modifying another noun
+            for i in range(1, len(tokens)):
+                if tokens[i-1]['upos'] == 'NOUN' and tokens[i]['upos'] == 'NOUN':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="nmod", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+            
+            # 12. compound - compound noun modifier
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] == 'NOUN' and tokens[i-1]['upos'] in ['NOUN', 'PROPN']:
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="compound", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+                    
+            # 13. mark - subordinating conjunction
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] == 'VERB' and tokens[i-1]['upos'] == 'SCONJ':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="mark", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
+                    
+            # 14. expl - expletive 'there' or 'it'
+            for i in range(len(tokens)):
+                if tokens[i]['text'].lower() in ['there', 'it'] and tokens[i]['upos'] == 'PRON':
+                    for j in range(i+1, len(tokens)):
+                        if tokens[j]['upos'] == 'VERB':
+                            relations.append(DependencyRelation(head=tokens[j]['text'],
+                                                                head_index=tokens[j]['id'],
+                                                                relation="expl", dependent=tokens[i]['text'],
+                                                                dependent_index=tokens[i]['id']))
+                            break
+                            
+            # 15. xcomp - open clausal complement
+            for i in range(len(tokens) - 1):
+                if tokens[i]['upos'] == 'VERB' and tokens[i+1]['upos'] == 'VERB':
+                    if tokens[i+1]['text'].lower() in ['to', 'be', 'go', 'do', 'have'] or tokens[i+1]['upos'] == 'VERB':
+                        relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                            head_index=tokens[i]['id'],
+                                                            relation="xcomp", dependent=tokens[i+1]['text'],
+                                                            dependent_index=tokens[i+1]['id']))
+                        
+            # 16. ccomp - clausal complement
+            for i in range(len(tokens) - 1):
+                if tokens[i]['upos'] == 'VERB' and tokens[i+1]['text'].lower() in ['that']:
+                    for j in range(i+2, len(tokens)):
+                        if tokens[j]['upos'] == 'VERB':
+                            relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                                ead_index=tokens[i]['id'],
+                                                                relation="ccomp", dependent=tokens[j]['text'],
+                                                                dependent_index=tokens[j]['id']))
+                            break
+
+            # 17. discourse - discourse markers
+            discourse_words = {'well', 'so', 'however', 'anyway', 'actually'}
+            for i, token in enumerate(tokens):
+                if token['text'].lower() in discourse_words:
+                    if root_candidate != -1:
+                        relations.append(DependencyRelation(head=tokens[root_candidate]['text'],
+                                                            head_index=tokens[root_candidate]['id'],
+                                                            relation="discourse", dependent=token['text'],
+                                                            dependent_index=token['id']))
+                        
+            # 18. vocative - direct address (PROPN or NOUN at sentence start)
+            if len(tokens) > 1 and tokens[0]['upos'] in ['PROPN', 'NOUN']:
+                for i in range(1, len(tokens)):
+                    if tokens[i]['upos'] == 'VERB':
+                        relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                            head_index=tokens[i]['id'],
+                                                            relation="vocative", dependent=tokens[0]['text'],
+                                                            dependent_index=tokens[0]['id']))
+                        break
+            
+            # 19. advcl - adverbial clause introduced by subordinator
+            for i in range(len(tokens) - 2):
+                if tokens[i]['upos'] == 'SCONJ' and tokens[i+1]['upos'] == 'PRON' and tokens[i+2]['upos'] == 'VERB':
+                    relations.append(DependencyRelation(head=tokens[i+2]['text'],
+                                                        head_index=tokens[i+2]['id'],
+                                                        relation="advcl", dependent=tokens[i]['text'],
+                                                        dependent_index=tokens[i]['id']))
+
+            # 20. obl - nominal used with preposition
+            for i in range(1, len(tokens) - 1):
+                if tokens[i]['upos'] == 'ADP' and tokens[i+1]['upos'] in ['NOUN', 'PROPN']:
+                    for j in range(i-1, -1, -1):
+                        if tokens[j]['upos'] == 'VERB':
+                            relations.append(DependencyRelation(head=tokens[j]['text'],
+                                                                head_index=tokens[j]['id'],
+                                                                relation="obl", dependent=tokens[i+1]['text'],
+                                                                dependent_index=tokens[i+1]['id']))
+                            break
+
+            # 21. nummod - numeric modifier
+            for i in range(1, len(tokens)):
+                if tokens[i]['upos'] in ['NOUN', 'PROPN'] and tokens[i-1]['upos'] == 'NUM':
+                    relations.append(DependencyRelation(head=tokens[i]['text'],
+                                                        head_index=tokens[i]['id'],
+                                                        relation="nummod", dependent=tokens[i-1]['text'],
+                                                        dependent_index=tokens[i-1]['id']))
 
         # ... many more rules needed for other relation types (amod, advmod, case, det, etc.) ...
         # A real system uses machine learning or hundreds/thousands of rules.
-
         return relations
+
+    def _detect_modality(self, tokens: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Detects linguistic modality of the sentence based on lexical markers.
+
+        Returns:
+            The modality label (e.g., 'epistemic', 'imperative', 'deontic', etc.) or None.
+        """
+        token_texts = [t["text"].lower() for t in tokens]
+
+        for modality_type, markers in self.modality_markers.items():
+            for marker in markers:
+                if marker in token_texts:
+                    return modality_type
+        return None
+
+    def extract_entities(self, text: str, pos_tags: List[Tuple[str, str]]) -> Dict[str, Dict[str, str]]:
+        """
+        Extracts basic named or noun phrase entities using POS-tag patterns.
+
+        Returns:
+            A dictionary of extracted entities with basic types (noun phrase).
+        """
+        entities = {}
+        current_entity = []
+
+        for word, tag in pos_tags:
+            if tag in {"NOUN", "PROPN"}:
+                current_entity.append(word)
+            else:
+                if current_entity:
+                    key = " ".join(current_entity)
+                    entities[key] = {"type": "noun_phrase"}
+                    current_entity = []
+
+        # Flush last entity
+        if current_entity:
+            key = " ".join(current_entity)
+            entities[key] = {"type": "noun_phrase"}
+
+        return entities
 
     def parse(self, text: str) -> Dict[str, Any]:
         """
-        Parses the text to extract shallow dependency relations.
-
-        Args:
-            text: The input text.
-
+        Parses input text and extracts shallow dependency relations.
+        
         Returns:
-            A dictionary containing the list of tokens (with POS/features)
-            and a list of identified dependency relations.
+            {
+                'tokens': List of POS-tagged token dictionaries,
+                'dependencies': List of DependencyRelation tuples,
+                'modality': Optional detected modality (e.g., 'epistemic', 'imperative', etc.),
+                'entities': Detected named or noun-phrase entities,
+                'sentiment_terms': Tokens contributing to sentiment,
+            }
         """
-        # 1. Tokenize and POS Tag (using placeholder)
-        tokens = self._tokenize_pos_tag(text)
+        # 1. Coreference resolution
+        resolved_text = self.coref_resolver.resolve(text)
 
-        # 2. Apply rules/patterns (using placeholder)
+        # 2. Tokenization & POS tagging
+        tokens = self._tokenize_pos_tag(resolved_text)
+
+        # 3. Dependency parsing rules
         dependencies = self._apply_rules(tokens)
 
-        # Update token dictionaries with head/relation info (optional)
-        # ... logic to map dependencies back to token['head'] and token['deprel'] ...
+        # 4. Modality detection
+        modality = self._detect_modality(tokens)
+
+        # 5. Named/noun-phrase entity recognition
+        tagged = [(t["text"], t["upos"]) for t in tokens]
+        entities = self.grammar.extract_entities(resolved_text, tagged)
+
+        # 6. Sentiment terms
+        sentiment_terms = [
+            t["text"] for t in tokens if t["text"].lower() in self.pos_clusters["SENTIMENT"]
+        ]
 
         return {
-            'tokens': tokens, # List of token dictionaries
-            'dependencies': dependencies # List of DependencyRelation namedtuples
+            "tokens": tokens,
+            "dependencies": dependencies,
+            "modality": modality,
+            "entities": entities,
+            "sentiment_terms": sentiment_terms,
         }
 
 
