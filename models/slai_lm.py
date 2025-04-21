@@ -1,3 +1,7 @@
+"""
+SLAILM is the Base Language Model of SLAI
+"""
+
 import os
 import sys
 import random
@@ -60,9 +64,7 @@ class SLAILM:
         start = time.time()
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.knowledge_agent = KnowledgeAgent(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,)
+        self._knowledge_agent = None
         self.conversation_history = []
         self.sentiment_lexicon = self.load_sentiment_lexicon()
         """
@@ -171,12 +173,6 @@ class SLAILM:
         self.custom_config = custom_config or {}
         self.context_memory = deque(maxlen=context_memory_limit)
 
-        #try:
-        #    with open("src/agents/language/nlg_templates_en.json", "r") as f:
-        #        self.responses.update(json.load(f))
-        #except Exception as e:
-        #    logging.warning("Could not load NLG templates: %s", e)
-
         # --- Final Checks and Setup ---
         if self.grammar_processor is None or self.dialogue_context is None:
             logging.critical("One or more critical components (GrammarProcessor, DialogueContext) failed to initialize. SLAILM may not function correctly.")
@@ -259,11 +255,18 @@ class SLAILM:
     
     def _tokenize(self, text: str) -> list[str]:
         """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
+        for i, pattern_item in enumerate(pos_patterns):
+            try:
+                pattern, name = pattern_item
+            except (ValueError, TypeError) as e:
+                logging.error(f"Invalid POS pattern format: {pattern_item}")
+                continue
+
         if self.grammar_processor and hasattr(self.grammar_processor, 'pos_patterns'):
             tokens = []
             pos_patterns = sorted(
-                self.grammar_processor.pos_patterns,
-                key=lambda x: len(x[0].pattern), 
+                [(p, name) for name, p in self.grammar_processor.pos_patterns.items()],  # Convert dict items to tuples
+                key=lambda x: len(x[0].pattern),
                 reverse=True  # Match longer patterns first
             )
             
@@ -446,6 +449,7 @@ class SLAILM:
         Loads a structured sentiment lexicon for valence scoring.
         Returns a dictionary with 'positive', 'negative', 'intensifiers', and 'negators'.
         """
+    
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -683,6 +687,15 @@ class SLAILM:
             
     def handle_general_prompt(self, prompt: str) -> str:
         return self.generate_response(prompt)
+
+    @property
+    def knowledge_agent(self):
+        if self._knowledge_agent is None:
+            self._knowledge_agent = KnowledgeAgent(
+                shared_memory=self.shared_memory,
+                agent_factory=self.agent_factory
+            )
+        return self._knowledge_agent
 
 class SLAILMValueModel:
     def __init__(self, slai_lm, memory=None, ethics_checker=None):
