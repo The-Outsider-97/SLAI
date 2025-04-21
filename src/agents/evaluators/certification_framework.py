@@ -7,10 +7,12 @@ Implements multi-level certification process based on:
 
 import datetime
 import hashlib
+import json
 
+from pathlib import Path
 from enum import Enum, auto
-from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
 
 class CertificationLevel(Enum):
     """SAE J3016-inspired levels"""
@@ -71,29 +73,34 @@ class CertificationManager:
         self.evidence_registry = []
         
     def _load_domain_requirements(self) -> Dict[CertificationLevel, List[CertificationRequirement]]:
-        """Domain-specific certification rules structured by CertificationLevel"""
-        templates = {
-            "automotive": {
-                CertificationLevel.DEVELOPMENT: [
+        """Load requirements from JSON template file"""
+        template_path = Path(__file__).parent / "certification_templates.json"
+        
+        try:
+            with open(template_path, 'r') as f:
+                templates = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"Failed to load certification templates: {str(e)}")
+
+        domain_templates = templates.get(self.domain, {})
+        
+        # Convert JSON structure to CertificationRequirement objects
+        requirements = {}
+        for level_name, req_list in domain_templates.items():
+            try:
+                level = CertificationLevel[level_name]
+                requirements[level] = [
                     CertificationRequirement(
-                        "Fail-operational architecture",
-                        "Fault injection testing",
-                        "No catastrophic failures",
-                        ["FTA report", "FMEA records"]
-                    )
-                ],
-                # Add other levels as needed
-            },
-            "healthcare": [
-                CertificationRequirement(
-                    "Patient confidentiality",
-                    "Data leakage testing",
-                    "0% unauthorized access",
-                    ["Privacy impact assessment"]
-                )
-            ]
-        }
-        return templates.get(self.domain, [])
+                        description=req["description"],
+                        test_method=req["test_method"],
+                        passing_condition=req["passing_condition"],
+                        evidence_required=req["evidence_required"]
+                    ) for req in req_list
+                ]
+            except KeyError:
+                continue  # Skip invalid certification levels
+                
+        return requirements
     
     def submit_evidence(self, evidence: Dict):
         """Add validation evidence to certification package"""
