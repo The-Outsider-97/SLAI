@@ -1,16 +1,54 @@
 import logging
 import os, sys
 import time
+import json
 import difflib
 import traceback
+from collections import OrderedDict, defaultdict, deque
 
 class BaseAgent:
     def __init__(self, shared_memory, agent_factory, config=None):
             self.shared_memory=shared_memory,
             self.agent_factory=agent_factory,
-            self.config=config or {}
+            self.config=config or {
+                'defer_initialization': True,
+                'memory_profile': 'low',
+                'network_compression': True
+            }
+            # Initialize lazy components system
+            self._component_initializers = {
+                'memory_view': lambda: self.SharedMemoryView(shared_memory),
+                'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
+            }
+            self._lazy_components = OrderedDict()
+            
+            # Initialize core components immediately
+            self._init_core_components()
+
             self.logger = logging.getLogger(self.__class__.__name__)
             self.name = self.__class__.__name__
+
+    def _init_core_components(self):
+        """Initialize essential components first"""
+        # Access memory view to initialize it
+        _ = self.memory_view  # Triggers initialization through property
+
+    @property
+    def memory_view(self):
+        return self.lazy_property('memory_view')
+
+    @property
+    def performance_metrics(self):
+        return self.lazy_property('performance_metrics')
+
+    def lazy_property(self, name):
+        """Get or create a lazy-initialized component"""
+        if name not in self._lazy_components:
+            if name in self._component_initializers:
+                self._lazy_components[name] = self._component_initializers[name]()
+            else:
+                raise AttributeError(f"No initializer for lazy component: {name}")
+        return self._lazy_components[name]
 
     def execute(self, input_data):
         try:
@@ -158,21 +196,115 @@ class BaseAgent:
         return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
     
     def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
+        """Handle query execution as the primary task"""
         self.logger.info(f"Executing task with data: {task_data}")
     
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
+        if isinstance(task_data, dict) and "query" in task_data:
+            return self.retrieve(task_data["query"])
+        elif isinstance(task_data, str):
+            return self.retrieve(task_data)
+        else:
+            raise ValueError("Unsupported task format")
+
+
+    class SharedMemoryView:
+        """Lightweight memory access with LRU caching"""
+        __slots__ = ['_source', '_cache', '_cache_size']
+        
+        def __init__(self, shared_memory):
+            self._source = shared_memory
+            self._cache = OrderedDict()
+            self._cache_size = 100
+            
+        def get(self, key):
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+
+            # Fetch from source and cache    
+            value = self._source.get(key)
+            self._cache[key] = value
+
+            # Enforce cache size limit
+            if len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+
+            return value
+
+        def set(self, key, value):
+            # Update both cache and source
+            self._source.set(key, value)
+            if key in self._cache:
+                self._cache[key] = value
+
+        def get_usage_stats(self):
+            return {
+                'cache_size': len(self._cache),
+                'hit_rate': self._source.get('cache_hit_rate', 0)
+            }
+
+    def optimized_step(self, state):
+        """Memory-aware step method template"""
+        if not hasattr(self, '_policy_net'):
+            self._policy_net = self.create_lightweight_network()
+        return self._policy_net.predict(state)
+
+    # Template methods for subclasses
+    def _init_agent_specific_components(self):
+        """To be implemented by subclasses"""
+        pass
+
+    def _warm_start_if_available(self):
+        """Optional warm-start from shared memory"""
+        pass
+
+    def create_lightweight_network(self):
+        """Override for agent-specific networks"""
+        return None
+
+class LightMetricStore:
+    """Lightweight metric tracking for performance and memory"""
+    def __init__(self):
+        self.metrics = {
+            'timings': {},
+            'memory_usage': {}
+        }
+
+    def start_tracking(self, metric_name: str):
+        """Start tracking a metric"""
+        self.metrics['timings'][metric_name] = time.time()
+        self.metrics['memory_usage'][metric_name] = self._get_current_memory()
+
+    def stop_tracking(self, metric_name: str):
+        """Stop tracking and calculate deltas"""
+        if metric_name in self.metrics['timings']:
+            self.metrics['timings'][metric_name] = time.time() - self.metrics['timings'][metric_name]
+        if metric_name in self.metrics['memory_usage']:
+            self.metrics['memory_usage'][metric_name] = self._get_current_memory() - self.metrics['memory_usage'][metric_name]
+
+    def _get_current_memory(self) -> float:
+        """Get current process memory in MB"""
+        import psutil
+        return psutil.Process().memory_info().rss / 1024 ** 2
+
+    def get_metrics_report(self) -> str:
+        """Generate formatted metrics report"""
+        return json.dumps(self.metrics, indent=2)
+
+class LazyAgent:
+    """
+    Wrapper for deferred initialization of learning sub-agents.
+    Executes creation only when first accessed.
+    """
+    def __init__(self, init_fn):
+        self._init_fn = init_fn
+        self._agent = None
+
+    def __getattr__(self, item):
+        if self._agent is None:
+            self._agent = self._init_fn()
+        return getattr(self._agent, item)
     
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
+#if __name__ == "__main__":
+#    agent.memory_view.get('recent_errors')
+#    agent.performance_metrics['response_times'].append(0.42)
