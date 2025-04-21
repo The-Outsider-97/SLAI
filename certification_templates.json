@@ -1,0 +1,36 @@
+{
+  "automotive": {
+    "DEVELOPMENT": [
+      {
+        "description": "Fail-operational architecture",
+        "test_method": "Fault injection testing",
+        "passing_condition": "No catastrophic failures", 
+        "evidence_required": ["FTA report", "FMEA records"]
+      },
+      {
+        "description": "Sensor redundancy",
+        "test_method": "Sensor failure simulation",
+        "passing_condition": "Degraded performance within safe limits",
+        "evidence_required": ["Sensor logs", "Failure recovery reports"]
+      }
+    ],
+    "PILOT": [
+      {
+        "description": "Real-world scenario coverage",
+        "test_method": "On-road testing",
+        "passing_condition": "95% scenario coverage",
+        "evidence_required": ["Test drive logs", "Scenario coverage maps"]
+      }
+    ]
+  },
+  "healthcare": {
+    "DEVELOPMENT": [
+      {
+        "description": "Patient confidentiality",
+        "test_method": "Data leakage testing", 
+        "passing_condition": "0% unauthorized access",
+        "evidence_required": ["Privacy impact assessment"]
+      }
+    ]
+  }
+}
