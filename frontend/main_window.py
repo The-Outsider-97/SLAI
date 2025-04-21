@@ -1,6 +1,5 @@
 import os, sys
-import psutil
-import GPUtil
+import psutil, GPUtil
 import torch
 import logging
 import subprocess
