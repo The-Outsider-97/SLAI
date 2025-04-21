@@ -1,6 +1,7 @@
 import re
 import math
 import json
+import copy
 import random
 import logging as logger
 from pathlib import Path
@@ -38,7 +39,8 @@ class GrammarProcessor:
         'existential': 'EX',   # Existential 'there'
     }
 
-    def __init__(self, lang='en', structured_wordlist=None, wordlist=None, nlg_templates=None, rules_path=None, knowledge_agent=None):
+    def __init__(self, lang='en', structured_wordlist=None, wordlist=None,
+                 nlg_templates=None, rules_path=None, knowledge_agent=None):
         self.morph_rules = MORPHOLOGY_RULES[lang]
         self.reset_parser_state()
         self.knowledge_base = knowledge_agent
