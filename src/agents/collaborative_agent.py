@@ -293,14 +293,14 @@ class CollaborativeAgent(BaseAgent):
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
-        self.performance_metrics = {
+        self.performance_metrics.update({
             'assessments_completed': 0,
             'interventions': 0,
             'false_positives': 0,
             'false_negatives': 0,
             'tasks_coordinated': 0,
             'coordination_failures': 0
-        }
+        })
 
     def _load_config(self, config_path: str) -> Dict:
         """Load agent network configuration from YAML file"""
