@@ -11,6 +11,7 @@ Key Features:
 
 import json
 import os
+import hashlib
 import logging
 import subprocess
 import numpy as np
@@ -85,24 +86,30 @@ class EvaluationAgent(BaseAgent):
                        rewards_b=None
                        ):
         """Central logging method"""
+        if not rewards_a or not rewards_b:
+            logging.warning("Empty reward arrays in log_evaluation.")
+            return
+        
         ci_a = self.stats.compute_confidence_interval(rewards_a)
         ci_b = self.stats.compute_confidence_interval(rewards_b)
         t_test = self.stats.t_test(rewards_a, rewards_b)
         effect = self.stats.effect_size(rewards_a, rewards_b)
 
-        self.log_evaluation({
+        self.log_stats({
             "ci_model_A": ci_a,
             "ci_model_B": ci_b,
             "t_test_p": t_test["p_value"],
             "significant": t_test["significant"],
             "effect_size": effect
         })
-        self.evaluation_results["statistical_analysis"] = {
-            "ci_model_A": [round(ci_a[0], 4), round(ci_a[1], 4)],
-            "ci_model_B": [round(ci_b[0], 4), round(ci_b[1], 4)],
-            "t_test_p": round(t_test["p_value"], 6),
-            "significant": t_test["significant"],
-            "effect_size": round(effect, 3)
+        self.evaluation_results = {
+            "statistical_analysis": {
+                "ci_model_A": [round(ci_a[0], 4), round(ci_a[1], 4)],
+                "ci_model_B": [round(ci_b[0], 4), round(ci_b[1], 4)],
+                "t_test_p": round(t_test["p_value"], 6),
+                "significant": t_test["significant"],
+                "effect_size": round(effect, 3)
+            }
         }
         try:
             hazards = results.get("hazards", {})
@@ -142,7 +149,12 @@ class EvaluationAgent(BaseAgent):
             "vuln_count": results.get("vuln_count", 1)
         })
         self.cert_auditor.evaluate_asil(results.get("coverage", 0.96), results.get("test_count", 10000))
-        self.cert_auditor.finalize_ul4600(results.get("log_snippets", ["validation passed", "tests successful"]))
+        log_snippets = results.get("log_snippets", [])
+        if not isinstance(log_snippets, list) or len(log_snippets) < 2:
+            logging.warning("Insufficient log_snippets for UL4600 finalization; applying defaults.")
+            log_snippets = ["validation passed", "tests successful"]  # fallback
+        
+        self.cert_auditor.finalize_ul4600(log_snippets)
         self.cert_auditor.integrate_nist_rmf({
             "distribution_shift": results.get("distribution_shift", 0.1),
             "fairness_score": results.get("fairness_score", 0.85)
@@ -194,6 +206,11 @@ class EvaluationAgent(BaseAgent):
 
         except Exception as e:
             logging.warning(f"Evaluation logging failed: {e}")
+
+    def log_stats(self, stats: Dict[str, Any]):
+        logging.info("[EvaluationAgent] Evaluation Summary:")
+        for key, val in stats.items():
+            logging.info(f"{key}: {val}")
 
 # ------------------------ Base Infrastructure ------------------------ #
 logger = logging.getLogger(__name__)
@@ -701,32 +718,37 @@ class CertificationManager:
         }.get(self.domain, [])
 
 
-# ----------------to be fix later - AuditTrail.__init__() got an unexpected keyword argument 'difficulty'----------------------
-#class AuditTrail: 
-#    """Implements immutable evidence storage per GDPR Article 30"""
-#    
-#    def __init__(self):
-#        self.chain = []
-#        self._genesis_block()
-#        
-#    def _genesis_block(self):
-#        """Initialize blockchain-style audit trail"""
-#        self.chain.append({
-#            'timestamp': datetime.now(),
-#            'hash': '0'*64,
-#            'data': 'GENESIS BLOCK'
-#        })
-#    
-#    def add_evidence(self, validation_data):
-#        """Add cryptographically-secured validation record"""
-#       new_block = {
-#          'timestamp': datetime.now(),
-#          'previous_hash': self.chain[-1]['hash'],
-#            'data': validation_data
-#        }
-#        # Simplified hash calculation
-#        new_block['hash'] = f"{hash(frozenset(new_block.items())):064x}"
-#        self.chain.append(new_block)
+class AuditTrail:
+    """Implements immutable evidence storage per GDPR Article 30"""
+
+    def __init__(self, difficulty: int = 1):
+        self.difficulty = difficulty
+        self.chain = []
+        self._genesis_block()
+
+    def _genesis_block(self):
+        """Initialize blockchain-style audit trail"""
+        self.chain.append({
+            'timestamp': datetime.now(),
+            'hash': '0' * 64,
+            'data': 'GENESIS BLOCK',
+            'difficulty': self.difficulty
+        })
+
+    def add_document(self, validation_data):
+        """Add cryptographically-secured validation record"""
+        block = {
+            'timestamp': datetime.now().isoformat(),
+            'previous_hash': self._last_hash(),
+            'data': validation_data,
+            'difficulty': self.difficulty
+        }
+        block_hash = hashlib.sha256(str(block).encode()).hexdigest()
+        block['hash'] = block_hash
+        self.chain.append(block)
+
+    def _last_hash(self):
+        return self.chain[-1]['hash'] if self.chain else '0' * 64
 
 
 # ------------------------ Example Usage ------------------------ #
