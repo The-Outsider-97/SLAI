@@ -6,6 +6,69 @@ class ProbabilisticModels:
     def __init__(self):
         pass
 
+    def bayesian_inference(self, query: str, evidence: Dict[str, bool]) -> float:
+        """
+        Exact inference using message passing algorithm based on:
+        - Pearl (1988) Probabilistic Reasoning in Intelligent Systems
+        - Koller & Friedman (2009) Probabilistic Graphical Models
+        """
+        # Convert evidence to network nodes
+        observed = {node: value for node, value in evidence.items() 
+                   if node in self.bayesian_network['nodes']}
+
+        # Initialize belief states
+        beliefs = {node: {'prior': 0.5, 'likelihood': 1.0} 
+                  for node in self.bayesian_network['nodes']}
+
+        # Set observed evidence
+        for node, value in observed.items():
+            beliefs[node]['prior'] = 1.0 if value else 0.0
+            beliefs[node]['likelihood'] = 1.0  # Hard evidence
+
+        # Message passing schedule
+        for _ in range(2):  # Two-pass loopy belief propagation
+            # Forward pass (children to parents)
+            for edge in self.bayesian_network['edges']:
+                parent, child = edge
+                if parent == query:
+                    continue
+
+                # Calculate message: P(child|parent) * belief(child)
+                cpt = self.bayesian_network['cpt'][child]
+                message = sum(cpt[parent_val][child_val] * beliefs[child]['prior']
+                             for parent_val in [True, False]
+                             for child_val in [True, False])
+
+                beliefs[parent]['likelihood'] *= message
+
+            # Backward pass (parents to children)
+            for edge in reversed(self.bayesian_network['edges']):
+                parent, child = edge
+                if child == query:
+                    continue
+
+                # Calculate message: sum_{parent} P(child|parent) * belief(parent)
+                cpt = self.bayesian_network['cpt'][child]
+                message = sum(cpt[parent_val][child_val] * beliefs[parent]['prior']
+                             for parent_val in [True, False]
+                             for child_val in [True, False])
+
+                beliefs[child]['likelihood'] *= message
+
+        # Final marginal calculation using belief propagation
+        marginal = 1.0
+        for node in self.bayesian_network['nodes']:
+            if node == query:
+                prior = self.bayesian_network['cpt'].get(node, {}).get('prior', 0.5)
+                marginal = prior * beliefs[node]['likelihood']
+                break
+            elif node in observed:
+                marginal *= beliefs[node]['prior']
+
+        # Normalize using partition function
+        partition = marginal + (1 - prior) * (1 - beliefs[node]['likelihood'])
+        return marginal / partition if partition != 0 else 0.5
+
     def probabilistic_query(self, fact: Tuple, evidence: Dict[Tuple, bool] = None) -> float:
         """
         Hybrid inference combining:
