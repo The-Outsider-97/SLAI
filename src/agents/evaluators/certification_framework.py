@@ -71,16 +71,19 @@ class CertificationManager:
         self.evidence_registry = []
         
     def _load_domain_requirements(self) -> Dict[CertificationLevel, List[CertificationRequirement]]:
-        """Domain-specific certification rules"""
+        """Domain-specific certification rules structured by CertificationLevel"""
         templates = {
-            "automotive": [
-                CertificationRequirement(
-                    "Fail-operational architecture",
-                    "Fault injection testing",
-                    "No catastrophic failures",
-                    ["FTA report", "FMEA records"]
-                )
-            ],
+            "automotive": {
+                CertificationLevel.DEVELOPMENT: [
+                    CertificationRequirement(
+                        "Fail-operational architecture",
+                        "Fault injection testing",
+                        "No catastrophic failures",
+                        ["FTA report", "FMEA records"]
+                    )
+                ],
+                # Add other levels as needed
+            },
             "healthcare": [
                 CertificationRequirement(
                     "Patient confidentiality",
@@ -101,9 +104,11 @@ class CertificationManager:
         })
     
     def evaluate_certification(self) -> tuple[bool, List[str]]:
-        """Determine if current evidence meets requirements"""
+        """Check requirements for the current certification level"""
         unmet = []
-        for req in self.requirements[self.current_level]:
+        # Get requirements for the current level
+        level_requirements = self.requirements.get(self.current_level, [])
+        for req in level_requirements:
             if not any(self._matches_requirement(ev, req) for ev in self.evidence_registry):
                 unmet.append(req.description)
         return (len(unmet) == 0, unmet)
