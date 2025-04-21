@@ -1,0 +1,320 @@
+{
+  "Adoption": {
+    "description": "An individual or group takes in and accepts a person, idea, or practice.",
+    "roles": ["Adopter", "Adoptee", "Reason", "Institution"],
+    "verbs": ["adopt", "accept", "embrace", "take in", "assimilate"],
+    "prepositions": ["into", "by", "from"]
+  },
+  "Agreement": {
+    "description": "An agreement is reached between parties, formal or informal.",
+    "roles": ["Participants", "Terms", "Topic", "Instrument", "Time"],
+    "verbs": ["agree", "consent", "accept", "negotiate", "ratify", "settle"],
+    "prepositions": ["on", "to", "with", "about"]
+  },
+  "Applying_heat": {
+    "description": "A cook applies heat to food, possibly using a heating instrument or container.",
+    "roles": ["Cook", "Food", "Heating_instrument", "Container", "Duration"],
+    "verbs": ["bake", "boil", "fry", "roast", "heat", "cook", "simmer", "steam", "broil"],
+    "prepositions": ["in", "on", "with", "for"]
+  },
+  "Approval": {
+    "description": "An authority or group accepts a proposal or action.",
+    "roles": ["Approver", "Proposal", "Reason", "Condition"],
+    "verbs": ["approve", "accept", "endorse", "authorize", "validate"],
+    "prepositions": ["of", "for", "with"]
+  },
+  "Attack": {
+    "description": "An aggressor initiates a harmful action against a target.",
+    "roles": ["Attacker", "Target", "Weapon", "Manner", "Cause"],
+    "verbs": ["attack", "assault", "strike", "invade", "bomb", "ambush"],
+    "prepositions": ["on", "against", "with"]
+  },
+  "Celebration": {
+    "description": "People celebrate an event with a specific purpose or emotion.",
+    "roles": ["Participants", "Event", "Reason", "Place", "Emotion"],
+    "verbs": ["celebrate", "commemorate", "honor", "rejoice", "observe"],
+    "prepositions": ["for", "at", "with"]
+  },
+  "CauseEffect": {
+    "description": "Causal relationships between events or conditions.",
+    "roles": ["Cause", "Effect", "Context"],
+    "verbs": ["cause", "lead to", "result in", "trigger", "induce"],
+    "prepositions": ["because", "since", "as a result of"]
+  },
+  "Change": {
+    "description": "Transformation or alteration of state.",
+    "roles": ["Entity", "InitialState", "ResultState", "Cause"],
+    "verbs": ["become", "turn", "change", "transform", "convert", "evolve"],
+    "prepositions": ["into", "from"]
+  },
+  "Cognitive": {
+    "description": "Mental activities involving thoughts and beliefs.",
+    "roles": ["Cognizer", "Content", "Stimulus"],
+    "verbs": ["think", "know", "believe", "consider", "understand", "imagine"],
+    "prepositions": ["about", "that"]
+  },
+  "Commerce_transaction": {
+    "description": "Exchange of goods or services for money between a buyer and a seller.",
+    "roles": ["Buyer", "Seller", "Goods", "Money", "Price", "Place"],
+    "verbs": ["buy", "sell", "purchase", "pay", "cost", "trade", "transact", "acquire", "vend"],
+    "prepositions": ["for", "from", "to", "at", "with"]
+  },
+  "Communication": {
+    "description": "Information exchange between participants.",
+    "roles": ["Speaker", "Message", "Listener", "Medium", "Topic"],
+    "verbs": ["say", "tell", "ask", "report", "announce", "claim", "communicate", "inform"],
+    "prepositions": ["to", "about", "with"]
+  },
+  "Competition": {
+    "description": "Two or more participants vie for a goal or superiority.",
+    "roles": ["Competitor", "Opponent", "Goal", "Judge", "Outcome"],
+    "verbs": ["compete", "contest", "rival", "challenge", "vie"],
+    "prepositions": ["for", "against", "with"]
+  },
+  "Creation": {
+    "description": "An agent creates a new product or concept.",
+    "roles": ["Creator", "Product", "Material", "Tool", "Purpose"],
+    "verbs": ["create", "build", "design", "compose", "develop", "construct"],
+    "prepositions": ["from", "with", "for"]
+  },
+  "Death": {
+    "description": "The ending of life of an animate entity.",
+    "roles": ["Deceased", "Cause", "Witness", "Time", "Place"],
+    "verbs": ["die", "perish", "pass away", "kill", "expire", "decease"],
+    "prepositions": ["of", "from", "in", "at"]
+  },
+  "Deception": {
+    "description": "An agent intentionally misleads another.",
+    "roles": ["Deceiver", "Victim", "Lie", "Motive", "Means"],
+    "verbs": ["deceive", "trick", "mislead", "lie", "fool"],
+    "prepositions": ["about", "to", "with"]
+  },
+  "Define": {
+    "description": "Explaining or specifying the nature or meaning of something.",
+    "roles": ["Definer", "Defined_Entity", "Definition", "Medium"],
+    "verbs": ["define", "explain", "specify", "describe", "characterize"],
+    "prepositions": ["as", "in terms of", "by"]
+  },
+  "Displacement": {
+    "description": "An entity is moved away from its usual location, forcibly or otherwise.",
+    "roles": ["Agent", "Theme", "Source", "Destination", "Cause"],
+    "verbs": ["displace", "evict", "move", "relocate", "remove"],
+    "prepositions": ["from", "to", "out of"]
+  },
+  "Education_teaching": {
+    "description": "A teacher imparts knowledge or skills to a learner.",
+    "roles": ["Teacher", "Student", "Subject", "Institution", "Tool"],
+    "verbs": ["teach", "educate", "instruct", "train", "tutor"],
+    "prepositions": ["about", "on", "with", "in"]
+  },
+  "Emotion": {
+    "description": "Emotional states or reactions.",
+    "roles": ["Experiencer", "Cause", "Stimulus", "Intensity", "Topic"],
+    "verbs": ["feel", "love", "hate", "fear", "enjoy", "miss", "despise", "like", "adore"],
+    "prepositions": ["about", "for", "because of", "at", "with"]
+  },
+  "Escape": {
+    "description": "An entity flees a location or situation of danger.",
+    "roles": ["Escaper", "Location", "Obstacle", "Threat", "Method"],
+    "verbs": ["escape", "flee", "run", "evade", "break out"],
+    "prepositions": ["from", "through", "via"]
+  },
+  "Experimentation": {
+    "description": "A researcher manipulates variables to observe outcomes.",
+    "roles": ["Researcher", "Variable", "Hypothesis", "Method", "Result"],
+    "verbs": ["experiment", "test", "measure", "observe", "analyze"],
+    "prepositions": ["on", "with", "using"]
+  },
+  "Exploration": {
+    "description": "An agent explores a new or unknown place or concept.",
+    "roles": ["Explorer", "Territory", "Motivation", "Tool"],
+    "verbs": ["explore", "investigate", "search", "scout", "survey"],
+    "prepositions": ["in", "into", "through"]
+  },
+  "Filling": {
+    "description": "An agent causes a container to become full of a substance.",
+    "roles": ["Agent", "Container", "Substance", "Instrument"],
+    "verbs": ["fill", "load", "stuff", "pack", "pour", "inflate"],
+    "prepositions": ["into", "with", "in"]
+  },
+  "Giving_birth": {
+    "description": "A biological process in which a mother delivers a child.",
+    "roles": ["Mother", "Child", "Place", "Time", "Medical_staff"],
+    "verbs": ["give birth", "deliver", "birth", "bear"],
+    "prepositions": ["to", "in", "at"]
+  },
+  "Illness": {
+    "description": "An individual is affected by a disease or condition.",
+    "roles": ["Patient", "Illness", "Symptom", "Cause", "Treatment"],
+    "verbs": ["suffer", "have", "diagnose", "treat", "recover"],
+    "prepositions": ["from", "with", "due to"]
+  },
+  "Ingestion": {
+    "description": "An animate entity consumes food or drink.",
+    "roles": ["Ingestor", "Food", "Container", "Tool", "Time"],
+    "verbs": ["eat", "drink", "consume", "devour", "ingest", "swallow"],
+    "prepositions": ["with", "from", "in"]
+  },
+  "Intention": {
+    "description": "Goal-directed or voluntary action planning.",
+    "roles": ["Agent", "Goal", "Plan", "Obstacle", "Purpose"],
+    "verbs": ["intend", "plan", "want", "aim", "try", "mean", "propose"],
+    "prepositions": ["to", "for", "despite"]
+  },
+  "Interrogation": {
+    "description": "An interrogator asks a subject for information, often formally.",
+    "roles": ["Interrogator", "Subject", "Question", "Purpose", "Tactic"],
+    "verbs": ["interrogate", "question", "grill", "ask", "probe"],
+    "prepositions": ["about", "on", "for"]
+  },
+  "Investment": {
+    "description": "An investor commits resources expecting a future return.",
+    "roles": ["Investor", "Asset", "Amount", "Risk", "Return"],
+    "verbs": ["invest", "allocate", "fund", "back", "support"],
+    "prepositions": ["in", "for", "with"]
+  },
+  "Judgment": {
+    "description": "A judge makes an assessment or evaluation of an evaluee based on some reason or evidence.",
+    "roles": ["Judge", "Evaluee", "Reason", "Evidence", "Manner", "Role"],
+    "verbs": ["judge", "evaluate", "assess", "rate", "blame", "praise", "criticize", "admire", "condemn"],
+    "prepositions": ["on", "based on", "for", "as", "against"]
+  },
+  "Judicial_proceeding": {
+    "description": "Legal actions in court regarding a dispute or accusation.",
+    "roles": ["Judge", "Plaintiff", "Defendant", "Case", "Verdict"],
+    "verbs": ["try", "hear", "rule", "adjudicate", "convict"],
+    "prepositions": ["in", "for", "under"]
+  },
+  "Learning": {
+    "description": "A learner acquires knowledge or skill through instruction or experience.",
+    "roles": ["Learner", "Subject", "Source", "Method", "Tool"],
+    "verbs": ["learn", "study", "practice", "grasp", "memorize", "understand"],
+    "prepositions": ["from", "about", "through", "with"]
+  },
+  "Legal": {
+    "description": "Situations involving laws, rules, or contracts.",
+    "roles": ["Plaintiff", "Defendant", "Court", "Claim", "Judgment", "Law", "Offense"],
+    "verbs": ["sue", "claim", "charge", "acquit", "judge", "appeal", "prosecute", "sentence"],
+    "prepositions": ["against", "in", "before", "for", "under"]
+  },
+  "Local": {
+    "description": "Specifies the spatial position or area of an entity or event (related to FrameNet's Locative_relation).",
+    "roles": ["Figure", "Ground", "Direction", "Distance", "Path", "Area"],
+    "verbs": ["be", "stay", "remain", "situate", "locate", "place", "lie", "reside"],
+    "prepositions": ["in", "at", "on", "near", "by", "under", "over", "across", "through", "beside"]
+  },
+  "Measurement": {
+    "description": "An agent quantifies a property of an object.",
+    "roles": ["Measurer", "Object", "Unit", "Instrument", "Result"],
+    "verbs": ["measure", "weigh", "assess", "quantify", "evaluate"],
+    "prepositions": ["with", "in", "by"]
+  },
+  "Manipulation": {
+    "description": "An agent physically manipulates an object to change its position or state.",
+    "roles": ["Agent", "Object", "Instrument", "Location", "Goal"],
+    "verbs": ["manipulate", "move", "adjust", "turn", "rotate", "handle"],
+    "prepositions": ["with", "to", "on", "at"]
+  },
+  "Motion": {
+    "description": "Movement of entities through space.",
+    "roles": ["Agent", "Theme", "Path", "Source", "Goal", "Distance", "Speed", "Direction"],
+    "verbs": ["move", "go", "walk", "run", "travel", "fly", "drive", "come", "proceed", "journey"],
+    "prepositions": ["to", "from", "into", "onto", "through", "across", "towards", "via"]
+  },
+  "Negotiation": {
+    "description": "Two or more parties communicate to resolve a conflict or reach agreement.",
+    "roles": ["Party1", "Party2", "Mediator", "Topic", "Resolution"],
+    "verbs": ["negotiate", "bargain", "discuss", "mediate", "settle"],
+    "prepositions": ["with", "over", "on"]
+  },
+  "Perception": {
+    "description": "Receiving sensory input.",
+    "roles": ["Perceiver", "Stimulus", "Medium", "Direction", "Body_part", "Manner"],
+    "verbs": ["see", "hear", "smell", "taste", "notice", "observe", "feel", "perceive", "sense"],
+    "prepositions": ["with", "through", "from", "at"]
+  },
+  "Permission": {
+    "description": "An authority allows or forbids an action.",
+    "roles": ["Authority", "Agent", "Action", "Rule"],
+    "verbs": ["allow", "permit", "authorize", "forbid", "ban"],
+    "prepositions": ["to", "for", "from"]
+  },
+  "Placing": {
+    "description": "An agent puts a theme in a specific location (Goal).",
+    "roles": ["Agent", "Theme", "Goal", "Cause"],
+    "verbs": ["place", "put", "set", "lay", "position", "arrange", "deposit", "situate"],
+    "prepositions": ["on", "in", "at", "near", "under", "beside", "onto", "into"]
+  },
+  "Possession": {
+    "description": "Ownership or having relationships.",
+    "roles": ["Possessor", "Possession", "Source", "Time"],
+    "verbs": ["have", "own", "possess", "acquire", "inherit", "gain", "belong to"],
+    "prepositions": ["of", "from", "with"]
+  },
+  "Possession_change": {
+    "description": "Ownership or control of an entity changes from one person to another.",
+    "roles": ["Former_owner", "New_owner", "Object", "Cause", "Time"],
+    "verbs": ["transfer", "inherit", "lose", "gain", "acquire", "sell"],
+    "prepositions": ["to", "from", "by"]
+  },
+  "Prediction": {
+    "description": "An agent makes a forecast about a future event.",
+    "roles": ["Forecaster", "Predicted_event", "Evidence", "Confidence"],
+    "verbs": ["predict", "forecast", "expect", "anticipate", "project"],
+    "prepositions": ["about", "based on", "for"]
+  },
+  "Protest": {
+    "description": "A group expresses objection or discontent publicly.",
+    "roles": ["Protesters", "Cause", "Target", "Location", "Means"],
+    "verbs": ["protest", "demonstrate", "march", "object", "resist", "rally"],
+    "prepositions": ["against", "over", "for", "at"]
+  },
+  "Repair": {
+    "description": "An agent restores a damaged object.",
+    "roles": ["Agent", "Object", "Tool", "Problem", "Outcome"],
+    "verbs": ["repair", "fix", "mend", "patch", "restore"],
+    "prepositions": ["with", "to", "by"]
+  },
+  "Rescue": {
+    "description": "An agent saves a victim from danger or threat.",
+    "roles": ["Rescuer", "Victim", "Threat", "Means", "Location"],
+    "verbs": ["rescue", "save", "free", "recover", "pull"],
+    "prepositions": ["from", "out of", "with"]
+  },
+  "Revenge": {
+    "description": "An avenger inflicts punishment on an offender for an injury caused to the injured party.",
+    "roles": ["Avenger", "Offender", "Injury", "Punishment", "Injured_party", "Place", "Time"],
+    "verbs": ["avenge", "retaliate", "revenge", "punish", "get back at"],
+    "prepositions": ["for", "on", "against", "with"]
+  },
+  "Searching": {
+    "description": "An agent actively looks for a person, object, or information.",
+    "roles": ["Searcher", "Target", "Tool", "Location", "Motivation"],
+    "verbs": ["search", "look for", "seek", "hunt", "scan"],
+    "prepositions": ["for", "in", "with"]
+  },
+  "Scheduling": {
+    "description": "Setting a time for an event or activity to occur.",
+    "roles": ["Organizer", "Event", "Time", "Location", "Participants"],
+    "verbs": ["schedule", "plan", "set", "arrange", "book"],
+    "prepositions": ["for", "on", "at"]
+  },
+  "Supply": {
+    "description": "An agent provides goods or resources to a recipient.",
+    "roles": ["Supplier", "Recipient", "Goods", "Amount", "Purpose"],
+    "verbs": ["supply", "deliver", "provide", "offer", "furnish"],
+    "prepositions": ["to", "with", "for"]
+  },
+  "Transfer": {
+    "description": "The act of giving or receiving something.",
+    "roles": ["Donor", "Recipient", "Theme", "Instrument", "Source", "Goal", "Purpose"],
+    "verbs": ["give", "send", "receive", "donate", "offer", "transfer", "hand", "provide"],
+    "prepositions": ["to", "from", "with", "for"]
+  },
+  "Transportation": {
+    "description": "Movement of goods or people via vehicle or infrastructure.",
+    "roles": ["Carrier", "Passenger", "Vehicle", "Origin", "Destination", "Cargo"],
+    "verbs": ["transport", "carry", "ship", "deliver", "haul"],
+    "prepositions": ["to", "from", "by", "via"]
+  }
+}
