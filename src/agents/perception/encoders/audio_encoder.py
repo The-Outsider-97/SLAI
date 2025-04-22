@@ -1,8 +1,8 @@
 import math
 import numpy as np
 
-from src.agents.perception import TensorOps, Parameter, Transformer
-
+from src.agents.perception import TensorOps, Parameter
+from src.agents.perception.modules.transformer import Transformer  
 
 class AudioEncoder:
     def __init__(self, audio_length=16000, patch_size=400, embed_dim=512):
