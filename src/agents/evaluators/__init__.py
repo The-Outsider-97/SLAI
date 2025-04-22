@@ -3,9 +3,9 @@
 Evaluation subsystem components
 """
 
-from src.agents.adaptive_risk import RiskAdaptation, RiskModelParameters
-from src.agents.certification_framework import CertificationManager, CertificationLevel, CertificationRequirement
-from src.agents.documentation import AuditTrail, AuditBlock
+from .adaptive_risk import RiskAdaptation, RiskModelParameters
+from .certification_framework import CertificationManager, CertificationLevel, CertificationRequirement
+from .documentation import AuditTrail, AuditBlock
 
 __all__ = [
     'RiskAdaptation',
