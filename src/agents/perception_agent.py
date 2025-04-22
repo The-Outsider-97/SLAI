@@ -1,6 +1,6 @@
 """
-Enhanced Perception Agent with:
-- Improved weight initialization
+Perception Agent:
+- Weight initialization
 - Memory-efficient attention
 - Batch processing
 - Pretrained loading
@@ -12,298 +12,7 @@ import math
 from collections import OrderedDict
 
 from src.agents.base_agent import BaseAgent
-
-class Parameter:
-    """Wrapper for trainable parameters with gradient storage"""
-    def __init__(self, data):
-        self.data = data
-        self.grad = np.zeros_like(data)
-
-class TensorOps:
-    @staticmethod
-    def layer_norm(x, eps=1e-5):
-        mean = x.mean(axis=-1, keepdims=True)
-        std = x.std(axis=-1, keepdims=True)
-        return (x - mean) / (std + eps)
-    
-    @staticmethod
-    def gelu(x):
-        return 0.5 * x * (1 + np.tanh(math.sqrt(2/math.pi) * (x + 0.044715 * x**3)))
-    
-    @staticmethod
-    def he_init(shape, fan_in):
-        return np.random.randn(*shape) * math.sqrt(2.0 / fan_in)
-
-class EfficientAttention:
-    def __init__(self, embed_dim=512, num_heads=8):
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        
-        # Initialize parameters with proper scaling
-        self.q_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.k_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.v_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.out_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        
-        self._cache = {}
-
-    def forward(self, x, context=None):
-        if context is None:
-            context = x
-            
-        q = np.matmul(x, self.q_proj.data)
-        k = np.matmul(context, self.k_proj.data)
-        v = np.matmul(context, self.v_proj.data)
-        
-        # Efficient batch-aware computation using einsum
-        q = self._split_heads(q)
-        k = self._split_heads(k)
-        v = self._split_heads(v)
-        
-        attn_scores = np.einsum('bhid,bhjd->bhij', q, k) / math.sqrt(self.head_dim)
-        attn_probs = self._softmax(attn_scores)
-        
-        # Memory-efficient attention computation
-        context_vec = np.einsum('bhij,bhjd->bhid', attn_probs, v)
-        context_vec = self._combine_heads(context_vec)
-        output = np.matmul(context_vec, self.out_proj.data)
-        
-        # Store intermediates for backward pass
-        self._cache = {'q': q, 'k': k, 'v': v, 'attn_probs': attn_probs}
-        return output
-
-    def backward(self, dout):
-        # Retrieve cached tensors from forward pass
-        q = self._cache['q']
-        k = self._cache['k']
-        v = self._cache['v']
-        attn_probs = self._cache['attn_probs']
-        batch_size, num_heads, seq_len, head_dim = q.shape
-
-        # Gradient for output projection
-        d_context_vec = np.matmul(dout, self.out_proj.data.T)
-        d_out_proj = np.matmul(
-            self._cache['context_vec'].transpose(0,2,1,3).reshape(-1, self.embed_dim).T,
-            dout.reshape(-1, self.embed_dim)
-        )
-        self.out_proj.grad += d_out_proj
-
-        # Gradient through attention combination
-        d_attn_probs = np.einsum('bhid,bhjd->bhij', d_context_vec, v)
-        d_v = np.einsum('bhij,bhid->bhjd', attn_probs, d_context_vec)
-
-        # Gradient through softmax
-        d_scores = attn_probs * (d_attn_probs - np.einsum('bhij,bhij->bhi', attn_probs, d_attn_probs)[..., None])
-        d_scores /= math.sqrt(self.head_dim)
-
-        # Gradients for Q and K
-        d_q = np.einsum('bhij,bhjd->bhid', d_scores, k)
-        d_k = np.einsum('bhij,bhid->bhjd', d_scores, q)
-
-        # Combine heads and calculate parameter gradients
-        d_q = self._combine_heads(d_q.transpose(0,2,1,3))
-        d_k = self._combine_heads(d_k.transpose(0,2,1,3))
-        d_v = self._combine_heads(d_v.transpose(0,2,1,3))
-
-        self.q_proj.grad += np.matmul(self._cache['x'].transpose(0,2,1), d_q).sum(axis=0)
-        self.k_proj.grad += np.matmul(self._cache['context'].transpose(0,2,1), d_k).sum(axis=0)
-        self.v_proj.grad += np.matmul(self._cache['context'].transpose(0,2,1), d_v).sum(axis=0)
-
-        return np.matmul(d_q, self.q_proj.data.T) + \
-               np.matmul(d_k, self.k_proj.data.T) + \
-               np.matmul(d_v, self.v_proj.data.T)
-
-    def _split_heads(self, x):
-        return x.reshape(x.shape[0], x.shape[1], self.num_heads, self.head_dim).transpose(0,2,1,3)
-
-    def _combine_heads(self, x):
-        return x.transpose(0,2,1,3).reshape(x.shape[0], x.shape[2], -1)
-
-    def _softmax(self, x):
-        max_x = np.max(x, axis=-1, keepdims=True)
-        exp_x = np.exp(x - max_x)
-        return exp_x / exp_x.sum(axis=-1, keepdims=True)
-
-class VisionEncoder:
-    def __init__(self, img_size=224, patch_size=16, embed_dim=512):
-        self.patch_size = patch_size
-        self.num_patches = (img_size // patch_size) ** 2
-        
-        # Proper initialization for convolutional projection
-        self.projection = Parameter(
-            TensorOps.he_init((3 * patch_size**2, embed_dim), 3*patch_size**2)
-        )
-        self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
-        self.position_embed = Parameter(np.random.randn(1, self.num_patches+1, embed_dim) * 0.02)
-        
-        self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
-
-    def extract_patches(self, x):
-        # Batch-aware patch extraction using reshape
-        b, c, h, w = x.shape
-        x = x.reshape(b, c, h//self.patch_size, self.patch_size, w//self.patch_size, self.patch_size)
-        x = x.transpose(0,2,4,1,3,5).reshape(b, -1, c*self.patch_size**2)
-        return x
-
-    def load_pretrained(self, weights):
-        pass
-        
-        def backward(self, dout):
-            return dout
-            """Load pretrained weights in Vision Transformer format
-            Args:
-            weights: Dict containing:
-            - conv_proj: (patch_size, patch_size, 3, embed_dim) for Conv2D projection
-            - cls_token: (1, 1, embed_dim)
-            - pos_embed: (1, num_patches + 1, embed_dim)
-            - transformer_*: Transformer weights
-            """
-            
-        # Convert Conv2D weights to linear projection
-        if 'conv_proj' in weights:
-            # Handle Conv2D -> Linear projection conversion
-            self.projection.data = weights['conv_proj'].transpose(3, 0, 1, 2)  # (embed_dim, 3, patch, patch)
-            self.projection.data = self.projection.data.reshape(self.projection.data.shape[0], -1).T
-        
-        # Direct loading for other parameters
-        self.cls_token.data = weights.get('cls_token', self.cls_token.data)
-        self.position_embed.data = weights.get('pos_embed', self.position_embed.data)
-        
-        # Load transformer weights
-        if any(k.startswith('transformer_') for k in weights):
-            self.transformer.load_pretrained({
-                k.split('transformer_')[-1]: v 
-                for k,v in weights.items() 
-                if k.startswith('transformer_')
-            })
-
-    def forward(self, x):
-        x = self.extract_patches(x)
-        self._patches = x.copy()
-        x = np.matmul(x, self.projection.data)
-        cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
-        x = np.concatenate((cls_tokens, x), axis=1)
-        x += self.position_embed.data
-        x = self.transformer.forward(x)
-        return x
-
-    def backward(self, dout):
-        d_x = self.transformer.backward(dout)
-        d_proj = np.matmul(self._patches.transpose(0, 2, 1), d_x[:, 1:, :])  # skip cls token
-        self.projection.grad += d_proj.sum(axis=0)
-
-class TextEncoder:
-    def __init__(self, vocab_size=50257, embed_dim=512):
-        self.embedding = Parameter(np.random.randn(vocab_size, embed_dim) * 0.02)
-        self.position_embed = Parameter(
-            TensorOps.he_init((1, 512, embed_dim), embed_dim))
-        self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
-
-    def load_pretrained(self, weights):
-        self.embedding.data = weights['token_embedding']
-        self.position_embed.data = weights['position_embedding']
-
-    def forward(self, x):
-        self._tokens = x.copy()
-        embed = np.take(self.embedding.data, x, axis=0) + self.position_embed.data[:, :x.shape[1]]
-        embed = self.transformer.forward(embed)
-        return embed
-
-    def backward(self, dout):
-        d_embed = self.transformer.backward(dout)
-        for i in range(self._tokens.shape[0]):
-            for j in range(self._tokens.shape[1]):
-                self.embedding.grad[self._tokens[i, j]] += d_embed[i, j]
-
-class AudioEncoder:
-    def __init__(self, audio_length=16000, patch_size=400, embed_dim=512):
-        self.patch_size = patch_size
-        self.num_patches = audio_length // patch_size
-        self.in_channels = 1  # Mono audio input
-        
-        # Convolutional projection initialization (1D equivalent)
-        self.projection = Parameter(
-            TensorOps.he_init((patch_size * self.in_channels, embed_dim), 
-            patch_size * self.in_channels)
-        )
-        self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
-        self.position_embed = Parameter(
-            np.random.randn(1, self.num_patches + 1, embed_dim) * 0.02
-        )
-        self.transformer = Transformer(num_layers=6, embed_dim=embed_dim)
-        
-        self._cache = {}
-
-    def extract_patches(self, x):
-        """Convert waveform to patched representation"""
-        # x shape: (batch, channels, length)
-        batch, channels, length = x.shape
-        assert length == self.num_patches * self.patch_size, \
-            "Input length must be divisible by patch size"
-        
-        # Reshape into non-overlapping patches
-        x = x.reshape(batch, channels, self.num_patches, self.patch_size)
-        return x.transpose(0, 2, 1, 3).reshape(batch, self.num_patches, -1)
-
-    def load_pretrained(self, weights):
-        """Load pretrained weights in audio transformer format"""
-        # Handle 1D convolutional projection conversion
-        if 'conv_proj' in weights:
-            # Convert (embed_dim, in_channels, kernel_size) to linear projection
-            self.projection.data = weights['conv_proj'].squeeze().T
-        
-        # Load standard parameters
-        self.cls_token.data = weights.get('cls_token', self.cls_token.data)
-        self.position_embed.data = weights.get('pos_embed', self.position_embed.data)
-        
-        # Load transformer weights
-        if any(k.startswith('transformer_') for k in weights):
-            self.transformer.load_pretrained({
-                k.split('transformer_')[-1]: v 
-                for k, v in weights.items() 
-                if k.startswith('transformer_')
-            })
-
-    def forward(self, x):
-        """Process audio input through encoder"""
-        # Patch extraction and projection
-        x = self.extract_patches(x)
-        self._cache['input_shape'] = x.shape
-        x = np.matmul(x, self.projection.data)
-        
-        # Add classification token
-        cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
-        x = np.concatenate((cls_tokens, x), axis=1)
-        
-        # Add positional embeddings
-        x += self.position_embed.data[:, :x.shape[1]]
-        
-        # Transformer processing
-        x = self.transformer.forward(x)
-        self._cache['pre_projection'] = x
-        return x
-
-    def backward(self, dout):
-        """Backpropagate gradients through audio encoder"""
-        # Backward through transformer
-        d_x = self.transformer.backward(dout)
-        
-        # Remove CLS token gradient
-        d_x = d_x[:, 1:, :]
-        
-        # Gradient for projection matrix
-        input_patches = self._cache['input_shape'][0]
-        d_proj = np.matmul(
-            self._cache['input_shape'].transpose(0, 2, 1), 
-            d_x.reshape(-1, d_x.shape[-1])
-        )
-        self.projection.grad += d_proj
-        
-        # Gradient for input (not used but maintained for completeness)
-        d_input = np.matmul(d_x, self.projection.data.T)
-        return d_input.reshape(self._cache['input_shape'])
-
+from src.agents.perception.utils.common import Parameter, TensorOps
 
 class PerceptionAgent(BaseAgent):
     def __init__(self, config, shared_memory, agent_factory,
@@ -314,9 +23,14 @@ class PerceptionAgent(BaseAgent):
             shared_memory=shared_memory,
             agent_factory=agent_factory
         )
+        from src.agents.perception.encoders.vision_encoder import VisionEncoder
+        from src.agents.perception.encoders.text_encoder import TextEncoder
+        from src.agents.perception.encoders.audio_encoder import AudioEncoder
+
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = config
+        self.pretrainer = self.PretrainingTasks(self)
         self.modalities = config['modalities']
         self.encoders = OrderedDict()
         embed_dim = config.get('embed_dim', 512)
@@ -330,34 +44,101 @@ class PerceptionAgent(BaseAgent):
         if 'audio' in self.modalities:
             self.encoders['audio'] = AudioEncoder()
 
-        # Pretrained loading would work similarly:
-        audio_weights = {
-            'conv_proj': np.random.randn(512, 1, 400),  # (embed_dim, in_ch, kernel_size)
+        audio_weights = {}
+        for layer in range(6):
+            audio_weights.update({
+                f'transformer_encoder_{layer}_attn_q_proj': np.random.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_k_proj': np.random.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_v_proj': np.random.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_out_proj': np.random.randn(512, 512),
+                f'transformer_encoder_{layer}_ffn_w1': np.random.randn(512, 2048),
+                f'transformer_encoder_{layer}_ffn_w2': np.random.randn(2048, 512),
+                f'transformer_encoder_{layer}_norm1': np.ones(512),
+                f'transformer_encoder_{layer}_norm2': np.ones(512),
+            })
+        audio_weights.update({
+            'conv_proj': np.random.randn(512, 1, 400),
             'cls_token': np.random.randn(1, 1, 512),
-            'pos_embed': np.random.randn(1, 41, 512),    # 40 patches + 1 cls token
-            'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
-            # ... other transformer weights
-        }
-        self.load_pretrained('audio', audio_weights)
+            'pos_embed': np.random.randn(1, 41, 512),
+        })
+        converted = self.convert_audio_weights(audio_weights)
+        prefixed = {f'transformer_{k}': v for k, v in converted.items()}
+        self.load_pretrained('audio', prefixed)
 
-        self.fusion = MultimodalFusion(embed_dim=embed_dim)
+        self.fusion = MultimodalFusion(embed_dim=embed_dim, modalities=self.modalities)
         self.projection = Parameter(
             TensorOps.he_init((embed_dim, projection_dim), embed_dim)
         )
-        
+
         # Initialize gradients
         self.params = self._collect_parameters()
 
-    def _collect_parameters(self):
-        params = []
-        for module in [self.encoders, self.fusion, self.projection]:
-            if hasattr(module, 'parameters'):
-                params.extend(module.parameters())
-        return params
+    def convert_audio_weights(self, weights):
+        """Convert custom audio weights to HF-style for all layers"""
+        new_w = {}
+        for layer in range(6):
+            for k, v in weights.items():
+                if f'transformer_encoder_{layer}_attn_q_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.query.weight'] = v
+                elif f'transformer_encoder_{layer}_attn_k_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.key.weight'] = v
+                elif f'transformer_encoder_{layer}_attn_v_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.value.weight'] = v
+                elif f'transformer_encoder_{layer}_attn_out_proj' in k: new_w[f'encoder.layer.{layer}.attention.output.dense.weight'] = v
+                elif f'transformer_encoder_{layer}_ffn_w1' in k: new_w[f'encoder.layer.{layer}.intermediate.dense.weight'] = v
+                elif f'transformer_encoder_{layer}_ffn_w2' in k: new_w[f'encoder.layer.{layer}.output.dense.weight'] = v
+                elif f'transformer_encoder_{layer}_norm1' in k: new_w[f'encoder.layer.{layer}.attention.output.LayerNorm.weight'] = v
+                elif f'transformer_encoder_{layer}_norm2' in k: new_w[f'encoder.layer.{layer}.output.LayerNorm.weight'] = v
+        return new_w
 
     def load_pretrained(self, modality, weights):
         if modality in self.encoders:
             self.encoders[modality].load_pretrained(weights)
+        elif modality == 'multimodal':
+            self._load_bert_style(weights)
+        elif modality == 'clip':
+            self._load_clip_style(weights)
+        else:
+            self.logger.warning(f"No encoder found for modality: {modality}")
+
+    def _load_bert_style(self, weights):
+        if 'vision' in self.encoders and 'visual' in weights:
+            self.encoders['vision'].load_pretrained(weights['visual'])
+    
+        if 'text' in self.encoders and 'textual' in weights:
+            self.encoders['text'].load_pretrained(weights['textual'])
+    
+        if 'audio' in self.encoders and 'audial' in weights:
+            self.encoders['audio'].load_pretrained(weights['audial'])
+    
+        if 'fusion' in weights and hasattr(self.fusion, 'load_pretrained'):
+            self.fusion.load_pretrained(weights['fusion'])
+    
+        if 'projection' in weights:
+            self.projection.data = weights['projection']
+
+    def _load_clip_style(self, weights):
+        """Handle vision-language pretrained weights"""
+        # CLIP-style loading
+        self.encoders['vision'].load_pretrained(weights['visual'])
+        self.encoders['text'].load_pretrained(weights['textual'])
+        
+        # Load fusion weights if available
+        if 'fusion' in weights:
+            self.fusion.load_pretrained(weights['fusion'])
+        
+        # Projection layer alignment
+        if 'proj' in weights:
+            self.projection.data = weights['proj']
+    
+
+    def _collect_parameters(self):
+        params = []
+        # Collect encoder parameters
+        for encoder in self.encoders.values():
+            params.extend(encoder.parameters())
+        # Collect fusion parameters
+        params.extend(self.fusion.parameters())
+        # Collect projection parameter
+        params.append(self.projection)
+        return params
 
     def forward(self, inputs):
         embeddings = {}
@@ -384,32 +165,318 @@ class PerceptionAgent(BaseAgent):
         
         return None  # Final gradients stored in parameters
 
-class Transformer:
-    def __init__(self, num_layers, embed_dim):
-        pass
+    def align_with_slailm(self, slailm_instance):
+        """Create bidirectional gradient pathways between perception and LLM"""
+        self.adapter = SLAILMAdapter(
+            self.config['projection_dim'],
+            slailm_instance.embed_dim
+        )
+        
+        # Create shared parameter registry
+        self.shared_params = {
+            'cross_attn': Parameter(TensorOps.he_init((slailm_instance.embed_dim, self.config['projection_dim'])))
+        }
 
-    def forward(self, x):
-        return x
+    def zero_grad(self):
+        for param in self.params:
+            param.grad.fill(0)
 
-    def load_pretrained(self, weights):
-        pass
+    def step(self, learning_rate=1e-3):
+        for param in self.params:
+            param.data -= learning_rate * param.grad
+        self.track_param_metrics()
 
-    def backward(self, dout):
-        return dout
+    def save_params(self, path):
+        weights = {f"param_{i}": param.data for i, param in enumerate(self.params)}
+        np.savez(path, **weights)
+
+    def load_params(self, path):
+        weights = np.load(path)
+        for i, param in enumerate(self.params):
+            key = f"param_{i}"
+            if key in weights:
+                param.data[:] = weights[key]
+
+    def track_param_metrics(self):
+        norms = [np.linalg.norm(p.data) for p in self.params]
+        grads = [np.linalg.norm(p.grad) for p in self.params]
+        self.performance_metrics['param_norms'].append(float(np.mean(norms)))
+        self.performance_metrics['grad_norms'].append(float(np.mean(grads)))
+
+    class PretrainingTasks:
+        """Multimodal pretraining objectives for perception agent"""
+        def __init__(self, agent):
+            self.agent = agent
+            self.masking_ratio = 0.15  # Default masking ratio
+
+        def masked_modality_modeling(self, inputs):
+            """
+            Joint masked reconstruction across multiple modalities
+            Args:
+                inputs: Dict of modality tensors {
+                    'vision': (batch, channels, H, W),
+                    'text': (batch, seq_len),
+                    'audio': (batch, samples)
+                }
+            Returns:
+                dict: Reconstruction losses per modality
+            """
+            losses = {}
+            
+            # Vision masking
+            if 'vision' in inputs:
+                masked_vision, mask_vision = self._apply_masking(inputs['vision'], mode='patch')
+                rec_vision = self.agent.encoders['vision'].forward(masked_vision)
+                losses['vision'] = self._calc_reconstruction_loss(rec_vision, inputs['vision'], mask_vision)
+
+            # Text masking
+            if 'text' in inputs:
+                masked_text, mask_text = self._apply_masking(inputs['text'], mode='token')
+                rec_text = self.agent.encoders['text'].forward(masked_text)
+                losses['text'] = self._calc_reconstruction_loss(rec_text, inputs['text'], mask_text)
+
+            # Audio masking
+            if 'audio' in inputs:
+                masked_audio, mask_audio = self._apply_masking(inputs['audio'], mode='frame')
+                rec_audio = self.agent.encoders['audio'].forward(masked_audio)
+                losses['audio'] = self._calc_reconstruction_loss(rec_audio, inputs['audio'], mask_audio)
+
+            return losses
+
+        def crossmodal_matching(self, embeddings):
+            """
+            Verify alignment between modality embeddings using contrastive learning
+            Args:
+                embeddings: Dict of modality embeddings {
+                    'vision': (batch, embed_dim),
+                    'text': (batch, embed_dim),
+                    'audio': (batch, embed_dim)
+                }
+            Returns:
+                dict: Matching accuracy and loss metrics
+            """
+            metrics = {}
+            
+            # Vision-text alignment
+            if 'vision' in embeddings and 'text' in embeddings:
+                metrics['vision_text'] = self._calc_crossmodal_similarity(
+                    embeddings['vision'], 
+                    embeddings['text']
+                )
+
+            # Audio-text alignment
+            if 'audio' in embeddings and 'text' in embeddings:
+                metrics['audio_text'] = self._calc_crossmodal_similarity(
+                    embeddings['audio'],
+                    embeddings['text']
+                )
+
+            return metrics
+
+        def temporal_consistency(self, sequences):
+            """
+            Enforce temporal coherence in sequential data (video/audio)
+            Args:
+                sequences: Dict of temporal sequences {
+                    'video': (batch, frames, H, W, C),
+                    'audio': (batch, seq_len, features)
+                }
+            Returns:
+                dict: Temporal coherence losses
+            """
+            losses = {}
+            
+            # Video temporal consistency
+            if 'video' in sequences:
+                frame_embeddings = [self.agent.encoders['vision'].forward(f) 
+                                  for f in sequences['video']]
+                losses['video'] = self._calc_temporal_loss(frame_embeddings)
+
+            # Audio temporal consistency
+            if 'audio' in sequences:
+                audio_embeddings = [self.agent.encoders['audio'].forward(a) 
+                                  for a in sequences['audio']]
+                losses['audio'] = self._calc_temporal_loss(audio_embeddings)
+
+            return losses
+
+        # Helper methods placeholder
+        def _apply_masking(self, data, mode):
+            """Apply modality-specific masking pattern"""
+            mask = np.random.rand(*data.shape) < self.masking_ratio
+            masked = data.copy()
+            masked[mask] = 0
+            return masked, mask
+
+        def _calc_reconstruction_loss(self, reconstructed, original, mask):
+            """Calculate reconstruction loss with masking"""
+            diff = (reconstructed - original) * mask
+            return np.mean(diff ** 2)
+
+        def _calc_crossmodal_similarity(self, emb1, emb2):
+            """Compute contrastive similarity between modalities"""
+            # Cosine similarity
+            norm1 = np.linalg.norm(emb1, axis=1, keepdims=True)
+            norm2 = np.linalg.norm(emb2, axis=1, keepdims=True)
+            similarity = np.sum(emb1 * emb2, axis=1) / (norm1 * norm2 + 1e-8)
+            loss = 1 - similarity.mean()
+            return {"similarity": similarity.mean(), "contrastive_loss": loss}
+
+        def _calc_temporal_loss(self, sequence_embeddings):
+            """Calculate temporal coherence loss"""
+            deltas = []
+            for i in range(1, len(sequence_embeddings)):
+                delta = np.mean((sequence_embeddings[i] - sequence_embeddings[i-1]) ** 2)
+                deltas.append(delta)
+            return np.mean(deltas)
+
+class CrossModalAttention:
+    def __init__(self, embed_dim):
+        self.query = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
+        self.key = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
+        self.value = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
+
+    def parameters(self):
+        return [self.query, self.key, self.value]
+
+    def forward(self, modality1, modality2):
+        q = np.matmul(modality1, self.query.data)
+        k = np.matmul(modality2, self.key.data)
+        v = np.matmul(modality2, self.value.data)
+        
+        attn_scores = np.matmul(q, k.T) / math.sqrt(self.query.data.shape[-1])
+        attn_probs = self._softmax(attn_scores)
+        return np.matmul(attn_probs, v)
+
+    def _softmax(self, x):
+        max_x = np.max(x, axis=-1, keepdims=True)
+        exp_x = np.exp(x - max_x)
+        return exp_x / exp_x.sum(axis=-1, keepdims=True)
+
+class MultimodalMetrics:
+    @staticmethod
+    def modality_importance_score(embeddings):
+        """
+        Compute L2 norm-based importance score per modality.
+        Returns dict of normalized scores.
+        """
+        norms = {k: np.linalg.norm(v, axis=-1).mean() for k, v in embeddings.items()}
+        total = sum(norms.values())
+        return {k: v / total for k, v in norms.items()}
+
+    @staticmethod
+    def crossmodal_consistency(features):
+        """
+        Compute pairwise cosine similarity between all modality embeddings.
+        Returns a matrix of pairwise consistency scores.
+        """
+        keys = list(features.keys())
+        matrix = {}
+        for i in range(len(keys)):
+            for j in range(i+1, len(keys)):
+                a = features[keys[i]]
+                b = features[keys[j]]
+                sim = np.sum(a * b, axis=-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1) + 1e-8)
+                matrix[f'{keys[i]}-{keys[j]}'] = np.mean(sim)
+        return matrix
+
+    @staticmethod
+    def embedding_stability(embeddings):
+        """
+        Track change in embedding norms over batch.
+        Could be used to detect saturation or vanishing dynamics.
+        """
+        stability = {}
+        for k, v in embeddings.items():
+            norm_diff = np.abs(np.diff(np.linalg.norm(v, axis=-1))).mean()
+            stability[k] = norm_diff
+        return stability
 
 class MultimodalFusion:
-    def __init__(self, embed_dim):
+    """Weighted feature fusion module using modality-specific importance with optional dropout and masking"""
+    def __init__(self, embed_dim, modalities, dropout_rate=0.1, masking_prob=0.15):
         self.embed_dim = embed_dim
+        self.modalities = modalities
+        self.modal_weights = OrderedDict()
+        self._shapes = {}
+        self.cross_attn = CrossModalAttention(embed_dim)
+        self.gating_weights = Parameter(np.ones(len(self.modalities)))  # Dynamic
+        self.dropout_rate = dropout_rate
+        self.masking_prob = masking_prob
+        self.training = True
+
+    def parameters(self):
+        return list(self.modal_weights.values()) + [self.gating_weights] + self.cross_attn.parameters()
 
     def forward(self, embeddings):
-        self._shapes = {k: v.shape for k, v in embeddings.items()}
+        self._cached_inputs = embeddings
+        self._mask_flags = {}
+    
         pooled = []
-        for value in embeddings.values():
-            pooled.append(value.mean(axis=1))  # Shape: (batch, embed_dim)
-        return sum(pooled) / len(pooled)  # Averaged across modalities
+        alphas = []
+    
+        # Dropout + Gating
+        for idx, (modality, tensor) in enumerate(embeddings.items()):
+            if modality not in self.modal_weights:
+                self.modal_weights[modality] = Parameter(np.array([1.0]))
+    
+            # Drop modality
+            if self.training and np.random.rand() < self.masking_prob:
+                self._mask_flags[modality] = True
+                tensor = np.zeros_like(tensor)
+            else:
+                self._mask_flags[modality] = False
+    
+            pooled_mod = tensor.mean(axis=1)  # (B, D)
+    
+            # Apply dropout
+            if self.training and self.dropout_rate > 0:
+                dropout_mask = (np.random.rand(*pooled_mod.shape) > self.dropout_rate).astype(np.float32)
+                pooled_mod *= dropout_mask
+    
+            weight = self.modal_weights[modality].data
+            pooled.append(weight * pooled_mod)
+            alphas.append(weight)
+    
+        # Combine
+        fused = sum(pooled) / max(len(pooled), 1)
+        self._alphas = {mod: alpha for mod, alpha in zip(embeddings.keys(), alphas)}
+        return fused
 
     def backward(self, d_fused):
-        return {k: np.repeat(d_fused[:, None, :], self._shapes[k][1], axis=1) for k in self._shapes}
+        grads = {}
+        for modality, input_tensor in self._cached_inputs.items():
+            B, T, D = input_tensor.shape
+            grad = np.repeat(d_fused[:, None, :], T, axis=1) * self.modal_weights[modality].data
+            grads[modality] = grad
+
+            if not self._mask_flags.get(modality, False):
+                pooled_input = input_tensor.mean(axis=1)  # shape (B, D)
+                d_alpha = np.sum(pooled_input * d_fused) / len(self._cached_inputs)
+                self.modal_weights[modality].grad += d_alpha
+
+        return grads
+
+    def parameters(self):
+        return list(self.modal_weights.values()) + [self.gating_weights]
+
+class SLAILMAdapter:
+    def __init__(self, perception_dim, llm_dim):
+        self.projection = Parameter(TensorOps.he_init((perception_dim, llm_dim), perception_dim))
+        self.layer_norm = Parameter(np.ones(llm_dim))
+        self._cache = {}  # initially empty
+
+    def parameters(self):
+        return [self.projection, self.layer_norm]
+
+    def set_cache(self, multimodal_emb, projected):
+        self._cache['multimodal_emb'] = multimodal_emb
+        self._cache['projected'] = projected
+
+    def forward(self, multimodal_emb):
+        projected = np.matmul(multimodal_emb, self.projection.data)
+        self.set_cache(multimodal_emb, projected)  # ensure cache is populated
+        return TensorOps.layer_norm(projected) * self.layer_norm.data
 
 # Complete Example Usage
 if __name__ == "__main__":
