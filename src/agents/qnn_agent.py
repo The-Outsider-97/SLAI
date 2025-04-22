@@ -1,10 +1,13 @@
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from collections import defaultdict
 
 from src.agents.base_agent import BaseAgent
+from src.agents.learning.maml_rl import MAMLAgent
+from src.agents.learning.rl_agent import RLAgent
 
 class QNNAgent(BaseAgent):
     """
@@ -29,6 +32,8 @@ class QNNAgent(BaseAgent):
             meta_learning_rate (float): The learning rate for the classical meta-learner.
             qrnn_params (dict): Parameters for the QRNN (e.g., number of hidden units, etc.).
         """
+        self.shared_memory=shared_memory
+        self.agent_factory=agent_factory
 
         self.num_qubits = config.get("num_qubits", 4)
         self.num_quantum_layers = config.get("num_quantum_layers", 2)
@@ -42,24 +47,67 @@ class QNNAgent(BaseAgent):
         # Define basic quantum gates as matrices
         self.gate_definitions = self._define_quantum_gates()
 
+        self.maml_agent = MAMLAgent(
+            state_size=config.get("state_size"),
+            action_size=config.get("action_size"),
+            shared_memory=self.shared_memory
+        )
+
+        self.rl_agent = RLAgent(
+            possible_actions=list(range(config.get("action_size"))),
+            learning_rate=0.01,
+            discount_factor=0.95
+        )
+
+        self.agent_success_tracker = {
+            "maml": {"rewards": [], "average": 0.0},
+            "rl": {"rewards": [], "average": 0.0}
+        }
+        self.routing_temperature = 0.8 
+
     def perform_task(self, task_data):
+        self._last_task_input_seq = task.input_sequences
+        self._last_task_ref = task
         tasks = task_data.get("tasks", [])
         if not tasks:
             return {"status": "failed", "reason": "No tasks provided"}
-    
+
         total_loss = 0.0
         for task in tasks:
-            output_sequence, _ = self._qrnn_forward(task)
+            env = getattr(task, "env", None)
+            if env is None:
+                continue
+
+            # === Step 1: MAML Adaptation ===
+            maml_policy = self.maml_agent.inner_update(env)
+            maml_trajectory = self.maml_agent.collect_trajectory(env, maml_policy)
+            self.maml_agent.meta_update([(env, maml_trajectory)])
+
+            # === Step 2: RL Experience Update ===
+            state, _ = env.reset()
+            for _ in range(10):  # Fixed horizon
+                action = self.rl_agent.step(state)
+                next_state, reward, done, _, _ = env.step(action)
+                self.rl_agent.receive_reward(reward)
+                self.rl_agent.learn(next_state, reward, done)
+                if done:
+                    break
+                state = next_state
+
+            # === Step 3: QRNN Output & Meta Update ===
+            output_sequence, _ = self._qrnn_forward(task.input_sequences)
             task_performance = self._evaluate_performance(output_sequence, task)
             self._meta_learn_update(task_performance)
+
             total_loss += sum(task_performance)
-    
-        avg_loss = total_loss / len(tasks)
+
         return {
             "status": "success",
-            "agent": "QNNAgent",
-            "average_loss": avg_loss,
-            "tasks_trained": len(tasks)
+            "combined_loss": total_loss / len(tasks),
+            "details": {
+                "maml_evaluation": self.maml_agent.evaluate(),
+                "rl_policy": self.rl_agent.get_policy()
+            }
         }
 
     def _initialize_quantum_weights(self):
@@ -280,27 +328,26 @@ class QNNAgent(BaseAgent):
 
     def _qrnn_forward(self, input_sequence):
         """
-        Performs a forward pass through the Quantum Recurrent Neural Network (QRNN).
-
+        Recurrent quantum sequence processing with hidden state feedback.
+    
         Args:
-            input_sequence (list): A list of quantum states representing the input sequence.
-
+            input_sequence (list): Quantum state inputs.
+    
         Returns:
-            list: A list of output quantum states for each time step.
+            output_sequence (list), final_hidden_state (np.ndarray)
         """
-
-        hidden_state = self._initialize_hidden_state()  # Initialize hidden state
+        hidden_state = self._initialize_hidden_state()
         output_sequence = []
-
-        for input_state in input_sequence:
-            input_state = self.qnn_layers.apply(input_state, {
-                "Rx": self._rx_gate,
-                "Ry": self._ry_gate,
-                "Rz": self._rz_gate,
-                "CNOT": self._controlled_not_gate,
-                "apply_gate": self._apply_gate
-            })
-
+    
+        for t, input_state in enumerate(input_sequence):
+            # Combine input and hidden state
+            combined = 0.5 * (input_state + hidden_state)  # You can try other merge strategies
+            for layer_idx in range(self.num_quantum_layers):
+                combined = self._quantum_layer(combined, self.quantum_weights[layer_idx])
+    
+            output_sequence.append(combined.copy())
+            hidden_state = combined  # Recurrent update
+    
         return output_sequence, hidden_state
 
     def _initialize_hidden_state(self):
@@ -321,6 +368,9 @@ class QNNAgent(BaseAgent):
         Args:
             task_performance (list): A list of performance metrics for the QRNN on different tasks.
         """
+        # Save references for loss_fn usage
+        self._last_task_input_seq = self._last_task_input_seq or []
+        self._last_task_ref = self._last_task_ref or None
 
         # This is a placeholder; replace with actual meta-learning update
         # The meta-learner observes the QRNN's performance and updates the quantum weights
@@ -329,6 +379,23 @@ class QNNAgent(BaseAgent):
         self.quantum_weights = new_quantum_weights
 
         # Update meta-learner parameters (if applicable)
+        self._update_meta_learner(task_performance)
+
+        def loss_fn(w):
+            original_weights = self.quantum_weights
+            self.quantum_weights = w
+            out_seq, _ = self._qrnn_forward(self._last_task_input_seq)
+            score = self._evaluate_performance(out_seq, self._last_task_ref)[0]
+            self.quantum_weights = original_weights  # Restore
+            return score
+    
+        grads = self._parameter_shift_gradient(loss_fn, self.quantum_weights)
+        for l in range(len(self.quantum_weights)):
+            self.quantum_weights[l] -= self.meta_learning_rate * grads[l]
+    
+        # Predictive update via meta learner
+        new_weights = self.meta_learner.predict(task_performance)
+        self.quantum_weights = new_weights
         self._update_meta_learner(task_performance)
 
     def _update_meta_learner(self, task_performance):
@@ -342,6 +409,42 @@ class QNNAgent(BaseAgent):
         self.meta_learner.train(task_performance, np.array(target_weights))
         pass
 
+    def meta_evaluate(self, tasks, evaluation_agent):
+        domain_groups = defaultdict(list)
+        for task in tasks:
+            domain = task.metadata.get("domain", "unknown")
+            domain_groups[domain].append(task)
+    
+        summary = {}
+        for domain, domain_tasks in domain_groups.items():
+            results = {"qnn": [], "maml": [], "rl": []}
+            for task in domain_tasks:
+                out_seq, _ = self._qrnn_forward(task.input_sequences)
+                results["qnn"].append(self._evaluate_performance(out_seq, task)[0])
+    
+                maml_policy = self.maml_agent.inner_update(task.env)
+                traj = self.maml_agent.collect_trajectory(task.env, maml_policy)
+                results["maml"].append(sum(t.reward for t in traj) / len(traj))
+    
+                state, _ = task.env.reset()
+                rewards = []
+                for _ in range(10):
+                    action = self.rl_agent.step(state)
+                    state, reward, done, *_ = task.env.step(action)
+                    rewards.append(reward)
+                    if done: break
+                results["rl"].append(sum(rewards) / len(rewards))
+    
+            evaluation_agent.log_evaluation(
+                results={"source": f"QNN Meta-Eval [{domain}]"},
+                rewards_a=results["qnn"],
+                rewards_b=results["maml"]
+            )
+            summary[domain] = results
+    
+        self._sync_agent_stats_to_memory()
+        return summary
+
     def train(self, tasks):
         """
         Trains the QNNAgent on a series of tasks using meta-learning.
@@ -354,6 +457,9 @@ class QNNAgent(BaseAgent):
             output_sequence, _ = self._qrnn_forward(task)
             task_performance = self._evaluate_performance(output_sequence, task)  # Evaluate performance
             self._meta_learn_update(task_performance)  # Update based on meta-learning
+
+
+        self._sync_agent_stats_to_memory()
 
     def _evaluate_performance(self, output_sequence, task):
         """
@@ -390,12 +496,101 @@ class QNNAgent(BaseAgent):
         output_sequence, _ = self._qrnn_forward(task)
         return output_sequence
 
+    def _probabilistic_strategy(self, task):
+        """
+        Dynamically routes task to MAML or RL using softmax over running performance.
+        """
+        # Compute moving averages
+        maml_avg = self.agent_success_tracker["maml"]["average"]
+        rl_avg = self.agent_success_tracker["rl"]["average"]
+
+        # Add slight task-conditioned noise
+        difficulty = task.metadata.get("difficulty", 0.5)
+        modifier = (1.2 * difficulty + 0.8 * (1 - task.metadata.get("success_rate", 0.5)))
+
+        logits = np.array([maml_avg + modifier, rl_avg + 1 - modifier])
+        logits = np.array(logits) / self.routing_temperature
+        probs = np.exp(logits - np.max(logits))  # softmax stabilization
+        probs /= np.sum(probs)
+
+        return np.random.choice(["maml", "rl"], p=probs)
+
     def _check_gradient_health(self):
         gradients = [np.linalg.norm(self.meta_learner.Wxh),
                      np.linalg.norm(self.meta_learner.Whh),
                      np.linalg.norm(self.meta_learner.Why)]
         if any(np.isnan(g) or g > 1e3 for g in gradients):
             raise ValueError("Gradient instability or explosion in QNN meta-learner")
+    
+    def _parameter_shift_gradient(self, loss_fn, weights, epsilon=np.pi/2):
+        """
+        Computes parameter-shift gradients for quantum weights.
+        """
+        gradients = []
+    
+        for l, layer_weights in enumerate(weights):
+            grad_layer = np.zeros_like(layer_weights)
+            for q in range(layer_weights.shape[0]):
+                for p in range(3):  # Rx, Ry, Rz
+                    shifted = np.copy(weights)
+                    shifted[l][q][p] += epsilon
+                    plus = loss_fn(shifted)
+    
+                    shifted[l][q][p] -= 2 * epsilon
+                    minus = loss_fn(shifted)
+    
+                    grad_layer[q][p] = (plus - minus) / 2
+            gradients.append(grad_layer)
+    
+        return gradients
+    
+    def _born_sample(self, quantum_state, num_samples=100):
+        """
+        Samples output probabilities using Born rule: P(i) = |amp_i|^2
+        """
+        probs = np.abs(quantum_state) ** 2
+        probs /= np.sum(probs)
+        return np.random.choice(len(probs), size=num_samples, p=probs)
+
+    def _plot_score_heatmap(self, qnn_scores, maml_scores, rl_scores):
+        """
+        Plots a heatmap comparison of QNN vs MAML vs RL agent scores.
+        """
+        
+
+        data = {
+            "QNN": qnn_scores,
+            "MAML": maml_scores,
+            "RL": rl_scores
+        }
+
+        # Create a matrix: rows = agents, columns = task indices
+        agent_names = list(data.keys())
+        max_len = max(len(v) for v in data.values())
+        heatmap_data = np.full((len(agent_names), max_len), np.nan)
+
+        for i, name in enumerate(agent_names):
+            vals = data[name]
+            heatmap_data[i, :len(vals)] = vals
+
+        plt.figure(figsize=(10, 3))
+        sns.heatmap(heatmap_data, cmap="viridis", annot=False, xticklabels=False,
+                    yticklabels=agent_names, cbar_kws={'label': 'Reward / Score'})
+        plt.title("Agent Performance Comparison (QNN vs MAML vs RL)")
+        plt.xlabel("Task Index")
+        plt.ylabel("Agent")
+        plt.tight_layout()
+        plt.show()
+
+    def _sync_agent_stats_to_memory(self):
+        self.shared_memory.set("qnn_agent/agent_success_tracker", {
+            agent: {
+                "average": round(stats["average"], 4),
+                "samples": len(stats["rewards"]),
+                "last_update": time.time()
+            }
+            for agent, stats in self.agent_success_tracker.items()
+        })
 
     def visualize_output(self, output_sequence):
         """
@@ -589,41 +784,80 @@ class RNNMetaLearner:
         y = np.dot(self.Why, self.h) + self.by
         return y.reshape(self.output_shape)
 
-    def train(self, inputs, target_output):
-        prediction = self.predict(inputs).flatten()
-        target = target_output.flatten()
-        loss_grad = 2 * (prediction - target) / prediction.shape[0]
+    def dynamic_architecture_tuner(self, hyperparam_space_path, evaluation_agent):
+        from src.tuning.bayesian_search import BayesianSearch
+    
+        def evaluation_function(params):
+            self.num_qubits = params["num_qubits"]
+            self.num_quantum_layers = params["num_quantum_layers"]
+            self.quantum_weights = self._initialize_quantum_weights()
+            results = self.meta_evaluate([self._last_task_ref], evaluation_agent)
+            return np.mean(results.get("general", {}).get("qnn", [0]))
+    
+        search = BayesianSearch(
+            config_file=hyperparam_space_path,
+            evaluation_function=evaluation_function,
+            n_calls=15,
+            n_random_starts=5
+        )
+        best_params, best_score, _ = search.run_search()
+        self.shared_memory.set("qnn_agent/best_architecture", best_params)
+        return best_params
 
-        dWhy = np.outer(loss_grad, self.last_hs[-1])
-        dby = loss_grad
+    def _update_agent_tracker(self, agent, score, maxlen=100):
+        tracker = self.agent_success_tracker[agent]
+        tracker["rewards"].append(score)
+        if len(tracker["rewards"]) > maxlen:
+            tracker["rewards"].pop(0)
+        tracker["average"] = np.mean(tracker["rewards"])
 
-        dh = np.dot(self.Why.T, loss_grad)
+    def train(self, tasks):
+        """
+        Trains the QNNAgent with probabilistic routing between MAML and RL.
+        Also logs performance of all agents for statistical comparison.
+        """
+        qnn_scores, maml_scores, rl_scores = [], [], []
 
-        dWxh = np.zeros_like(self.Wxh)
-        dWhh = np.zeros_like(self.Whh)
-        dbh = np.zeros_like(self.bh)
+        for task in tasks:
+            env = getattr(task, "env", None)
+            if env is None:
+                continue
+    
+            # === Dynamic routing logic ===
+            route = self._probabilistic_strategy(task)
+    
+            if route == "maml":
+                policy = self.maml_agent.inner_update(env)
+                traj = self.maml_agent.collect_trajectory(env, policy)
+                self.maml_agent.meta_update([(env, traj)])
+                maml_score = sum(t.reward for t in traj) / len(traj)
+                maml_scores.append(maml_score)
+                self._update_agent_tracker("maml", maml_score)
+    
+            elif route == "rl":
+                state, _ = env.reset()
+                rewards = []
+                for _ in range(10):  # Fixed-length episodes
+                    action = self.rl_agent.step(state)
+                    next_state, reward, done, _, _ = env.step(action)
+                    self.rl_agent.receive_reward(reward)
+                    self.rl_agent.learn(next_state, reward, done)
+                    rewards.append(reward)
+                    if done:
+                        break
+                    state = next_state
+                rl_score = sum(rewards) / len(rewards)
+                rl_scores.append(rl_score)
+                self._update_agent_tracker("rl", rl_score)
+    
+            # === QNN Meta-learning ===
+            output_sequence, _ = self._qrnn_forward(task.input_sequences)
+            performance = self._evaluate_performance(output_sequence, task)
+            self._meta_learn_update(performance)
+            qnn_scores.append(performance[0])
 
-        for t in reversed(range(len(self.last_inputs))):
-            temp_h = self.last_hs[t + 1]
-            temp_input = self.last_inputs[t]
-
-            dh_raw = self.dtanh(temp_h) * dh
-            dWxh += np.outer(dh_raw, temp_input)
-            dWhh += np.outer(dh_raw, self.last_hs[t])
-            dbh += dh_raw
-
-            dh = np.dot(self.Whh.T, dh_raw)
-
-        # Gradient clipping
-        for grad in [dWxh, dWhh, dWhy, dbh, dby]:
-            np.clip(grad, -1.0, 1.0, out=grad)
-
-        # Update weights
-        self.Wxh -= self.learning_rate * dWxh
-        self.Whh -= self.learning_rate * dWhh
-        self.Why -= self.learning_rate * dWhy
-        self.bh -= self.learning_rate * dbh
-        self.by -= self.learning_rate * dby
+        self._plot_score_heatmap(qnn_scores, maml_scores, rl_scores)
+        self._plot_routing_probabilities()
 
 class MetaLearner:
     """
@@ -654,22 +888,22 @@ class MetaLearner:
         """
         # Main update logic
         new_quantum_weights = self.model.predict(task_performance)
-        
+
         # Validation step
         if validation_data:
             val_score = self.validate(new_quantum_weights, validation_data)
             self.training_history['validation_scores'].append(val_score)
-        
+
         # Log to shared memory
         if self.shared_memory:
             self.shared_memory.set(
                 f"meta_learner/{self.model_type}/last_weights",
                 new_quantum_weights.tolist()
             )
-        
+
         self.training_history['loss'].append(np.mean(task_performance))
         self.training_history['update_timestamps'].append(time.time())
-        
+
         return new_quantum_weights
 
     def validate(self, proposed_weights, validation_task):
@@ -679,7 +913,7 @@ class MetaLearner:
         # Create temporary agent clone with proposed weights
         temp_agent = self.shared_memory.get('prototype_agent').clone()
         temp_agent.quantum_weights = proposed_weights
-        
+
         # Execute validation task
         results = temp_agent.run_task(validation_task)
         evaluator = PerformanceEvaluator(metric='cosine')
@@ -788,7 +1022,10 @@ class PerformanceEvaluator:
         """
         self.metric = metric.lower()
 
-    def evaluate(self):
+    def evaluate(self, outputs, targets):
+        if self.metric == "mse":
+            return np.mean((outputs - targets) ** 2)
+
         losses = list(self.performance_metrics['loss'])
         return {
             "agent": "QNNAgent",
