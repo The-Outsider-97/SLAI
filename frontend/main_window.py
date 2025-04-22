@@ -9,7 +9,7 @@ import getpass
 import queue
 from datetime import datetime
 
-from src.utils.async_task_runner import run_in_thread
+from src.utils.async_task_report import run_in_thread
 from src.agents.collaborative_agent import CollaborativeAgent
 
 from torch.nn.functional import cosine_similarity # Assuming this and REFERENCE_EMBEDDINGS/QUERIES are defined elsewhere if needed
