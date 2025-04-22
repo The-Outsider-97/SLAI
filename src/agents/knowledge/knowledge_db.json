@@ -10,7 +10,10 @@
     [["SLAI", "includes", "language model"], 0.88],
     [["SLAI", "supports", "multi-agent communication"], 0.9],
     [["multi-agent system", "requires", "collaboration"], 0.87],
-    [["safe ai", "monitors", "risk triggers"], 0.93]
+    [["safe ai", "monitors", "risk triggers"], 0.93],
+    {
+      "['subject', 'predicate', 'object']": 0.8
+    }
   ],
 
   "rules": [

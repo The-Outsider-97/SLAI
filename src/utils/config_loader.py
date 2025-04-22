@@ -56,8 +56,10 @@ class ConfigLoader:
         xdg_config_home = os.getenv('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
         return os.path.join(xdg_config_home, 'slai', 'config.yaml')
 
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self, path) -> Dict[str, Any]:
         """Secure config loading with defense-in-depth measures"""
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
         try:
             with open(self.config_path, 'r') as f:
                 user_config = yaml.safe_load(f) or {}

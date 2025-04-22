@@ -627,7 +627,7 @@ class ExecutionAgent:
 
 
 
-    def _parse_action(self, thought: str) -> dict:  # <-- ADD THIS METHOD
+    def _parse_action(self, thought: str) -> dict:
         """Parse action details from thought string"""
     
         # Match action pattern: [ACTION] <type> params: {<params>}

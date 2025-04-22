@@ -23,11 +23,47 @@ import torch
 import numpy as np
 
 import statsmodels.formula.api as smf
-from src.agents.alignment.alignment_monitor import AlignmentMonitor
-from src.evaluators.report import PerformanceEvaluator
+from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
+from src.agents.evaluators.report import PerformanceVisualizer
+from src.agents.base_agent import BaseAgent
 
+constitutional_rules = {
+    "privacy": [
+        "Anonymize or pseudonymize all personal data before processing",
+        "Do not retain sensitive information beyond operational necessity",
+        "Explicitly request user consent for data collection activities",
+        "Implement end-to-end encryption for data in transit and at rest",
+        "Immediately report any unauthorized data access attempts"
+    ],
+    "safety": [
+        "Prevent physical, psychological, or environmental harm through all outputs",
+        "Refuse to generate content that could enable violence or self-harm",
+        "Implement multi-layered fact-checking before sharing critical information",
+        "Automatically sanitize inputs containing dangerous instructions",
+        "Maintain emergency shutdown protocols for unsafe situations"
+    ],
+    "ethics": [
+        "Actively mitigate biases in training data and decision processes",
+        "Respect cultural norms while maintaining universal human rights",
+        "Provide clear provenance information for generated content",
+        "Maintain transparency about system capabilities and limitations",
+        "Implement accountability mechanisms for automated decisions"
+    ],
+    "security": [
+        "Validate all external inputs through multiple sanitization layers",
+        "Regularly rotate cryptographic keys and access credentials",
+        "Maintain defense-in-depth against prompt injection attacks",
+        "Implement automatic security patch management",
+        "Conduct daily vulnerability scans and penetration tests"
+    ]
+}
+
+def load_config(Path):
+    with open(Path, "r") as f:
+        return yaml.safe_load(f) 
 
 @dataclass
 class SafetyAgentConfig:
@@ -41,40 +77,77 @@ class SafetyAgentConfig:
     audit_level: int = 2
     enable_rlhf: bool = True
 
-class SafeAI_Agent:
+class SafeAI_Agent(BaseAgent):
     """Holistic safety management per Bai et al. (2022) with integrated safety layers"""
-    
-    def __init__(self, agent_factory, config: SafetyAgentConfig, shared_memory=None, args=(), kwargs={}):
+    def __init__(self, agent_factory, alignment_agent_cls, config: SafetyAgentConfig, shared_memory=None):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
+        alignment_config = load_config('src/agents/alignment/configs/alignment_config.yaml')
+        alignment_init_args = {
+            "memory": alignment_config.get("memory", {}),
+            "monitor": alignment_config.get("monitor", {}),
+            "value_model": alignment_config.get("value_model", {}),
+            "ethics": alignment_config.get("ethics", {}),
+            "corrections": alignment_config.get("corrections", {})
+        }
+
+        self.alignment_agent = alignment_agent_cls(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            sensitive_attrs=alignment_config.get("sensitive_attrs", []),
+            config=alignment_init_args
+        )
+        alignment_init_args['memory'] = alignment_config.get('memory', {})
+
+        alignment_init_args.setdefault('monitor', {
+            'fairness_metrics': ['demographic_parity', 'equal_opportunity', 'predictive_equality'],
+            'ethical_rules': {},
+            'drift_threshold': 0.15
+        })
+        alignment_init_args.setdefault('value_model', {
+            "embedding_dim": 512,
+            "num_cultural_dimensions": 6,
+            "num_ethical_principles": 12,
+            "temperature": 0.07,
+            "dropout": 0.1,
+            "margin": 0.2,
+            "max_seq_length": 128
+        })
         self.name = "SafeAI_Agent"
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.alignment_monitor = AlignmentMonitor
-        self.config = config
-        self.logger = logging.getLogger("SLAI.SafetyFactory")
+        if isinstance(config, dict):
+            config = SafetyAgentConfig(**config)
         
-        # Initialize components from original SafeAI_Agent
-        self.alignment_agent = AlignmentAgent(
-            sensitive_attrs=['gender', 'race'],
-            config=load_config('alignment_config.yaml'),
-            shared_memory=shared_memory
-        )
+        self.config = config
+        self.risk_threshold = self.config.risk_thresholds.get("safety", 0.01)
+        # self.evaluator = PerformanceVisualizer(threshold=self.risk_threshold * 100)
+
+        self.logger = logging.getLogger("SLAI.SafetyFactory")
         self.training_data = []
         self.risk_table = {}
-        self.evaluator = PerformanceEvaluator(threshold=self.config.risk_thresholds["safety"] * 100)
+
         self.audit_trail = []
-        
+
         # Add SafetyAgent components
         self.reward_model = RewardModel()
         self.attention_monitor = AttentionMonitor()
-        
+
         # Initialize constitutional rules
         self.constitution = self._load_constitution(config.constitutional_rules)
-        
+
         # Logger setup
         if not self.logger.handlers:
             handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             self.logger.addHandler(handler)
+
+        if not isinstance(config, SafetyAgentConfig):
+            raise TypeError("Expected SafetyAgentConfig, got", type(config))
 
     # --- Merged Methods from Both Classes ---
     def validate_action(self, action: Dict) -> Dict:
@@ -85,7 +158,7 @@ class SafeAI_Agent:
             "risk_assessment": {},
             "reward_scores": self.reward_model.evaluate(str(action))
         }
-        
+
         for risk_type, threshold in self.config.risk_thresholds.items():
             risk_score = self._calculate_risk(action, risk_type)
             validation["risk_assessment"][risk_type] = risk_score
@@ -93,7 +166,7 @@ class SafeAI_Agent:
                 validation["approved"] = False
                 correction = self.apply_corrections(action)
                 validation["corrections"].append(correction)
-                
+    
         return validation
 
     def _calculate_risk(self, action: Dict, risk_type: str) -> float:
@@ -119,13 +192,13 @@ class SafeAI_Agent:
         # Original execution logic
         if not alignment_report['approved']:
             return self.apply_corrections(alignment_report['corrections'])
-        
+
         # Integrated safety validation
         validation = self.validate_action(task_data)
         if not validation['approved']:
             self.logger.warning(f"Unsafe action detected: {validation['corrections']}")
             return self.apply_corrections(validation['corrections'])
-            
+
         # Retrieve past errors from shared memory
         failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
         for err in failures:
@@ -198,118 +271,6 @@ class SafeAI_Agent:
         self.alignment_agent.log_outcomes(task_data)
         self.logger.info(f"[SafeAI Agent] Executed risk assessment: {result}")
         return result
-
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def apply_corrections(self, corrections: List) -> Dict:
-        """Apply safety corrections to outputs"""
-        corrected = {}
-        for correction in corrections:
-            if 'sanitize' in correction:
-                corrected['sanitized'] = self._sanitize_inputs(correction['content'])
-            if 'filter' in correction:
-                corrected['filtered'] = self._apply_constitutional_rules(correction['content'])
-        return corrected
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def run_alignment_check(self, data, predictions, probs, labels, actions):
         return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)

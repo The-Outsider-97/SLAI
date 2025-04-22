@@ -9,11 +9,9 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-from src.collaborative.shared_memory import SharedMemory
-
 class RSI_Agent:
-    def __init__(self, state_size, action_size, shared_memory: SharedMemory, config: dict = None):
+    def __init__(self, state_size, action_size, shared_memory, config: dict = None):
+        self.shared_memory = shared_memory
         self.state_size = state_size
         self.action_size = action_size
         self.memory = deque(maxlen=2000)
@@ -29,7 +27,6 @@ class RSI_Agent:
         self.performance_history = deque(maxlen=50)  # Track recent performance
         self.param_mutation_rate = 0.1  # Exploration in parameter space
         
-        self.shared_memory = shared_memory
         self.config = config or {}
         self.model_id = "RSI_Agent"
         

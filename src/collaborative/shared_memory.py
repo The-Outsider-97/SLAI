@@ -12,7 +12,7 @@ import datetime
 import threading
 
 from multiprocessing import Manager
-from typing import Tuple, Type
+from typing import Tuple, Type, Any
 from collections import namedtuple, defaultdict, deque
 
 
@@ -33,12 +33,13 @@ class SharedMemory:
     like Redis or Memcached.
     """
 
-    def __init__(self, default_ttl=None, max_versions=None, network_latency=0.5):
+    def __init__(self, max_versions=10, ttl_check_interval=30, network_latency=0.0):
         from src.collaborative.registry import AgentRegistry
         from src.collaborative.task_router import TaskRouter
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
         self.data = {}
+        self.callbacks = defaultdict(list)
         self.lock = threading.Lock()
         self.subscribers = {}
         self.registry = AgentRegistry(shared_memory=self)
@@ -50,8 +51,10 @@ class SharedMemory:
             self._max_versions = None
 
         self._data = defaultdict(lambda: deque(maxlen=self._validate_max_versions(max_versions)))
+        self._expiration = {}  # key -> expiry time
+        self._access_log = {}  # key -> last access time
         self._priority_queue = []
-
+        self.network_latency = network_latency
         """
         Initializes the SharedMemory instance.
 
@@ -61,21 +64,45 @@ class SharedMemory:
             max_versions (int, optional): Maximum number of versions to keep per key.
                                           Older versions are discarded. Defaults to None (keep all).
         """
-        # Tracking last access time: key -> timestamp
-        self._access_log = {}
-
-        # Expiration time: key -> expiration_timestamp (absolute time)
-        self._expiration = {}
-
-        # Timestamp is used as a tie-breaker (FIFO for same priority).
-        self._priority_queue = []
 
         # Lock for thread safety
         self._lock = threading.Lock()
 
         # Default time-to-live
-        self._default_ttl = self._validate_ttl(default_ttl)
+        self.ttl_check_interval = ttl_check_interval
         self._network_latency = self._validate_network_latency(network_latency)
+
+        # Start background cleanup thread
+        self._start_expiration_cleaner()
+
+    def register_callback(self, key: str, callback: callable):
+        """Register a callback for specific key updates"""
+        with self.lock:
+            self.callbacks[key].append(callback)
+
+    def append(self, key: str, value: Any):
+        """Store data and trigger callbacks"""
+        with self.lock:
+            if key not in self.data:
+                self.data[key] = []
+            self.data[key].append(value)
+            
+            # Trigger registered callbacks
+            for cb in self.callbacks.get(key, []):
+                try:
+                    cb(value)
+                except Exception as e:
+                    logging.error(f"Callback error for {key}: {str(e)}")
+
+    def configure(self, default_ttl=None, max_versions=None):
+        if default_ttl is not None:
+            if not isinstance(default_ttl, (int, float)):
+                raise ValueError("default_ttl must be a number")
+            self.default_ttl = default_ttl
+        if max_versions is not None:
+            if not isinstance(max_versions, int):
+                raise ValueError("max_versions must be an integer")
+            self.max_versions = max_versions
 
     def _validate_max_versions(self, value):
         """Ensure max_versions is a positive integer or None."""
@@ -119,6 +146,28 @@ class SharedMemory:
         except Exception as e:
             logging.warning(f"Invalid network latency: {self._network_latency} ({e})")
 
+    def _remove_key(self, key):
+        """Removes a key and associated metadata without locking."""
+        if key in self._data:
+            del self._data[key]
+        if key in self._expiration:
+            del self._expiration[key]
+        if key in self._access_log:
+            del self._access_log[key]
+        # Note: Removing from priority queue efficiently is hard.
+        # We'll filter expired items when retrieving from the queue.
+
+    def _start_expiration_cleaner(self):
+        def cleaner():
+            while True:
+                time.sleep(self.ttl_check_interval)
+                current_time = time.time()
+                expired_keys = [k for k, v in self._expiration.items() if v < current_time]
+                for key in expired_keys:
+                    self._remove_key(key)
+        thread = threading.Thread(target=cleaner, daemon=True)
+        thread.start()
+
     def set(self, key, value, *, ttl=None, **kwargs):
         """Set a value in shared memory with TTL and versioning"""
         self._simulate_network()
@@ -142,22 +191,63 @@ class SharedMemory:
 
         return self.put(key, value, ttl=ttl, **kwargs)
 
+    def get(self, key, version_timestamp=None, update_access=True, default=None):
+        """
+        Retrieves a value associated with a key.
+        """
+        self._lock = threading.Lock()
+
+        # 1. Check existence and expiration
+        if key not in self._data or self._is_expired(key, current_time):
+            if key in self._data: # It exists but is expired
+                self._remove_key(key) # Clean up expired item
+            return None
+
+        # 2. Update access log if requested
+        if update_access:
+            self._access_log[key] = current_time
+
+        versions = self._data[key]
+        if not versions: # Should not happen if key in _data, but defensive check
+                return None
+
+        # 3. Find the correct version
+        if version_timestamp is None:
+            # Return the latest version's value
+            return versions[-1].value
+        else:
+            # Find the latest version <= version_timestamp
+            # Iterate backwards for efficiency as timestamps are ordered
+            found_version = None
+            for version in reversed(versions):
+                if version.timestamp <= version_timestamp:
+                    found_version = version
+                    break
+            return found_version.value if found_version else None
+
+    def get_all_versions(self, key, update_access=True):
+        """
+        Retrieves all available versions of a value associated with a key.
+        """
+        with self._lock:
+            current_time = time.time()
+
+            if key not in self._data or self._is_expired(key, current_time):
+                if key in self._data:
+                    self._remove_key(key)
+                return []
+
+            if update_access:
+                self._access_log[key] = current_time
+
+            # Return a copy of the deque as a list
+            return list(self._data[key]) if key in self._data else []
+
     def _is_expired(self, key, current_time):
         """Checks if a key is expired without locking."""
         if key not in self._expiration:
             return False
         return self._expiration[key] <= current_time
-
-    def _remove_key(self, key):
-        """Removes a key and associated metadata without locking."""
-        if key in self._data:
-            del self._data[key]
-        if key in self._access_log:
-            del self._access_log[key]
-        if key in self._expiration:
-            del self._expiration[key]
-        # Note: Removing from priority queue efficiently is hard.
-        # We'll filter expired items when retrieving from the queue.
 
     def put(self, key, value, ttl=None, priority=None):
         # Normalize timedelta to seconds
@@ -175,20 +265,6 @@ class SharedMemory:
     
         """
         Stores or updates a value associated with a key.
-
-        Args:
-            key (hashable): The key to store the value under.
-            value (any): The value to store.
-            ttl (int, optional): Time-to-live in seconds for this item.
-                                 Overrides the default_ttl if provided.
-                                 Use None for no expiration.
-                                 Use 0 or negative for immediate expiration (useful for cleanup).
-            priority (int, optional): If provided, adds the key to the priority queue
-                                      with this priority (lower number = higher priority).
-                                      Defaults to None (not added to queue).
-
-        Returns:
-            float: The timestamp associated with this version.
         """
         with self._lock:
             current_time = time.time()
@@ -227,88 +303,10 @@ class SharedMemory:
 
             return current_time
 
-    def get(self, key, version_timestamp=None, update_access=True, default=None):
-        """
-        Retrieves a value associated with a key.
-
-        Args:
-            key (hashable): The key of the value to retrieve.
-            version_timestamp (float, optional): If provided, retrieves the latest version
-                                                 at or before this timestamp.
-                                                 Defaults to None (retrieve the absolute latest version).
-            update_access (bool): Whether to update the last access time for this key. Defaults to True.
-
-        Returns:
-            any: The requested value, or None if the key doesn't exist, is expired,
-                 or the specified version doesn't exist.
-        """
-        self._lock = threading.Lock()
-
-        # 1. Check existence and expiration
-        if key not in self._data or self._is_expired(key, current_time):
-            if key in self._data: # It exists but is expired
-                self._remove_key(key) # Clean up expired item
-            return None
-
-        # 2. Update access log if requested
-        if update_access:
-            self._access_log[key] = current_time
-
-        versions = self._data[key]
-        if not versions: # Should not happen if key in _data, but defensive check
-                return None
-
-        # 3. Find the correct version
-        if version_timestamp is None:
-            # Return the latest version's value
-            return versions[-1].value
-        else:
-            # Find the latest version <= version_timestamp
-            # Iterate backwards for efficiency as timestamps are ordered
-            found_version = None
-            for version in reversed(versions):
-                if version.timestamp <= version_timestamp:
-                    found_version = version
-                    break
-            return found_version.value if found_version else None
-
-    def get_all_versions(self, key, update_access=True):
-        """
-        Retrieves all available versions of a value associated with a key.
-
-        Args:
-            key (hashable): The key to retrieve versions for.
-            update_access (bool): Whether to update the last access time. Defaults to True.
-
-        Returns:
-            list[VersionedItem]: A list of (timestamp, value) tuples,
-                                 or an empty list if the key doesn't exist or is expired.
-                                 Returns a copy to prevent modification.
-        """
-        with self._lock:
-            current_time = time.time()
-
-            if key not in self._data or self._is_expired(key, current_time):
-                if key in self._data:
-                    self._remove_key(key)
-                return []
-
-            if update_access:
-                self._access_log[key] = current_time
-
-            # Return a copy of the deque as a list
-            return list(self._data[key])
-
 
     def delete(self, key):
         """
         Deletes a key and all its associated data (versions, metadata).
-
-        Args:
-            key (hashable): The key to delete.
-
-        Returns:
-            bool: True if the key existed and was deleted, False otherwise.
         """
         with self._lock:
             if key in self._data:
@@ -423,3 +421,12 @@ class SharedMemory:
             if key in self._data and self._is_expired(key, current_time):
                  self._remove_key(key)
             return False
+
+    def clear_all(self):
+        self._data.clear()
+        self._expiration.clear()
+        self._access_log.clear()
+        self._priority_queue.clear()
+
+    def get_all_keys(self):
+        return list(self._data.keys())

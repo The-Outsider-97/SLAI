@@ -4,6 +4,7 @@ import nltk
 import json
 import time
 import math
+import random
 import pickle
 import hashlib
 import logging
@@ -13,11 +14,14 @@ import multiprocessing as mp
 
 from textstat import textstat
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import deque, defaultdict, OrderedDict
 from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
 from functools import partial
 from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.safety.safety_guard import SafetyGuard
+from src.agents.base_agent import BaseAgent
+from src.utils.slailm_loader import get_slailm
 
 class DialogueContext:
     def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None):
@@ -93,9 +97,13 @@ class LinguisticFrame:
     intent: str
     entities: Dict[str, str]
     sentiment: float  # Range [-1, 1]
-    modality: str  # e.g., "query", "command", "clarification"
+    modality: str  # From Nuyts (2005) modality taxonomy
     confidence: float  # [0, 1]
 
+    # Validation
+    def __post_init__(self):
+        self.confidence = min(1.0, max(0.0, self.confidence))
+        self.sentiment = min(1.0, max(-1.0, self.sentiment))
 # --------------------------
 # Independent Modules
 # --------------------------
@@ -845,7 +853,22 @@ class Wordlist:
     
     def _update_cache(self, word: str, entry: Dict) -> None:
         """Hybrid cache update strategy"""
-        # Combined LRU/LFU eviction logic...
+        self.lru_cache[word] = entry
+        self.lru_cache.move_to_end(word)
+        self.lfu_cache[word] += 1
+
+        if len(self.lru_cache) > self.max_cache_size:
+            # Eviction strategy: combined LRU + LFU
+            # 1. Identify least frequently used items
+            min_freq = min(self.lfu_cache.values())
+            candidates = [k for k, v in self.lfu_cache.items() if v == min_freq]
+        
+            # 2. Of those, evict the least recently used
+            for k in self.lru_cache:
+                if k in candidates:
+                    del self.lru_cache[k]
+                    del self.lfu_cache[k]
+                    break
     
     # GRAPH-BASED RELATIONSHIPS -------------------------------------------------
     
@@ -930,13 +953,13 @@ class Wordlist:
         if candidates:
             closest = min(candidates, key=lambda x: self.weighted_edit_distance(word, x))
             if self.weighted_edit_distance(word, closest) < 2.0:
-                if closest and self.weighted_edit_distance(word, closest) < 2.0:
-                    return True
-        
+                return True  # Valid candidate found
+            
+            # Proceed to typo correction if no close candidate
             correction, confidence = self.correct_typo(word)
             return confidence > 0.7
-
-            # Grapheme-to-phoneme alignment
+        
+        # Fallback to grapheme-phoneme alignment
         return self._validate_grapheme_phoneme(word)
 
     def _check_morphology(self, word: str) -> bool:
@@ -1097,12 +1120,107 @@ class Wordlist:
         )
 
     def _check_phonotactics(self, word: str) -> bool:
-        """Validate word structure against language phonotactic rules"""
-        # Implementation of phonotactic constraints...
+        """Validate word structure against language-specific phonotactic rules"""
+        lang = self.metadata.get('language', 'en').lower()
+        word_lower = word.lower()
+    
+        # Universal check: Minimum word structure
+        if len(word_lower) < 1:
+            return False
+    
+        # Language-specific rule sets
+        if lang == 'en':
+            return self._validate_english_phonotactics(word_lower)
+        elif lang == 'es':
+            return self._validate_spanish_phonotactics(word_lower)
+        # Add other languages as needed
+        return True  # Default pass for unsupported languages
+    
+    def _validate_english_phonotactics(self, word: str) -> bool:
+        """English phonotactic constraints based on Cruttenden (2014)"""
+        # 1. Mandatory vowel presence
+        if not re.search(r'[aeiouy]', word):
+            return False
+    
+        # 2. Invalid initial clusters (Blevins, 1995)
+        invalid_onsets = {
+            'tk', 'pf', 'gb', 'sr', 'dlr', 'lv', 'km',
+            'bd', 'gt', 'pn', 'ts', 'dz', 'fp', 'vr'
+        }
+        if any(word.startswith(onset) for onset in invalid_onsets):
+            return False
+    
+        # 3. Invalid final clusters (Harris, 1994)
+        invalid_codas = {
+            'mt', 'pn', 'dl', 'bm', 'lr', 'nm', 'tn',
+            'aa', 'ii', 'uu', 'vv', 'jk', 'qq', 'xz'
+        }
+        if any(word.endswith(coda) for coda in invalid_codas):
+            return False
+    
+        # 4. Maximal onset principle (Kahn, 1976)
+        if re.search(r'[bcdfghjklmnpqrstvwxz]{4}', word):
+            return False  # No quad-consonant sequences
+    
+        # 5. Vowel sequence constraints (Roach, 2000)
+        if re.search(r'[aeiouy]{3}', word):
+            return False
+    
+        # 6. Valid syllable structure (C)(C)(C)V(C)(C)(C)(C)
+        syllables = self._split_syllables(word)
+        for syl in syllables:
+            if not re.fullmatch(r'^([bcdfghjklmnpqrstvwxz]{0,3}[aeiouy]+[bcdfghjklmnpqrstvwxz]{0,4})$', syl):
+                return False
+    
+        return True
+    
+    def _validate_spanish_phonotactics(self, word: str) -> bool:
+        """Spanish phonotactic rules (Hualde, 2005)"""
+        # 1. No initial consonant clusters except pr, br, tr, etc.
+        if re.match(r'^[bcdfghjklmnpqrstvwxz]{2}', word):
+            valid_spanish_onsets = {'pr', 'br', 'tr', 'dr', 'cr', 'gr', 'fr', 'pl', 'bl', 'cl', 'gl'}
+            onset = word[:2]
+            if onset not in valid_spanish_onsets:
+                return False
+    
+        # 2. No final consonants except d, l, n, r, s, z
+        if word[-1] not in {'d', 'l', 'n', 'r', 's', 'z'} and word[-1] in 'bcdfghjklmnpqrstvwxz':
+            return False
+    
+        # 3. No vowel sequences except diphthongs
+        if re.search(r'[aeiou]{3}', word):
+            return False
+    
+        return True
+    
+    def _split_syllables(self, word: str) -> list:
+        """Basic syllabification using sonority hierarchy (Selkirk, 1984)"""
+        vowels = 'aeiouy'
+        syllables = []
+        current = ''
+        
+        for i, char in enumerate(word):
+            current += char
+            if char in vowels:
+                # Look ahead to determine syllable boundary
+                if i < len(word)-1 and word[i+1] in vowels:
+                    syllables.append(current)
+                    current = ''
+                elif i < len(word)-2 and word[i+1] not in vowels and word[i+2] in vowels:
+                    syllables.append(current)
+                    current = ''
+        
+        if current:
+            syllables.append(current)
+        return syllables
+
+    def __contains__(self, word: str) -> bool:
+        """Case-insensitive check against wordlist data (no cache side effects)."""
+        return word.lower() in self.data  # Directly check the source data
 
 class TypoHandler:
     """Comprehensive typo handling with multiple correction strategies"""
-    
+
     def __init__(self, wordlist: Wordlist):
         self.wordlist = wordlist
         self.max_edit_distance = 2
@@ -1110,38 +1228,70 @@ class TypoHandler:
         self.frequency_weight = 0.3
         self.keyboard_weight = 0.3
 
-    def suggest_corrections(self, word: str, max_suggestions: int = 5) -> List[Tuple[str, float]]:
+    def suggest_corrections(self, word: str, context: Optional[str] = None, max_suggestions: int = 5) -> List[Tuple[str, float]]:
         """Generate ranked spelling corrections using hybrid approach"""
-        candidates = self._generate_candidates(word.lower())
+        score = self._calculate_confidence(word, candidate)
+
+        # Contextual check (optional bonus validation)
+        if context and self.wordlist.grammar_processor:
+            # POS comparison: is original a preposition? noun? etc.
+            expected_pos = self.wordlist.grammar_processor._get_pos_tag(word)
+            candidate_pos = self.wordlist.grammar_processor._get_pos_tag(candidate)
+
+            # Penalize mismatch (e.g., you expected a preposition, but “bout” is a noun)
+            if candidate_pos != expected_pos:
+                score *= 0.75  # Penalize lightly
+
+        scored.append((candidate, score))
+
+        # Immediate return for exact match with original casing
+        if word in self.wordlist.data:
+            return [(word, 1.0)]
+
+        lower_word = word.lower()
+        candidates = self._generate_candidates(lower_word)
         valid_words = [w for w in candidates if w in self.wordlist.data]
-        
-        # If exact match exists with different case
-        if not valid_words and word.lower() in self.wordlist.data:
-            return [(word.lower(), 1.0)]
-        
-        # Score candidates using multiple features
+
+        # Check if lowercase version exists (different casing in wordlist)
+        if lower_word in self.wordlist.data:
+            valid_words.append(lower_word)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_valid = []
+        for w in valid_words:
+            if w not in seen:
+                seen.add(w)
+                unique_valid.append(w)
+        valid_words = unique_valid
+
+        # Handle cases where lower_word is the only valid candidate
+        if not valid_words and lower_word in self.wordlist.data:
+            return [(lower_word, 1.0)]
+
+        # Score remaining candidates
         scored = []
         for candidate in valid_words:
             score = self._calculate_confidence(word, candidate)
             scored.append((candidate, score))
-        
-        # Sort by descending confidence and frequency
+
+        # Sort by confidence and frequency
         scored.sort(key=lambda x: (-x[1], -self.wordlist.word_probability(x[0])))
         return scored[:max_suggestions]
 
     def _generate_candidates(self, word: str) -> Set[str]:
         """Generate possible corrections using multiple strategies"""
         candidates = set()
-        
+
         # Strategy 1: Edit distance variants
         candidates.update(self._edit_distance_candidates(word))
-        
+
         # Strategy 2: Phonetic matches
         candidates.update(self.wordlist.phonetic_candidates(word))
-        
+
         # Strategy 3: Common mistyping patterns
         candidates.update(self._common_mistype_patterns(word))
-        
+
         return candidates
 
     def _edit_distance_candidates(self, word: str) -> Set[str]:
@@ -1160,30 +1310,55 @@ class TypoHandler:
         """Generate all edits that are one edit away"""
         letters = 'abcdefghijklmnopqrstuvwxyz'
         splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
-        
+
         deletes = [L + R[1:] for L, R in splits if R]
         transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
         replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
         inserts = [L + c + R for L, R in splits for c in letters]
-        
+
         return set(deletes + transposes + replaces + inserts)
 
     def _common_mistype_patterns(self, word: str) -> Set[str]:
         """Correct common mistyping patterns using rules"""
         patterns = [
-            (r'ie$', 'ei'),  # recieve -> receive
-            (r'([aeiou])\1', r'\1'),  # occured -> occurred
-            (r'([a-z])\1+', r'\1'),  # happpy -> happy
-            (r'^[aeiou]', ''),  # about -> bout
-            (r'(.)\1(.)\2', r'\1\2'),  # committe -> committee
+            (r'ie$', 'ei'), (r'ei$', 'ie'),  # receive, their
+            (r'ou$', 'uo'), (r'uo$', 'ou'),  # guard vs gurad
+            (r'([aeiou])\1', r'\1'),  # repeated vowels: aa -> a
+            (r'([a-z])\1+', r'\1'),   # happpy -> happy
+            (r'^[aeiou]', ''),         # about -> bout (edge case)
+            (r'(.)\1(.)\2', r'\1\2'), # committee -> commite
+            (r'ph', 'f'), (r'f(?!e)', 'ph'),  # phone <-> fone
+            (r'(\w)(ie|ei)(\w)', r'\1\3\2'),  # transposes ei/ie in middle
+            (r'c([ei])', r's\1'),    # receive -> seive (then validated)
+            (r'(\w)or$', r'\1er'), (r'(\w)er$', r'\1or'),  # color <-> colour
+            (r're$', 'er'), (r'er$', 're'),  # centre <-> center
+            (r'able$', 'ible'), (r'ible$', 'able'),  # convertible
+            (r'ance$', 'ence'), (r'ence$', 'ance'),  # persistence
+            (r'ary$', 'ery'), (r'ery$', 'ary'),      # stationary vs stationery
+            (r'gh', ''),          # though -> thou (but validate via wordlist)
+            (r'([td])h$', r'\1'), # with -> wit (edge cases)
+            (r'll$', 'l'), (r'l$', 'll'),  # full vs ful
+            (r'([aeiou])([^aeiou])$', r'\1\2e'),  # lov -> love
+            (r'([^e])e$', r'\1'),  # have -> hav (validate)
+            (r'([^c])ie$', r'\1y'),  # tidy -> tidie (reverse)
+            (r'([cs])h$', r'\1'), # tech -> tec
+            (r'([aeiou])r([e$])', r'\1er'),  # centre -> center
         ]
-        
+
         variants = set()
         for pattern, replacement in patterns:
+            # Apply pattern in both directions
             variants.add(re.sub(pattern, replacement, word))
             variants.add(re.sub(replacement, pattern, word))
+
+        # Handle case variations for generated candidates
+        case_variants = set()
+        for v in variants:
+            case_variants.add(v.lower())
+            if len(v) > 0:
+                case_variants.add(v[0].upper() + v[1:])
         
-        return variants
+        return case_variants
 
     def _calculate_confidence(self, original: str, candidate: str) -> float:
         """Calculate combined confidence score using multiple features"""
@@ -1234,7 +1409,16 @@ class TypoHandler:
 
 class NLUEngine:
     """Rule-based semantic parser with fallback patterns"""
-    def __init__(self, wordlist_path: str = "src/agents/language/structured_wordlist_en.json"):
+    def __init__(self, path: str):
+        try:
+            from src.agents.language.resource_loader import ResourceLoader
+            word_data = ResourceLoader.get_structured_wordlist()
+        except Exception as e:
+            self.logger.warning(f"[NLUEngine] Failed to load structured wordlist: {e}")
+            return {}
+
+        # structured_words = word_data.get("words", word_data)  # fallback if top-level structure is flat
+
         # Hierarchical intent recognition system with pattern clusters
         self.intent_weights = {
             'information_request': {
@@ -1313,68 +1497,12 @@ class NLUEngine:
         }
 
         # Sentiment lexicon (word: polarity_score)
-        self.sentiment_lexicon = {
-            # Strong Positive (1.5-3.0)
-            'excellent': 2.9, 'outstanding': 2.8, 'magnificent': 2.7,
-            'superb': 2.6, 'brilliant': 2.5, 'fantastic': 2.4,
-            
-            # Moderate Positive (0.5-1.4)
-            'good': 1.3, 'pleasing': 1.2, 'satisfactory': 1.0,
-            'adequate': 0.8, 'acceptable': 0.6,
-            
-            # Weak Positive (0.1-0.4)
-            'neutral': 0.3, 'tolerable': 0.2, 'passable': 0.1,
-            
-            # Strong Negative (-3.0--1.5)
-            'horrendous': -2.9, 'atrocious': -2.8, 'abysmal': -2.7,
-            'disastrous': -2.6, 'appalling': -2.5,
-            
-            # Moderate Negative (-1.4--0.5)
-            'poor': -1.3, 'subpar': -1.2, 'deficient': -1.0,
-            'unsatisfactory': -0.8, 'inadequate': -0.6,
-            
-            # Weak Negative (-0.4--0.1)
-            'questionable': -0.3, 'dubious': -0.2, 'mediocre': -0.1,
-            
-            # Intensifiers/Modifiers
-            'very': 0.5, 'extremely': 0.7, 'somewhat': -0.3,
-            'slightly': -0.2, 'remarkably': 0.6
-        }
+        self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
 
         # Modality markers
-        self.modality_markers = {
-            'epistemic': {  # Knowledge/belief
-                'certainly', 'probably', 'possibly', 
-                'apparently', 'seemingly', 'evidently'
-            },
-            'deontic': {  # Obligation/permission
-                'must', 'should', 'ought', 
-                'permitted', 'allowed', 'forbidden'
-            },
-            'dynamic': {  # Ability/capacity
-                'can', 'could', 'able', 
-                'capable', 'enable', 'capacity'
-            },
-            'alethic': {  # Logical necessity
-                'necessarily', 'possibly', 
-                'contingently', 'impossibly'
-            },
-            'interrogative': {
-                'who', 'what', 'when', 
-                'where', 'why', 'how', 
-                'which', 'whom', 'whose'
-            },
-            'imperative': {
-                'please', 'kindly', 'urgently',
-                'immediately', 'require', 'demand'
-            },
-            'conditional': {
-                'if', 'unless', 'provided',
-                'assuming', 'contingent', 'conditional'
-            }
-        }
+        self.modality_markers = ResourceLoader.get_modality_markers()
 
-        self.wordlist = self._load_wordlist(wordlist_path)  # Assume returns POS-annotated dict
+        self.wordlist = self._load_wordlist(path)  # Assume returns POS-annotated dict
 
     def _validate_temporal(self, entity: str) -> bool:
         """Temporal validation using date logic"""
@@ -1403,30 +1531,32 @@ class NLUEngine:
     
     def parse(self, text: str) -> LinguisticFrame:
         """Hybrid parsing using rules and simple statistics"""
+        sentiment = self._calculate_sentiment(text)
         frame = LinguisticFrame(
             intent='unknown',
             entities={},
-            sentiment=self._calculate_sentiment(text),
-            modality='statement',
+            sentiment=0.0,
+            modality='none',
             confidence=0.0
         )
 
         # Intent detection
-        for intent, patterns in self.intent_patterns.items():
-            for pattern in patterns:
+        for intent, intent_data in self.intent_weights.items():
+            for pattern, weight in intent_data.get("patterns", []):
                 if re.search(pattern, text, re.IGNORECASE):
                     frame.intent = intent
-                    frame.confidence += 0.3  # Simple confidence scoring
+                    frame.confidence += weight * 0.1 
 
         # Entity extraction
         entities = {}
-        for entity_type, pattern in self.entity_patterns.items():
+        for entity_type, meta in self.entity_patterns.items():
+            pattern = meta['pattern'].format(**meta['components'])
             matches = [m[0] if isinstance(m, tuple) else m for m in re.findall(pattern, text)]
             entities[entity_type] = [m for m in matches if m]
         frame.entities = entities
 
         self._validate_words(frame)
-        return frame
+        return asdict(frame)
 
     def _validate_words(self, frame: LinguisticFrame) -> None:
         """Check if recognized entities exist in the wordlist"""
@@ -1438,33 +1568,50 @@ class NLUEngine:
         frame.entities = valid_entities
 
     def _calculate_sentiment(self, text: str) -> float:
-        """Basic sentiment analysis using lexicon approach"""
-        tokens = re.findall(r'\b\w+\b', text.lower())
-        base_score = 0.0
-        current_intensity = 1.0
-        
-        for i, token in enumerate(tokens):
-            # Handle intensifiers
-            if token in {'very', 'extremely', 'remarkably'}:
-                current_intensity *= 1.5
-                continue
-            elif token in {'somewhat', 'slightly'}:
-                current_intensity *= 0.7
-                continue
-                
-            # Reset intensity after each sentiment-bearing word
-            if token in self.sentiment_lexicon:
-                base_score += self.sentiment_lexicon[token] * current_intensity
-                current_intensity = 1.0  # Reset modifier
+        """Enhanced sentiment analysis using lexicon and syntactic patterns"""
+        # Use the wordlist's sentiment lexicon instead of local copy
+        if not hasattr(self.wordlist, 'sentiment_lexicon'):
+            return 0.0  # Fallback if no lexicon available
+            
+        tokens = self._tokenize(text)
+        valence_dict = self.wordlist.sentiment_lexicon
+        intensifiers = valence_dict.get("intensifiers", {})
+        negators = valence_dict.get("negators", [])
 
-        # Normalization using softmax-inspired approach
-        normalized = math.tanh(base_score / math.sqrt(len(tokens))) if tokens else 0.0
-        return round(normalized, 2)
+        sentiment_score = 0.0
+        weight_sum = 0.0
+        negate = False
+        intensity = 1.0
+
+        for word in tokens:
+            w = word.lower()
+            if w in negators:
+                negate = not negate  # Toggle negation state
+                continue
+            elif w in intensifiers:
+                intensity *= intensifiers[w]
+                continue
+
+            # Check both positive and negative lexicons
+            score = valence_dict["positive"].get(w, 0) + valence_dict["negative"].get(w, 0)
+            if score != 0:
+                if negate:
+                    score *= -1
+                    negate = False  # Reset negation after application
+                sentiment_score += score * intensity
+                weight_sum += abs(score) * intensity  # Use absolute value for weighting
+                intensity = 1.0  # Reset intensity after application
+
+        # Normalize and clamp between -1 and 1
+        if weight_sum > 0:
+            normalized = sentiment_score / weight_sum
+            return max(-1.0, min(1.0, normalized))
+        return 0.0
 
     def _detect_modality(self, text: str) -> str:
         """Hierarchical modality detection"""
         text_lower = text.lower()
-        
+
         # Priority detection order
         modalities = [
             ('interrogative', any(m in text_lower for m in self.modality_markers['interrogative'])),
@@ -1480,26 +1627,57 @@ class NLUEngine:
             if detected:
                 return mod_type
         return 'declarative'
-    
+
     def _calculate_confidence(self, text: str) -> float:
         total_weight = 0.0
         for intent, patterns in self.intent_weights.items():
             for pattern, weight in patterns.items():
                 if re.search(pattern, text, re.IGNORECASE):
                     total_weight += weight
-        
+
         # Sigmoid function for confidence scaling
         return 1 / (1 + math.exp(-total_weight/3))  # Logistic curve
 
-    def _load_wordlist(self, path: str) -> Dict[str, Any]:
-        # Assume implementation loads wordlist with POS data
-        return {}  # Placeholder
-    
+    def _load_wordlist(self, path: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Loads the structured wordlist from JSON and prepares internal NLU mappings.
+        """
+        try:
+            from src.agents.language.resource_loader import ResourceLoader
+            word_data = ResourceLoader.get_structured_wordlist(path)
+        except Exception as e:
+            self.logger.warning(f"[NLUEngine] Failed to load structured wordlist: {e}")
+            return {}
+
+        structured_words = word_data.get("words", word_data)  # fallback if top-level structure is flat
+
+        processed = {}
+        for word, entry in structured_words.items():
+            if isinstance(entry, list):
+                # Map list indices to expected keys
+                processed[word] = {
+                    "pos": entry[0] if len(entry) > 0 else [],
+                    "synonyms": entry[1] if len(entry) > 1 else [],
+                    "related_to": entry[2] if len(entry) > 2 else [],
+                    "translate": entry[3] if len(entry) > 3 else [],
+                    "translate_synonyms": entry[4] if len(entry) > 4 else [],
+                }
+            else:
+                processed[word] = {
+                    "pos": entry.get("pos", []),
+                    "synonyms": entry.get("synonyms", []),
+                    "related_to": entry.get("related_to", []),
+                    "translate": entry.get("translate", []),
+                    "translate_synonyms": entry.get("translate_synonyms", [])
+                }
+        return processed
+
 # --------------------------
 # Enhanced NLU Components
 # --------------------------
 class EnhancedNLU(NLUEngine):
     """Implements advanced NLU techniques from recent research"""
+    from src.agents.language.nlp_utils import CoreferenceResolver, ShallowDependencyParser
     def __init__(self, wordlist_path: str):
         super().__init__(wordlist_path)
         self.coref_resolver = CoreferenceResolver()
@@ -1549,34 +1727,17 @@ class EnhancedNLU(NLUEngine):
         }
         return modality_map.get(main_verb, 'statement')
 
-class CoreferenceResolver:
-    """Simple rule-based coreference resolution"""
-    def resolve(self, text: str, history: deque) -> str:
-        """Replace pronouns with recent entities"""
-        # Implementation inspired by Hobbs algorithm (1978)
-        last_entities = self._extract_last_entities(history)
-        return re.sub(r'\b(he|she|it|they)\b', lambda m: last_entities.get(m.group().lower(), m.group()), text)
-
-class ShallowDependencyParser:
-    """Lightweight dependency parser using regex patterns"""
-    def parse(self, text: str) -> Dict:
-        """Extract basic dependency relations"""
-        # Simplified version of Marneffe et al. (2014) Universal Dependencies
-        patterns = {
-            'nsubj': r'(\w+)\s+is',  # Simplified subject detection
-            'dobj': r'(\w+)\s+',      # Direct object placeholder
-        }
-        return {'nodes': [...]}  # Simplified output
-
 # --------------------------
 # Enhanced NLG Components
 # --------------------------
 class NLGEngine:
     """Controlled text generation with style management"""
-    def __init__(self, templates_path: str = "src/agents/language/nlg_templates_en.json"):
+    def __init__(self, path: str):
+        from src.agents.language.response_coherence import ResponseCoherence
+        from src.agents.language.resource_loader import ResourceLoader
 
 
-        self.templates = self._load_templates(templates_path)
+        self.templates = ResourceLoader.get_nlg_templates()
         self.style = {'formality': 0.5, 'verbosity': 1.0}
         self.coherence_checker = ResponseCoherence()
 
@@ -1615,21 +1776,21 @@ class NLGEngine:
 
         return templates
 
-    def generate(self, frame: LinguisticFrame, context: DialogueContext) -> str:
-        """Generate response using hybrid template-neural approach"""
-        # Step 1: Template selection
-        if template := self._match_template(frame):
-            response = self._instantiate_template(template, context)
-        else:
-            response = self._neural_generation(frame, context)
-            
-        # Step 2: Style adaptation
-        response = self._adapt_style(response)
-        
-        # Step 3: Coherence check
-        if not self.coherence_checker.validate(response, context):
-            response = self._fallback_generation(frame)
-            
+    def generate(self, intent: str, entities: Dict[str, str], context: Optional[str] = None) -> str:
+        """Generate a response given intent and entities using appropriate templates"""
+        if intent not in self.templates:
+            return "I'm not sure how to respond to that yet."
+
+        # Choose template and format with entities
+        candidates = self.templates[intent]
+        response = random.choice(candidates).format(**entities)
+
+        # Apply verbosity styling (e.g., repetition, expansions)
+        if self.style['verbosity'] > 1.0:
+            response += " Let me know if you need more details."
+
+        # Formality tweaks could be added here...
+
         return response
 
     def _match_template(self, frame: LinguisticFrame) -> Optional[str]:
@@ -1652,15 +1813,6 @@ class NLGEngine:
         if self.style['verbosity'] < 0.5:
             text = ' '.join(text.split()[:15]) + '...'
         return text
-
-class ResponseCoherence:
-    """Ensure generated responses stay on-topic"""
-    def validate(self, response: str, context: DialogueContext) -> bool:
-        """Check lexical overlap with conversation history"""
-        # Implementation inspired by Centering Theory (Grosz et al. 1995)
-        history_words = set(word for turn in context.history for word in turn[0].split())
-        response_words = set(response.split())
-        return len(history_words & response_words) / len(response_words) > 0.3
 
 class KnowledgeCache:
     """Lightweight cache with LRU eviction policy"""
@@ -1685,50 +1837,24 @@ class KnowledgeCache:
         """Semantic hashing for similar queries (simplified)"""
         return hashlib.md5(query.encode()).hexdigest()
 
-class SafetyGuard:
-    """Multi-layered content safety system"""
-    def __init__(self):
-        self.redact_patterns = [
-            (r'\b\d{3}-\d{2}-\d{4}\b', '[REDACTED_SSN]'),
-            (r'(?i)\b(credit card|password)\b', '[REDACTED_PII]')
-        ]
-        
-        self.toxicity_patterns = [
-            r'\b(kill|harm|attack)\b',
-            r'(racial|ethnic)\s+slur'
-        ]
+class LanguageAgent(BaseAgent):
+    def __init__(self, *, shared_memory, agent_factory, grammar, context, slai_lm,
+                 config=None, dialogue_context=None, args=(), kwargs={}):
+        if not slai_lm:
+            raise ValueError("LanguageAgent requires an LLM instance.")
+        self.slai_lm = slai_lm
+        self.context = context
+        self.grammar = grammar
+        self.config = config or {}
+        super().__init__(shared_memory, agent_factory, config)
 
-    def sanitize(self, text: str) -> str:
-        """Apply redaction and toxicity filtering"""
-        # Redaction layer
-        for pattern, replacement in self.redact_patterns:
-            text = re.sub(pattern, replacement, text)
-            
-        # Toxicity check
-        for pattern in self.toxicity_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                return "[SAFETY_BLOCK] Content violates safety policy"
-            
-        return text
-
-
-class LanguageAgent:
-    def __init__(self, shared_memory, agent_factory, llm=None, grammar_processor=None, dialogue_context=None, config=None, args=(), kwargs={}):
-        self.llm = llm
+        self.llm = slai_lm or get_slailm(shared_memory, agent_factory)
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.grammar_processor = grammar_processor
         self.dialogue_context = dialogue_context
-        self.config = config or {}
-        if not llm:
-            raise ValueError("LanguageAgent requires an LLM instance.")
+        self.grammar_processor = self._init_grammar_processor()
+        self.sentiment_lexicon = self._load_sentiment_lexicon()
 
-        # GrammarProcessor setup
-        if grammar_processor:
-            self.grammar_processor = grammar_processor
-        else:
-            from src.agents.language.grammar_processor import GrammarProcessor
-            self.grammar_processor = GrammarProcessor()
 
         # NLU and Wordlist
         wordlist_path = self.config.get("wordlist_path")
@@ -1764,11 +1890,237 @@ class LanguageAgent:
             "default": ["I am processing your input."]
         })
 
-    def perform_task(self, input_data):
-        if isinstance(input_data, str):
-            input_data = {"text": input_data}
+    def _init_grammar_processor(self, grammar_processor=None):
+        # GrammarProcessor setup
+        self.grammar_processor = grammar_processor
+        if grammar_processor:
+            self.grammar_processor = grammar_processor
+        else:
+            self.grammar_processor = GrammarProcessor()
 
-    def generate(self, prompt: str) -> str:
+        return self.config.get("grammar_processor") or GrammarProcessor()
+
+    def _load_sentiment_lexicon(self):
+        path = "src/agents/language/sentiment_lexicon.json"
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to load sentiment lexicon: {e}")
+            return {"positive": {}, "negative": {}, "intensifiers": {}, "negators": []}
+
+    def build_frame(self, text: str) -> LinguisticFrame:
+        """
+        Construct a LinguisticFrame from input text.
+        """
+        try:
+            tokens = self.grammar._pos_tag(text)
+            intent = self.grammar.detect_intent(text)
+            entities = self.grammar.extract_entities(text, tokens)
+            sentiment = self.analyze_sentiment(text)
+            modality = self._detect_modality(tokens)
+            confidence = self._estimate_confidence(text, tokens)
+
+            frame = LinguisticFrame(
+                intent=intent,
+                entities=entities,
+                sentiment=sentiment,
+                modality=modality,
+                confidence=confidence
+            )
+
+            return frame
+
+        except Exception as e:
+            self.logger.error(f"Frame construction failed: {e}", exc_info=True)
+            return LinguisticFrame(
+                intent="unknown",
+                entities={},
+                sentiment=0.0,
+                modality="none",
+                confidence=0.0
+        )
+
+    def analyze_sentiment(self, text: str) -> float:
+        """
+        Rule-based sentiment analysis using economic lexicon from GrammarProcessor.
+        Returns a sentiment score in the range [-1, 1].
+        """
+        lexicon = self.grammar._load_econ_lexicon()
+        words = text.lower().split()
+    
+        pos_hits = sum(1 for w in words if w in lexicon["positive"])
+        neg_hits = sum(1 for w in words if w in lexicon["negative"])
+    
+        total = pos_hits + neg_hits
+        if total == 0:
+            return 0.0
+        return (pos_hits - neg_hits) / total 
+
+    def _estimate_confidence(self, text: str, tokens: List[Tuple[str, str]]) -> float:
+        """
+        Estimate confidence based on coverage and readability heuristics.
+        """
+        known_token_count = sum(1 for _, tag in tokens if tag not in {"X", None})
+        coverage_ratio = known_token_count / max(1, len(tokens))
+    
+        # Readability heuristic (Flesch score normalized)
+        try:
+            readability = textstat.flesch_reading_ease(text)
+            readability_score = min(max(readability / 100, 0.0), 1.0)
+        except Exception:
+            readability_score = 0.5
+    
+        # Blend both
+        return round(0.6 * coverage_ratio + 0.4 * readability_score, 3)
+
+    def _tokenize(self, text: str) -> list[str]:
+        """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
+        if self.grammar_processor and hasattr(self.grammar_processor, 'pos_patterns'):
+            tokens = []
+            pos_patterns = sorted(
+                [(p, name) for p, name in self.grammar_processor.pos_patterns],  # Convert dict items to tuples
+                key=lambda x: len(x[0].pattern),
+                reverse=True  # Match longer patterns first
+            )
+
+            # Build combined regex pattern with UNIQUE group names
+            combined_pattern = '|'.join(
+                f'(?P<{name}_{i}>{pattern.pattern})'  # Unique group names: NOUN_0, VERB_1, etc.
+                for i, (pattern, name) in enumerate(pos_patterns)
+            )
+            combined_re = re.compile(combined_pattern, re.IGNORECASE)
+
+            # Scan text using POS-aware tokenization
+            pos = 0
+            while pos < len(text):
+                match = combined_re.match(text, pos)
+                if match:
+                    token = match.group()
+                    # Determine which group matched and extract the POS tag
+                    for i, (pattern, name) in enumerate(pos_patterns):
+                        group_name = f"{name}_{i}"
+                        if match.group(group_name):  # Check if this group matched
+                            pos_tag = name
+                            break
+                    tokens.append(token)
+                    pos = match.end()
+                else:
+                    # Fallback: Split unknown characters
+                    tokens.append(text[pos])
+                    pos += 1
+
+            # Post-process hyphenated words and contractions
+            refined_tokens = []
+            for token in tokens:
+                if '-' in token and token not in self.structured_wordlist:
+                    refined_tokens.extend(token.split('-'))
+                elif "'" in token:
+                    parts = re.split(r"('(?:t|s|d|ll|re|ve|m))$", token)
+                    refined_tokens.extend(filter(None, parts))
+                else:
+                    refined_tokens.append(token)
+            return refined_tokens
+
+        # Fallback to enhanced regex-based tokenization
+        text = re.sub(r"([^'\w\s-]|(?<!\d)\.(?!\d))", r' \1 ', text)  # Handle punctuation
+        tokens = re.findall(
+            r"\w+(?:[-']\w+)*|['\".,!?;:()\-–—/]",  # Match words, contractions, punctuation
+            text,
+            re.UNICODE
+        )
+
+        # Validate against wordlist and morphology rules
+        validated = []
+        for token in tokens:
+            if (token not in self.wordlist and 
+                not self.grammar_processor._guess_pos_by_morphology(token)):
+                stems = self.grammar_processor.stemmer.stem(token)
+                if '-' in stems:
+                    validated.extend(stems.split('-'))
+                else:
+                    validated.append(token)
+            else:
+                validated.append(token)
+        return validated
+
+    def _calculate_sentiment(self, tokens: list) -> float:
+        """Hybrid sentiment scoring using lexicon and syntactic patterns"""
+        # Lexicon-based scoring
+        valence = sum(
+            self.sentiment_lexicon.get(token.lower(), 0)
+            for token in tokens
+        )
+
+        # Syntax modifiers
+        negation = any(t.lower() in {"not", "no", "never"} for t in tokens)
+        intensifiers = sum(
+            1.5 for t in tokens if t.lower() in {"very", "extremely"}
+        )
+
+        # Normalization
+        score = valence * (-1 if negation else 1) * (1 + intensifiers)
+        return max(-1.0, min(1.0, score / (len(tokens) or 1)))
+
+    def _detect_modality(self, tokens: list) -> str:
+        """Modality classification using lexical markers"""
+        markers = {
+            'interrogative': {"what", "why", "how", "?"},
+            'imperative': {"please", "must", "should"},
+            'conditional': {"if", "unless", "provided"}
+        }
+
+        for mod_type, mod_markers in markers.items():
+            if any(m in tokens for m in mod_markers):
+                return mod_type
+        return "declarative"
+
+    def _calculate_confidence(self, tokens: list, frame: LinguisticFrame) -> float:
+        """Composite confidence scoring using multiple features"""
+        valid_tokens = sum(1 for t in tokens if self.wordlist.query(t) is not None) # Count how many tokens exist in the wordlist
+
+        factors = {
+            'lexical_coverage': valid_tokens/len(tokens) if tokens else 0,
+            'entity_density': len(frame.entities)/10,
+            'sentiment_magnitude': abs(frame.sentiment),
+            'intent_match': 0.7 if frame.intent != "unknown" else 0.2
+        }
+
+        return min(1.0, max(0.0, sum(factors.values())/len(factors)))
+
+    def _create_fallback_frame(self, text: str) -> LinguisticFrame:
+        """Creates emergency frame when analysis fails"""
+        return LinguisticFrame(
+            intent="fallback",
+            entities={"text": [text]},
+            sentiment=0.0,
+            modality="declarative",
+            confidence=0.1
+        )
+
+    def perform_task(self, task_data, input_data):
+        """Handle different language processing tasks."""
+        self.logger.info(f"Executing language task with data: {task_data}")
+        
+        try:
+            if isinstance(task_data, dict):
+                task_type = task_data.get("type", "general")
+                input_text = task_data.get("input", "")
+                
+                if task_type == "question":
+                    return self.answer_question(input_text)
+                elif task_type == "summarize":
+                    return self.summarize_text(input_text)
+                else:
+                    return self.handle_general_prompt(input_text)
+            else:
+                return self.handle_general_prompt(str(task_data))
+                
+        except Exception as e:
+            self.logger.error(f"Task failed: {e}")
+            raise
+
+    def generate(self, frame, context, prompt: str) -> str:
         """Wrapper to route generation through the LLM"""
         if not prompt or not isinstance(prompt, str):
             return "[Invalid input]"
@@ -1792,25 +2144,6 @@ class LanguageAgent:
                     return intent
         return "default"
 
-    def preprocess_input(self, user_input, text: str) -> str:
-        intent = self.llm.parse_intent(user_input)
-        if not isinstance(intent, dict):
-            intent = {"type": str(intent), "confidence": 0.5}
-
-        words = text.split()
-        corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
-                     for w in words]
-        
-        # Analyze user input and generate a linguistic frame
-        linguistic_frame = self.analyze_input(user_input)
-        
-        # Generate raw response using SLAILM
-        raw_response = self.slailm.generate(linguistic_frame)
-        
-        # Process the raw response with GrammarProcessor
-        structured_response = self.grammar_processor.process(linguistic_frame, raw_response)
-        return structured_response.join(corrected)
-    
     def process_input(self, safe_response, user_input: str) -> Tuple[str, LinguisticFrame]:
         """Full processing pipeline with academic-inspired components"""
         # Stage 1: Input sanitization
@@ -1835,7 +2168,29 @@ class LanguageAgent:
 
         if cached := self.cache.get(self.cache.hash_query(clean_input)):
             return safe_response, frame
+        
+        return self.generate_response(frame)
 
+    def preprocess_input(self, user_input, text: str) -> str:
+        intent = self.llm.parse_intent(user_input)
+        if not isinstance(intent, dict):
+            self.logger.warning("Intent is not a dict; creating fallback LinguisticFrame.")
+            return self._create_fallback_frame(user_input)
+
+        words = text.split()
+        corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
+                     for w in words]
+        
+        # Analyze user input and generate a linguistic frame
+        linguistic_frame = self.analyze_input(user_input)
+        
+        # Generate raw response using SLAILM
+        raw_response = self.slailm.generate(linguistic_frame)
+        
+        # Process the raw response with GrammarProcessor
+        structured_response = self.grammar_processor.process(linguistic_frame, raw_response)
+        return structured_response.join(corrected)
+    
     def expand_query(self, query: str) -> str:
         words = query.split()
         expanded = []
@@ -1929,6 +2284,10 @@ class LanguageAgent:
             ]
         }
 
+    def test_validate_response_rejects_pii():
+        agent = LanguageAgent()
+        assert agent.validate_response("SSN 123-45-6789") is False
+
     def validate_response(self, response: str) -> bool:
         unsafe_patterns = [
             # Existing patterns
@@ -2017,23 +2376,42 @@ class LanguageAgent:
             return self.summarize_text(prompt)
         else:
             return self.handle_general_prompt(prompt)
+
+    def answer_question(self, question: str) -> dict:
+        """Generate an answer using knowledge retrieval and LLM."""
+        context = self.knowledge_agent.retrieve(question)[:3] if self.knowledge_agent else []
+        prompt = f"Answer this question: {question}\nContext: {' '.join(context)}"
+        response = self.llm.generate(prompt)
+        return {"type": "answer", "input": question, "output": response}
+
+    def summarize_text(self, text: str) -> dict:
+        """Generate a summary using the LLM."""
+        prompt = f"Summarize this text clearly and concisely:\n\n{text}\n\nSummary:"
+        response = self.llm.generate(prompt)
+        return {"type": "summary", "input": text, "output": response}
+
+    def handle_general_prompt(self, prompt: str) -> dict:
+        """Handle generic input using the full processing pipeline."""
+        processed = self.process_input(prompt)
+        response = self.generate(processed, self.dialogue_context, prompt)
+        return {"type": "response", "input": prompt, "output": response}
+
+if __name__ == "__main__":
+    wl = Wordlist()
+    print("Loaded", len(wl.words), "words.")
     
-# if __name__ == "__main__":
-#     wordlist = Wordlist()
-#     wordlist._build_ngram_model(3)
-#     wordlist.build_synonym_graph()
+    word = "recieve"
+    corrected, score = wl.correct_typo(word)
+    print(f"Typo correction: {word} → {corrected} (confidence: {score:.2f})")
 
-# Get next word suggestions
-# context = ["artificial", "intelligence"]
-# suggestions = wordlist.context_suggestions(context, 5)
-# print("Next word predictions:", suggestions)
+    frame = NLUEngine().parse("Can you explain the significance of quantum computing tomorrow?")
+    print("Parsed intent:", frame.intent)
+    print("Entities:", frame.entities)
+    print("Sentiment:", frame.sentiment)
 
-# Calculate conditional probability
-# prob = wordlist.word_probability("systems", context)
-# print(f"P(systems|{' '.join(context)}) = {prob:.4f}")
-
-# Assuming synonyms:
-# happy → joyful → delighted
-# happy → glad → pleased
-# path = wordlist.synonym_path("Happy", "pleased")
-# Returns: ['happy', 'glad', 'pleased']
+def validate_word(self, word: str) -> bool:
+    return (
+        self._check_orthography(word) and
+        self._check_morphology(word) and
+        self._check_phonotactics(word)  # Now with full implementation
+    )

@@ -13,6 +13,24 @@ run:
   plots_dir: "plots/"
 
 agent-network:
+  adaptive:
+    class: AdaptiveAgent
+    path: src.agents.adaptive_agent
+    learning_rate: 0.02
+    exploration_rate: 0.2
+    memory_capacity: 500
+
+  alignment:
+    class: AlignmentAgent
+    path: src.agents.alignment_agent
+    init_args:
+      value_model: {}
+      ethics: {}
+      memory: {}
+      sensitive_attrs: ["age", "gender"]
+      monitor: {}
+      corrections: {}
+
   language:  
     class: LanguageAgent
     path: src.agents.language_agent
@@ -37,46 +55,42 @@ agent-network:
       state_dim: 4
       action_dim: 2
       hidden_size: 128
+    dqn:
       learning_rate: 0.001
-      gamma: 0.99
-      epsilon: 1.0
-      epsilon_decay: 0.995
-      epsilon_min: 0.01
       buffer_size: 10000
       batch_size: 64
+    maml:
+      type: maml
+      class: MAMLAgent
+      path: src.agents.learning.maml_rl
+      state_size: 52
+      action_size: 3
+      hidden_size: 64
+      meta_lr: 0.001
+      inner_lr: 0.01
+      gamma: 0.99
+    rsi:
+      type: rl
+      class: RLAgent
+      path: src.agents.learning.rl_agent
+      learning_rate: 0.01
+      discount_factor: 0.99
+      epsilon: 0.1
+    rl:
+      type: rsi
+      calss: RSI_Agent
+      path: src.agents.learning.rsi
       target_update_frequency: 100
+      state_size: 52
+      action_size: 3
+      shared_memory: null
     epsilon: 0.1
     discount: 0.95
     memory_limit: 50000
     learning_rate: 0.001
-
-  maml:
-    type: maml
-    class: MAMLAgent
-    path: src.agents.learning.maml_rl
-    state_size: 52
-    action_size: 3
-    hidden_size: 64
-    meta_lr: 0.001
-    inner_lr: 0.01
-    gamma: 0.99
-
-  rsi:
-    type: rsi
-    calss: RSI_Agent
-    path: src.agents.learning.rsi
-    target_update_frequency: 100
-    state_size: 52
-    action_size: 3
-    shared_memory: null
-
-  rl:
-    type: rl
-    class: RLAgent
-    path: src.agents.learning.rl_agent
-    learning_rate: 0.01
-    discount_factor: 0.99
-    epsilon: 0.1
+    optimized_mode': True
+    network_size': 128
+    max_task_pool': 50
 
   evaluation:
     class: EvaluationAgent
@@ -86,26 +100,30 @@ agent-network:
   safety:
     class: SafeAI_Agent
     path: src.agents.safety_agent
-    init_args: {}
-    risk_threshold: 0.2
-
-  adaptive:
-    class: AdaptiveAgent
-    path: src.agents.adaptive_agent
-    learning_rate: 0.02
-    exploration_rate: 0.2
-    memory_capacity: 500
-
-  alignment:
-    class: AlignmentAgent
-    path: src.agents.alignment_agent
-    learning_rate: 0.01
-    momentum: 0.9
+    init_args:
+      constitutional_rules:
+        general: ["Do no harm", "Respect autonomy"]
+        data: ["Avoid PII leakage"]
+      risk_threshold:
+        safety: 0.02
+        privacy: 0.05
+        security: 0.01
+      audit_level: 3
+      enable_rlhf: true
 
   perception:
     class: PerceptionAgent
     path: src.agents.perception_agent
-    init_args: {}
+    init_args:
+      modalities:
+        - vision
+        - text
+        - audio
+      embed_dim: 512
+      projection_dim: 256
+      batch_size: 8
+      learning_rate: 0.001
+      epochs: 20
 
   planning:
     class: PlanningAgent
@@ -113,9 +131,31 @@ agent-network:
     init_args: {}
 
   reasoning:
-    class: Reasoninggent
+    class: ReasoningAgent
     path: src.agents.reasoning_agent
-    init_args: {}
+    init_args:
+      tuple_key: "subject|predicate|object"
+      storage_path: "src/agents/knowledge/knowledge_db.json"
+      contradiction_threshold: 0.25       # Threshold for conflict detection
+      rule_validation: 
+        enable: true
+        min_soundness_score: 0.7          # Minimum logical validity score
+        max_circular_depth: 3             # Max allowed dependency depth
+      nlp_integration:
+        spacy_model: "en_core_web_lg"     # Replace regex parsing
+        sentence_transformer: "all-MiniLM-L6-v2" # For semantic similarity
+      serialization:
+        persist_nlp_state: true           # Save word vectors/entity recognition
+        compress_knowledge: true
+      inference:
+        default_chain_length: 5           # For multi-hop reasoning
+        neuro_symbolic_weight: 0.4        # Balance between symbolic/neural
+      limits:
+        max_rules: 200                    # Prevent rule explosion
+        max_hypotheses: 100               # Control graph traversal
+      fallback:
+        enable_llm_fallback: true         # Integrate with LanguageAgent
+        llm_temperature: 0.3
 
 training:
   num_samples: 500
@@ -167,6 +207,14 @@ hyperparameters:
     max: 0.999
     steps: 5
 
+  - name: num_qubits
+    type: int
+    min: 2
+    max: 6
+  - name: num_quantum_layers
+    type: int
+    min: 1
+    max: 4
 
 # ==========================
 # Tuning Strategy Settings

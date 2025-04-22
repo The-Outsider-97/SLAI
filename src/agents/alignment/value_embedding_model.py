@@ -9,12 +9,14 @@ Implements:
 
 import logging
 import torch
+import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from transformers import AutoTokenizer, AutoModel
+from models.slai_lm import SLAILM, get_shared_slailm
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -45,13 +47,10 @@ class ValueEmbeddingModel(nn.Module):
     4. Alignment Scorer: Cross-attention value-policy matching
     """
 
-    def __init__(self, config: ValueConfig):
+    def __init__(self, config, slai_lm=None):
         super().__init__()
         self.config = config
-        
-        # Text-based value encoder
-        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self.text_encoder = AutoModel.from_pretrained("bert-base-uncased")
+        self.slai_lm = slai_lm
         self.value_proj = nn.Linear(768, config.embedding_dim)
         
         # Cultural context adaptor
@@ -112,22 +111,21 @@ class ValueEmbeddingModel(nn.Module):
         }
 
     def encode_value(self, text: List[str], cultural: torch.Tensor) -> torch.Tensor:
-        """Multi-factor value embedding"""
-        # Text encoding
-        inputs = self.tokenizer(
-            text, 
-            padding=True, 
-            truncation=True, 
-            max_length=self.config.max_seq_length,
-            return_tensors="pt"
-        )
-        text_emb = self.text_encoder(**inputs).last_hidden_state[:,0,:]
-        text_emb = self.value_proj(text_emb)
-        
-        # Cultural adaptation
+        """Use SLAILM to generate value embeddings from text and cultural context"""
+        embeddings = []
+
+        for t in text:
+            result = self.slai_lm.process_input(prompt=t, text=t)
+            tokens = result.get("tokens", [])
+            vector = np.array([len(token) for token in tokens], dtype=np.float32)  # Simple placeholder
+
+            # Normalize and resize
+            vec = np.pad(vector, (0, max(1, self.config.embedding_dim - len(vector))), mode='constant')[:self.config.embedding_dim]
+            embeddings.append(torch.tensor(vec))
+
+        text_emb = torch.stack(embeddings)
         cultural_emb = self.cultural_adaptor(cultural)
-        
-        # Combined value representation
+
         return self.dropout(text_emb + cultural_emb)
 
     def encode_policy(self, policy: torch.Tensor) -> torch.Tensor:

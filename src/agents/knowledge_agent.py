@@ -4,12 +4,18 @@ Implements core RAG functionality with TF-IDF based retrieval from scratch
 """
 
 import os
+import re
 import json
 import math
-import re
+import time
+import hashlib
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, deque
 from heapq import nlargest
+
+from src.agents.base_agent import BaseAgent
+from src.agents.knowledge.rule_engine import RuleEngine
+
 
 def cosine_sim(v1, v2):
     v1, v2 = np.array(v1), np.array(v2)
@@ -17,8 +23,13 @@ def cosine_sim(v1, v2):
     return dot / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
 
-class KnowledgeAgent:
-    def __init__(self, shared_memory, agent_factory, knowledge_agent_dir=None, persist_file: str = None, args=(), kwargs={}):
+class KnowledgeAgent(BaseAgent):
+    def __init__(self, shared_memory, agent_factory, config=None, language_agent=None, knowledge_agent_dir=None, persist_file: str = None, args=(), kwargs={}):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
         self.knowledge_agent = []
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -37,147 +48,31 @@ class KnowledgeAgent:
             'had', 'do', 'does', 'did', 'will', 'would', 'should', 'can',
             'could', 'not', 'but', 'he', 'she', 'his', 'her', 'they', 'them',
             'their', 'you', 'your', 'we', 'our', 'us', 'i', 'me', 'my', 'mine'
+            'if', 'then', 'when', 'which', 'what', 'how', 'while', 'after',
+            'before', 'who', 'where', 'why', 'so', 'because', 'than', 'just', 'also'
         ])
+        self.rule_engine = RuleEngine()
+        self.ontology = defaultdict(lambda: {'type': None, 'relations': set()})
+
+        # Semantic fallback
+#        self.language_agent = language_agent or self._safe_create_language_agent()
+#        self.embedding_fallback = self.language_agent.embedder if self.language_agent else None
 
         if knowledge_agent_dir:
             self.load_from_directory(knowledge_agent_dir)
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-            
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        pass
-
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
-
+#    def _safe_create_language_agent(self):
+#        try:
+#            self.language_agent = self.agent_factory.create('language', config={})
+#        except Exception as e:
+#            self.logger.warning(f"[KnowledgeAgent] Failed to create language agent: {e}")
+#            self.language_agent = None
+        
     def load_from_directory(self, directory_path: str):
         """Loads all .txt and .json files in the directory as knowledge documents."""
 
         if not os.path.isdir(directory_path):
-            print(f"[KnowledgeAgent] Invalid directory: {directory_path}")
+            self.logger.error(f"Invalid directory: {directory_path}")
             return
 
         for fname in os.listdir(directory_path):
@@ -186,7 +81,10 @@ class KnowledgeAgent:
                 if fname.endswith(".txt"):
                     with open(fpath, "r", encoding="utf-8") as f:
                         text = f.read().strip()
-                        self.add_document(text, metadata={"source": fname})
+                        self.add_document(text, metadata={
+                            "source": fname,
+                            "timestamp": time.time(),
+                            "checksum": hashlib.sha1(text.encode("utf-8")).hexdigest()})
 
                 elif fname.endswith(".json"):
                     with open(fpath, "r", encoding="utf-8") as f:
@@ -195,10 +93,25 @@ class KnowledgeAgent:
                             text = entry.get("text") or str(entry)
                             self.add_document(text, metadata={"source": fname})
             except Exception as e:
-                print(f"[KnowledgeAgent] Failed to load {fname}: {e}")
+                self.logger.error(f"Failed to load {fname}: {str(e)}", exc_info=True)
 
-    def retrieve(self, query, k=5, similarity_threshold=0.2):
-        cache_key = hash(query)
+    def load_knowledge_db(self, db_path: str):
+        """Integrate structured knowledge from knowledge_db.json"""
+        with open(db_path, 'r') as f:
+            data = json.load(f)
+            for triple in data["knowledge"]:
+                self.add_document(triple[0], metadata={"type": "fact", "confidence": triple[1]})
+            for rule in data["rules"]:
+                self.rule_engine.add_rule(*rule)
+
+    def retrieve(self, query, k=5, use_ontology=True, similarity_threshold=0.2):
+        cache_key = hashlib.sha256(query.encode()).hexdigest()
+        start_time = time.time()
+        cache_hit = cache_key in self.cache
+        self.performance_metrics['retrieval_times'].append(time.time() - start_time)
+        self.performance_metrics['cache_hits'].append(1 if cache_hit else 0)
+        self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in results])
+
         if cache_key in self.cache:
             return self.cache[cache_key]
 
@@ -208,32 +121,63 @@ class KnowledgeAgent:
             return []
 
         # Calculate query vector
-        query_vector = self._calculate_tfidf(query_tokens, is_query=True)
+        query_vector = self._dict_to_numpy(
+            self._calculate_tfidf(
+                query_tokens, is_query=True
+        ))
 
         # Calculate document vectors and similarities
         similarities = []
         for doc in self.knowledge_agent:
-            doc_vector = self._calculate_tfidf(doc['tokens'])
-            similarity = self._cosine_similarity(query_vector, doc_vector)
+            doc_vec = self.doc_vectors[doc['doc_id']]  # Precomputed    
+            similarity = cosine_sim(query_vector, doc_vec)
+            if similarity < similarity_threshold and self.embedding_fallback:
+                try:
+                    emb_query = self.embedding_fallback.encode(query)
+                    emb_doc = self.embedding_fallback.encode(doc['text'])
+                    similarity = cosine_sim(emb_query, emb_doc)
+                except Exception:
+                    similarity = 0.0
+
             if similarity >= similarity_threshold:
                 similarities.append((similarity, doc))
 
-        # Cache results
         results = nlargest(k, similarities, key=lambda x: x[0])
         if len(self.cache) > self.cache_size:
             self.cache.popitem()
         self.cache[cache_key] = results
-
+    
+        if use_ontology:
+            query_terms = self._preprocess(query)
+            expanded_query = self._expand_with_ontology(query_terms)
+            return super().retrieve(expanded_query, k=k)
         return results
 
-    def add_document(self, text, doc_id, doc_text, metadata=None):
-        self.doc_vectors[doc_id] = self._compute_vector(doc_text)
+    def _expand_with_ontology(self, terms):
+        expanded = []
+        for term in terms:
+            if term in self.ontology:
+                expanded.append(term)
+                for pred, obj in self.ontology[term]['relations']:
+                    expanded.extend([pred, obj])
+        return " ".join(expanded)
+
+    def add_document(self, text, doc_id=None, metadata=None):
+        if isinstance(text, tuple) and len(text) == 3:
+            self.add_to_ontology(*text)
         if not isinstance(text, str) or len(text.strip()) < 3:
             raise ValueError("Document text must be non-empty string")
+        if doc_id and doc_id in self.doc_vectors:
+            raise KeyError(f"Document ID {doc_id} already exists")
+        
+        # Auto-generate doc_id if None
+        doc_id = doc_id or hash(text) 
 
         """Store documents with preprocessing and vocabulary update"""
         tokens = self._preprocess(text)
         self.knowledge_agent.append({'text': text, 'tokens': tokens, 'metadata': metadata})
+        tfidf_vector = self._calculate_tfidf(tokens)
+        self.doc_vectors[doc_id] = self._dict_to_numpy(tfidf_vector)  # Store as numpy array
         
         # Update vocabulary and document frequency
         unique_tokens = set(tokens)
@@ -241,6 +185,15 @@ class KnowledgeAgent:
             self.document_frequency[token] += 1
         self.vocabulary.update(unique_tokens)
         self.total_documents += 1
+
+    def add_to_ontology(self, subject: str, predicate: str, obj: str):
+        self.ontology[subject]['relations'].add((predicate, obj))
+        if predicate in ('is_a', 'type', 'class'):
+            self.ontology[subject]['type'] = obj
+
+    def _dict_to_numpy(self, vector):
+        """Convert TF-IDF dict to numpy array aligned with vocabulary"""
+        return np.array([vector.get(term, 0) for term in self.vocabulary])
 
     def _preprocess(self, text):
         """Text normalization and tokenization"""
@@ -268,15 +221,12 @@ class KnowledgeAgent:
         return vector
 
     def _cosine_similarity(self, vec_a, vec_b):
-        """Calculate cosine similarity between two vectors"""
-        intersection = set(vec_a.keys()) & set(vec_b.keys())
-        numerator = sum(vec_a[x] * vec_b[x] for x in intersection)
-        
-        sum_a = sum(v**2 for v in vec_a.values())
-        sum_b = sum(v**2 for v in vec_b.values())
-        denominator = math.sqrt(sum_a) * math.sqrt(sum_b)
-        
-        return numerator / denominator if denominator else 0
+        """Convert sparse dicts to dense numpy arrays and compute cosine similarity"""
+        all_terms = set(vec_a.keys()) | set(vec_b.keys())
+        a = np.array([vec_a.get(term, 0) for term in all_terms])
+        b = np.array([vec_b.get(term, 0) for term in all_terms])
+        return cosine_sim(a, b)
+
 
     def update_memory(self, key, value):
         """Store information in long-term memory"""
@@ -286,10 +236,56 @@ class KnowledgeAgent:
         """Retrieve information from long-term memory"""
         return self.memory.get(key)
 
-    def contextual_search(self, query, context_window=3):
-        """Search with consideration of recent context"""
-        # Implementation stub for contextual search
-        return self.retrieve(query)
+
+    def contextual_search(self, query, context_window=3, decay_factor=0.8):
+        """
+        Search with consideration of recent context, using weighted term emphasis.
+        
+        Args:
+            query: Current search query.
+            context_window: Number of past interactions to consider.
+            decay_factor: Weight reduction for older queries (0.5 = older terms matter half as much).
+        
+        Returns:
+            List of (score, document) tuples, prioritized by contextual relevance.
+        """
+        # Retrieve or initialize context storage
+        context_key = f"context:{self.name}"
+        context = self.shared_memory.get(context_key, deque(maxlen=context_window))
+        
+        # Preprocess current query and extract key terms
+        current_tokens = self._preprocess(query)
+        current_terms = self._extract_significant_terms(current_tokens, top_n=10)
+        
+        # Update context with current terms and their freshness
+        context.append({
+            "timestamp": time.time(),
+            "terms": current_terms,
+            "raw_query": query
+        })
+        self.shared_memory.set(context_key, context)
+        
+        # Generate augmented query with temporal weighting
+        augmented_terms = []
+        max_weight = sum(decay_factor ** i for i in range(len(context)))
+        
+        for idx, entry in enumerate(reversed(context)):
+            weight = decay_factor ** idx  # Most recent gets highest weight
+            augmented_terms.extend([term for term in entry["terms"] for _ in range(int(weight * 10))])
+        
+        # Combine with current terms (full weight)
+        augmented_terms.extend(current_terms * 10)  # 10x multiplier for emphasis
+        augmented_query = " ".join(augmented_terms)
+        
+        self.logger.debug(f"Augmented query: {augmented_query}")
+        return self.retrieve(augmented_query)
+
+    def _extract_significant_terms(self, tokens, top_n=5):
+        """Identify top TF-IDF terms from a token list."""
+        tfidf = self._calculate_tfidf(tokens)
+        sorted_terms = sorted(tfidf.items(), key=lambda x: x[1], reverse=True)
+        return [term for term, score in sorted_terms[:top_n]]
+
 
     def get_references_for_concepts(self, concepts: list, k: int = 3) -> list:
         """
@@ -304,6 +300,10 @@ class KnowledgeAgent:
                 references.append(doc.get("text", ""))
 
         return references
+
+    def broadcast_knowledge(self, tag="knowledge_snippet"):
+        for idx, doc in enumerate(self.knowledge_agent[-5:]):
+            self.shared_memory.set(f"{tag}:{idx}", doc)
 
 # Example usage
 #if __name__ == "__main__":

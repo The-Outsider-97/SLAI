@@ -6,23 +6,26 @@ Implements:
 - Emergent goal detection (Christiano et al., 2021)
 """
 
+import re
 import os, sys
 import logging
 import torch
 import time as timedelta
 import datetime
-import re
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 from scipy.stats import entropy
 
+from src.agents.base_agent import BaseAgent
 from src.agents.safety_agent import SafeAI_Agent
 from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
+from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
+from models.slai_lm import SLAILMValueModel, get_shared_slailm
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -49,19 +52,101 @@ class CorrectionPolicy:
     learning_rate: float = 0.01
     momentum: float = 0.9
 
-class AlignmentAgent:
-    def __init__(self, sensitive_attrs, config, shared_memory, agent_factory, args=(), kwargs={}):
-        self.monitor = AlignmentMonitor(
-            sensitive_attrs=sensitive_attrs,
-            config=config['monitor']
+@dataclass
+class PolicyAdapter:
+    """Placeholder for policy adaptation logic"""
+    @staticmethod
+    def convert_feedback(raw_feedback: Dict, format: str, action_space: Any, reward_schema: Any) -> Dict:
+        return {
+            'risk_parameters': {
+                'default': {'adjustment_factor': 0.9, 'min_value': 0.05, 'max_value': 0.3}
+            }
+        }
+
+@dataclass 
+class HumanOversightInterface:
+    """Placeholder for human notification system"""
+    @staticmethod
+    def request_intervention(report: Dict, channels: List[str], urgency: str, response_timeout: int) -> Dict:
+        return {
+            'status': 'received',
+            'feedback': {'comment': 'Adjust risk thresholds by 10%'},
+            'format': 'json'
+        }
+
+@dataclass
+class AlignmentMemory:
+    """Enhanced memory with DataFrame initialization"""
+    fairness_records: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[
+        'timestamp', 'metric', 'value', 'threshold', 'violation'
+    ]))
+    ethical_violations: List[Dict] = field(default_factory=list)
+    policy_adjustments: List[Dict] = field(default_factory=list)
+    drift_scores: pd.Series = field(default_factory=pd.Series)
+
+
+    def store_evaluation(self, report: Dict):
+        """Properly handle DataFrame storage"""
+        timestamp = datetime.now()
+
+        # Create temporary DataFrame for new entries
+        new_entries = []
+        for metric, value in report.get('fairness', {}).items():
+            new_entries.append({
+                'timestamp': timestamp,
+                'metric': metric,
+                'value': value.get('value', 0),
+                'threshold': value.get('threshold', 0),
+                'violation': value.get('violation', False)
+            })
+
+        if new_entries:
+            new_df = pd.DataFrame(new_entries)
+            self.fairness_records = pd.concat([self.fairness_records, new_df], ignore_index=True)
+
+        # Store ethical violations
+        self.ethical_violations.extend(report.get('ethical_violations', []))
+
+class AlignmentAgent(BaseAgent):
+    def __init__(self,
+                 shared_memory,
+                 agent_factory,
+                 sensitive_attrs,
+                 config,
+                 monitor_config: Optional[MonitorConfig] = None,
+                 correction_policy: Optional[CorrectionPolicy] = None,
+                 safe_agent: Optional[SafeAI_Agent] = None
+                 ):
+        super().__init__(
+            agent_factory=agent_factory,
+            config=config,
+            shared_memory = shared_memory,
         )
-        
+        self.agent_factory = agent_factory
+
+        slailm_instance = get_shared_slailm(shared_memory, agent_factory)
+        self.monitor = AlignmentMonitor(
+            sensitive_attributes=sensitive_attrs,
+            config=config['monitor'],
+            slai_lm=slailm_instance
+        )
+        #value_config = ValueConfig(**config['value_model'])
+        allowed_keys = ValueConfig.__annotations__.keys()
+        filtered_value_model_config = {k: v for k, v in config['value_model'].items() if k in allowed_keys}
+        value_config = ValueConfig(**filtered_value_model_config)
+        self.value_model = ValueEmbeddingModel(config=value_config, slai_lm=slailm_instance)
+
         self.memory = AlignmentMemory(config['memory'])
         self.ethics = EthicalConstraints(config['ethics'])
-        self.value_model = ValueEmbeddingModel(config['value_model'])
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
         self.correction_policy = CorrectionPolicy(config['corrections'])
+
+        # Initialize from second implementation
+        if safe_agent:
+            self.shared_memory = safe_agent.shared_memory
+            self.risk_threshold = safe_agent.risk_threshold
+        self.adjustment_history = []
+        self.safety_buffer = 0.1
+        self.correction_policy = correction_policy or CorrectionPolicy()
 
     def verify_alignment(self, task_data):
         report = self.monitor.assess(
@@ -69,7 +154,7 @@ class AlignmentAgent:
             task_data['predictions'],
             task_data.get('labels')
         )
-        
+
         self.memory.store_evaluation(report)
         return self._generate_decision(report)
 
@@ -88,7 +173,7 @@ class AlignmentAgent:
             if self.is_similar(task_data, err["data"]):
                 self.logger.info("Recognized a known problematic case, applying workaround.")
                 return self.alternative_execute(task_data)
-            
+
         errors = self.shared_memory.get(f"errors:{self.name}", [])
 
         # Check if current task_data has caused errors before
@@ -211,34 +296,6 @@ class AlignmentAgent:
     
         # Simulate result
         return {"status": "success", "result": f"Processed: {task_data}"}
-
-class AlignmentAgent(SafeAI_Agent):
-    """
-    Proactive alignment maintenance agent that:
-    1. Maintains longitudinal alignment state
-    2. Learns optimal correction policies
-    3. Coordinates system-wide value preservation
-    4. Implements safe interrupt protocols
-    
-    Inherits from SafeAI_Agent for risk assessment capabilities
-    """
-    
-    def __init__(self, 
-                 safe_agent: SafeAI_Agent,
-                 monitor_config: Optional[MonitorConfig] = None,
-                 correction_policy: Optional[CorrectionPolicy] = None):
-        super().__init__(shared_memory=safe_agent.shared_memory,
-                        risk_threshold=safe_agent.risk_threshold)
-        
-        self.monitor = AlignmentMonitor(
-            sensitive_attributes=self._detect_sensitive_attributes(),
-            config=monitor_config or MonitorConfig()
-        )
-        
-        self.memory = AlignmentMemory()
-        self.correction_policy = correction_policy or CorrectionPolicy()
-        self.adjustment_history = []
-        self.safety_buffer = 0.1  # Safe interruptibility margin
 
     def align(self, 
              data: pd.DataFrame,
@@ -509,7 +566,8 @@ class AlignmentAgent(SafeAI_Agent):
         - Semantic similarity matching
         """
         sensitive_attrs = set()
-        
+        recent_data = self.shared_memory.get("recent_tasks", [])
+
         # 1. Check shared memory for known sensitive attributes
         if self.shared_memory:
             sensitive_attrs.update(
@@ -535,7 +593,6 @@ class AlignmentAgent(SafeAI_Agent):
                 unique_vals = df[col].nunique()
                 if 2 <= unique_vals <= 10:
                     sensitive_attrs.add(col)
-
         # 3. Check alignment memory for historical violations
         violation_records = self.memory.fairness_records
         if not violation_records.empty:
@@ -554,31 +611,61 @@ class AlignmentAgent(SafeAI_Agent):
             if attr in df.columns
         ])
 
+        return sorted(sensitive_attrs)
+    # Utility methods
+    def calculate_risk(self, report):
+        """Integrated risk calculation from both implementations"""
+        current_state = self._vectorize_report(report)
+        ideal_state = self._get_ideal_state_vector()
+        kl_risk = entropy(ideal_state, current_state)
+        temporal_risk = self._calculate_temporal_risk(current_state)
+        return kl_risk + temporal_risk
+
+#    def store_evaluation(self, report):
+#        """Integrated memory update from both implementations"""
+#        self._update_memory(report, None)
+
         # 5. Semantic analysis using embedding similarity
-        if hasattr(self, 'value_model'):
-            column_embeddings = self.value_model.encode_value(
-                df.columns.tolist(), 
-                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
-            )
-            sensitive_embeddings = self.value_model.encode_value(
-                ['gender', 'race', 'religion'],
-                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
-            )
-            similarities = torch.cosine_similarity(
-                column_embeddings, 
-                sensitive_embeddings.unsqueeze(0)
-            )
-            semantic_matches = [
-                df.columns[i] for i in range(len(df.columns))
-                if similarities[i].max() > 0.7
-            ]
-            sensitive_attrs.update(semantic_matches)
+#        if hasattr(self, 'value_model'):
+#            column_embeddings = self.value_model.encode_value(
+#                df.columns.tolist(), 
+#                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
+#            )
+#            sensitive_embeddings = self.value_model.encode_value(
+#                ['gender', 'race', 'religion'],
+#                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
+#            )
+#            similarities = torch.cosine_similarity(
+#                column_embeddings, 
+#                sensitive_embeddings.unsqueeze(0)
+#            )
+#            semantic_matches = [
+#                df.columns[i] for i in range(len(df.columns))
+#                if similarities[i].max() > 0.7
+#            ]
+#            sensitive_attrs.update(semantic_matches)
 
         # 6. Remove false positives using denylist
-        denylist = ['modified_date', 'processed_flag']
-        sensitive_attrs = [attr for attr in sensitive_attrs 
-                        if attr not in denylist]
+#        denylist = ['modified_date', 'processed_flag']
+#        sensitive_attrs = [attr for attr in sensitive_attrs 
+#                        if attr not in denylist]
 
-        logger.info(f"Detected sensitive attributes: {sorted(sensitive_attrs)}")
+#        logger.info(f"Detected sensitive attributes: {sorted(sensitive_attrs)}")
         
-        return sorted(sensitive_attrs)
+#        return sorted(sensitive_attrs)
+
+class HumanOversightTimeout(Exception):
+    pass
+
+# Add missing component stubs
+@dataclass
+class EthicalConstraints:
+    def __init__(self, config=None):
+        self.config = config if config is not None else {
+            "constraints": [
+                "Do not generate discriminatory content",
+                "Uphold user dignity and agency",
+                "Avoid promoting misinformation",
+                "Respect user privacy and autonomy"
+            ]
+        }

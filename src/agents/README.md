@@ -3,6 +3,20 @@
 This folder contains all agent implementations for SLAI. Each agent encapsulates a distinct learning strategy or system behavior. Below is a summary of each agent's role and core functionality.
 
 ---
+### base_agent.py
+```mermaid
+flowchart TD
+    A[Agent X] --> B(Performs Task)
+    B --> C{extract_performance_metrics}
+    C --> D[evaluate_performance]
+    D --> E[log_evaluation_result]
+    D --> F[flag_for_retraining]
+    E --> G[evaluation_logs/]
+    F --> H[shared_memory flag]
+    H --> I[Retrainer loop watches this]
+```
+
+---
 
 ### `dqn_agent.py`
 **Deep Q-Network Agent (DQN)**  

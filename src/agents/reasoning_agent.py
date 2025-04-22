@@ -10,188 +10,146 @@ Features:
 
 import json
 import re
+import yaml
 import math
+import logging as logger
 import itertools
 import random
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Set, Tuple, Union
-from pathlib import Path
+import hashlib
 import numpy as np
 
+from collections import defaultdict, OrderedDict
+from typing import Any, Callable, Dict, List, Set, Tuple, Union, Optional
+from pathlib import Path
+from src.agents.base_agent import BaseAgent
+from src.agents.language.resource_loader import ResourceLoader
+from src.agents.reasoning.rule_engine import RuleEngine
+from src.agents.reasoning.probabilistic_models import ProbabilisticModels
+from src.agents.reasoning.validation import (
+        detect_circular_rules,
+        detect_fact_conflicts,
+        redundant_fact_check
+    )
 
-class ReasoningAgent:
-    def __init__(self, shared_memory, agent_factory, storage_path: str = "src/agents/knowledge/knowledge_db.json", args=(), kwargs={}):
-        """
-        Initialize the Reasoning Agent with learning capabilities.
-        
-        Args:
-            storage_path: Path to persist knowledge base and learned models
-        """
-        # Knowledge representation with confidence scores
+
+def identity_rule(kb):
+    return {(s, p, o): 1.0 for (s, p, o) in kb if p == 'is'}
+
+def transitive_rule(kb):
+    new_facts = {}
+    for (a, _, b1), conf1 in kb.items():
+        for (b2, _, c), conf2 in kb.items():
+            if b1 == b2:
+                new_facts[(a, 'is', c)] = min(conf1, conf2)
+    return new_facts
+
+class ReasoningAgent(BaseAgent):
+    """
+    Initialize the Reasoning Agent with learning capabilities.
+    """
+    def __init__(self, shared_memory, agent_factory, tuple_key,
+                 storage_path: str = "src/agents/knowledge/knowledge_db.json",
+                 contradiction_threshold=0.25,
+                 rule_validation: Dict = None,
+                 nlp_integration: Dict = None,
+                 inference: Dict = None,
+                 llm: Any = None,
+                 language_agent: Any = None,
+                 args=(), kwargs={}):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory
+        )
+        self.hypothesis_graph = defaultdict(
+            lambda: {
+                'nodes': set(),
+                'edges': defaultdict(float),
+                'confidence': 0.0
+            }
+        )
+
+        # Core components
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.knowledge_base: Dict[Tuple, float] = defaultdict(float)
-        self.rules: List[Tuple[str, Callable, float]] = []  # (name, rule, weight)
-        self.rule_weights: Dict[str, float] = defaultdict(float)
-        self.storage_path = Path(storage_path)
-        self.reasoning_traces = []  # For CoT logging
-        self.hypothesis_graph = defaultdict(set)  # For multi-hop reasoning
-
-        # Learning parameters
-        self.learning_rate = 0.1
-        self.exploration_rate = 0.2
-        self.decay_factor = 0.99
-        
-        # NLP components
-        self.vocab = set()
-        self.word_vectors = {}
-        self.entity_recognition = {}
-        
-        # Probabilistic reasoning
+        self.llm = llm
+        self.language_agent = language_agent
+        self.knowledge_base = {}
         self.bayesian_network = {}
-        
+        self.rule_engine = RuleEngine()
+        self.rules = []
+        self.rule_weights = {}
+
+        # Ensure storage_path is set before it's used
+        self.storage_path = storage_path
+
+        # Add default rules
+        self.add_rule(identity_rule, rule_name="IdentityRule", weight=1.0)
+        self.add_rule(transitive_rule, rule_name="TransitiveIsRule", weight=0.8)
+
+        # Load YAML config if available
+        config_path = "src/agents/reasoning/templates/reasoning_config.yaml"
+        if Path(config_path).exists():
+            with open(config_path, 'r') as f:
+                external_config = yaml.safe_load(f)
+                self.inference_settings = external_config.get('inference', {})
+                self.rule_validation = external_config.get('rules', {})
+                self.nlp_config = external_config.get('nlp', {})
+                self.storage_path = external_config.get('storage', {}).get('knowledge_db', self.storage_path)
+
+        # Fallback configurations if not set
+        self.contradiction_threshold = contradiction_threshold
+        self.rule_validation = self.rule_validation or {
+            'enable': True,
+            'min_soundness_score': 0.7,
+            'max_circular_depth': 3
+        }
+        self.nlp_config = nlp_integration or self.nlp_config or {
+            'sentence_transformer': 'your-internal-model',
+            'tokenizer': self.language_agent.tokenizer if language_agent else None
+        }
+        self.inference_settings = inference or self.inference_settings or {
+            'default_chain_length': 5,
+            'neuro_symbolic_weight': 0.4,
+            'max_hypotheses': 100,
+            'exploration_rate': 0.1,
+            'llm_fallback': {
+                'enable': True,
+                'temperature': 0.3,
+                'max_tokens': 100
+            }
+        }
+
+        # Initialize components
         self._load_knowledge()
         self._initialize_nlp()
         self._initialize_probabilistic_models()
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        pass
-    
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-    
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
-
-    def _load_knowledge(self):
+    def _load_knowledge(self, storage_path: str = None):
         """Load knowledge and learned models from storage."""
-        if self.storage_path.exists():
-            with open(self.storage_path, 'r') as f:
+        self.knowledge_base = {}
+        self.rule_weights = {}
+        self.bayesian_network = {}
+
+        # Use the instance storage_path if not overridden
+        path = storage_path or self.storage_path
+        knowledge = []
+
+        if Path(path).exists():
+            with open(path, 'r') as f:
                 data = json.load(f)
-                self.knowledge_base = {tuple(k): v for k, v in data.get('knowledge', {}).items()}
-                self.rules = [(r[0], eval(r[1]), r[2]) for r in data.get('rules', [])]  # Note: eval is unsafe here - use proper serialization in production
+                knowledge = data.get('knowledge', [])
+
+                if isinstance(knowledge, list):
+                    clean_knowledge = {}
+                    for k in knowledge:
+                        try:
+                            key = tuple(k) if isinstance(k, (list, tuple)) else (k,)
+                            clean_knowledge[key] = 1.0
+                        except TypeError:
+                            print(f"[Warning] Skipped invalid knowledge item: {k}")
+                    knowledge = clean_knowledge
+
+                self.knowledge_base = {tuple(k): v for k, v in knowledge.items()}
                 self.rule_weights = data.get('rule_weights', {})
                 self.bayesian_network = data.get('bayesian_network', {})
 
@@ -222,12 +180,12 @@ class ReasoningAgent:
         
         # Embedding spaces
         self.word_vectors = self._init_embeddings()
-        self.dependency_grammar = self._create_dependency_rules()
+        self.dependency_grammar = self.rule_engine._create_dependency_rules()
         self.pos_tagger = self._build_rule_based_tagger()
         
         # Discourse features
         self.cohesion_metrics = {'entity_grid': {}, 'coref_chains': {}}
-        self.pragmatic_rules = self._load_pragmatic_heuristics()
+        self.pragmatic_rules = self.rule_engine._load_pragmatic_heuristics()
 
     def _build_core_lexicon(self) -> Set[str]:
         """Construct foundational lexicon with psycholinguistic priors"""
@@ -266,16 +224,6 @@ class ReasoningAgent:
         embed_dim = 50  # Reduced dimension for efficiency
         return {word: np.random.normal(scale=0.1, size=embed_dim)
                 for word in self.vocab}
-
-    def _create_dependency_rules(self) -> Dict[str, list]:
-        """Head-modifier grammar inspired by Universal Dependencies"""
-        return {
-            'nsubj': ['NN', 'VB'],
-            'dobj': ['VB', 'NN'],
-            'amod': ['NN', 'JJ'],
-            'advmod': ['VB', 'RB'],
-            'prep': ['IN', 'NN']
-        }
 
     def _build_rule_based_tagger(self) -> Dict[str, str]:
         """Regex-based POS tagger with context rules"""
@@ -318,6 +266,56 @@ class ReasoningAgent:
             'went': 'go',
             'better': 'good',
             'best': 'good'
+        }
+
+    def _inflection_patterns(self) -> Dict[str, Union[List[Tuple], Dict[str, str]]]:
+        """Return regex patterns and irregular mappings for inflection handling."""
+        return {
+            # Ordered regex patterns (most specific first)
+            'regular': [
+                # --- Noun Plurals ---
+                (r'(?i)([aeiou]y)s$', r'\1y'),         # toys -> toy
+                (r'(?i)([^aeiou]y)s$', r'\1y'),        # babies -> baby (but catches "boys" -> "boy")
+                (r'(?i)(ss|sh|ch|x|z)es$', r'\1'),     # buses -> bus, dishes -> dish
+                (r'(?i)(m|l)ice$', r'\1ouse'),         # mice -> mouse, lice -> louse
+                (r'(?i)([ft]eeth)$', r'\1ooth'),       # teeth -> tooth, feet -> foot
+                (r'(?i)([a-z]+[^aeiou])ies$', r'\1y'), # cities -> city
+                (r'(?i)([a-z]+[aeiou])s$', r'\1'),     # radios -> radio
+                
+                # --- Verb Conjugations ---
+                (r'(?i)(\w+)(ed)$', r'\1'),            # walked -> walk
+                (r'(?i)(\w+)(ing)$', r'\1'),           # running -> run
+                (r'(?i)(\w+)(s)$', r'\1'),             # walks -> walk
+                
+                # --- Adjectives/Adverbs ---
+                (r'(?i)(\w+)(er)$', r'\1'),            # bigger -> big
+                (r'(?i)(\w+)(est)$', r'\1'),           # biggest -> big
+                (r'(?i)(\w+)(ly)$', r'\1'),            # quickly -> quick
+            ],
+            
+            # Irregular forms (inflected -> base)
+            'irregular': {
+                # Nouns
+                'children': 'child',
+                'men': 'man',
+                'women': 'woman',
+                'people': 'person',
+                'geese': 'goose',
+                'mice': 'mouse',
+                
+                # Verbs
+                'went': 'go',
+                'were': 'be',
+                'ate': 'eat',
+                'ran': 'run',
+                'spoke': 'speak',
+                
+                # Adjectives
+                'better': 'good',
+                'best': 'good',
+                'worse': 'bad',
+                'worst': 'bad'
+            }
         }
 
     def _context_sensitive_rules(self) -> List[tuple]:
@@ -377,6 +375,8 @@ class ReasoningAgent:
             rule_name: Optional identifier for the rule
             weight: Initial weight/importance of the rule
         """
+        if not hasattr(self, "knowledge_base"):
+            raise AttributeError("ReasoningAgent: knowledge_base not initialized before rule addition.")
         if not callable(rule):
             raise ValueError("Rule must be callable")
             
@@ -427,74 +427,6 @@ class ReasoningAgent:
                     self.rules[i] = (name, rule, new_weight)
                     break
 
-    def _discover_new_rules(self, min_support: float = 0.3, min_confidence: float = 0.7):
-        """
-        Association rule mining with Apriori algorithm adaptation.
-        Implements:
-        - Agrawal & Srikant (1994) Fast Algorithms for Mining Association Rules
-        - Confidence-weighted support from Lê et al. (2014) Fuzzy Association Rules
-        """
-        # Convert knowledge base to transaction-style format
-        transactions = []
-        for fact, conf in self.knowledge_base.items():
-            if conf > 0.5:  # Consider facts with at least 50% confidence
-                transactions.append(fact)
-
-        # Generate frequent itemsets with confidence-weighted support
-        itemsets = defaultdict(float)
-        for fact in transactions:
-            for element in itertools.chain.from_iterable(
-                itertools.combinations(fact, r) for r in range(1, 4)
-            ):
-                itemsets[element] += self.knowledge_base.get(fact, 0.5)
-
-        # Filter by minimum support
-        freq_itemsets = {k: v/len(transactions) for k, v in itemsets.items() 
-                        if v/len(transactions) >= min_support}
-
-        # Generate candidate rules
-        candidate_rules = []
-        for itemset in freq_itemsets:
-            if len(itemset) < 2:
-                continue
-            for i in range(1, len(itemset)):
-                antecedent = itemset[:i]
-                consequent = itemset[i:]
-                candidate_rules.append((antecedent, consequent))
-
-        # Calculate rule confidence
-        valid_rules = []
-        for ant, cons in candidate_rules:
-            ant_support = sum(self.knowledge_base.get(fact, 0.0) 
-                            for fact in transactions 
-                            if set(ant).issubset(fact)) / len(transactions)
-            
-            rule_support = sum(self.knowledge_base.get(fact, 0.0)
-                            for fact in transactions
-                            if set(ant+cons).issubset(fact)) / len(transactions)
-            
-            if ant_support > 0:
-                confidence = rule_support / ant_support
-                if confidence >= min_confidence:
-                    valid_rules.append({
-                        'antecedent': ant,
-                        'consequent': cons,
-                        'confidence': confidence,
-                        'support': rule_support
-                    })
-
-        # Convert to executable rules
-        for rule in valid_rules:
-            ant = rule['antecedent']
-            cons = rule['consequent']
-            
-            def rule_func(kb, antecedents=ant, consequents=cons, conf=rule['confidence']):
-                matches = [fact for fact in kb if all(e in fact for e in antecedents)]
-                return {consequents: conf * len(matches)/(len(kb)+1e-8)}  # Prevent division by zero
-                
-            rule_name = f"LearnedRule_{hash(frozenset(ant+cons))}"
-            self.add_rule(rule_func, rule_name, weight=rule['confidence'])
-
     def check_consistency(self, fact: Tuple) -> bool:
         """
         Self-consistency via paraphrased queries.
@@ -504,20 +436,26 @@ class ReasoningAgent:
             f"Does {fact} hold in all cases?",
             f"Confirm the validity of {fact}"
         ]
-        results = [self.probabilistic_query(fact) > 0.8 for _ in paraphrases]
+        results = [self.ProbabilisticModels.probabilistic_query(fact) > 0.8 for _ in paraphrases]
         return sum(results)/len(results) >= 0.75
 
-    def neuro_symbolic_verify(self, fact: Tuple) -> float:
-        """
-        Neuro-symbolic validation using embedding similarity.
-        """
-        # Symbolic check
-        symbolic_score = self.knowledge_base.get(fact, 0.0)
-        
-        # Neural check (simulated)
-        neural_score = self.semantic_similarity(str(fact), "valid_fact_template")
-        
-        return 0.7*symbolic_score + 0.3*neural_score  # Weighted ensemble
+    def validate_fact(self, fact: Tuple[str, str, str], threshold: float = 0.75) -> Dict[str, Any]:
+        subject, predicate, obj = fact
+    
+        symbolic_confidence = 1.0 if self.knowledge and self.knowledge.has_fact(fact) else 0.0
+        semantic_similarity_score = self.llm.semantic_similarity(f"{subject} {predicate}", obj)
+    
+        combined_score = (symbolic_confidence + semantic_similarity_score) / 2
+    
+        validation_result = {
+            "fact": fact,
+            "symbolic_confidence": symbolic_confidence,
+            "semantic_similarity": semantic_similarity_score,
+            "combined_confidence": combined_score,
+            "valid": combined_score >= threshold
+        }
+    
+        return validation_result
 
     def react_loop(self, problem: str, max_steps: int = 5) -> dict:
         """
@@ -539,19 +477,35 @@ class ReasoningAgent:
                 break
         return solution
 
-    def generate_chain_of_thought(self, query: str, max_depth: int = 3) -> List[str]:
+    def generate_chain_of_thought(self, query: Union[str, Tuple], depth: int = 3) -> List[str]:
         """
-        Generate reasoning steps using internal LM-style simulation.
+        Generate step-by-step inference trace for the given query.
+        Returns a list of reasoning steps ("thoughts").
         """
-        # Simulated LM pipeline (replace with actual model in production)
-        intermediate_steps = [
-            f"Analyzing query: {query}",
-            "Retrieving relevant facts from knowledge base",
-            "Applying forward chaining rules",
-            "Verifying consistency with Bayesian network"
-        ]
-        self.reasoning_traces.append((query, intermediate_steps))
-        return intermediate_steps
+        chain = []
+        visited = set()
+        current = [query] if isinstance(query, tuple) else [self._parse_statement(query)]
+
+        for step in range(depth):
+            next_facts = []
+            for fact in current:
+                if fact in visited:
+                    continue
+                visited.add(fact)
+
+                confidence = self.knowledge_base.get(fact, 0.0)
+                trace = f"Step {step+1}: {fact} with confidence {confidence:.2f}"
+                chain.append(trace)
+
+                for (subj, pred, obj), conf in self.knowledge_base.items():
+                    if subj == fact[2] or obj == fact[2]:
+                        next_facts.append((subj, pred, obj))
+
+            if not next_facts:
+                break
+            current = next_facts
+
+        return chain
 
     def _select_action(self, thoughts: List[str]) -> str:
         """
@@ -564,163 +518,77 @@ class ReasoningAgent:
             return "run_consistency_check"
         return "forward_chaining"
     
-    def multi_hop_reasoning(self, query: Tuple) -> float:
+    def execute_action(self, action: List[str]) -> str:
+        pass
+    
+    def _is_goal_reached(self, context: Dict[str, Any]) -> bool:
         """
-        Graph-based traversal for combining facts across sources.
+        Determines whether the reasoning process has reached its goal.
+        Based on:
+        - Confidence threshold        - Fact convergence        - Contradiction avoidance
         """
-        # Build hypothesis graph
-        self._build_hypothesis_graph(query)
+        target = context.get("target_fact")
+        if not target:
+            return False
+
+        confidence = self.knowledge_base.get(target, 0.0)
+        contradiction = any(
+            k for k in self.knowledge_base
+            if k[0] == target[0] and k[1] == target[1] and k != target and self.knowledge_base[k] > self.contradiction_threshold
+        )
+    
+        return confidence >= 0.9 and not contradiction
         
-        # Probabilistic graph traversal
-        confidence = 1.0
-        for hop in self.hypothesis_graph[query]:
-            confidence *= self.knowledge_base.get(hop, 0.5)  # Bayesian chain rule
-        return confidence
-                
     def forward_chaining(self, max_iterations: int = 100) -> Dict[Tuple, float]:
         """
         Probabilistic forward chaining inference.
-        
+
         Args:
             max_iterations: Maximum number of inference cycles
-            
+
         Returns:
             New facts with their confidence scores
         """
         new_facts = {}
         for _ in range(max_iterations):
             current_new = {}
-            
+
             # Explore new rules occasionally
-            if random.random() < self.exploration_rate:
-                self._discover_new_rules()
-            
-            for name, rule, weight in self.rules:
+            if random.random() < self.inference_settings.get("exploration_rate", 0.1):
+                self.rule_engine._discover_new_rules()
+
+            for name, rule_func, weight in self.rules:
                 try:
-                    # Rules now return (fact, confidence) pairs
-                    inferred = rule(self.knowledge_base)
+                    inferred = rule_func(self.knowledge_base)
                     for fact, confidence in inferred.items():
                         weighted_conf = confidence * weight
-                        
                         if fact not in self.knowledge_base or weighted_conf > self.knowledge_base[fact]:
                             current_new[fact] = weighted_conf
                             self._update_rule_weights(name, True)
                         else:
                             self._update_rule_weights(name, False)
                 except Exception as e:
-                    print(f"Rule {name} failed: {e}")
-                    self._update_rule_weights(name, False)
-            
+                    self.logger.warning(f"Rule {name} failed: {e}")
+
             if not current_new:
                 break
-                
+
             new_facts.update(current_new)
             self.knowledge_base.update(current_new)
-        
-        if new_facts:
-            self._save_knowledge()
-        return new_facts
 
-    def probabilistic_query(self, fact: Tuple, evidence: Dict[Tuple, bool] = None) -> float:
-        """
-        Hybrid inference combining:
-        - Exact Bayesian inference when network structure exists
-        - Markov Logic Network-style weighted formulae
-        - Neural semantic similarity fallback
-        """
-        # First check Bayesian network structure
-        bn_nodes = self.bayesian_network['nodes']
-        if fact[0] in bn_nodes and all(e[0] in bn_nodes for e in evidence.keys()):
-            return self.bayesian_inference(fact[0], {k[0]:v for k,v in evidence.items()})
-            
-        # Fallback to Markov Logic Network-style inference
-        ml_weights = []
-        ml_evidences = []
-        
-        # Weighted formulae components
-        for e_fact, e_value in evidence.items():
-            if e_fact in self.knowledge_base:
-                # Formula weight from KB confidence
-                weight = math.log(self.knowledge_base[e_fact] / (1 - self.knowledge_base[e_fact] + 1e-8))
-                ml_weights.append(weight * (1 if e_value else -1))
-                ml_evidences.append(1)
-                
-        # Add semantic similarity component
-        semantic_sim = sum(self.semantic_similarity(str(fact), str(e)) 
-                        for e in evidence.keys()) / len(evidence)
-        ml_weights.append(2.0)  # Fixed weight for semantic component
-        ml_evidences.append(semantic_sim)
-        
-        # Logistic regression combination
-        z = sum(w * e for w, e in zip(ml_weights, ml_evidences))
-        probability = 1 / (1 + math.exp(-z))
-        
-        # Knowledge-based calibration
-        base_prob = self.knowledge_base.get(fact, 0.5)
-        return 0.7 * probability + 0.3 * base_prob  # Ensured to stay in [0,1]
+        # --- Validation Phase ---
+        circular = detect_circular_rules(self.rules)
+        conflicts = detect_fact_conflicts(self.knowledge_base)
+        redundant = redundant_fact_check(new_facts, self.knowledge_base)
 
-    def bayesian_inference(self, query: str, evidence: Dict[str, bool]) -> float:
-        """
-        Exact inference using message passing algorithm based on:
-        - Pearl (1988) Probabilistic Reasoning in Intelligent Systems
-        - Koller & Friedman (2009) Probabilistic Graphical Models
-        """
-        # Convert evidence to network nodes
-        observed = {node: value for node, value in evidence.items() 
-                   if node in self.bayesian_network['nodes']}
-        
-        # Initialize belief states
-        beliefs = {node: {'prior': 0.5, 'likelihood': 1.0} 
-                  for node in self.bayesian_network['nodes']}
-        
-        # Set observed evidence
-        for node, value in observed.items():
-            beliefs[node]['prior'] = 1.0 if value else 0.0
-            beliefs[node]['likelihood'] = 1.0  # Hard evidence
+        if circular:
+            self.logger.warning(f"Circular rules detected: {circular}")
+        if conflicts:
+            self.logger.warning(f"Conflicting facts found: {conflicts}")
+        if redundant:
+            self.logger.info(f"Redundant facts skipped: {redundant}")
 
-        # Message passing schedule
-        for _ in range(2):  # Two-pass loopy belief propagation
-            # Forward pass (children to parents)
-            for edge in self.bayesian_network['edges']:
-                parent, child = edge
-                if parent == query:
-                    continue
-                    
-                # Calculate message: P(child|parent) * belief(child)
-                cpt = self.bayesian_network['cpt'][child]
-                message = sum(cpt[parent_val][child_val] * beliefs[child]['prior']
-                             for parent_val in [True, False]
-                             for child_val in [True, False])
-                
-                beliefs[parent]['likelihood'] *= message
-
-            # Backward pass (parents to children)
-            for edge in reversed(self.bayesian_network['edges']):
-                parent, child = edge
-                if child == query:
-                    continue
-                
-                # Calculate message: sum_{parent} P(child|parent) * belief(parent)
-                cpt = self.bayesian_network['cpt'][child]
-                message = sum(cpt[parent_val][child_val] * beliefs[parent]['prior']
-                             for parent_val in [True, False]
-                             for child_val in [True, False])
-                
-                beliefs[child]['likelihood'] *= message
-
-        # Final marginal calculation using belief propagation
-        marginal = 1.0
-        for node in self.bayesian_network['nodes']:
-            if node == query:
-                prior = self.bayesian_network['cpt'].get(node, {}).get('prior', 0.5)
-                marginal = prior * beliefs[node]['likelihood']
-                break
-            elif node in observed:
-                marginal *= beliefs[node]['prior']
-        
-        # Normalize using partition function
-        partition = marginal + (1 - prior) * (1 - beliefs[node]['likelihood'])
-        return marginal / partition if partition != 0 else 0.5
+        return {k: v for k, v in new_facts.items() if k not in redundant}
 
     def _parse_statement(self, statement: str) -> Tuple:
         """
@@ -734,14 +602,14 @@ class ReasoningAgent:
         """
         # Enhanced parsing with simple entity recognition
         parsed = self._recognize_entities(statement)
-        
+
         # Try multiple parsing patterns
         patterns = [
             r'(.+)\s+(is|are)\s+(.+)',  # "X is Y"
             r'(.+)\s+->\s+(.+)',        # "X -> Y"
             r'(.+):\s+(.+)'             # "X: Y"
         ]
-        
+
         for pattern in patterns:
             match = re.match(pattern, parsed)
             if match:
@@ -750,7 +618,7 @@ class ReasoningAgent:
                     return (groups[0].strip(), 'is', groups[1].strip())
                 elif len(groups) == 3:
                     return (groups[0].strip(), groups[1].strip(), groups[2].strip())
-        
+
         raise ValueError(f"Could not parse statement: {statement}")
 
     def _recognize_entities(self, text: str) -> str:
@@ -766,7 +634,7 @@ class ReasoningAgent:
         # Semantic normalization pipeline
         normalized = text.lower()
         entities = []
-        
+
         # Rule-based patterns with priority
         patterns = OrderedDict([
             ('DATE', r'\b(\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b'),
@@ -782,7 +650,7 @@ class ReasoningAgent:
             for match in re.finditer(pattern, text):
                 span = match.span()
                 raw_entity = text[span[0]:span[1]]
-                
+
                 # Conflict resolution: prefer longer matches and higher priority types
                 existing = next((e for e in entities if e['start'] <= span[0] and e['end'] >= span[1]), None)
                 if not existing:
@@ -832,37 +700,73 @@ class ReasoningAgent:
         self.entity_recognition[text] = marked_text
         return marked_text
 
+    def _tokenize(self, text: str) -> List[str]:
+        """Enhanced tokenization with linguistic features"""
+        # Basic tokenization with regex
+        tokens = re.findall(r'''
+            \b\w+(?:['’]\w+)?        # Words with contractions
+            | \d+\.?\d*              # Numbers
+            | \S\W+                  # Special characters
+            ''', text, re.X)
+        
+        # Normalization pipeline
+        processed = []
+        for token in tokens:
+            # Case normalization
+            if self.config.get('lowercase', True):
+                token = token.lower()
+                
+            # Stemming
+            if self.config.get('stemming', False):
+                token = self.morphology['stemmer'](token)
+                
+            # Remove residual punctuation
+            token = re.sub(r'^[^\w\s]+|[^\w\s]+$', '', token)
+            
+            if token:
+                processed.append(token)
+                
+        return processed
+
     def _update_vocabulary(self, text: str):
-        """Update NLP vocabulary and simple word vectors."""
-        words = re.findall(r'\w+', text.lower())
-        for word in words:
-            if word not in self.vocab:
-                self.vocab.add(word)
-                # Simple binary word vector (could be enhanced)
-                self.word_vectors[word] = {w: 1 if w == word else 0 for w in self.vocab}
+        if not hasattr(self, "vocab_vectors"):
+            self.vocab_vectors = {}
+        
+        tokens = self._tokenize(text)
+        for token in tokens:
+            self.vocab_vectors[token.lower()] = self._enhanced_binary_encode(token)
+
+    def _enhanced_binary_encode(self, word: str, dim: int = 64) -> np.ndarray:
+        """
+        Enhanced binary encoding for discrete semantic hashing.
+        """
+        hash_val = int(hashlib.sha256(word.encode()).hexdigest(), 16)
+        bin_hash = bin(hash_val)[2:].zfill(dim)
+        return np.array([int(b) for b in bin_hash[-dim:]], dtype=np.uint8)
 
     def semantic_similarity(self, text1: str, text2: str) -> float:
         """
-        Compute semantic similarity between two texts.
-        
-        Args:
-            text1: First text
-            text2: Second text
-            
-        Returns:
-            Similarity score (0.0 to 1.0)
+        Compute semantic similarity using mean-pooled word vectors and cosine similarity.
+        Falls back to token overlap if embeddings are missing.
         """
-        # Simple cosine similarity using word vectors
-        vec1 = self._text_to_vector(text1)
-        vec2 = self._text_to_vector(text2)
-        
-        dot_product = sum(vec1.get(word, 0) * vec2.get(word, 0) for word in set(vec1) | set(vec2))
-        norm1 = math.sqrt(sum(v**2 for v in vec1.values()))
-        norm2 = math.sqrt(sum(v**2 for v in vec2.values()))
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        return dot_product / (norm1 * norm2)
+        def embed(text: str) -> Optional[np.ndarray]:
+            tokens = self._tokenize(text)
+            vectors = [self.word_vectors[t] for t in tokens if t in self.word_vectors]
+            if not vectors:
+                return None
+            return np.mean(vectors, axis=0)
+
+        vec1 = embed(text1)
+        vec2 = embed(text2)
+
+        if vec1 is None or vec2 is None:
+            # Fallback: Jaccard token overlap
+            t1, t2 = set(self._tokenize(text1)), set(self._tokenize(text2))
+            return len(t1 & t2) / max(len(t1 | t2), 1)
+
+        numerator = np.dot(vec1, vec2)
+        denominator = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+        return float(numerator / denominator) if denominator != 0 else 0.0
 
     def _text_to_vector(self, text: str) -> Dict[str, float]:
         """Convert text to simple word vector."""
@@ -875,9 +779,45 @@ class ReasoningAgent:
         return dict(vec)
     
     def _build_hypothesis_graph(self, root_node: Tuple):
-        """
-        Construct connected fact graph using semantic similarity.
-        """
-        for fact in self.knowledge_base:
-            if self.semantic_similarity(str(fact), str(root_node)) > 0.7:
-                self.hypothesis_graph[root_node].add(fact)
+        """Constructs multi-layered hypothesis graph with confidence scoring"""
+        root_key = hash(root_node)
+        
+        # Initialize root node
+        self.hypothesis_graph[root_key]['nodes'].add(root_node)
+        self.hypothesis_graph[root_key]['confidence'] = \
+            self.knowledge_base.get(root_node, 0.5)
+        
+        # Semantic expansion with decay factor
+        decay = 0.8  # Confidence reduction per hop
+        visited = set()
+        
+        def expand_node(node, current_confidence, depth=0):
+            if depth > 5 or node in visited:  # Limit recursion depth
+                return
+                
+            visited.add(node)
+            
+            for fact in self.knowledge_base:
+                similarity = self.semantic_similarity(str(node), str(fact))
+                if similarity > 0.65:
+                    edge_conf = current_confidence * decay * similarity
+                    
+                    # Add node and edge
+                    self.hypothesis_graph[root_key]['nodes'].add(fact)
+                    self.hypothesis_graph[root_key]['edges'][(node, fact)] = \
+                        max(edge_conf, 
+                            self.hypothesis_graph[root_key]['edges'].get((node, fact), 0))
+                    
+                    # Recursive expansion
+                    expand_node(fact, edge_conf, depth+1)
+        
+        expand_node(root_node, self.hypothesis_graph[root_key]['confidence'])
+        
+        # Normalize confidence scores
+        max_conf = max([c for _, c in self.hypothesis_graph[root_key]['edges'].values()] 
+                       or [0])
+        if max_conf > 0:
+            for edge in self.hypothesis_graph[root_key]['edges']:
+                self.hypothesis_graph[root_key]['edges'][edge] /= max_conf
+
+# if __name__ == "__main__":

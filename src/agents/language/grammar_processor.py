@@ -1,10 +1,11 @@
 import re
 import math
 import json
+import copy
 import random
 import logging as logger
 from pathlib import Path
-from typing import Optional, Any, List, Union
+from typing import Optional, Any, List, Union, Tuple
 from src.agents.language.language_profiles import MORPHOLOGY_RULES
 from collections import defaultdict, deque, Counter
 
@@ -38,7 +39,8 @@ class GrammarProcessor:
         'existential': 'EX',   # Existential 'there'
     }
 
-    def __init__(self, lang='en', structured_wordlist=None, wordlist=None, rules_path=None, knowledge_agent=None):
+    def __init__(self, lang='en', structured_wordlist=None, wordlist=None,
+                 nlg_templates=None, rules_path=None, knowledge_agent=None):
         self.morph_rules = MORPHOLOGY_RULES[lang]
         self.reset_parser_state()
         self.knowledge_base = knowledge_agent
@@ -51,6 +53,11 @@ class GrammarProcessor:
             self.wordlist = wordlist
         else:
             self.wordlist = {}
+        if nlg_templates is not None:
+            self.nlg_templates = nlg_templates
+        else:
+            from src.agents.language.resource_loader import ResourceLoader
+            self.nlg_templates = ResourceLoader.get_nlg_templates()
         self._build_pos_patterns()
         if rules_path:
             self._load_custom_cfg_rules(rules_path)
@@ -165,6 +172,35 @@ class GrammarProcessor:
             'entities': deque(maxlen=15)  # Increased buffer size
         }
 
+        self.pos_patterns = [
+            # Proper nouns (must come first to prevent substring matches)
+            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),
+            
+            # Core POS patterns with descending specificity
+            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
+            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
+            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
+            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
+            
+            # Closed class words
+            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
+            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
+            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
+            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
+            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
+            
+            # Special categories
+            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
+            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
+            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
+            
+            # Auxiliaries and modals
+            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
+            
+            # Fallback patterns (lower priority)
+            (re.compile(r'\b\w+\b'), 'NOUN')  # Default catch-all
+        ]
+
     def extract_entities(self, text, pos_tags):
         """
         Extracts basic named entities using noun/proper noun clusters.
@@ -188,6 +224,8 @@ class GrammarProcessor:
         return entities
 
     def _convert_structured_wordlist(self, structured_wordlist: dict) -> dict:
+        if not isinstance(structured_wordlist, dict):
+            raise ValueError("structured_wordlist must be a dict, got {}".format(type(structured_wordlist).__name__))
         pos_mapping = {}
         from collections import Counter
         for word, entry in structured_wordlist.items():
@@ -396,6 +434,14 @@ class GrammarProcessor:
 
         return pos_mapping
 
+    def _pos_tag(self, text: str) -> List[Tuple[str, str]]:
+        """
+        Tokenize and apply POS tagging to input text using internal POS map and stem fallback.
+        """
+        tokens = re.findall(r'\b\w+\b', text)
+        tagged = [(token, self._get_pos_tag(token)) for token in tokens]
+        return tagged
+
     def _get_pos_tag(self, word):
         """Get standardized POS tag with fallback"""
         base_tag = self.pos_map.get(word.lower()) or \
@@ -406,6 +452,58 @@ class GrammarProcessor:
             return self._guess_pos_by_morphology(word)
         
         return base_tag
+
+    def _load_econ_lexicon(self):
+        """Financial Sentiment Lexicon from FinancialTracker (shared for NLP-based agents)"""
+        return {
+            'positive': {
+                'bullish', 'growth', 'buy', 'strong', 'surge', 'rally', 'gain', 
+                'profit', 'upside', 'outperform', 'recovery', 'breakout', 'boom',
+                'soar', 'target', 'undervalued', 'dividend', 'premium', 'stable',
+                'rebound', 'momentum', 'innovative', 'leadership', 'upgrade',
+                'opportunity', 'success', 'record', 'beat', 'raise', 'trending',
+                'accumulate', 'hold', 'long', 'bull', 'green', 'positive', 'strong',
+                'resilient', 'robust', 'thrive', 'accelerate', 'superior', 'peak',
+                'promising', 'dominant', 'breakthrough', 'optimal', 'efficient',
+                'sustainable', 'hodl', 'moon', 'lambo', 'fomo', 'yolo', 'rocket',
+                'adoption', 'institutional', 'partnership', 'burn', 'deflationary'
+            },
+            'negative': {
+                'bearish', 'loss', 'sell', 'weak', 'crash', 'plunge', 'decline',
+                'downturn', 'risk', 'warning', 'volatile', 'fraud', 'bankrupt',
+                'default', 'short', 'dump', 'bubble', 'correction', 'manipulation',
+                'recession', 'downgrade', 'distress', 'failure', 'bear', 'red',
+                'negative', 'warning', 'caution', 'overbought', 'overvalued',
+                'uncertainty', 'fear', 'volatility', 'liquidate', 'capitulation',
+                'contraction', 'headwind', 'insolvent', 'delist', 'regulation',
+                'hack', 'exploit', 'rugpull', 'ponzi', 'wash', 'fud', 'rekt',
+                'bagholder', 'dump', 'correction', 'sink', 'collapse', 'bleed',
+                'stagnant', 'dilution', 'inflation', 'deficit', 'warn', 'sue',
+                'investigate', 'scam', 'vulnerability', 'attack', 'compromise'
+            }
+        }
+
+    def detect_intent(self, text: str) -> str:
+        """
+        Enhanced intent recognizer using financial sentiment lexicon and rule patterns.
+        """
+        lowered = text.lower()
+        lexicon = self._load_econ_lexicon()  # Pull sentiment terms from FinancialTracker
+        
+        pos_hits = [word for word in lexicon['positive'] if word in lowered]
+        neg_hits = [word for word in lexicon['negative'] if word in lowered]
+
+        # Simple rule priority based on term presence
+        if any(word in lowered for word in ["buy", "accumulate", "long"]) or len(pos_hits) > len(neg_hits):
+            return "buy_signal"
+        if any(word in lowered for word in ["sell", "short", "dump"]) or len(neg_hits) > len(pos_hits):
+            return "sell_signal"
+        if any(word in lowered for word in ["hold", "wait", "stable"]):
+            return "hold_signal"
+        if any(word in lowered for word in ["risk", "volatility", "uncertainty", "fear", "warning"]):
+            return "risk_assessment"
+        
+        return "unknown"
 
     def _guess_pos_by_morphology(self, word):
         """Advanced morphological analysis using linguistic patterns (Aronoff, 1976)"""
@@ -1042,20 +1140,38 @@ class GrammarProcessor:
         
         # Create regex patterns for each POS group
         self.pos_patterns = []
-        for pos, words in pos_groups.items():
-            if words:  # Only create patterns for non-empty groups
-                # Sort by word length descending to match longer words first
-                words_sorted = sorted(words, key=len, reverse=True)
-                pattern = r'\b(' + '|'.join(words_sorted) + r')\b'
-                self.pos_patterns.append((re.compile(pattern, re.IGNORECASE), pos))
-        
+
         # Add fallback morphological patterns (lower priority)
         self.pos_patterns.extend([
-            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b'), 'NOUN'),
-            (re.compile(r'\b\w+(ate|ify|ize|ise|en)\b'), 'VERB'),
-            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary)\b'), 'ADJ'),
-            (re.compile(r'\b\w+(wise|ward|ly)\b'), 'ADV'),
-            (re.compile(r'\b(the|a|an|some)\b'), 'DET')  # Common determiners
+            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),  # Proper nouns
+            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
+            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
+            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
+            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
+            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
+            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
+            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
+            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
+            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
+            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
+            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
+            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
+            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
+        ])
+
+        # Add patterns from structured wordlist groups
+        for pos, words in pos_groups.items():
+            if words:
+                # Sort to prioritize longer words
+                words_sorted = sorted(words, key=len, reverse=True)
+                pattern = r'\b(' + '|'.join(words_sorted) + r')\b'
+                self.pos_patterns.append(
+                    (re.compile(pattern, re.IGNORECASE), pos)
+                )
+        
+        # Add fallback patterns (lower priority)
+        self.pos_patterns.extend([
+            (re.compile(r'\b\w+\b'), 'NOUN')  # Catch-all
         ])
 
     def parse_grammar(self, sentence, max_length=20):
@@ -1194,13 +1310,42 @@ class GrammarProcessor:
         }
         self.quote_stack = []  # Added for better quotation tracking
 
+    def is_grammatical(self, text: str) -> bool:
+        """Check if the input text is grammatically valid using the CYK parser."""
+        return self.parse_grammar(text)
+
     def process(self, linguistic_frame, raw_response):
         if self.is_grammatical(raw_response):
             return raw_response
         else:
-            # Attempt to rephrase or use templates
             return self.rephrase_response(linguistic_frame, raw_response)
-        
+
+    def rephrase_response(self, linguistic_frame: dict, raw_response: str) -> str:
+        """Rephrase a sentence using seed words or structured templates."""
+        # Extract seed words (nouns, verbs, adjectives) from raw_response
+        words = re.findall(r'\b\w+\b', raw_response.lower())
+        pos_tags = [(word, self._get_pos_tag(word)) for word in words]
+        seed_words = [word for word, tag in pos_tags if tag in {'NOUN', 'VERB', 'ADJ', 'PROPN'}]
+
+        # Attempt 3 times to generate a grammatical sentence
+        for _ in range(3):
+            generated = self.generate_sentence(seed_words)
+            if self.is_grammatical(generated):
+                return generated.capitalize() + '.'  # Ensure punctuation
+
+        # Fallback to structured template using linguistic_frame
+        event = linguistic_frame.get("event", "unknown_event")
+        agent = linguistic_frame.get("agent", "The system")
+        metric = linguistic_frame.get("metric", "performance")
+        value = linguistic_frame.get("value", None)
+
+        if event == "training_complete" and value is not None:
+            return f"{agent} completed training with a {metric} score of {value}."
+        elif event == "failure":
+            return f"{agent} encountered an error."
+        else:
+            return f"{agent} reports: '{event}'."
+
 class EnhancedLanguageAgent():
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

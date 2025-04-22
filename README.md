@@ -130,12 +130,15 @@ Note: If you see an error about execution policy:
    pip install pandas
    pip install pyarrow
    pip install spacy
-   pip install transformers
    pip install tenacity
    pip install rollback
    pip install statsmodels
    pip install numpy scipy scikit-learn
    pip install scikit-optimize
+   pip install shap
+   pip install nltk
+   pip install gymnasium
+   pip install beautifulsoup4
    ```
 
 5. Run Model:

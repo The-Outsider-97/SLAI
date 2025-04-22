@@ -29,6 +29,8 @@ from datetime import datetime
 
 from src.utils.agent_factory import AgentFactory
 from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.base_agent import BaseAgent
+from models.slai_lm_registry import SLAILMManager
 
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.WARNING)
@@ -91,6 +93,9 @@ class ThreadSafeSharedMemory:
         self._expirations = {}
     
     def get(self, key: str, default: Any = None) -> Any:
+        agent = self.registry.get(shared_memory=self.shared_memory, agent_factory=self.factory)
+        response = agent.perform_task(task)
+
         with self._lock:
             if key in self._expirations and self._expirations[key] < datetime.now().timestamp():
                 del self._data[key]
@@ -208,13 +213,15 @@ class DeadlineAwareScheduler(TaskScheduler):
         return assignments
 
 
-class CollaborativeAgent:
+class CollaborativeAgent(BaseAgent):
     """Main collaborative agent implementation"""
     
     def __init__(self, shared_memory, agent_factory: AgentFactory,
                  config: Optional[Dict] = None,
                  risk_threshold=0.2, agent_network: Optional[Dict] = None,
                  config_path: Optional[str] = None):
+        super().__init__("CollaborativeAgent", shared_memory)
+        self.registry = self.agent_factory
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.risk_threshold = max(0.0, min(1.0, risk_threshold))
@@ -225,7 +232,10 @@ class CollaborativeAgent:
         }
 
         config = config or {}
-        
+        slailm_instance = SLAILMManager.get_instance("default",
+                                                     shared_memory=self.shared_resources.get("shared_memory"),
+                                                     agent_factory=self)
+
         # Load config if needed
         if config_path and not agent_network:
             self.agent_network = self._load_config(config_path)
@@ -260,14 +270,14 @@ class CollaborativeAgent:
             "task_router": {}
         }
         self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
-        from src.agents.learning_agent import LearningAgent, SLAIEnv
+        from src.agents.learning_agent import LearningAgent
+        from src.agents.learning.slaienv import SLAIEnv
         self.factory.register("learning",
-                              lambda **kwargs: LearningAgent(
-                                  env=SLAIEnv(),
-                                  config=kwargs,
+                              lambda config: LearningAgent(
+                                  agent_factory=self.factory,
+                                  env=SLAIEnv(shared_memory=self.shared_memory),
+                                  config=config,
                                   shared_memory=self.shared_memory,
-                                  args=kwargs.get("args", ()),
-                                  kwargs=kwargs.get("kwargs", {})
                                   ))
 
         self.grammar = GrammarProcessor(lang='en')
@@ -283,14 +293,14 @@ class CollaborativeAgent:
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
-        self.performance_metrics = {
+        self.performance_metrics.update({
             'assessments_completed': 0,
             'interventions': 0,
             'false_positives': 0,
             'false_negatives': 0,
             'tasks_coordinated': 0,
             'coordination_failures': 0
-        }
+        })
 
     def _load_config(self, config_path: str) -> Dict:
         """Load agent network configuration from YAML file"""
@@ -307,179 +317,6 @@ class CollaborativeAgent:
         """Validate risk score is between 0.0 and 1.0"""
         if not 0.0 <= score <= 1.0:
             raise ValueError(f"Risk score {score} out of bounds [0.0, 1.0]")
-
-    def execute(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute task with safety monitoring.
-        
-        Args:
-            task_data: Dictionary containing:
-                - policy_risk_score: Required risk score (0.0-1.0)
-                - task_type: Task category
-                - source_agent: Originating agent
-                - action_details: Action metadata
-                
-        Returns:
-            Dictionary with assessment results
-        """
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        try:
-            # Validate input
-            if 'policy_risk_score' not in task_data:
-                return self._error_response("Missing policy_risk_score")
-            
-            risk_score = task_data['policy_risk_score']
-            self._validate_risk_score(risk_score)
-            
-            # Perform assessment
-            assessment = self.assess_risk(
-                risk_score=risk_score,
-                task_type=task_data.get('task_type', 'general'),
-                source_agent=task_data.get('source_agent', 'unknown'),
-                action_details=task_data.get('action_details')
-            )
-            
-            # Update knowledge base
-            self._update_shared_knowledge(assessment, task_data)
-            
-            # Prepare response
-            return {
-                'status': 'success',
-                'assessment': assessment.__dict__,
-                'performance_metrics': self.performance_metrics
-            }
-            
-        except ValueError as e:
-            return self._error_response(f"Validation error: {str(e)}")
-        except Exception as e:
-            logger.exception("Unexpected error in execute()")
-            return self._error_response(f"Internal error: {str(e)}")
-
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."        
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def assess_risk(self, 
                    risk_score: float, 
@@ -534,7 +371,10 @@ class CollaborativeAgent:
 
     def coordinate_tasks(self, tasks, available_agents, optimization_goals=None, constraints=None):
         """        Full coordination pipeline with safety checks        """
-    
+        agent_type = task["type"]
+        agent = self.registry.get(agent_type)
+        result = agent.perform_task(task)
+
         # Validate inputs
         if not tasks or not available_agents:
             return {'status': 'error', 'error': 'Invalid input'}
@@ -585,7 +425,7 @@ class CollaborativeAgent:
             'metadata': self._calculate_coordination_metrics(
                 optimized,
                 safety_checks)
-        }
+        } or result
 
     def _apply_optimizations(
         self,
@@ -812,7 +652,7 @@ class CollaborativeAgent:
     def generate(self, shared_memory, task_data: Union[str, dict]) -> str:
         from models.slai_lm import SLAILM, get_shared_slailm
 
-        llm = get_shared_slailm(shared_memory)
+        llm = get_shared_slailm(shared_memory, agent_factory=self.factory)
         agent = self.factory.create("language", {"llm": llm})
 
         try:
@@ -858,12 +698,13 @@ class CollaborativeAgent:
                 }
                 return self.grammar.compose_sentence(raw_facts)
 
-            return lang_agent.generate(prompt)
+            frame = lang_agent.build_frame(prompt)
+            context = lang_agent.dialogue_context            
+            return lang_agent.generate(frame, prompt, context)
 
         except Exception as e:
             logger.error(f"Generation failed: {str(e)}", exc_info=True)
             return f"[System Error] Generation failed: {str(e)}"
-
 
     def _build_learning_config(self, config: Optional[Dict] = None) -> Dict:
         base_config = {

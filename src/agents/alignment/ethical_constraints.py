@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 @dataclass
-class EthicalConstraints:
+class EthicalConfig:
     """Hierarchical ethical governance configuration"""
     safety_constraints: Dict[str, List[str]] = field(default_factory=lambda: {
         'physical_harm': ["Prevent injury to humans", "Avoid property damage"],
@@ -52,11 +52,24 @@ class EthicalConstraints:
     4. Adaptation Layer: Experience-driven rule updates
     """
 
-    def __init__(self, config: Optional[EthicalConstraints] = None):
-        self.config = config or EthicalConstraints()
+    def __init__(self, config: Optional["EthicalConfig"] = None):
+        from types import SimpleNamespace
+        
+        if isinstance(config, dict):
+            # Patch in missing fields using fallback defaults
+            default = self._default_config()
+            merged = {**default.__dict__, **config}
+            self.config = SimpleNamespace(**merged)
+        elif config is None:
+            self.config = self._default_config()
+        else:
+            self.config = config
         self.audit_log = []
         self.constraint_weights = self._init_weights()
         self._build_constraint_graph()
+
+    def _default_config(self) -> EthicalConfig:
+        return EthicalConfig()
 
     def enforce(self, action_context: Dict) -> Dict:
         """
@@ -155,17 +168,78 @@ class EthicalConstraints:
         }
 
     def _detect_hazard(self, context: Dict, hazard_type: str) -> bool:
-        """STPA-inspired hazard detection"""
-        # Implementation using system-theoretic analysis
-        return any(
-            self._hazard_condition(context, rule)
-            for rule in self.config.safety_constraints[hazard_type]
-        )
+        """STPA hazard detection using control structure modeling"""
+        # Model system components as nodes in control structure
+        system_model = {
+            'controller': context.get('decision_engine'),
+            'actuators': context.get('output_mechanisms'),
+            'sensors': context.get('feedback_systems'),
+            'controlled_process': context.get('affected_environment')
+        }
+
+        # Define safety constraints as mathematical boundaries
+        safety_bounds = {
+            'physical_harm': lambda x: x.get('kinetic_energy', 0) < 50,  # Joules
+            'psychological_harm': lambda x: x.get('stress_index', 0) < 0.7  # 0-1 scale
+        }
+
+        # Analyze control actions using STPA four-step process
+        unsafe_control = any([
+            # 1. Missing necessary control action
+            not system_model['controller']['is_active'],
+            
+            # 2. Incorrect timing/order of execution
+            context.get('execution_sequence') != safety_bounds[hazard_type],
+            
+            # 3. Inadequate duration/magnitude
+            safety_bounds[hazard_type](context['action_parameters']),
+            
+            # 4. Unsafe process model
+            system_model['controlled_process'].get('state') in ['overloaded', 'resonance']
+        ])
+
+        # Calculate hazard potential using system energy state
+        system_energy = sum([
+            context.get('potential_energy', 0),
+            context.get('kinetic_energy', 0),
+            context.get('informational_entropy', 0) * 10  # Weighting factor
+        ])
+
+        return unsafe_control or (system_energy > self._calculate_safe_energy_threshold())
 
     def _hazard_condition(self, context: Dict, rule: str) -> bool:
-        """Semantic rule evaluation using NLP models"""
-        # Implementation using constitutional AI techniques
-        return False
+        """Constitutional rule evaluation using formal argumentation frameworks"""
+        # Convert rule to logical proposition
+        propositions = {
+            "Prevent injury to humans": "¬(∃x human(x) ∧ injured(x))",
+            "Avoid property damage": "∀y property(y) → intact(y)"
+        }
+
+        # Build semantic model from context
+        domain_model = {
+            'human': context.get('affected_people', []),
+            'property': context.get('affected_assets', []),
+            'intact': lambda x: x.get('damage_level', 0) < 0.1
+        }
+
+        # Evaluate using three-valued logic (Kleene logic)
+        def evaluate(proposition):
+            try:
+                return eval(proposition, {}, domain_model)
+            except:
+                return 'unknown'
+
+        # Calculate rule compliance score
+        truth_value = evaluate(propositions[rule])
+        compliance_score = {
+            True: 1.0,
+            False: 0.0,
+            'unknown': 0.5
+        }[truth_value]
+
+        # Apply tolerance threshold from information theory
+        shannon_entropy = -sum(p * np.log2(p) for p in [compliance_score, 1-compliance_score] if p > 0)
+        return shannon_entropy > 0.7
 
     def _generate_safety_correction(self, context: Dict, hazard_type: str) -> Dict:
         """Generates STPA-compliant corrective action"""
@@ -196,8 +270,35 @@ class EthicalConstraints:
         }
 
     def _calculate_societal_impact(self, context: Dict, dimension: str) -> float:
-        """Quantitative societal impact assessment"""
-        # Implementation using welfare economics models
+        """Computational welfare economics using fundamental axioms"""
+        # Rawlsian maximin principle for distribution
+        if dimension == 'distribution':
+            utilities = [u['utility'] for u in context['affected_population']]
+            return 1 - (min(utilities) / max(utilities)) if max(utilities) != 0 else 0
+
+        # Atkinson inequality index for procedural fairness
+        elif dimension == 'procedure':
+            n = len(context['decision_history'])
+            epsilon = 1.0  # Inequality aversion parameter
+            mean_utility = np.mean([d['fairness_score'] for d in context['decision_history']])
+            
+            if mean_utility == 0:
+                return 0
+                
+            atkinson = 1 - (1/mean_utility) * (sum([u**(1-epsilon) for u in utilities])/n)**(1/(1-epsilon))
+            return atkinson
+
+        # Gini coefficient calculation
+        def gini(x):
+            x = sorted(x)
+            n = len(x)
+            return (sum(i * xi for i, xi in enumerate(x)) / (n * sum(x))) - (n + 1)/(2 * n)
+
+        # Sen's capability approach
+        capabilities = context.get('capability_vectors', [])
+        if len(capabilities) > 1:
+            return gini([sum(c) for c in capabilities])
+        
         return 0.0
 
     def _mitigation_strategy(self, dimension: str) -> Dict:

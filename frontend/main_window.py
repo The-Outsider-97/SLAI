@@ -1,14 +1,16 @@
 import os, sys
-import psutil
-import GPUtil
+import psutil, GPUtil
 import torch
 import logging
 import subprocess
 import json
-import random   
+import random
 import getpass
 import queue
 from datetime import datetime
+
+from src.utils.async_task_runner import run_in_thread
+from src.agents.collaborative_agent import CollaborativeAgent
 
 from torch.nn.functional import cosine_similarity # Assuming this and REFERENCE_EMBEDDINGS/QUERIES are defined elsewhere if needed
 from PyQt5 import QtWidgets, QtGui, QtCore
@@ -17,6 +19,22 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayou
                              QSplitter, QApplication) # Added QStackedWidget, QSplitter, QApplication
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QTextCursor, QColor, QPainter
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QVariantAnimation, QSize, QThread
+
+REFERENCE_QUERIES = [
+    "What is the capital of France?",
+    "Explain Newton's second law.",
+    "Describe the process of photosynthesis."
+]
+
+def encode_sentence(text):
+    import hashlib
+    # Simulated embedding using a deterministic hash to tensor conversion
+    hash_val = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (10**8)
+    torch.manual_seed(hash_val)
+    return torch.rand(1, 768)
+
+REFERENCE_EMBEDDINGS = torch.stack([encode_sentence(q) for q in REFERENCE_QUERIES])  
+
 
 class PromptThread(QThread):
     result_ready = pyqtSignal(str)
@@ -110,11 +128,17 @@ class StatusIndicator(QLabel):
         radius = min(rect.width(), rect.height()) // 2 - 1 # Small padding
         painter.drawEllipse(center, radius, radius)
 
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, collaborative_agent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
         super().__init__()
-        self.collaborative_agent = collaborative_agent
         self.shared_memory = shared_memory
+        self.collaborative_agent = collaborative_agent
+        self.optimizer = optimizer
+        self.factory = AgentFactory(config=None, shared_resources=shared_resources, optimizer=optimizer)
+
+        self._init_base_ui()
+        self._deferred_ui_setup()
         self.log_queue = log_queue or []
         self.metric_queue = metric_queue or []
         self.session_start_time = datetime.now()
@@ -126,12 +150,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.safe_ai_count = 0
         shared_resources = {"log_path": "logs/", "memory_limit": 1000}
         optimizer = SystemOptimizer()
-
-        self.factory = AgentFactory(config=None, shared_resources=shared_resources, optimizer=optimizer)
-
         self.agent = self.collaborative_agent
         self.setWindowTitle("SLAI Launcher")
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "..", "frontend", "assets", "logo1.ico")))
+
+        QTimer.singleShot(0, self._deferred_ui_setup)  # Defer heavy UI loading
+
+        from src.agents.evaluators.report import PerformanceVisualizer
+        self.visualizer = PerformanceVisualizer(max_points=200)
+        self.last_visual_update = datetime.now()
+
+        # Connect to evaluation agent updates
+        shared_memory.register_callback('evaluation_metrics', self.handle_evaluation_update)
 
         # Geometry fix for large DPI / screen
         screen_geometry = QtWidgets.QDesktopWidget().availableGeometry()
@@ -253,6 +283,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_splitter.setSizes([int(total_width * 0.6), int(total_width * 0.4)])
 
         self.greetUser()
+    def handle_evaluation_update(self, metrics):
+        """Process evaluation metrics from EvaluationAgent"""
+        self.visualizer.update_metrics(metrics)
+        
+        # Throttle visual updates to 15 FPS
+        if (datetime.now() - self.last_visual_update).total_seconds() > 0.066:
+            self.update_visualizations()
+            self.last_visual_update = datetime.now()
 
     def initUI(self):
         # === Left Panel Content ===
@@ -344,6 +382,10 @@ class MainWindow(QtWidgets.QMainWindow):
         status_indicator_layout.addWidget(self.indicator_green)
         self.right_panel_layout.addLayout(status_indicator_layout)
 
+        self.indicator_heartbeat = StatusIndicator("grey")
+        self.indicator_heartbeat.setToolTip("System Heartbeat")
+        status_indicator_layout.addWidget(self.indicator_heartbeat)
+
         # --- Switchable Panels ---
         self.right_tab_widget = QStackedWidget()
         self.right_panel_layout.addWidget(self.right_tab_widget, 1) # Takes expanding space
@@ -367,6 +409,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.media_panel.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
         self.right_tab_widget.addWidget(self.media_panel)
 
+        # Panel 4: Monitor Panel
+        self.monitor_panel = QWidget()
+        self.monitor_panel.setLayout(QVBoxLayout())
+        self.right_tab_widget.addWidget(self.monitor_panel)
+
+        # Panel 5: Risk & Reward Visualization Panel
+        self.visualization_panel = QWidget()
+        vis_layout = QVBoxLayout()
+        vis_layout.setContentsMargins(5, 5, 5, 5)
+
+        self.vis_tradeoff = QLabel()
+        self.vis_tradeoff.setMinimumSize(360, 240)
+        self.vis_tradeoff.setAlignment(Qt.AlignCenter)
+        
+        self.vis_risk_trend = QLabel()
+        self.vis_risk_trend.setMinimumSize(360, 240)
+        self.vis_risk_trend.setAlignment(Qt.AlignCenter)
+        
+        self.vis_reward_trend = QLabel()
+        self.vis_reward_trend.setMinimumSize(360, 240)
+        self.vis_reward_trend.setAlignment(Qt.AlignCenter)
+    
+        vis_layout.addWidget(self.vis_tradeoff)
+        vis_layout.addWidget(self.vis_risk_trend)
+        vis_layout.addWidget(self.vis_reward_trend)
+        
+        self.visualization_panel.setLayout(vis_layout)
+        self.right_tab_widget.addWidget(self.visualization_panel)
+
         # --- Footer (System Stats) ---
         self.footer = QtWidgets.QLabel("System Stats Initializing...")
         self.footer.setObjectName("footerLabel") # For styling
@@ -384,14 +455,48 @@ class MainWindow(QtWidgets.QMainWindow):
         log_btn = QPushButton("Logs")
         graph_btn = QPushButton("Graph")
         media_btn = QPushButton("Media")
+        monitor_btn = QPushButton("Monitoring")
+        viz_btn = QPushButton("Eval Charts")
         log_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(0))
         graph_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(1))
         media_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(2))
+        monitor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(3))
+        viz_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(4))
         switcher_layout.addWidget(log_btn)
         switcher_layout.addWidget(graph_btn)
         switcher_layout.addWidget(media_btn)
+        switcher_layout.addWidget(monitor_btn)
+        switcher_layout.addWidget(viz_btn)
         switcher_layout.addStretch()
         self.right_panel_layout.insertLayout(1, switcher_layout) # Insert above the stack
+
+    def update_visualizations(self):
+        """Update all visualization elements"""
+        if not self.visualization_panel.isVisible():
+            return
+    
+        # Get current panel size
+        panel_size = self.visualization_panel.size()
+        chart_width = max(360, panel_size.width() - 20)
+        chart_height = max(240, panel_size.height() // 3 - 10)
+        chart_size = QtCore.QSize(chart_width, chart_height)
+    
+        # Update charts
+        try:
+            self.vis_tradeoff.setPixmap(
+                self.visualizer.render_tradeoff_chart(chart_size))
+            self.vis_risk_trend.setPixmap(
+                self.visualizer.render_temporal_chart(chart_size, 'hazard_rates'))
+            self.vis_reward_trend.setPixmap(
+                self.visualizer.render_temporal_chart(chart_size, 'operational_times'))
+        except Exception as e:
+            logging.error(f"Visualization update failed: {str(e)}")
+    
+    # Add resize handler
+    def resizeEvent(self, event):
+        """Handle window resizing for proper visualization scaling"""
+        super().resizeEvent(event)
+        self.update_visualizations()
 
     def handleInputKeyPress(self, event):
         """ Handle key presses in the input field """
@@ -437,6 +542,57 @@ class MainWindow(QtWidgets.QMainWindow):
         # Post greeting to the main output area
         self.output_area.append(f"<font color='gold'>SLAI:</font> {greeting_message}<br>{'-'*50}<br>")
 
+    def _init_base_ui(self):
+        """Set up minimal UI elements that don't depend on agents."""
+        self.setWindowTitle("SLAI Interface")
+        self.setMinimumSize(1024, 768)
+        self.statusBar().showMessage("Loading agents in background...")
+
+        # You can pre-render panels, logs, or splash visuals here
+        # Example: set up a placeholder chat or loading widget
+        from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+        placeholder = QLabel("🧠 Initializing SLAI Core...\nPlease wait.", self)
+        placeholder.setStyleSheet("font-size: 18px; color: gray;")
+        placeholder.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout()
+        layout.addWidget(placeholder)
+
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
+
+    def _deferred_ui_setup(self):
+        # Load heavy resources here after UI becomes visible
+        # self._load_charts()
+        self._init_visualization_engine()
+        self._connect_analytics()
+        run_in_thread(self._load_agents_and_finalize_ui)
+
+    def _load_agents_and_finalize_ui(self):
+        try:
+            self.agent_factory = AgentFactory(
+                shared_resources={
+                    "shared_memory": self.shared_memory,
+                    "optimizer": self.optimizer
+                },
+                optimizer=self.optimizer
+            )
+
+            self.collaborative_agent = CollaborativeAgent(
+                shared_memory=self.shared_memory,
+                agent_factory=self.agent_factory,
+                agent_network={},  # Load or replace from config
+                config_path="config.yaml"
+            )
+
+            # If you want to pass these back to the UI thread later, use QMetaObject
+            print("[MainWindow] AgentFactory + CollaborativeAgent loaded successfully.")
+
+        except Exception as e:
+            logging.error(f"[MainWindow] Failed to load agents in thread: {e}")
+
     def play_audio(self, audio_path):
         """Plays the selected audio file."""
         # Basic audio playback (Needs more robust implementation)
@@ -450,6 +606,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_message.show()
             QTimer.singleShot(3000, self.status_message.hide)
 
+  
     def handle_response(self, text):
         self.stop_loading_animation()
         current_output = self.tabs[self.tab_stack.currentIndex()]
@@ -470,10 +627,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(3000, self.status_message.hide)
 
         self.input_field.clear()
-
-    def encode_sentence(text):
-        # needs to expanded upon
-            return
 
     def save_logs(self):
         chat_text = self.output_area.toHtml() # Save rich text if needed
@@ -571,9 +724,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hours, remainder = divmod(session_duration.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)
 
-        """
-        Exports chat and system session data into a styled PDF using generate_pdf_report.
-        """
+        from bs4 import BeautifulSoup  # Add this import at the top of the file
+
+        """Exports chat and system session data into a styled PDF using generate_pdf_report."""
         from frontend.templates.generate_pdf_report import generate_pdf_report
 
         logs_dir = os.path.join("reports", "session_reports")
@@ -591,12 +744,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            # Collect dynamic chat logs
-            chat_text = self.output_area.toPlainText()
+            # Collect dynamic chat logs and sanitize HTML
+            chat_text = self.output_area.toHtml()
+            
+            # Convert HTML to plain text and strip all tags
+            soup = BeautifulSoup(chat_text, "html.parser")
+            clean_text = soup.get_text('\n')  # Convert <br> to newlines
+            
+            # Additional cleanup for HTML entities and special characters
+            clean_text = clean_text.replace('&nbsp;', ' ').replace('<', '[').replace('>', ']')
+            
+            # Capitalize first letter of each line
+            cleaned_lines = []
+            for line in clean_text.split('\n'):
+                if line.strip():
+                    cleaned_lines.append(line[0].upper() + line[1:])
+                else:
+                    cleaned_lines.append('')
 
             # Build data structure expected by generate_pdf_report
             data = {
-                "chat_history": chat_text,
+                "chat_history": '\n'.join(cleaned_lines),  # Use sanitized text
                 "executive_summary": "This report summarizes the SLAI session performance and system activity.",
                 "user_id": getpass.getuser(),
                 "interaction_count": len(self.response_times),
@@ -622,7 +790,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "log_file_path": "N/A",
                 "chat_export_path": "N/A",
                 "notes": "Auto-generated report from SLAI desktop session.",
-                "date_range": "Last 7 days",
+                "date_range": f"{self.session_start_time.strftime('%Y-%m-%d')} to {datetime.now().strftime('%Y-%m-%d')}",
                 "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "generated_by": getpass.getuser(),
                 "country": "Netherlands",
@@ -635,7 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception as e:
             logging.exception("Failed to generate PDF report")
-            self.set_status_indicator("error") # Set YELLOW light on error
+            self.set_status_indicator("error")
             self.show_status_message(f"Error: {str(e)}", 5000)
 
     def set_status_indicator(self, state):
@@ -661,7 +829,9 @@ class MainWindow(QtWidgets.QMainWindow):
         text = self.input_field.toPlainText().strip()
         if text:
             self.set_status_indicator("busy") # Set RED light
-            self.output_area.append(f"<font color='lightblue'>User:</font> {text}<br>") # Display user prompt
+            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+            self.output_area.append(f"{timestamp}<font color='lightblue'>User:</font> {text}<br>")
+            #self.output_area.append(f"<font color='lightblue'>User:</font> {text}<br>") # Display user prompt
             self.input_field.clear() # Clear input after sending
             self.show_status_message("Sending prompt to SLAI...", 2000)
 
@@ -675,21 +845,19 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
 
         try:
-            # Start response timer
-            self.current_response_start = datetime.now()
+            self.current_response_start = datetime.now() # Start response timer
 
-            # Call the generate method of the imported CollaborativeAgent instance
-            slai_response = self.agent.generate(prompt, task_data)
-            
+            slai_response = self.agent.generate(prompt, task_data) # Call the generate method of the imported CollaborativeAgent instance
+
             # Calculate response time
             response_time = (datetime.now() - self.current_response_start).total_seconds()
             self.response_times.append(response_time)
-            
+
             # Display response
             self.output_area.append(f"<font color='gold'>SLAI:</font> {slai_response}<br>")
             self.set_status_indicator("standby") # Set GREEN light on success
             self.show_status_message("Response received.", 3000)
-            
+
             # Track SafeAI interventions
             if "SafeAI intervention" in slai_response:
                 self.safe_ai_count += 1
@@ -734,7 +902,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.start(1000)
 
     def updateSystemStats(self):
-        
+
         # System stats update logic (minor formatting change)
         try:
             current_mem = psutil.virtual_memory().used / (1024**3)
@@ -772,19 +940,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self.footer.setText(text)
 
     def update_log_panel(self):
-        """ Placeholder to update log panel """
-        # In a real app, you'd fetch logs from a queue or source
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        # Append vs SetText: Append keeps history
-        self.log_panel.append(f"[{timestamp}] System heartbeat...")
-        # Auto-scroll to bottom
-        self.log_panel.moveCursor(QTextCursor.End)
+        """Update heartbeat visual and heartbeat count display"""
+        if not hasattr(self, "heartbeat_count"):
+            self.heartbeat_count = 0
+            self.heartbeat_flash = False
 
+        self.heartbeat_count += 1
+        self.heartbeat_flash = not self.heartbeat_flash
+
+        # Toggle between green and grey
+        target_color = "#00bf63" if self.heartbeat_flash else "grey"
+        self.indicator_heartbeat.set_status(target_color)
+
+        # Format uptime
+        session_duration = datetime.now() - self.session_start_time
+        total_seconds = int(session_duration.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        formatted_time = f"{hours:02}:{minutes:02}:{seconds:02}"
+
+        # Compose heartbeat log (live-updating)
+        line = f"System Heartbeat | Active: {formatted_time} | Beats: {self.heartbeat_count}"
+
+        # Overwrite last line
+        cursor = self.log_panel.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.select(QTextCursor.BlockUnderCursor)
+        cursor.removeSelectedText()
+        cursor.insertText(line)
+        self.log_panel.moveCursor(QTextCursor.End)
+    
     def show_status_message(self, message, duration_ms):
         """ Displays a status message for a specified duration """
         self.status_message.setText(message)
         self.status_message.show()
         QTimer.singleShot(duration_ms, self.status_message.hide)
+
+    def _init_visualization_engine(self):
+        # Placeholder for future chart setup (e.g., performance graph)
+        pass
+
+    def _connect_analytics(self):
+        # Placeholder for future chart setup (e.g., performance graph)
+        pass
 
     # --- Layout Handling for Vertical/Horizontal ---
     def resizeEvent(self, event):

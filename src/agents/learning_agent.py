@@ -14,26 +14,76 @@ Academic Foundations:
 - Evolutionary Strategies: Salimans et al. (2017)
 """
 
+import torch
+import time
+import psutil
+import random
 import logging
 import os, sys
+import warnings
+import functools
 import numpy as np
+import gymnasium as gym
 
-from collections import deque
+from collections import deque, defaultdict, OrderedDict
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, defaultdict, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any
+from functools import partial
 
 from src.agents.learning.dqn import DQNAgent
 from src.agents.learning.maml_rl import MAMLAgent
 from src.agents.learning.rsi import RSI_Agent
 from src.agents.learning.rl_agent import RLAgent
+from src.agents.safety_agent import SafeAI_Agent
+from src.agents.base_agent import BaseAgent, LightMetricStore, LazyAgent
+
 
 logger = logging.getLogger(__name__)
 
-class LearningAgent:
-    """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
+def validation_logic(self):
+    required_params = {
+        'dqn': ['hidden_size', 'gamma'],
+        'maml': ['meta_lr', 'inner_lr']
+    }
+    for agent_type, params in required_params.items():
+        if not all(k in self.config[agent_type] for k in params):
+            raise ValueError(f"Missing params for {agent_type}: {params}")
+
+class NaNException(Exception):
+    """Raised when a NaN is encountered during learning"""
+    def __init__(self, message="NaN value detected in training"):
+        super().__init__(message)
+
+class GradientExplosionError(Exception):
+    """Raised when gradient norms exceed a safety threshold"""
+    def __init__(self, norm, threshold=1e3):
+        super().__init__(f"Gradient explosion detected: norm={norm:.2f}, threshold={threshold}")
+
+class InvalidActionError(Exception):
+    """Raised when an action fails safety validation or is undefined"""
+    def __init__(self, action=None):
+        message = f"Invalid or unsafe action: {action}" if action else "Invalid or unsafe action encountered"
+        super().__init__(message)
+
+class InvalidConfigError(Exception):
+    """Raised when agent configuration validation fails"""
+    def __init__(self, message="Invalid agent configuration"):
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self):
+        return f'InvalidConfigError: {self.message}'
     
-    def __init__(self, agent_factory, env=None, config: dict = None, shared_memory: Optional[Any] = None, args=(), kwargs={}):
+class LearningAgent(BaseAgent):
+    """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
+
+    def __init__(self, shared_memory, agent_factory, slai_lm, safety_agent, env=None, config=None):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
         """
         Initialize learning subsystems with environment context
         
@@ -41,164 +91,337 @@ class LearningAgent:
             env: OpenAI-like environment
             config: Dictionary with agent configurations
         """
+        self.slai_lm = slai_lm
         self.env = env
-        self.config = config or {}
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
+        self.safety_agent = safety_agent
+        self.config = config or {}
         self.rl_algorithm = self.config.get("rl_algorithm", None)
-        self.strategy_weights = np.ones(4)  # [RL, DQN, MAML, RSI]
+        self.strategy_weights = np.array([0.25]*4)  # [RL, DQN, MAML, RSI]
+        self.prediction_weights = self.config.get('prediction_weights', [0.25, 0.25, 0.25, 0.25])
         self.performance_history = deque(maxlen=1000)
 
+    @property
+    def performance_metrics(self):
+        return self._performance_metrics
+    
+    @performance_metrics.setter
+    def performance_metrics(self, value):
+        self._performance_metrics = value
+
         # Initialize learning subsystems
-        self.performance_metrics = defaultdict(lambda: deque(maxlen=1000))
         self._initialize_agents(
             env=self.env,
             performance_metrics=self.performance_metrics,
             shared_memory=self.shared_memory
         )
+        if self.env is None or not hasattr(self.env, 'observation_space') or not hasattr(self.env, 'action_space'):
+            raise ValueError("LearningAgent requires a valid environment with observation_space and action_space.")
+        else:
+            state_dim = self.env.observation_space.shape[0]
+            action_dim = self.env.action_space.n
+
+        possible_actions = list(range(action_dim))
+
         self.agents = {
-            'dqn': self._create_agent('dqn', self.config.get('dqn', {})),
-            'maml': self._create_agent('maml', self.config.get('maml', {})),
-            'rsi': self._create_agent('rsi', self.config.get('rsi', {})),
-            'rl': self._create_agent('rl', self.config.get('rl', {}))
+            'dqn': DQNAgent(state_dim, action_dim, config.get('dqn', {})),
+            'maml': MAMLAgent(state_dim, action_dim, **config.get('maml', {})),
+            'rsi': RSI_Agent(state_dim, action_dim, shared_memory, config=config.get('rsi', {})),
+            'rl': RLAgent(possible_actions, **config.get('rl', {}))
         }
+        # Enhanced MAML initialization
+        self.maml_task_pool_size = config.get('maml_task_pool_size', 100)
+        self.maml_task_pool = deque(maxlen=self.maml_task_pool_size)
+        
+        # Deeper RSI integration
+        self.rsi_improvement_cycle = config.get('rsi_improvement_cycle', 50)
+        self.architecture_history = deque(maxlen=10)  # Tracks network changes
+        
+        # Integrated strategy evaluator
+        self.strategy_evaluator = MetaStrategyEvaluator(
+            agents=self.agents,
+            performance_metrics=self.performance_metrics
+        )
+
         self._setup_continual_learning()
         self._setup_trigger_system()
 
         # State tracking
         self.concept_drift_detector = ConceptDriftDetector()
         self.last_retraining = datetime.now()
+        self.slai_lm = slai_lm
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
+        # Error recovery state tracking
+        self.error_history = deque(maxlen=100)
+        self.consecutive_errors = 0
+        self.recovery_strategies = [
+            self._recover_soft_reset,
+            self._recover_learning_rate_adjustment,
+            self._recover_strategy_switch,
+            self._recover_full_reset
+        ]
+        
+        # Defer heavy initialization
+        self._deferred_initialization()
+
+        
+        logger.info(f"[TIME] create executed in {time.time()-start_time:.2f} seconds")
+        logger.info(f"[MEMORY] create used {(psutil.Process().memory_info().rss - mem_before)/1024/1024:.2f} MB")
+
+    def _deferred_initialization(self):
+        """Initialize heavy components only when needed"""
+        # Lightweight agent shells
+        self.agents = {
+            'dqn': LazyAgent(partial(self._create_dqn_agent)),
+            'maml': LazyAgent(partial(self._create_maml_agent)),
+            'rsi': LazyAgent(partial(self._create_rsi_agent)),
+            'rl': LazyAgent(partial(self._create_rl_agent))
+        }
+        
+        # Shared components
+        self.memory = BaseAgent.SharedMemoryView(self.shared_memory)
+        self.performance_metrics = LightMetricStore()
+        
+        # Configuration with memory limits
+        self._config = {
+            'max_network_size': 256,  # Hidden units
+            'max_task_pool': 50,
+            'max_history': 500
+        }
+
+    def _create_dqn_agent(self):
+        """Create DQN agent with optimized network"""
+        return DQNAgent(
+            state_dim=self.env.observation_space.shape[0],
+            action_dim=self.env.action_space.n,
+            config={
+                'hidden_size': min(128, self._config['max_network_size']),
+                'buffer_size': 2000,
+                'batch_size': 32
+            }
+        )
+
+    def _create_maml_agent(self):
+        """Create MAML agent with shared network components"""
+        return MAMLAgent(
+            state_size=self.env.observation_space.shape[0],
+            action_size=self.env.action_space.n,
+            hidden_size=min(64, self._config['max_network_size']),
+            shared_components=self.shared_memory.get('shared_networks')
+        )
+
+    def _create_rsi_agent(self):
+        """Create RSI agent with memory limits"""
+        return RSI_Agent(
+            state_size=self.env.observation_space.shape[0],
+            action_size=self.env.action_space.n,
+            shared_memory=self.memory,
+            config={'memory_size': 1000}
+        )
+
+    def _create_rl_agent(self):
+        """Create basic RL agent"""
+        return RLAgent(
+            possible_actions=list(range(self.env.action_space.n)),
+            learning_rate=0.001,
+            discount_factor=0.95
+        )
+
+    def _create_task_variation(self):
+        import copy
+        """Enhanced environment variation generator for MAML"""
+        try:
+            env_variant = copy.deepcopy(self.env)
             
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
+            # Systematic parameter randomization
+            variation_params = {}
+            if hasattr(env_variant.unwrapped, 'dynamics_config'):
+                # Physics-based environments
+                dynamics = env_variant.unwrapped.dynamics_config
+                variation_params = {
+                    'mass': np.clip(dynamics.mass * np.random.uniform(0.3, 3)), 
+                    'damping': dynamics.damping * np.random.uniform(0.5, 2),
+                    'gravity': np.clip(dynamics.gravity * np.random.uniform(0.5, 1.5)), 
+                }
+                env_variant.unwrapped.configure(**variation_params)
+            
+            # Reward shaping variations
+            if hasattr(env_variant.unwrapped, 'reward_weights'):
+                original_weights = env_variant.unwrapped.reward_weights
+                variation_params['reward_weights'] = {
+                    k: v * np.random.uniform(0.7, 1.3) 
+                    for k,v in original_weights.items()
+                }
+                env_variant.unwrapped.reward_weights = variation_params['reward_weights']
+            
+            # Add to task pool for MAML
+            self.maml_task_pool.append(env_variant)
+            return env_variant
+            
         except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
+            self.logger.error(f"Task variation failed: {str(e)}")
+            return self.env  # Fallback to base env
 
-        pass
+    def _run_rsi_self_improvement(self):
+        """Enhanced RSI integration with architectural evolution"""
+        analysis = self.agents["rsi"].execute({
+            "performance_history": self.performance_history,
+            "strategy_weights": self.strategy_weights,
+            "network_metrics": self._get_network_metrics()
+        })
+        
+        # Apply architectural improvements
+        if 'network_architecture' in analysis:
+            new_arch = analysis['network_architecture']
+            self._evolve_network_architecture(new_arch)
+            self.architecture_history.append(new_arch)
+        
+        # Strategy reweighting based on RSI analysis
+        if 'strategy_weights' in analysis:
+            self.strategy_weights = np.clip(
+                analysis['strategy_weights'], 0.1, 0.8
+            )
+            self.logger.info(f"RSI updated strategy weights: {self.strategy_weights}")
 
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
+    def _evolve_network_architecture(self, new_arch):
+        """Dynamic network architecture modification"""
+        for agent_id in ['dqn', 'maml']:
+            agent = self.agents[agent_id]
+            if hasattr(agent, 'policy_net'):
+                self.logger.info(f"Evolving {agent_id} network architecture")
+                new_net = self._build_network_from_arch(new_arch)
+                agent.policy_net = new_net
+                agent.target_net.load_state_dict(new_net.state_dict())
 
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
+    def _get_network_metrics(self):
+        """Collect network health metrics for RSI analysis"""
+        return {
+            agent_id: {
+                'gradient_norms': self._get_gradient_norm(agent),
+                'activation_stats': self._get_activation_stats(agent),
+                'parameter_count': sum(p.numel() for p in agent.policy_net.parameters())
+            }
+            for agent_id, agent in self.agents.items()
+            if hasattr(agent, 'policy_net')
+        }
 
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
+    def meta_learn(self, num_tasks=5):
+        """Enhanced MAML training with real task variations"""
+        if len(self.maml_task_pool) < num_tasks:
+            self.logger.warning("Insufficient tasks for MAML training")
+            return
+        
+        # Select diverse tasks from pool
+        task_variants = random.sample(self.maml_task_pool, num_tasks)
+        task_batch = [(env, self._collect_adaptation_data(env)) for env in task_variants]
+        
+        # Perform meta-update
+        meta_loss = self.agents["maml"].meta_update(task_batch)
+        self.performance_metrics['meta_loss'].append(meta_loss)
+        
+        # Update strategy weights based on meta-learning performance
+        self.strategy_weights[2] *= (1 + 1/(meta_loss + 1e-6))  # MAML index is 2
 
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
+    def _collect_adaptation_data(self, env):
+        """Collect adaptation data for a specific task variant"""
+        state = env.reset()
+        episode_data = []
+        for _ in range(self.config.get('maml_adaptation_steps', 10)):
+            action = self.agents["maml"].get_action(state)
+            next_state, reward, done, _ = env.step(action)
+            episode_data.append((state, action, reward, next_state, done))
+            state = next_state if not done else env.reset()
+        return episode_data
 
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
+    def _validate_config(self, config):
+        """Centralized configuration validation"""
+        required_params = {
+            'dqn': ['hidden_size', 'gamma', 'epsilon_decay', 'buffer_size'],
+            'maml': ['meta_lr', 'inner_lr', 'adaptation_steps'],
+            'rsi': ['memory_size', 'exploration_rate', 'plasticity'],
+            'rl': ['learning_rate', 'discount_factor']
+        }
+        
+        error_messages = []
+        for agent_type, params in required_params.items():
+            if agent_type not in config:
+                error_messages.append(f"Missing {agent_type} config section")
+                continue
+                
+            missing = [p for p in params if p not in config[agent_type]]
+            if missing:
+                error_messages.append(
+                    f"Missing in {agent_type} config: {', '.join(missing)}"
+                )
+        
+        if error_messages:
+            raise InvalidConfigError(
+                "Configuration validation failed:\n- " + "\n- ".join(error_messages)
+            )
+        
+        # Type validation
+        if not isinstance(config.get('dqn', {}).get('hidden_size'), int):
+            error_messages.append("DQN hidden_size must be integer")
+        
+        if error_messages:
+            raise InvalidConfigError("\n".join(error_messages))
 
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
+    def _get_training_context(self):
+        """Capture training state for error diagnostics"""
+        return {
+            'current_strategy': self.active_strategy,
+            'recent_rewards': list(self.performance_history)[-10:],
+            'memory_usage': len(self.memory),
+            'gradient_norms': {
+                agent_id: self._get_gradient_norm(agent)
+                for agent_id, agent in self.agents.items()
+            }
+        }
+
+    def _get_gradient_norm(self, agent):
+        """Safety check for gradient stability"""
+        if hasattr(agent, 'policy_net'):
+            params = [p.grad for p in agent.policy_net.parameters() if p.grad is not None]
+            return torch.norm(torch.stack([torch.norm(p) for p in params])).item()
+        return 0.0
+
+    def _execute_recovery_strategy(self):
+        """Hierarchical recovery system"""
+        strategy_level = min(self.consecutive_errors // 3, len(self.recovery_strategies)-1)
+        return self.recovery_strategies[strategy_level]()
+
+    def _recover_soft_reset(self):
+        """Level 1 Recovery: Reset network weights and clear buffers"""
+        self.logger.warning("Executing soft reset")
+        for agent in self.agents.values():
+            if hasattr(agent, 'reset_parameters'):
+                agent.reset_parameters()
+        self.memory.clear()
+        return {'status': 'recovered', 'strategy': 'soft_reset'}
+
+    def _recover_learning_rate_adjustment(self):
+        """Level 2 Recovery: Adaptive learning rate scaling"""
+        self.logger.warning("Adjusting learning rates")
+        for agent_id, agent in self.agents.items():
+            if hasattr(agent, 'learning_rate'):
+                agent.learning_rate *= 0.5
+                agent.learning_rate = max(agent.learning_rate, 1e-6)
+        return {'status': 'recovered', 'strategy': 'lr_adjustment'}
+
+    def _recover_strategy_switch(self):
+        """Level 3 Recovery: Fallback to safe strategy"""
+        self.logger.warning("Switching to safe strategy")
+        self.active_strategy = 'rl'  # Default to basic RL
+        if self.safety_agent:
+            return self.safety_agent.execute({'task': 'emergency_override'})
+        return {'status': 'recovered', 'strategy': 'strategy_switch'}
+
+    def _recover_full_reset(self):
+        """Level 4 Recovery: Complete system reset"""
+        self.logger.critical("Performing full reset!")
+        self.__init__(...)  # Reinitialize with original params
+        return {'status': 'recovered', 'strategy': 'full_reset'}
 
         # Initialize sub-agents
     def _initialize_agents(self, env, performance_metrics, shared_memory, 
@@ -232,7 +455,7 @@ class LearningAgent:
                 'epsilon_decay': (0.9, 0.9999)
             }
         }
-        
+
         # Learning state
         self.meta_update_interval = 100
         self.curiosity_beta = 0.2  # Pathak et al. (2017)
@@ -273,29 +496,72 @@ class LearningAgent:
         raise ValueError(f"Unknown agent type: {agent_id}")
 
     def _select_action(self, state, agent_type):
-        """
-        Select action based on agent type.
-        
-        Args:
-            state: Current environment state
-            agent_type: One of ['rl', 'dqn', 'maml', 'rsi']
-        
-        Returns:
-            action: Selected action
-        """
-        agent = self.agents[agent_type]
-        
-        if agent_type == "rl":
-            return agent.select_action(state)
-        elif agent_type == "dqn":
-            return agent.select_action(state)
-        elif agent_type == "maml":
-            return agent.select_action(state)
-        elif agent_type == "rsi":
-            return agent.select_action(state)
-        else:
-            raise ValueError(f"Unknown agent type: {agent_type}")
+        """ Safe action selection """
+        action = super()._select_action(state, agent_type)
 
+        # Validate with safety agent
+        validation = self.safety_agent.validate_action({
+            'state': state,
+            'proposed_action': action,
+            'agent_type': agent_type
+        })
+
+        if not validation['approved']:
+            self.logger.warning(f"Unsafe action {action} detected, using corrected action")
+            return validation['corrected_action']
+            
+        return action
+
+    def _process_state(self, raw_state):
+        """
+        Use the SLAILM to process environment state into a semantic feature vector.
+        """
+        if not isinstance(raw_state, str):
+            raise ValueError("Expected raw_state to be a string.")
+    
+        analysis = self.slai_lm.process_input(prompt="Agent observation", text=raw_state)
+    
+        # Basic check on result structure
+        if not isinstance(analysis, dict) or "feature_vector" not in analysis:
+            raise NaNException("SLAILM returned malformed or incomplete feature vector")
+    
+        features = analysis["feature_vector"]
+    
+        if isinstance(features, list):
+            # Convert to tensor
+            features = torch.tensor(features, dtype=torch.float32)
+    
+        # Safety: check for NaNs or explosion
+        if torch.isnan(features).any():
+            raise NaNException("Feature vector contains NaN values.")
+    
+        grad_norm = features.norm().item()
+        if grad_norm > 1e3:  # Customizable explosion threshold
+            raise GradientExplosionError(grad_norm)
+    
+        return features
+
+    def _training_error_handler(func):
+        """Decorator for error recovery in training methods"""
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except (NaNException, GradientExplosionError, InvalidActionError) as e:
+                self.logger.error(f"Training error: {str(e)}")
+                self.error_history.append({
+                    'timestamp': datetime.now(),
+                    'error_type': type(e).__name__,
+                    'context': self._get_training_context()
+                })
+                self.consecutive_errors += 1
+                return self._execute_recovery_strategy()
+            finally:
+                if self.consecutive_errors > 0:
+                    self.consecutive_errors -= 1
+        return wrapper
+
+    @_training_error_handler
     def train_episode(self, agent_type="dqn"):
         """
         Execute one training episode with selected strategy
@@ -303,13 +569,25 @@ class LearningAgent:
         Implements Hybrid Reward Architecture from:
         van Seijen et al. (2017). Hybrid Reward Architecture for RL
         """
+        state = self._process_state(self.env.reset())
+        action = self._select_action(state, agent_type)
+        if not self.safety_agent.validate_action({'action': action})['approved']:
+            action = self.safety_agent.apply_corrections()
+        self.shared_memory.append('learning_experiences', episode_data)
+        external_data = self.shared_memory.get('external_experiences', [])
+        self.memory.extend(external_data)
         state = self.env.reset()
         total_reward = 0
         episode_data = []
+        dqn_loss = agent.train()
+        grad_norm = self._get_gradient_norm(agent)
         
         while True:
             action = self._select_action(state, agent_type)
             next_state, reward, done, _ = self.env.step(action)
+            raw_next_state, reward, done, _ = self.env.step(action)
+            next_state = self._process_state(raw_next_state)
+
             
             # Store experience
             episode_data.append((state, action, reward, next_state, done))
@@ -322,6 +600,9 @@ class LearningAgent:
         # Train on episode data
         loss = self._train_strategy(episode_data, agent_type)
         self.performance_history.append(total_reward)
+        self.performance_metrics['dqn_loss'].append(dqn_loss)
+        self.performance_metrics['maml_grad_norm'].append(grad_norm)
+        self.shared_memory.set('learning_metrics', self.performance_metrics)
         
         # Update strategy weights
         self._update_strategy_weights(loss)
@@ -353,6 +634,7 @@ class LearningAgent:
         else:
             logger.debug(f"Agent '{agent_type}' does not support feedback processing.")
 
+    @_training_error_handler
     def meta_learn(self, num_tasks=5):
         """
         Meta-learning phase using MAML
@@ -368,14 +650,135 @@ class LearningAgent:
             self._update_meta_params(reward)
 
     def _setup_continual_learning(self):
-        """Configure parameters for continual learning"""
-        self.ewc_lambda = 0.4  # Elastic Weight Consolidation
+        """Advanced neuroplasticity-preserving continual learning system"""
+        # Core EWC parameters
+        self.ewc_lambda = 0.4  # Elastic Weight Consolidation strength
+        self.synaptic_plasticity = 0.8  # Maintain capacity for new learning
         self.meta_update_interval = 100
-        self.strategy_weights = np.ones(len(self.agents)) / len(self.agents)
+        # Biological plasticity mechanisms
+        self.neurogenesis_threshold = 0.65  # Threshold for adding new units
+        self.dendritic_scaling = 1.2  # Factor for branch-specific plasticity
+        self.glial_support_factor = 0.3  # Simulated glial cell support
+        # Dual plasticity-consolidation system
+        self.plastic_weights = defaultdict(float)  # Transient knowledge
+        self.consolidated_weights = defaultdict(float)  # Long-term storage
+        # Neuromodulatory components
+        self.norepinephrine_level = 0.5  # Attention/alertness
+        self.dopamine_decay_rate = 0.95  # Reward prediction decay
+       
+        self.synaptic_strengths = { # Structural plasticity parameters
+            'excitatory': 1.4,
+            'inhibitory': 0.6,
+            'modulatory': 0.9
+        }
+
+        self.fisher_matrix = self._initialize_fisher_matrix( # Advanced Fisher Information Matrix for EWC++ 
+            decay_factor=0.9,
+            sparse_rep=True,
+            moving_avg_window=10
+        )
+
+        # Spike-Timing Dependent Plasticity (STDP) simulation
+        self.stdp_window = deque(maxlen=100)  # Temporal integration window
+        self.stdp_parameters = {
+            'tau_plus': 20.0,   # LTP time constant
+            'tau_minus': 20.0,  # LTD time constant
+            'A_plus': 0.1,      # LTP rate
+            'A_minus': 0.12     # LTD rate
+        }
+
+        # Molecular mechanisms
+        self.protein_synthesis = {
+            'mTOR_activation': 0.7,          # Memory consolidation pathway
+            'BDNF_level': 0.85,              # Neurotrophic support
+            'amyloid_clearance_rate': 0.92, # Simulated waste removal
+            'prion_like_propagation': 0.05  # Memory engram spread
+        }
+
+        # Neurovascular coupling simulation
+        self.metabolic_support = {
+            'glucose_uptake': 0.88,
+            'oxygen_supply': 0.95,
+            'waste_removal': 0.78
+        }
+
+    def _initialize_fisher_matrix(self, decay_factor, sparse_rep, moving_avg_window):
+        """Hierarchical Fisher information tracking with decay and sparsity"""
+        return {
+            'global_fisher': defaultdict(float),
+            'modular_fisher': defaultdict(lambda: defaultdict(float)),
+            'decay_factor': decay_factor,
+            'sparsity_threshold': 0.01 if sparse_rep else 0,
+            'moving_average': deque(maxlen=moving_avg_window),
+            'historical_variance': defaultdict(float)
+        }
+
+    def _update_neuroplasticity(self, episode_data):
+        """Dynamic neuroplasticity regulation based on learning progress"""
+        # Calculate plasticity balance
+        recent_grad_norm = np.mean(list(self.performance_metrics['gradient_norms'][-10:]))
+        consolidation_pressure = min(1.0, recent_grad_norm * self.ewc_lambda)
         
-        # Neuroplasticity preservation
-        self.synaptic_importance = {}
-        self.fisher_matrix = {}
+        # Adaptive metaplasticity (Bienenstock-Cooper-Munro rule)
+        self.synaptic_plasticity = np.tanh(
+            self.dopamine_level * 
+            self.norepinephrine_level *
+            consolidation_pressure
+        )
+        
+        # Structural reorganization
+        if self._requires_neurogenesis(episode_data):
+            self._add_neuronal_units(
+                growth_factor=0.1,
+                connectivity_density=0.7
+            )
+        
+        # Update molecular pathways
+        self._regulate_protein_synthesis(
+            learning_intensity=np.mean(episode_data['rewards']),
+            memory_age=time.time() - self.last_consolidation
+        )
+
+    def _apply_biologically_constrained_learning(self, gradients):
+        """Apply neuromodulated, structure-aware learning rules"""
+        # Dendritic compartmentalization
+        gradients = self._scale_by_dendritic_branches(gradients)
+        
+        # Glial-guided learning
+        gradients = self._apply_glial_modulation(gradients)
+        
+        # STDP-based weight update
+        return self._stdp_weight_update(gradients)
+
+    def _scale_by_dendritic_branches(self, gradients):
+        """Simulate dendritic tree computation through gradient modulation"""
+        for param, grad in gradients.items():
+            if 'hidden' in param.name:
+                gradients[param] *= self.dendritic_scaling * self.glial_support_factor
+        return gradients
+
+    def _requires_neurogenesis(self, episode_data):
+        """Determine if new neural units should be added"""
+        novelty_score = self._calculate_novelty(episode_data)
+        resource_availability = self.metabolic_support['glucose_uptake']
+        return (novelty_score > self.neurogenesis_threshold and 
+                resource_availability > 0.6)
+
+    def _regulate_protein_synthesis(self, learning_intensity, memory_age):
+        """Simulate molecular mechanisms of memory consolidation"""
+        # mTOR activation based on learning intensity
+        self.protein_synthesis['mTOR_activation'] = np.clip(
+            0.2 + 0.8 * learning_intensity,
+            0.1, 0.95
+        )
+       
+        self.protein_synthesis['BDNF_level'] = 0.5 + 0.5 * np.exp(-memory_age/1e5) # BDNF regulation
+        
+        # Amyloid clearance based on metabolic support
+        self.protein_synthesis['amyloid_clearance_rate'] = (
+            self.metabolic_support['waste_removal'] * 
+            self.glial_support_factor
+        )
 
     def continual_learning_loop(self, total_episodes=5000):
         """
@@ -391,9 +794,14 @@ class LearningAgent:
                 self.meta_learn(num_tasks=3)
                 
             # RSI self-improvement
-            if ep % 100 == 0:
+            if ep % self.rsi_improvement_cycle == 0:
                 self._run_rsi_self_improvement()
+                self._adapt_exploration_strategy()
 
+            # Main training with meta-informed strategy selection
+            strategy = self.strategy_evaluator.select_strategy()
+            reward = self.train_episode(strategy)
+            
     def _setup_trigger_system(self):
         """Initialize trigger detection parameters"""
         self.performance_threshold = 0.7  # Relative performance
@@ -402,11 +810,101 @@ class LearningAgent:
 
     def run_learning_cycle(self):
         """Main learning orchestration loop"""
-        if self._check_learning_triggers():
-            logger.info("Initiating learning cycle")
-            self._execute_continual_learning()
-            self._update_shared_knowledge()
-            self.last_retraining = datetime.now()
+        if self.concept_drift_detector.analyze():
+            self._adjust_learning_strategies()
+            self._replay_historical_data()
+
+    def _adjust_learning_strategies(self):
+        """Dynamic strategy reweighting based on concept drift detection"""
+        # Calculate recent performance variance
+        recent_perf = list(self.performance_history)[-100:]
+        if len(recent_perf) < 10:
+            return
+
+        # Calculate strategy effectiveness metrics
+        perf_mean = np.mean(recent_perf)
+        perf_std = np.std(recent_perf)
+        volatility = perf_std / (abs(perf_mean) + 1e-9)
+
+        # Adaptive strategy weighting
+        if volatility > 0.5:  # High uncertainty regime
+            # Favor exploration-heavy strategies
+            self.strategy_weights = np.array([0.1, 0.3, 0.1, 0.5])  # Boost RSI
+        else:  # Stable regime
+            # Favor exploitation-optimized strategies
+            self.strategy_weights = np.array([0.2, 0.4, 0.3, 0.1])  # Favor DQN/MAML
+
+        # Apply momentum to smooth transitions
+        self.strategy_weights = 0.7 * self.strategy_weights + 0.3 * np.ones(4)/4
+
+        # Parameter adjustments
+        for agent_id, agent in self.agents.items():
+            # Increase exploration in volatile phases
+            if hasattr(agent, 'epsilon'):
+                new_epsilon = min(1.0, agent.epsilon * (1.2 if volatility > 0.5 else 0.95))
+                agent.epsilon = max(new_epsilon, 0.01)
+
+            # Adjust learning rates inversely with performance stability
+            if hasattr(agent, 'learning_rate'):
+                lr_factor = 1.0 + (perf_std / (abs(perf_mean) + 1e-9))
+                agent.learning_rate = np.clip(
+                    agent.learning_rate * lr_factor,
+                    1e-5, 0.1
+                )
+
+    def _replay_historical_data(self):
+        """Experience replay with prioritized historical sampling"""
+        # Retrieve historical data from shared memory
+        historical_data = self.shared_memory.get('historical_episodes', [])
+        if not historical_data:
+            return
+
+        # Hybrid replay sampling
+        replay_strategy = 'prioritized' if len(historical_data) > 100 else 'uniform'
+        
+        if replay_strategy == 'prioritized':
+            # Simple temporal prioritization (recent experiences first)
+            replay_data = sorted(historical_data, 
+                            key=lambda x: x['timestamp'], 
+                            reverse=True)[:100]
+        else:
+            replay_data = random.sample(historical_data, 
+                                    min(len(historical_data), 100))
+
+        # Batch replay training
+        for episode in replay_data:
+            # Convert stored data to training format
+            states = episode.get('states', [])
+            actions = episode.get('actions', [])
+            rewards = episode.get('rewards', [])
+            
+            if len(states) < 2:
+                continue
+
+            # Train each agent with historical data
+            for agent_id, agent in self.agents.items():
+                if agent_id == 'dqn' and hasattr(agent, 'store_transition'):
+                    # Convert to DQN's transition format
+                    for i in range(len(states)-1):
+                        agent.store_transition(
+                            states[i], actions[i], rewards[i], 
+                            states[i+1], False
+                        )
+                    if len(agent.memory) > agent.batch_size:
+                        agent.train()
+                        
+                elif agent_id == 'rl' and hasattr(agent, 'learn'):
+                    # Update Q-values directly from historical traces
+                    for i in range(len(states)-1):
+                        current_state = tuple(states[i])
+                        next_state = tuple(states[i+1])
+                        agent.learn(next_state, rewards[i], False)
+
+                # Additional agent-specific replay logic can be added here
+
+        # Clear old memories to prevent overfitting
+        if len(historical_data) > 1000:
+            self.shared_memory.set('historical_episodes', historical_data[-1000:])
 
     def _check_learning_triggers(self):
         """Evaluate activation conditions for learning"""
@@ -484,12 +982,13 @@ class LearningAgent:
         })
         logger.info(f"RSI optimization result: {analysis}")
 
-    def _update_strategy_weights(self, loss):
-        """Dynamic strategy weighting using normalized inverse loss"""
-        losses = np.array([loss, 0.1, 0.1, 0.1])  # Placeholder values
-        self.strategy_weights = 1 / (losses + 1e-8)
-        self.strategy_weights /= self.strategy_weights.sum()
-    # Trigger Detection Methods
+    def _update_strategy_weights(self, rewards):
+        strategy_performance = {
+            agent_id: np.mean(rewards[agent_id][-10:]) 
+            for agent_id in self.agents
+        }
+        total = sum(strategy_performance.values())
+        self.strategy_weights = np.array([strategy_performance[id]/total for id in self.agents.keys()])
 
     def _detect_new_data(self):
         """Check shared memory for new data flags"""
@@ -527,9 +1026,87 @@ class LearningAgent:
         return [self._create_task_variation() for _ in range(3)]
 
     def _create_task_variation(self):
-        """Create new task variant for meta-learning"""
-        # Implement environment parameter randomization
-        return self.env
+        import copy
+        """Create new task variant through controlled parameter randomization
+        without requiring environment-specific knowledge"""
+        try:
+            # Create a deep copy to avoid modifying original environment
+            env_variant = copy.deepcopy(self.env)
+            
+            # Generic parameter randomization
+            if hasattr(env_variant.unwrapped, 'gravity'):
+                # Physics-based environment modification
+                env_variant.unwrapped.gravity = np.clip(
+                    self.env.unwrapped.gravity * np.random.uniform(0.8, 1.2),
+                    0.5 * self.env.unwrapped.gravity,
+                    2.0 * self.env.unwrapped.gravity
+                )
+                
+            if hasattr(env_variant.unwrapped, 'mass'):
+                # Mass property randomization
+                env_variant.unwrapped.mass = np.clip(
+                    self.env.unwrapped.mass * np.random.uniform(0.5, 2.0),
+                    0.1 * self.env.unwrapped.mass,
+                    5.0 * self.env.unwrapped.mass
+                )
+                
+            if hasattr(env_variant.unwrapped, 'tau'):
+                # Control timing parameter variation
+                env_variant.unwrapped.tau = np.clip(
+                    self.env.unwrapped.tau * np.random.uniform(0.9, 1.1),
+                    0.001, 0.05
+                )
+                
+            # Generic reward shaping variation
+            reward_weights = {
+                'time': np.random.uniform(0.8, 1.2),
+                'survival': np.random.uniform(0.5, 1.5),
+                'action_cost': np.random.uniform(0.7, 1.3)
+            }
+            env_variant.unwrapped.reward_weights = reward_weights
+            
+            # Stochastic dynamics injection
+            if hasattr(env_variant, 'model'):
+                # For Mujoco-based environments
+                for joint in env_variant.model.jnt_names:
+                    idx = env_variant.model.joint_name2id(joint)
+                    env_variant.model.dof_damping[idx] *= np.random.uniform(0.8, 1.2)
+                    
+            # Add observation noise if no physical parameters changed
+            if env_variant == self.env:
+                env_variant.observation_space = self._add_observation_noise()
+                
+            params = {
+                'gravity': getattr(env_variant.unwrapped, 'gravity', None),
+                'mass': getattr(env_variant.unwrapped, 'mass', None),
+                'reward_weights': reward_weights
+            }
+            self.logger.info(f"Created task variant with params: {params}")
+            
+            return env_variant
+            
+        except Exception as e:
+            self.logger.warning(f"Task variation failed: {str(e)}")
+            # Fallback: Add observation noise to original environment
+            return self._add_observation_noise()
+
+    def _add_observation_noise(self):
+        """Create observation space variation through noise injection"""
+        class NoisyEnvWrapper(gym.Wrapper):
+            def __init__(self, env):
+                super().__init__(env)
+                self.noise_level = np.random.uniform(0.01, 0.1)
+                
+            def reset(self, **kwargs):
+                state = self.env.reset(**kwargs)
+                return state + self.noise_level * np.random.randn(*state.shape)
+                
+            def step(self, action):
+                state, reward, done, truncated, info = self.env.step(action)
+                noisy_state = state + self.noise_level * np.random.randn(*state.shape)
+                return noisy_state, reward, done, truncated, info
+                
+        return NoisyEnvWrapper(self.env)
 
     def _evaluate_adapted(self, agent):
         """Evaluate adapted policy on modified task"""
@@ -564,6 +1141,33 @@ class LearningAgent:
                 for agent_id, agent in self.agents.items()
                 if hasattr(agent, 'get_parameters')}
 
+class MetaStrategyEvaluator:
+    """Decides strategy weighting using meta-learning insights"""
+    def __init__(self, agents, performance_metrics):
+        self.agents = agents
+        self.metric_history = performance_metrics
+        self.strategy_candidates = ['rl', 'dqn', 'maml', 'rsi']
+        
+    def select_strategy(self):
+        """Context-aware strategy selection"""
+        recent_perf = {s: np.mean(self.metric_history[s][-10:]) 
+                      for s in self.strategy_candidates}
+        
+        # Meta-learning based weighting
+        weights = np.array([
+            recent_perf['rl']**2,  # Basic RL stability
+            recent_perf['dqn'] * 1.5,  # DQN sample efficiency
+            self.agents['maml'].meta_loss * -0.1 if hasattr(self.agents['maml'], 'meta_loss') else 1.0,
+            recent_perf['rsi'] * 0.8  # RSI long-term adaptation
+        ])
+        
+        # Softmax normalization
+        exp_weights = np.exp(weights - np.max(weights))
+        return np.random.choice(
+            self.strategy_candidates, 
+            p=exp_weights/exp_weights.sum()
+        )
+
 class ConceptDriftDetector:
     """Statistical concept drift detection system using multivariate Gaussian KL-divergence"""
     
@@ -594,7 +1198,7 @@ class ConceptDriftDetector:
 
     def _calculate_kl_divergence(self, p, q):
         """Compute KL(P||Q) between two multivariate Gaussian distributions"""
-        # Add epsilon to prevent singular matrices
+        # Epsilon to prevent singular matrices
         p += np.random.normal(0, self.epsilon, p.shape)
         q += np.random.normal(0, self.epsilon, q.shape)
         
@@ -690,6 +1294,9 @@ class EvolutionaryFactory:
                 
         return params
 
+    def _create_agent():
+        pass
+
     def _crossover(self, agent_id1, agent_id2):
         """Combine parameters from two different agent types"""
         common_params = set(self.param_bounds[agent_id1]) & set(self.param_bounds[agent_id2])
@@ -701,44 +1308,4 @@ class EvolutionaryFactory:
                 hybrid_params[param] = self.param_bounds[agent_id2][param][1]
         return hybrid_params
 
-class SLAIEnv:
-    """Base environment interface for SLAI operations"""
-    def __init__(self, shared_memory, state_dim=4, action_dim=2):
-        self.observation_space = self.ObservationSpace(state_dim)
-        self.action_space = self.ActionSpace(action_dim)
-        self.shared_memory = shared_memory
-        env = SLAIEnv()
-        learning_agent = LearningAgent(
-            env=env,
-            shared_memory=shared_memory,
-            config={
-                'dqn': {'hidden_size': 256},
-                'maml': {'meta_lr': 0.001},
-                'rsi': {'memory_size': 10000},
-                'rl': {'learning_rate': 0.001}
-            }
-        )
-
-    def reset(self):
-        return np.random.randn(self.observation_space.shape[0])
-    
-    def step(self, action):
-        return (np.random.randn(self.observation_space.shape[0]),
-                np.random.rand(),
-                np.random.rand() < 0.2,
-                {})
-    
-    class ObservationSpace:
-        def __init__(self, dim):
-            self.shape = (dim,)
-    
-    class ActionSpace:
-        def __init__(self, n):
-            self.n = n
-            
-        def sample(self):
-            return np.random.randint(self.n)
-
-# Continuous operation loop
-#while True:
-#    learning_agent.run_learning_cycle()
+__all__ = ['LearningAgent', 'SLAIEnv']
