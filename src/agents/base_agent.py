@@ -20,8 +20,12 @@ class BaseAgent:
                 'memory_view': lambda: self.SharedMemoryView(shared_memory),
                 'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
             }
+
             self._lazy_components = OrderedDict()
-            
+            self.retraining_thresholds = {}
+            self.evaluation_log_dir = "evaluation_logs"
+            os.makedirs(self.evaluation_log_dir, exist_ok=True)
+
             # Initialize core components immediately
             self._init_core_components()
 
@@ -54,6 +58,9 @@ class BaseAgent:
         try:
             self.logger.info(f"[{self.name}] Executing task...")
             result = self.perform_task(input_data)
+            if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
+                performance_metrics = self.extract_performance_metrics(result)
+                self.evaluate_performance(performance_metrics)
             self.logger.info(f"[{self.name}] Task execution completed.")
             
             # Log successful stats
@@ -62,7 +69,6 @@ class BaseAgent:
                 "success": True,
                 "result_summary": str(result)[:200]
             })
-
             return result
 
         except Exception as e:
@@ -181,7 +187,7 @@ class BaseAgent:
             cleaned = task_data.replace("🧠", "").replace("🔥", "")
             self.logger.info(f"Retrying with cleaned input: {cleaned}")
             return self.perform_task(cleaned)
-    
+
         # Fallback strategy #2: modify specific fields in structured input
         if isinstance(task_data, dict):
             cleaned_data = task_data.copy()
@@ -194,7 +200,11 @@ class BaseAgent:
         # Fallback strategy #3: return a graceful degradation response
         self.logger.warning("Returning fallback response for unresolvable input.")
         return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
+
+    def extract_performance_metrics(self, result):
+        """Override to extract performance from result"""
+        return {}  # Subclasses should return a dict like {'accuracy': 0.93}
+
     def perform_task(self, task_data):
         """Handle query execution as the primary task"""
         self.logger.info(f"Executing task with data: {task_data}")
@@ -206,6 +216,35 @@ class BaseAgent:
         else:
             raise ValueError("Unsupported task format")
 
+    def evaluate_performance(self, metrics: dict):
+        """Evaluate and log performance, and check if retraining is needed"""
+        self.performance_metrics.update(metrics)
+        self.log_evaluation_result(metrics)
+    
+        for key, value in metrics.items():
+            threshold = self.retraining_thresholds.get(key)
+            if threshold is not None:
+                if isinstance(threshold, (int, float)):
+                    if value < threshold:
+                        self.logger.warning(f"[{self.name}] Metric '{key}' below threshold: {value} < {threshold}")
+                        self.flag_for_retraining()
+
+    def flag_for_retraining(self):
+        """Request retraining for this agent"""
+        self.shared_memory.set(f"retraining_flag:{self.name}", True)
+        self.logger.info(f"[{self.name}] Flagged for retraining.")
+
+    def log_evaluation_result(self, metrics: dict):
+        """Log the evaluation with timestamp and config to disk"""
+        log_entry = {
+            "timestamp": time.time(),
+            "agent": self.name,
+            "config": self.config,
+            "metrics": metrics
+        }
+        path = os.path.join(self.evaluation_log_dir, f"{self.name}.jsonl")
+        with open(path, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
     class SharedMemoryView:
         """Lightweight memory access with LRU caching"""
@@ -251,16 +290,38 @@ class BaseAgent:
 
     # Template methods for subclasses
     def _init_agent_specific_components(self):
-        """To be implemented by subclasses"""
-        pass
+        """Initialize agent-specific tools, modules, or stateful processors."""
+        # Example: Load grammar model, setup vision encoders, or initialize embeddings
+        if hasattr(self, "grammar"):
+            self.grammar.load_rules()
+        if hasattr(self, "vision_model"):
+            self.vision_model.initialize()
+        self.logger.info(f"[{self.name}] Agent-specific components initialized.")
 
     def _warm_start_if_available(self):
-        """Optional warm-start from shared memory"""
-        pass
+        """Restore from memory cache if recent session exists."""
+        warm_key = f"warm_state:{self.name}"
+        cached = self.shared_memory.get(warm_key)
+        if cached:
+            self.logger.info(f"[{self.name}] Warm-starting from cached memory state.")
+            try:
+                self.__dict__.update(cached)
+            except Exception as e:
+                self.logger.warning(f"[{self.name}] Warm-start failed: {str(e)}")
 
     def create_lightweight_network(self):
-        """Override for agent-specific networks"""
-        return None
+        """Returns a basic shallow policy or prediction model stub."""
+        import numpy as np
+        class SimplePolicyNet:
+            def __init__(self):
+                self.weights = np.random.randn(10, 2) * 0.05
+
+            def predict(self, state):
+                state_vec = np.array(state)
+                logits = np.dot(state_vec, self.weights)
+                return np.argmax(logits)
+
+        return SimplePolicyNet()
 
 class LightMetricStore:
     """Lightweight metric tracking for performance and memory"""
@@ -304,7 +365,13 @@ class LazyAgent:
         if self._agent is None:
             self._agent = self._init_fn()
         return getattr(self._agent, item)
-    
+
+class RetrainingManager:
+    def __init__(self, agent, shared_memory):
+        if shared_memory.get(f"retraining_flag:{agent.name}"):
+            agent.retrain()
+        pass
+
 #if __name__ == "__main__":
 #    agent.memory_view.get('recent_errors')
 #    agent.performance_metrics['response_times'].append(0.42)
