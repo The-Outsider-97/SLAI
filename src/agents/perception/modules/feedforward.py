@@ -1,7 +1,7 @@
 import numpy as np
 import math
 
-from src.agents.perception import TensorOps, Parameter
+from src.agents.perception.utils.common import TensorOps, Parameter
 
 class FeedForward:
     """Position-wise Feed-Forward Network (FFN) from original transformer"""
