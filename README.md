@@ -140,6 +140,7 @@ Note: If you see an error about execution policy:
    pip install gymnasium
    pip install beautifulsoup4
    pip install fastapi uvicorn
+   pip install selenium
    ```
 
 5. Run Model:
