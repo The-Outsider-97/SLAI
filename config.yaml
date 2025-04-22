@@ -88,6 +88,9 @@ agent-network:
     discount: 0.95
     memory_limit: 50000
     learning_rate: 0.001
+    optimized_mode': True
+    network_size': 128
+    max_task_pool': 50
 
   evaluation:
     class: EvaluationAgent
@@ -112,8 +115,15 @@ agent-network:
     class: PerceptionAgent
     path: src.agents.perception_agent
     init_args:
-      modalities: ["vision", "audio", "text"]
+      modalities:
+        - vision
+        - text
+        - audio
       embed_dim: 512
+      projection_dim: 256
+      batch_size: 8
+      learning_rate: 0.001
+      epochs: 20
 
   planning:
     class: PlanningAgent
@@ -197,6 +207,14 @@ hyperparameters:
     max: 0.999
     steps: 5
 
+  - name: num_qubits
+    type: int
+    min: 2
+    max: 6
+  - name: num_quantum_layers
+    type: int
+    min: 1
+    max: 4
 
 # ==========================
 # Tuning Strategy Settings
