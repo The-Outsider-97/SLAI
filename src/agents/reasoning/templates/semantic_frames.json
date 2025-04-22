@@ -11,6 +11,18 @@
     "verbs": ["agree", "consent", "accept", "negotiate", "ratify", "settle"],
     "prepositions": ["on", "to", "with", "about"]
   },
+  "Anthropic_principle": {
+    "description": "Observational selection effects in cosmology",
+    "roles": ["Observer", "Universe", "Constraint", "Probability", "Multiverse"],
+    "verbs": ["constrain", "select", "observe", "postulate", "infer"],
+    "prepositions": ["for", "given", "through"]
+  },
+  "Anthropocene_impact": {
+    "description": "Human-driven geological-scale environmental changes",
+    "roles": ["Activity", "Earth_system", "Feedback_loop", "Threshold", "Anthropogenic_marker"],
+    "verbs": ["perturb", "accelerate", "deplete", "disrupt", "geoengineer"],
+    "prepositions": ["through", "beyond", "across"]
+  },
   "Applying_heat": {
     "description": "A cook applies heat to food, possibly using a heating instrument or container.",
     "roles": ["Cook", "Food", "Heating_instrument", "Container", "Duration"],
@@ -29,6 +41,18 @@
     "verbs": ["attack", "assault", "strike", "invade", "bomb", "ambush"],
     "prepositions": ["on", "against", "with"]
   },
+  "Biofabrication": {
+    "description": "Growing materials using biological systems",
+    "roles": ["Biologist", "Organism", "Scaffold", "Nutrient", "Product"],
+    "verbs": ["culture", "scaffold", "harvest", "differentiate", "bioprint"],
+    "prepositions": ["with", "using", "through"]
+  },
+  "Biomimicry_design": {
+    "description": "Creating technologies inspired by biological systems",
+    "roles": ["Designer", "Biological_model", "Application", "Prototype", "Principle"],
+    "verbs": ["emulate", "adapt", "mimic", "translate", "optimize"],
+    "prepositions": ["from", "to", "through"]
+  },
   "Celebration": {
     "description": "People celebrate an event with a specific purpose or emotion.",
     "roles": ["Participants", "Event", "Reason", "Place", "Emotion"],
@@ -46,6 +70,12 @@
     "roles": ["Entity", "InitialState", "ResultState", "Cause"],
     "verbs": ["become", "turn", "change", "transform", "convert", "evolve"],
     "prepositions": ["into", "from"]
+  },
+  "Chronobiology": {
+    "description": "Biological processes related to periodic cycles",
+    "roles": ["Organism", "Circadian_rhythm", "Zeitgeber", "Phase_shift", "Entrainment"],
+    "verbs": ["oscillate", "synchronize", "disrupt", "reset", "adapt"],
+    "prepositions": ["to", "with", "despite"]
   },
   "Cognitive": {
     "description": "Mental activities involving thoughts and beliefs.",
@@ -76,6 +106,24 @@
     "roles": ["Creator", "Product", "Material", "Tool", "Purpose"],
     "verbs": ["create", "build", "design", "compose", "develop", "construct"],
     "prepositions": ["from", "with", "for"]
+  },
+  "Cryospheric_feedback": {
+    "description": "Ice-earth-atmosphere interactions in climate systems",
+    "roles": ["Ice_sheet", "Albedo", "Temperature", "Sea_level", "Feedback_mechanism"],
+    "verbs": ["melt", "reflect", "amplify", "destabilize", "model"],
+    "prepositions": ["through", "with", "due to"]
+  },
+  "Cryptographic_protocol": {
+    "description": "Securing communication through mathematical protocols",
+    "roles": ["Cryptographer", "Message", "Key", "Algorithm", "Adversary"],
+    "verbs": ["encrypt", "decrypt", "sign", "verify", "compromise"],
+    "prepositions": ["with", "against", "using"]
+  },
+  "Dark_pattern": {
+    "description": "Designing interfaces that manipulate user behavior",
+    "roles": ["Designer", "User", "Interface", "Cognitive_bias", "Outcome"],
+    "verbs": ["trick", "nudge", "obfuscate", "entrap", "manipulate"],
+    "prepositions": ["into", "through", "via"]
   },
   "Death": {
     "description": "The ending of life of an animate entity.",
@@ -113,11 +161,35 @@
     "verbs": ["feel", "love", "hate", "fear", "enjoy", "miss", "despise", "like", "adore"],
     "prepositions": ["about", "for", "because of", "at", "with"]
   },
+  "Epigenetic_modification": {
+    "description": "Changes in gene expression without DNA alteration",
+    "roles": ["Stimulus", "Gene", "Methylation", "Phenotype", "Heritability"],
+    "verbs": ["methylate", "silence", "activate", "inherit", "reverse"],
+    "prepositions": ["through", "in response to", "without"]
+  },
   "Escape": {
     "description": "An entity flees a location or situation of danger.",
     "roles": ["Escaper", "Location", "Obstacle", "Threat", "Method"],
     "verbs": ["escape", "flee", "run", "evade", "break out"],
     "prepositions": ["from", "through", "via"]
+  },
+  "Exaptation": {
+    "description": "Evolutionary repurposing of biological features",
+    "roles": ["Trait", "Original_function", "New_function", "Selective_pressure", "Organism"],
+    "verbs": ["co-opt", "repurpose", "adapt", "radiate", "specialize"],
+    "prepositions": ["from", "to", "through"]
+  },
+  "Exascale_computing": {
+    "description": "High-performance computing at 10^18 operations per second",
+    "roles": ["System", "Workload", "Parallelism", "Energy_efficiency", "Application"],
+    "verbs": ["simulate", "scale", "optimize", "partition", "benchmark"],
+    "prepositions": ["at", "with", "for"]
+  },
+  "Exoplanet_detection": {
+    "description": "Identifying planets outside solar systems",
+    "roles": ["Astronomer", "Star", "Detection_method", "Instrument", "Orbital_characteristics"],
+    "verbs": ["detect", "confirm", "transit", "wobble", "characterize"],
+    "prepositions": ["around", "using", "via"]
   },
   "Experimentation": {
     "description": "A researcher manipulates variables to observe outcomes.",
@@ -215,6 +287,12 @@
     "verbs": ["manipulate", "move", "adjust", "turn", "rotate", "handle"],
     "prepositions": ["with", "to", "on", "at"]
   },
+  "Memetic_evolution": {
+    "description": "Cultural information units undergoing selection and variation",
+    "roles": ["Meme", "Host", "Medium", "Mutation", "Fitness"],
+    "verbs": ["replicate", "mutate", "spread", "compete", "persist"],
+    "prepositions": ["through", "across", "via"]
+  },
   "Motion": {
     "description": "Movement of entities through space.",
     "roles": ["Agent", "Theme", "Path", "Source", "Goal", "Distance", "Speed", "Direction"],
@@ -226,6 +304,18 @@
     "roles": ["Party1", "Party2", "Mediator", "Topic", "Resolution"],
     "verbs": ["negotiate", "bargain", "discuss", "mediate", "settle"],
     "prepositions": ["with", "over", "on"]
+  },
+  "Neuroplasticity": {
+    "description": "Brain's ability to reorganize neural pathways",
+    "roles": ["Stimulus", "Brain_region", "Cognitive_function", "Duration", "Outcome"],
+    "verbs": ["rewire", "adapt", "strengthen", "prune", "compensate"],
+    "prepositions": ["through", "in response to", "during"]
+  },
+  "Optical_illusion": {
+    "description": "Perceptual experiences that deceive visual processing",
+    "roles": ["Stimulus", "Perceiver", "Cognitive_bias", "Context", "Interpretation"],
+    "verbs": ["deceive", "trick", "reveal", "exploit", "demonstrate"],
+    "prepositions": ["through", "via", "despite"]
   },
   "Perception": {
     "description": "Receiving sensory input.",
@@ -269,6 +359,18 @@
     "verbs": ["protest", "demonstrate", "march", "object", "resist", "rally"],
     "prepositions": ["against", "over", "for", "at"]
   },
+  "Quantum_computation": {
+    "description": "Processing information using quantum-mechanical phenomena",
+    "roles": ["Physicist", "Qubit", "Algorithm", "Quantum_state", "Noise_source"],
+    "verbs": ["entangle", "superimpose", "measure", "decohere", "teleport"],
+    "prepositions": ["through", "via", "using", "in"]
+  },
+  "Quantum_entanglement": {
+    "description": "Correlated quantum states between particles",
+    "roles": ["Particle", "Observable", "Measurement", "Correlation", "Distance"],
+    "verbs": ["entangle", "disentangle", "measure", "violate", "maintain"],
+    "prepositions": ["with", "across", "despite"]
+  },
   "Repair": {
     "description": "An agent restores a damaged object.",
     "roles": ["Agent", "Object", "Tool", "Problem", "Outcome"],
@@ -305,6 +407,36 @@
     "verbs": ["supply", "deliver", "provide", "offer", "furnish"],
     "prepositions": ["to", "with", "for"]
   },
+  "Swarm_intelligence": {
+    "description": "Collective behavior of decentralized systems",
+    "roles": ["Agent", "Emergence", "Coordination_rule", "Environment", "Outcome"],
+    "verbs": ["self-organize", "flock", "synchronize", "disperse", "aggregate"],
+    "prepositions": ["through", "without", "in response to"]
+  },
+  "Synthetic_biology": {
+    "description": "Redesigning organisms for novel purposes",
+    "roles": ["Biologist", "Genetic_circuit", "Chassis", "Part", "Function"],
+    "verbs": ["engineer", "assemble", "debug", "optimize", "refactor"],
+    "prepositions": ["for", "using", "through"]
+  },
+  "Technological_singularity": {
+    "description": "Hypothetical future AI-driven societal transformation",
+    "roles": ["AI", "Inflection_point", "Prediction", "Outcome", "Theorist"],
+    "verbs": ["predict", "accelerate", "transcend", "transform", "speculate"],
+    "prepositions": ["beyond", "through", "about"]
+  },
+  "Terraforming": {
+    "description": "Planetary engineering to make environments habitable",
+    "roles": ["Engineer", "Planet", "Technology", "Atmosphere", "Timeline"],
+    "verbs": ["seed", "modify", "stabilize", "introduce", "regulate"],
+    "prepositions": ["for", "through", "over"]
+  },
+  "Topological_defect": {
+    "description": "Structural irregularities in ordered media",
+    "roles": ["Medium", "Symmetry", "Dimension", "Stability", "Cosmology"],
+    "verbs": ["form", "propagate", "annihilate", "stabilize", "observe"],
+    "prepositions": ["in", "through", "across"]
+  },
   "Transfer": {
     "description": "The act of giving or receiving something.",
     "roles": ["Donor", "Recipient", "Theme", "Instrument", "Source", "Goal", "Purpose"],
@@ -316,5 +448,23 @@
     "roles": ["Carrier", "Passenger", "Vehicle", "Origin", "Destination", "Cargo"],
     "verbs": ["transport", "carry", "ship", "deliver", "haul"],
     "prepositions": ["to", "from", "by", "via"]
+  },
+  "Ultraintelligent_machine": {
+    "description": "Hypothetical AI surpassing human intelligence",
+    "roles": ["Architect", "Goal_system", "Capability", "Ethical_constraint", "Outcome"],
+    "verbs": ["recursively_improve", "align", "outthink", "control", "contain"],
+    "prepositions": ["beyond", "through", "despite"]
+  },
+  "Viral_evolution": {
+    "description": "Pathogen adaptation through mutation and selection",
+    "roles": ["Virus", "Host", "Mutation_rate", "Selection_pressure", "Transmissibility"],
+    "verbs": ["mutate", "recombine", "escape", "adapt", "jump"],
+    "prepositions": ["in", "through", "across"]
+  },
+  "Zoonotic_spillover": {
+    "description": "Pathogen transmission between animal and human populations",
+    "roles": ["Pathogen", "Reservoir_host", "Vector", "Ecosystem_disturbance", "Outbreak"],
+    "verbs": ["transmit", "spillover", "amplify", "monitor", "contain"],
+    "prepositions": ["from", "to", "through"]
   }
 }
