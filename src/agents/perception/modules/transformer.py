@@ -1,27 +1,39 @@
 import math
 import numpy as np
-from src.agents.perception import TensorOps, Parameter  
+from src.agents.perception.utils.common import TensorOps, Parameter  
 from src.agents.perception.modules.attention import EfficientAttention  
 from src.agents.perception.modules.feedforward import FeedForward  
 
 class Transformer:
     def __init__(self, num_layers=6, embed_dim=512, num_heads=8, ff_dim=2048):
         self.layers = [
-            {'attention': EfficientAttention(embed_dim), 
-             'ff': FeedForward(embed_dim)} 
-             for _ in range(num_layers) 
-        ]
-        for _ in range(num_layers):
-            self.layers.append({
+            {
                 'attention': EfficientAttention(embed_dim, num_heads),
                 'ff': FeedForward(embed_dim, ff_dim),
-                'norm1': Parameter(np.ones(embed_dim)),  # Layer norm gamma
-                'norm2': Parameter(np.ones(embed_dim)),  # Layer norm beta
-                'norm_ff1': Parameter(np.ones(embed_dim)),
-                'norm_ff2': Parameter(np.ones(embed_dim))
-            })
+                'norm1': Parameter(np.ones(embed_dim)),
+                'norm2': Parameter(np.ones(embed_dim)),
+            }
+            for _ in range(num_layers) 
+        ]
         self.positional_encoding = self._init_positional_encoding(embed_dim)
-        
+
+    def parameters(self):
+        params = [self.positional_encoding]
+        for layer in self.layers:
+            params.extend([
+                layer['attention'].q_proj,
+                layer['attention'].k_proj,
+                layer['attention'].v_proj,
+                layer['attention'].out_proj,
+                layer['ff'].w1,
+                layer['ff'].b1,
+                layer['ff'].w2,
+                layer['ff'].b2,
+                layer['norm1'],
+                layer['norm2']
+            ])
+        return params
+
     def _init_positional_encoding(self, d_model, max_len=5000):
         """Sinusoidal positional encoding (Vaswani et al. 2017)"""
         position = np.arange(max_len)[:, np.newaxis]
