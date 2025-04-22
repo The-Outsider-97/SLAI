@@ -1,4 +1,4 @@
-### PerceptionAgent — Multimodal Encoder & Fusion Layer
+# PerceptionAgent — Multimodal Encoder & Fusion Layer
 
 ## Overview
 PerceptionAgent is the sensory-computational module within SLAI, designed to process and unify visual, textual, and auditory data into a shared multimodal embedding. It supports pretraining, dropout masking, and full backpropagation, making it ideal for tasks requiring comprehensive environmental awareness or LLM integration.
@@ -25,11 +25,14 @@ PerceptionAgent is the sensory-computational module within SLAI, designed to pro
    - Downstream task prediction
    - Feeding into SLAILM for reasoning
 
+---
+
 ## Pretraining Objectives
 - Masked Modality Modeling — Randomly masks patches/tokens/frames and reconstructs them.
 - Crossmodal Matching — Contrastive learning for embedding alignment across modalities.
 - Temporal Consistency — Ensures coherence across frames/audio sequences over time.
 
+---
 
 ```mermaid
 graph TD  
@@ -50,6 +53,8 @@ graph TD
   losses = agent.pretrainer.masked_modality_modeling(batch_inputs)
   similarity = agent.pretrainer.crossmodal_matching(embeddings)
 ```
+
+---
 
 ## Compatibility
 - Plug-and-play with SLAILM via .align_with_slailm(llm)
