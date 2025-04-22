@@ -3,7 +3,7 @@ import math
 
 from collections import OrderedDict
 
-from src.agents.perception import TensorOps, Parameter
+from src.agents.perception.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer
 
 
