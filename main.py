@@ -135,6 +135,47 @@ def main():
     logger.info("Launching SLAI Interface")
     launch_ui(lambda: None, launch_components)
 
+class IdleMonitor:
+    def __init__(self, idle_threshold=1800):  # 30 mins
+        import time
+        from threading import Thread
+        self.last_active = time.time()
+        self.idle_threshold = idle_threshold
+        self.running = True
+        Thread(target=self._watchdog, daemon=True).start()
+
+    def reset_timer(self):
+        import time
+        self.last_active = time.time()
+
+    def _watchdog(self):
+        import time
+        while self.running:
+            if time.time() - self.last_active > self.idle_threshold:
+                self._trigger_audit()
+                self.last_active = time.time()  # Reset after audit
+            time.sleep(60)  # Check every minute
+
+    def _run_pylint(target_path):
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["pylint", target_path, "--output-format=text", "--score=n"],
+                capture_output=True, text=True
+            )
+            with open("logs/pylint_audit.log", "w") as f:
+                f.write(result.stdout)
+        except Exception as e:
+            logging.getLogger("SLAI.Pylint").error(f"Pylint failed: {e}")
+
+    def _trigger_audit(self):
+        from models.auditor import CodeAuditor, _run_pylint_scan
+        auditor = CodeAuditor(target_path="src/")
+        issues = auditor.run_audit()
+        auditor.log_issues(issues)
+        _run_pylint_scan("src/")
+
+
 if __name__ == "__main__":
     # Windows multiprocessing support
     if sys.platform.startswith('win'):
