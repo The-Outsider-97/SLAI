@@ -139,6 +139,7 @@ Note: If you see an error about execution policy:
    pip install nltk
    pip install gymnasium
    pip install beautifulsoup4
+   pip install fastapi uvicorn
    ```
 
 5. Run Model:
