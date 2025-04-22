@@ -14,7 +14,7 @@ import multiprocessing as mp
 
 from textstat import textstat
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import deque, defaultdict, OrderedDict
 from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
 from functools import partial
@@ -1535,8 +1535,8 @@ class NLUEngine:
         frame = LinguisticFrame(
             intent='unknown',
             entities={},
-            sentiment=sentiment,
-            modality='statement',
+            sentiment=0.0,
+            modality='none',
             confidence=0.0
         )
 
@@ -1556,7 +1556,7 @@ class NLUEngine:
         frame.entities = entities
 
         self._validate_words(frame)
-        return frame
+        return asdict(frame)
 
     def _validate_words(self, frame: LinguisticFrame) -> None:
         """Check if recognized entities exist in the wordlist"""
@@ -1910,44 +1910,69 @@ class LanguageAgent(BaseAgent):
             return {"positive": {}, "negative": {}, "intensifiers": {}, "negators": []}
 
     def build_frame(self, text: str) -> LinguisticFrame:
-        """Processes input text through the full NLP pipeline.
-
-        Args:
-            text: Raw user input (min 2 chars).
-
-        Returns:
-            LinguisticFrame with intent, entities, and sentiment.
         """
-
-        # Input validation
-        if not isinstance(text, str) or len(text.strip()) < 2:
-            return self._create_fallback_frame(text)
-
-        # Phase 1: Text Preprocessing
-        clean_text = self.safety.sanitize(text)
-        tokens = self._tokenize(clean_text)
-
-        # Phase 2: Core NLP Analysis
+        Construct a LinguisticFrame from input text.
+        """
         try:
-            # Parse with enhanced NLU
-            frame = self.nlu.parse(clean_text)
+            tokens = self.grammar._pos_tag(text)
+            intent = self.grammar.detect_intent(text)
+            entities = self.grammar.extract_entities(text, tokens)
+            sentiment = self.analyze_sentiment(text)
+            modality = self._detect_modality(tokens)
+            confidence = self._estimate_confidence(text, tokens)
 
-            # Enrich with additional features
-            # frame.sentiment = self._calculate_sentiment(tokens)
-            frame.modality = self._detect_modality(tokens)
-            frame.confidence = self._calculate_confidence(tokens, frame)
+            frame = LinguisticFrame(
+                intent=intent,
+                entities=entities,
+                sentiment=sentiment,
+                modality=modality,
+                confidence=confidence
+            )
 
-            # Keep entity validation against wordlist
-            frame.entities = {
-                k: [e for e in v if self.wordlist.query(e)]
-                for k, v in frame.entities.items()
-            }
+            return frame
 
         except Exception as e:
-            logging.error(f"Frame construction failed: {str(e)}", exc_info=True)
-            return self._create_fallback_frame(clean_text)
+            self.logger.error(f"Frame construction failed: {e}", exc_info=True)
+            return LinguisticFrame(
+                intent="unknown",
+                entities={},
+                sentiment=0.0,
+                modality="none",
+                confidence=0.0
+        )
 
-        return frame
+    def analyze_sentiment(self, text: str) -> float:
+        """
+        Rule-based sentiment analysis using economic lexicon from GrammarProcessor.
+        Returns a sentiment score in the range [-1, 1].
+        """
+        lexicon = self.grammar._load_econ_lexicon()
+        words = text.lower().split()
+    
+        pos_hits = sum(1 for w in words if w in lexicon["positive"])
+        neg_hits = sum(1 for w in words if w in lexicon["negative"])
+    
+        total = pos_hits + neg_hits
+        if total == 0:
+            return 0.0
+        return (pos_hits - neg_hits) / total 
+
+    def _estimate_confidence(self, text: str, tokens: List[Tuple[str, str]]) -> float:
+        """
+        Estimate confidence based on coverage and readability heuristics.
+        """
+        known_token_count = sum(1 for _, tag in tokens if tag not in {"X", None})
+        coverage_ratio = known_token_count / max(1, len(tokens))
+    
+        # Readability heuristic (Flesch score normalized)
+        try:
+            readability = textstat.flesch_reading_ease(text)
+            readability_score = min(max(readability / 100, 0.0), 1.0)
+        except Exception:
+            readability_score = 0.5
+    
+        # Blend both
+        return round(0.6 * coverage_ratio + 0.4 * readability_score, 3)
 
     def _tokenize(self, text: str) -> list[str]:
         """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
@@ -2149,7 +2174,8 @@ class LanguageAgent(BaseAgent):
     def preprocess_input(self, user_input, text: str) -> str:
         intent = self.llm.parse_intent(user_input)
         if not isinstance(intent, dict):
-            intent = {"type": str(intent), "confidence": 0.5}
+            self.logger.warning("Intent is not a dict; creating fallback LinguisticFrame.")
+            return self._create_fallback_frame(user_input)
 
         words = text.split()
         corrected = [w if self.wordlist.query(w) else self._guess_spelling(w) 
