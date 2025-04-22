@@ -1,7 +1,7 @@
 import numpy as np
 import math
 
-from src.agents.perception import TensorOps, Parameter
+from src.agents.perception.utils.common import TensorOps, Parameter
 
 class EfficientAttention:
     def __init__(self, embed_dim=512, num_heads=8):
