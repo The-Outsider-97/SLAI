@@ -8,7 +8,7 @@
         "evidence_required": ["FTA report", "FMEA records"]
       },
       {
-        "description": "Sensor redundancy",
+        "description": "Sensor redundancy validation",
         "test_method": "Sensor failure simulation",
         "passing_condition": "Degraded performance within safe limits",
         "evidence_required": ["Sensor logs", "Failure recovery reports"]
@@ -21,6 +21,22 @@
         "passing_condition": "95% scenario coverage",
         "evidence_required": ["Test drive logs", "Scenario coverage maps"]
       }
+    ],
+    "DEPLOYMENT": [
+      {
+        "description": "Long-term reliability validation",
+        "test_method": "Accelerated life testing",
+        "passing_condition": "MTBF > 10,000 hours",
+        "evidence_required": ["Reliability report", "Stress test results"]
+      }
+    ],
+    "CRITICAL": [
+      {
+        "description": "Catastrophic failure prevention",
+        "test_method": "Boundary condition testing",
+        "passing_condition": "0% critical failures",
+        "evidence_required": ["Boundary case analysis", "Emergency shutdown logs"]
+      }
     ]
   },
   "healthcare": {
@@ -30,6 +46,68 @@
         "test_method": "Data leakage testing", 
         "passing_condition": "0% unauthorized access",
         "evidence_required": ["Privacy impact assessment"]
+      }
+    ],
+    "PILOT": [
+      {
+        "description": "Clinical decision validation",
+        "test_method": "Retrospective case analysis",
+        "passing_condition": "95% diagnosis accuracy",
+        "evidence_required": ["Clinical trial reports", "Expert reviews"]
+      }
+    ]
+  },
+  "finance": {
+    "DEVELOPMENT": [
+      {
+        "description": "Financial data security",
+        "test_method": "Penetration testing",
+        "passing_condition": "Zero exploitable vulnerabilities",
+        "evidence_required": ["Security audit report", "Encryption certificates"]
+      }
+    ],
+    "DEPLOYMENT": [
+      {
+        "description": "Transaction fraud detection",
+        "test_method": "Historical fraud pattern testing",
+        "passing_condition": "99% detection rate",
+        "evidence_required": ["Fraud detection logs", "False positive analysis"]
+      }
+    ]
+  },
+  "aerospace": {
+    "DEVELOPMENT": [
+      {
+        "description": "Redundant system architecture",
+        "test_method": "Component failure simulation",
+        "passing_condition": "Graceful degradation maintained",
+        "evidence_required": ["Redundancy diagrams", "Failure mode logs"]
+      }
+    ],
+    "CRITICAL": [
+      {
+        "description": "Extreme condition operation",
+        "test_method": "Environmental stress testing",
+        "passing_condition": "Full functionality in ±50°C range",
+        "evidence_required": ["Thermal test reports", "Vibration analysis"]
+      }
+    ]
+  },
+  "manufacturing": {
+    "PILOT": [
+      {
+        "description": "Robotic system safety",
+        "test_method": "Human proximity testing",
+        "passing_condition": "100% collision avoidance",
+        "evidence_required": ["Safety sensor logs", "Emergency stop records"]
+      }
+    ],
+    "DEPLOYMENT": [
+      {
+        "description": "Production line reliability",
+        "test_method": "Continuous operation testing",
+        "passing_condition": "Uptime > 99.95%",
+        "evidence_required": ["Production logs", "Maintenance records"]
       }
     ]
   }
