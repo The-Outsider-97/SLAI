@@ -143,6 +143,7 @@ Note: If you see an error about execution policy:
    pip install selenium
    pip install pynvml
    pip install robotexclusionrulesparser
+   pip install pytesseract pillow
    ```
 
 5. Run Model:
