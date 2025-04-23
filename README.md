@@ -141,6 +141,7 @@ Note: If you see an error about execution policy:
    pip install beautifulsoup4
    pip install fastapi uvicorn
    pip install selenium
+   pip install pynvml
    ```
 
 5. Run Model:
