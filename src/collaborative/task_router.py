@@ -68,13 +68,7 @@ class TaskRouter:
                         try:
                             return self.route(subtask, task_data)  # Recursive retry
                         except Exception:
-                            logger.warning(f"Subtask '{subtask}' failed: {e}")
-                            continue
-
-                    else:
-                        logger.info(f"Fallback plan for '{task_type}' succeeded.")
-                        self._record_success(agent_name)
-                        return result
+                            raise RuntimeError(f"No agents found for task type '{task_type}'")
 
         # If all fail
         raise Exception(f"All agents failed for task type '{task_type}'")
