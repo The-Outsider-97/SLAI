@@ -144,6 +144,7 @@ Note: If you see an error about execution policy:
    pip install pynvml
    pip install robotexclusionrulesparser
    pip install pytesseract pillow
+   pip install evaluate
    ```
 
 5. Run Model:
