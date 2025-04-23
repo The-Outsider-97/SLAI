@@ -6,7 +6,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from src.tuning.tuner import HyperparamTuner
-from srce.agents.learning.rl_agent import RLAgent
+from src.agents.learning.rl_agent import RLAgent
 
 # Setup SLAI logging paths
 LOG_FILE = "logs/run.txt"
