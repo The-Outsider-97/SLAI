@@ -4,7 +4,6 @@ Combines features from both implementations with improved integration
 """
 
 import logging
-import os
 import json
 import yaml
 import numpy as np
