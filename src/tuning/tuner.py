@@ -96,28 +96,30 @@ class HyperparamTuner:
         return best_params
 
 
-if __name__ == "__main__":
-    args = parser.parse_args()
-    logging.info("Starting tuner with strategy: %s", args.strategy)
+#if __name__ == "__main__":
+#    from src.agent.evaluation_agent import EvaluationAgent
+#    from src.agent.reasoning_agent import ReasoningAgent
+#    args = parser.parse_args()
+#    logging.info("Starting tuner with strategy: %s", args.strategy)#
 
-    try:
-        tuner = HyperparamTuner(
-            config_path=None,  # Leave None to auto-generate
-            evaluation_function=EvaluationAgent,
-            strategy='grid',
-            config_format='yaml'
-          )  # Choose output format if generating
-        grid_search = GridSearch(
-            config_file="src/tuning/configs/grid_config.json",
-            evaluation_function=rl_agent_evaluate,
-            reasoning_agent=ReasoningAgent(),
-            n_jobs=8,
-            cross_val_folds=5
-        )
+#    try:
+#        tuner = HyperparamTuner(
+#            config_path=None,  # Leave None to auto-generate
+#            evaluation_function=EvaluationAgent,
+#            strategy='grid',
+#            config_format='yaml'
+#          )  # Choose output format if generating
+#        grid_search = GridSearch(
+#            config_file="src/tuning/configs/grid_config.json",
+#            evaluation_function=rl_agent_evaluate,
+#            reasoning_agent=ReasoningAgent(),
+#            n_jobs=8,
+#            cross_val_folds=5
+ #       )
 
-        best_params = grid_search.run_search()
-        best = tuner.run_tuning_pipeline()
-        print("Best parameters:", best)
-    except Exception as e:
-        logging.error("Tuning failed: %s", str(e))
-        sys.exit(1)
+#        best_params = grid_search.run_search()
+#        best = tuner.run_tuning_pipeline()
+#        print("Best parameters:", best)
+#    except Exception as e:
+#        logging.error("Tuning failed: %s", str(e))
+#        sys.exit(1)
