@@ -3,21 +3,60 @@ import mido  # For MIDI processing
 import music21  # For sheet music processing
 import random
 import re
-import numpy as np  # for numerical operations
+import math
+import json
+import logging
+import numpy as np
+
 from collections import defaultdict
+
+from models.slai_lm import SLAILM
+from src.agents.reasoning_agent import ReasoningAgent
+from src.agents.knowledge_agent import KnowledgeAgent
 
 class Musician:
     """
     A model designed to empower musicians in their growth and creative endeavors.
     """
 
-    def __init__(self):
+    def __init__(self, shared_memory, agent_factory, expert_level=None, instrument=None):
         """
         Initializes the Musician model.
         """
+        if expert_level is None or instrument is None:
+            self.defer_setup = True
+        else:
+            self.defer_setup = False
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
+        self.slailm = SLAILM(shared_memory, agent_factory)
+        self.reasoner = ReasoningAgent(shared_memory, agent_factory, tuple_key="music|property|value")
         self.knowledge_base = KnowledgeBase()  # Initialize the knowledge base
         self.output_module = OutputModule()
         self.music_theory_engine = MusicTheoryEngine() # music theory
+
+        if expert_level is None:
+            print("\n🎵 Welcome to the SLAI Musician Model 🎵")
+            print("Please select your musical experience level:")
+            print("1. Beginner\n2. Intermediate\n3. Advanced")
+            level_choice = input("Enter choice (1-3): ").strip()
+            self.expert_level = ["beginner", "intermediate", "advanced"][int(level_choice) - 1]
+        else:
+            self.expert_level = expert_level
+
+        if instrument is None:
+            print("\nWhat instrument do you play?")
+            print("1. Piano\n2. Guitar\n3. Violin\n4. Cello\n5. Bass\n6. Drum\n7. Vocalist")
+            instrument_choice = input("Enter choice (1-7): ").strip()
+            self.instrument = ["piano", "guitar", "violin", "cello", "bass", "drum", "vocalist"][int(instrument_choice) - 1]
+        else:
+            self.instrument = instrument
+
+    def interactive_setup(self):
+        if self.defer_setup:
+            # Replace this with a non-blocking UI dialog from Qt
+            self.expert_level = "beginner"
+            self.instrument = "piano"
 
     def process_input(self, input_data, input_type):
         """
@@ -74,28 +113,17 @@ class Musician:
             prompt: A text prompt describing the desired music.
 
         Returns:
-            The generated sheet music in a specified format (e.g., MusicXML).
+            The generated sheet music in a MusicXML format
         """
-        # Placeholder for sheet music generation logic
-        # This is where you would integrate your generative models (RNNs, Transformers, VAEs)
-        # The actual implementation would involve complex music theory and composition algorithms
-        # For now, we'll return a placeholder
-
-        notes = ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"]
-        durations = [1, 2, 4]  # quarter, half, whole
-        music_xml_content = "<score-partwise version='3.0'><part-list><score-part id='P1'><part-name>Music</part-name></score-part></part-list><part id='P1'>"
-
-        num_measures = 4
-        for measure in range(num_measures):
-            music_xml_content += f"<measure number='{measure + 1}'>"
-            music_xml_content += "<attributes><divisions>4</divisions><key><fifths>0</fifths><mode>major</mode></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>"
-            for i in range(4):  # 4 notes per measure
-                note_name = random.choice(notes)
-                duration = random.choice(durations)
-                music_xml_content += f"<note><pitch><step>{note_name[0]}</step><octave>{note_name[1]}</octave></pitch><duration>{duration * 4}</duration><type>{'quarter' if duration == 1 else 'half' if duration == 2 else 'whole'}</type></note>"
-            music_xml_content += "</measure>"
-        music_xml_content += "</part></score-partwise>"
-        return music_xml_content
+        from src.agents.perception.modules.transformer import Transformer
+        from src.agents.qnn_agent import QNNAgent
+        
+        self.transformer = Transformer(num_layers=4)
+        self.qrnn = QNNAgent(shared_memory, agent_factory, config={"num_qubits": 4})
+        tokens = tokenize_prompt(prompt)
+        sequence = self.transformer.forward(tokens)
+        generated_notes = decode_music_tokens(sequence)
+        return music21.stream.Score(generated_notes).write('musicxml')
 
     def process_audio(self, audio_data):
         """
@@ -141,7 +169,7 @@ class Musician:
         """
         # Placeholder:  text processing
         print("Processing text data...")
-        return text_data
+        return self.slailm.process_input("musical_prompt", text_data)
 
     def process_sheet_music(self, sheet_music_data):
         """
@@ -158,7 +186,7 @@ class Musician:
         print("Processing sheet music data...")
         return sheet_music_data
 
-    def analyze_audio_performance(self, audio_data):
+    def analyze_audio_performance(self, audio_path):
         """
         Analyzes audio performance data.
 
@@ -168,11 +196,15 @@ class Musician:
         Returns:
             A dictionary containing the analysis results.
         """
-        # Placeholder: Implement audio analysis using Librosa
-        # pitch = librosa.yin(y, fmin=50, fmax=800)
-        # tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        print("Analyzing audio performance...")
-        return {"pitch": [], "rhythm": [], "timbre": []}  # Return dummy data
+        y, sr = librosa.load(audio_path)
+        pitches = librosa.yin(y, fmin=50, fmax=1000)
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr)
+        return {
+            "pitch": pitches.tolist(),
+            "rhythm": beats.tolist(),
+            "timbre": mfcc.mean(axis=1).tolist()
+        }
 
     def analyze_midi_performance(self, midi_data):
         """
@@ -184,10 +216,20 @@ class Musician:
         Returns:
             A dictionary containing the analysis results.
         """
-        # Placeholder: Implement MIDI analysis
-        # Extract notes, timing, velocity
-        print("Analyzing MIDI performance...")
-        return {"notes": [], "timing": [], "dynamics": []}  # Return dummy data
+        notes = []
+        for msg in midi_data:
+            if msg.type == 'note_on':
+                notes.append({
+                    "note": msg.note,
+                    "velocity": msg.velocity,
+                    "time": msg.time
+                })
+        return {"notes": notes}
+
+    def compare_with_reference(self, reference, performance):
+        # Compute duration/velocity deltas
+        ...
+        return {"timing_accuracy": ..., "velocity_accuracy": ...}
 
     def generate_feedback(self, analysis_results, input_type):
         """
@@ -200,17 +242,9 @@ class Musician:
         Returns:
             A string containing the feedback.
         """
-        # Placeholder: Generate feedback using NLP or rule-based system
-        if input_type == 'audio':
-            if not analysis_results["pitch"]:
-                return "No pitch detected."
-            return "Audio performance feedback:  (Place holder, implement NLP here) Good job!"
-        elif input_type == 'midi':
-            if not analysis_results["notes"]:
-                return "No notes detected."
-            return "MIDI performance feedback: (Place holder,  implement NLP here)  Great timing!"
-        else:
-            return "Feedback: (Place holder)  Nice playing!"
+        prompt = f"Evaluate this {input_type} performance: {json.dumps(analysis_results)}"
+        result = self.slailm.forward_pass({"raw_text": prompt})
+        return result["text"]
 
     def get_practice_recommendations(self, skill_level, instrument, focus_area=None):
         """
@@ -263,11 +297,12 @@ class Musician:
         Returns:
             A dictionary containing the goals and progress.
         """
-        # Placeholder:  Implement goal setting and progress tracking
-        print("Setting goals and tracking progress...")
-        return {"goals": goals, "progress": []}
+        facts = extract_music_facts(piece)  # e.g. [('piece', 'has_tempo', 'allegro')]
+        self.reasoner.insert_knowledge(facts)
+        inference = self.reasoner.query(("piece", "is_style", "?"))
+        return str(inference)
 
-class KnowledgeBase:
+class KnowledgeBase(KnowledgeAgent):
     """
     A class to represent the knowledge base.
     """
@@ -797,46 +832,6 @@ class MusicTheoryEngine:
 
         return melody
 
-# Example usage
+
 if __name__ == "__main__":
-    Musician = Musician()
-
-    # Text Input and Output
-    text_input = "What is the meaning of life?"
-    processed_text = Musician.process_input(text_input, 'text')
-    Musician.output_module.generate_text_output(processed_text)
-
-    # Sheet Music Generation and Output
-    sheet_music = Musician.generate_sheet_music("Generate a simple melody in C major.")
-    Musician.output_module.generate_sheet_music_output(sheet_music)
-
-    # Get practice recommendations
-    recommendations = Musician.get_practice_recommendations("beginner", "piano", "scales")
-    Musician.output_module.generate_text_output(f"Practice Recommendations: {recommendations}")
-
-    # Explain music theory
-    theory_explanation = Musician.explain_music_theory("harmony")
-    Musician.output_module.generate_text_output(f"Music Theory Explanation: {theory_explanation}")
-
-    # Example of analyzing a simple chord progression.
-    chord_notes = ['C4', 'E4', 'G4']
-    chord_name = Musician.music_theory_engine.identify_harmony(chord_notes)
-    print(identify_harmony(['C', 'E', 'G']))          # C Major
-    print(identify_harmony(['C#', 'F', 'G#']))        # C# Major
-    print(identify_harmony(['C', 'G']))               # C power chord
-    print(identify_harmony(['C', 'D', 'E', 'F', 'G', 'A', 'B']))  # C Major Scale
-
-    # Example of generating a chord progression
-    progression = Musician.music_theory_engine.generate_chord_progression(4, 'C', 'major')
-    print(generate_chord_progression())  # ['C Major', 'F Major', 'G Major', 'C Major']
-    print(generate_chord_progression('A Minor', 'i-iv-VII'))  # ['A minor', 'D minor', 'G Major']
-    print(generate_chord_progression('F# Major', 'I-V-vi-IV'))  # ['F# Major', 'C# Major', 'D# minor', 'B Major']
-
-    # Example of generating a scale
-    scale_notes = Musician.music_theory_engine.get_scale_notes('C4', 'major')
-    print(f"C Major Scale: {scale_notes}")
-
-    # Example of generating a melody
-    scale_notes = Musician.music_theory_engine.get_scale_notes('C4', 'major')
-    melody = Musician.music_theory_engine.generate_melody(scale_notes, style="blues")
-    print(f"Melody: {melody}")
+    Musician = Musician(shared_memory=None, agent_factory=None)
