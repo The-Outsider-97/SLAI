@@ -201,6 +201,9 @@ class GrammarProcessor:
             (re.compile(r'\b\w+\b'), 'NOUN')  # Default catch-all
         ]
 
+        # This ensures that _expand_with_synonyms() has access to the enriched synonyms.
+        self.structured_wordlist = {"words": structured_wordlist} if structured_wordlist else {"words": {}}
+
     def extract_entities(self, text, pos_tags):
         """
         Extracts basic named entities using noun/proper noun clusters.
@@ -1258,10 +1261,49 @@ class GrammarProcessor:
                 cumulative += prob
                 if rand <= cumulative:
                     current_tag = tag
-                    sentence.append(self._sample_word(tag, seed_words))
+                    if len(sentence) == 0:  # only expand at start
+                        expanded = self._expand_with_synonyms(seed_words)
+                    else:
+                        expanded = seed_words
+                    sentence.append(self._sample_word(tag, expanded))
                     break
         
         return ' '.join(sentence)
+
+    def _expand_with_synonyms(self, seed_words: List[str], max_expansions: int = 3) -> List[str]:
+        """
+        Expand the seed words using synonyms from structured_wordlist.
+        """
+        if not hasattr(self, 'structured_wordlist') or not isinstance(self.structured_wordlist, dict):
+            return seed_words
+
+        enriched = []
+        seen = set(seed_words)
+
+        for word in seed_words:
+            enriched.append(word)
+            entry = self.structured_wordlist.get("words", {}).get(word.lower())
+            if not entry:
+                continue
+            synonyms = entry.get("synonyms", [])
+            for syn in synonyms:
+                if syn not in seen:
+                    enriched.append(syn)
+                    seen.add(syn)
+                    if len(enriched) - len(seed_words) >= max_expansions:
+                        break
+        return enriched
+
+    def _sample_word(self, tag, seed_words):
+        """Word selection using TF-IDF similarity (Salton, 1971)"""
+        candidates = [w for w in seed_words 
+                     if any(re.match(p, w) for p,t in self.pos_patterns if t == tag)]
+        
+        if not candidates:
+            return self._get_default_word(tag)
+            
+        # Simple frequency-based selection
+        return max(set(candidates), key=candidates.count)
 
     def compose_sentence(self, facts: dict) -> str:
         """
@@ -1283,17 +1325,6 @@ class GrammarProcessor:
         """Get non-terminals producing the given POS tag"""
         return [A for A, prods in self.cfg_rules.items() 
                 for prod in prods if tag in prod]
-
-    def _sample_word(self, tag, seed_words):
-        """Word selection using TF-IDF similarity (Salton, 1971)"""
-        candidates = [w for w in seed_words 
-                     if any(re.match(p, w) for p,t in self.pos_patterns if t == tag)]
-        
-        if not candidates:
-            return self._get_default_word(tag)
-            
-        # Simple frequency-based selection
-        return max(set(candidates), key=candidates.count)
 
     def _get_default_word(self, tag):
         defaults = {'DET': 'the', 'NOUN': 'thing', 'VERB': 'is'}
