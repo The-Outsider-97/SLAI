@@ -49,6 +49,7 @@ class AgentFactory:
         self.optimizer = optimizer
         self.lazy_registry = {}
 
+
         if not tracemalloc.is_tracing():
             start_memory_tracing()
         
@@ -115,6 +116,8 @@ class AgentFactory:
             config=config.get("init_args", {}),
             shared_memory=self.shared_resources.get("shared_memory")
         ))
+        self.register("learner", self.registry["learning"]
+        )
         self.register("perception", lambda config: PerceptionAgent(
             config=config.get("init_args", {}),
             shared_memory=self.shared_resources.get("shared_memory"),
