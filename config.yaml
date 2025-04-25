@@ -41,6 +41,8 @@ agent-network:
     memory_limit: 1000  
     enable_summarization: true  
     summarizer: null
+    readonly_wordlist: true
+    disable_synonym_training: true
 
   knowledge:
     class: KnowledgeAgent
