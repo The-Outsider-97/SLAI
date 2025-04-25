@@ -2,6 +2,7 @@ import logging
 import os, sys
 import time
 import json
+import torch
 import difflib
 import traceback
 from collections import OrderedDict, defaultdict, deque
@@ -322,6 +323,25 @@ class BaseAgent:
                 return np.argmax(logits)
 
         return SimplePolicyNet()
+    
+    def update_projection(self, reward_scores, lr):
+        """Update projection layer weights using policy gradient"""
+        # Convert rewards to tensor
+        rewards = torch.tensor(reward_scores, dtype=torch.float32)
+        
+        # Calculate gradient (maximize reward)
+        grad = torch.autograd.grad(
+            outputs=torch.sum(self.projection.data * rewards),
+            inputs=self.projection.data
+        )[0]
+        
+        # Update with momentum
+        self.projection.grad = grad
+        self.projection.data += lr * grad
+        
+        # Apply constraints
+        torch.nn.utils.clip_grad_norm_(self.projection.data, 1.0)
+        self.projection.data = torch.clamp(self.projection.data, -1.0, 1.0)
 
 class LightMetricStore:
     """Lightweight metric tracking for performance and memory"""
@@ -371,7 +391,3 @@ class RetrainingManager:
         if shared_memory.get(f"retraining_flag:{agent.name}"):
             agent.retrain()
         pass
-
-#if __name__ == "__main__":
-#    agent.memory_view.get('recent_errors')
-#    agent.performance_metrics['response_times'].append(0.42)
