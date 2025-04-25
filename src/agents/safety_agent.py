@@ -18,7 +18,7 @@ import logging
 import random
 import hashlib
 import os, sys
-import yaml
+import yaml, json
 import torch
 import numpy as np
 
@@ -29,37 +29,6 @@ from dataclasses import dataclass, field
 from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.agents.evaluators.report import PerformanceVisualizer
 from src.agents.base_agent import BaseAgent
-
-constitutional_rules = {
-    "privacy": [
-        "Anonymize or pseudonymize all personal data before processing",
-        "Do not retain sensitive information beyond operational necessity",
-        "Explicitly request user consent for data collection activities",
-        "Implement end-to-end encryption for data in transit and at rest",
-        "Immediately report any unauthorized data access attempts"
-    ],
-    "safety": [
-        "Prevent physical, psychological, or environmental harm through all outputs",
-        "Refuse to generate content that could enable violence or self-harm",
-        "Implement multi-layered fact-checking before sharing critical information",
-        "Automatically sanitize inputs containing dangerous instructions",
-        "Maintain emergency shutdown protocols for unsafe situations"
-    ],
-    "ethics": [
-        "Actively mitigate biases in training data and decision processes",
-        "Respect cultural norms while maintaining universal human rights",
-        "Provide clear provenance information for generated content",
-        "Maintain transparency about system capabilities and limitations",
-        "Implement accountability mechanisms for automated decisions"
-    ],
-    "security": [
-        "Validate all external inputs through multiple sanitization layers",
-        "Regularly rotate cryptographic keys and access credentials",
-        "Maintain defense-in-depth against prompt injection attacks",
-        "Implement automatic security patch management",
-        "Conduct daily vulnerability scans and penetration tests"
-    ]
-}
 
 def load_config(Path):
     with open(Path, "r") as f:
@@ -138,7 +107,7 @@ class SafeAI_Agent(BaseAgent):
         self.attention_monitor = AttentionMonitor()
 
         # Initialize constitutional rules
-        self.constitution = self._load_constitution(config.constitutional_rules)
+        self.constitution = self._load_constitution() 
 
         # Logger setup
         if not self.logger.handlers:
@@ -275,23 +244,19 @@ class SafeAI_Agent(BaseAgent):
     def run_alignment_check(self, data, predictions, probs, labels, actions):
         return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)
 
-    def _load_constitution(self, config: Dict) -> Dict:
-        """Load safety rules from config or default constitution"""
-        default_rules = {
-            "privacy": [
-                "Do not reveal personal or sensitive information",
-                "Anonymize data before processing"
-            ],
-            "safety": [
-                "Prevent physical or psychological harm",
-                "Avoid dangerous content generation"
-            ],
-            "ethics": [
-                "Maintain fairness and avoid discrimination",
-                "Respect cultural and social norms"
-            ]
-        }
-        return config.get("constitutional_rules", default_rules)
+    def _load_constitution(self) -> Dict:
+        """Load safety rules from JSON file in security subfolder"""
+        try:
+            # Path adjusted to point to security subdirectory
+            constitution_path = Path(__file__).parent / "security/constitutional_rules.json"
+            with open(constitution_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.logger.error("Constitutional rules file not found at %s", constitution_path)
+            raise
+        except json.JSONDecodeError as e:
+            self.logger.error("Invalid JSON format in constitutional rules: %s", str(e))
+            raise
 
     def _create_input_sanitizer(self) -> Dict:
         """STPA-based input validation (Leveson, 2011)"""
