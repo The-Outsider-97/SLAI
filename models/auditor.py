@@ -105,10 +105,14 @@ class CodeAuditor(QObject):
     def run_audit(self):
         issues = []
         for root, _, files in os.walk(self.target_path):
+            if any(skip in root for skip in ("venv", "node_modules", "__pycache__")):
+                continue  # Skip unnecessary directories
+
             for file in files:
                 if file.endswith((".py", ".json", ".yaml", ".yml")):
                     filepath = os.path.join(root, file)
                     issues.extend(self._audit_file(filepath))
+
         return issues
 
     def log_issues(self, issues):
@@ -128,7 +132,7 @@ class CodeAuditor(QObject):
         return new_issues
 
     @staticmethod
-    def run_pylint_scan(target_path="src", log_path="logs/pylint_audit.log"):
+    def run_pylint_scan(target_path=".", log_path="logs/pylint_audit.log"):
         logger = logging.getLogger("SLAI.Pylint")
         try:
             result = subprocess.run(
@@ -145,7 +149,7 @@ class CodeAuditor(QObject):
             logger.error(f"Pylint execution failed: {e}")
 
 class IdleAuditManager:
-    def __init__(self, shared_memory, agent_factory, agent, target_path="src", idle_threshold=120):
+    def __init__(self, shared_memory, agent_factory, agent, target_path="s.rc", idle_threshold=120):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.agent = agent
@@ -190,7 +194,7 @@ class IdleAuditManager:
             logger.error(f"Failed to log audit results to EvaluationAgent: {e}")
 
 if __name__ == "__main__":
-    auditor = CodeAuditor("src")
+    auditor = CodeAuditor(".")
     issues = auditor.run_audit()
     auditor.log_issues(issues)
 
