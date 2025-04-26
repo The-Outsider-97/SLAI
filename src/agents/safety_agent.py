@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.agents.evaluators.report import PerformanceVisualizer
 from src.agents.base_agent import BaseAgent
-from src.agetns.safety.safety_guard import SafetyGuard
+from src.agents.safety.safety_guard import SafetyGuard
 
 def load_config(Path):
     with open(Path, "r") as f:
@@ -293,7 +293,7 @@ class SafeAI_Agent(BaseAgent):
         """Load safety rules from JSON file in security subfolder"""
         try:
             # Path adjusted to point to security subdirectory
-            constitution_path = Path(__file__).parent / "security/constitutional_rules.json"
+            constitution_path = Path(__file__).parent / "safety/constitutional_rules.json"
             with open(constitution_path, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
