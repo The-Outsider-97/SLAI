@@ -41,12 +41,12 @@ class Transformer:
         pe = np.zeros((max_len, d_model))
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
-        return Parameter(pe.T)  # (d_model, max_len)
+        return Parameter(pe)  # (max_len, d_model)
 
     def forward(self, x):
         """Implements transformer encoder forward pass"""
         seq_len = x.shape[1]
-        x += self.positional_encoding.data[:, :seq_len]
+        x += self.positional_encoding.data[np.newaxis, :seq_len, :]
         
         for layer in self.layers:
             # Self-attention sublayer
