@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, Tuple
 from src.agents.language.language_profiles import MORPHOLOGY_RULES
 from collections import defaultdict, deque, Counter
-
+# === Configuration ===
+STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
 
 class GrammarProcessor:
     """Implements formal grammar systems based on Chomsky hierarchy and information theory"""
@@ -41,6 +42,12 @@ class GrammarProcessor:
 
     def __init__(self, lang='en', structured_wordlist=None, wordlist=None,
                  nlg_templates=None, rules_path=None, knowledge_agent=None):
+        self._wordlist = None
+        self._structured_wordlist = None
+
+        if not self._validate_wordlist_integrity():
+            raise ValueError("Wordlist failed integrity check")
+
         self.morph_rules = MORPHOLOGY_RULES[lang]
         self.reset_parser_state()
         self.knowledge_base = knowledge_agent
@@ -202,7 +209,24 @@ class GrammarProcessor:
         ]
 
         # This ensures that _expand_with_synonyms() has access to the enriched synonyms.
-        self.structured_wordlist = {"words": structured_wordlist} if structured_wordlist else {"words": {}}
+        self._wordlist = {"words": structured_wordlist} if structured_wordlist else {"words": {}}
+
+
+    @property
+    def structured_wordlist(self):
+        if self._wordlist is None:
+            with open(STRUCTURED_WORDLIST_PATH) as f:
+                self._wordlist = json.load(f)
+        return self._wordlist
+
+    def _validate_wordlist_integrity(self):
+        required_keys = {'pos', 'synonyms', 'related_terms'}
+        for word, entry in self.structured_wordlist['words'].items():
+            if not isinstance(entry, dict):
+                return False
+            if not required_keys.issubset(entry.keys()):
+                return False
+        return True
 
     def extract_entities(self, text, pos_tags):
         """
