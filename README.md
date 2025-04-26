@@ -147,6 +147,7 @@ Note: If you see an error about execution policy:
    pip install evaluate
    pip install bert_score
    pip install rouge_score
+   pip install sounddevice
    ```
 
 5. Run Model:
