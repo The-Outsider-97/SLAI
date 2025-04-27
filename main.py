@@ -20,17 +20,7 @@ from frontend.startup_screen import StartupScreen # no-audit
 from frontend.main_window import MainWindow # no-audit
 
 
-
 # Configure logging early to capture all events
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('logs/slai_core.log'),
-            logging.StreamHandler()
-        ]
-    )
 logger = get_logger("SLAI-Launcher")
 
 _config_cache = None
