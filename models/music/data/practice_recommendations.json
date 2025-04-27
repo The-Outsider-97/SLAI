@@ -1,0 +1,94 @@
+{
+  "practice_recommendations": {
+    "beginner": {
+      "piano": [
+        "Practice C major scale hands separately",
+        "Learn basic triads in root position",
+        "Work on simple Hanon exercises",
+        "Practice sight-reading with beginner-level pieces",
+        "Develop proper finger posture with five-finger patterns"
+      ],
+      "guitar": [
+        "Practice basic open chords: G, C, D, Em",
+        "Work on downstroke strumming patterns",
+        "Learn simple fingerpicking patterns",
+        "Practice chord transitions with a metronome",
+        "Develop calluses with 15-minute daily sessions"
+      ],
+      "violin": [
+        "Practice bow hold exercises",
+        "Work on open string bowing techniques",
+        "Learn first position finger patterns",
+        "Practice simple scales with drone accompaniment",
+        "Develop proper shoulder rest positioning"
+      ],
+      "vocalist": [
+        "Practice diaphragmatic breathing exercises",
+        "Work on vowel articulation drills",
+        "Learn proper warm-up routines",
+        "Practice pitch matching with piano",
+        "Develop microphone technique basics"
+      ]
+    },
+    "intermediate": {
+      "piano": [
+        "Practice arpeggios in all major keys",
+        "Work on Czerny etudes for technique",
+        "Learn Bach two-part inventions",
+        "Practice chord inversions and voicings",
+        "Develop memorization strategies"
+      ],
+      "guitar": [
+        "Master barre chords in all positions",
+        "Work on alternate picking techniques",
+        "Learn blues scale patterns",
+        "Practice hybrid picking exercises",
+        "Develop improvisation skills over backing tracks"
+      ],
+      "violin": [
+        "Practice shifting to third position",
+        "Work on vibrato development exercises",
+        "Learn double stop techniques",
+        "Practice spiccato bowing control",
+        "Develop interpretation skills for romantic era music"
+      ],
+      "vocalist": [
+        "Practice belting technique safely",
+        "Work on mixed voice registration",
+        "Learn vocal ornamentation techniques",
+        "Practice sight-singing with solfège",
+        "Develop stage presence and performance skills"
+      ]
+    },
+    "advanced": {
+      "piano": [
+        "Practice Chopin etudes for technical mastery",
+        "Work on advanced polyrhythms",
+        "Learn Liszt transcendental études",
+        "Practice orchestral reduction techniques",
+        "Develop contemporary improvisation skills"
+      ],
+      "guitar": [
+        "Master sweep picking techniques",
+        "Work on advanced chord substitutions",
+        "Learn jazz harmony and reharmonization",
+        "Practice transcriptions of master players",
+        "Develop unique compositional voice"
+      ],
+      "violin": [
+        "Practice Paganini caprices",
+        "Work on extended techniques: harmonics, col legno",
+        "Learn concerto repertoire",
+        "Practice chamber music collaboration skills",
+        "Develop historical performance practice knowledge"
+      ],
+      "vocalist": [
+        "Practice coloratura technique",
+        "Work on operatic repertoire",
+        "Learn extended vocal techniques",
+        "Practice microtonal singing",
+        "Develop vocal pedagogy knowledge"
+      ]
+    }
+  }
+}
