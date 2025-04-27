@@ -98,6 +98,7 @@ agent-network:
     class: EvaluationAgent
     path: src.agents.evaluation_agent
     init_args: {}
+    threshold: 0.9
 
   safety:
     class: SafeAI_Agent
@@ -161,9 +162,6 @@ agent-network:
 
 training:
   num_samples: 500
-
-evaluator:
-  threshold: 0.9
 
 # ==========================
 # Hyperparameters Definition
@@ -246,6 +244,10 @@ alignment_thresholds:
 rollback:
   enabled: true
   backup_dir: "models/backups/"
+
+paths:
+  models: "models/"
+
 
 retrain:
   enabled: true
