@@ -19,8 +19,11 @@ if TYPE_CHECKING:
 # Shared logging queue
 log_queue = queue.Queue()
 
+# Global flag to track initialization
+_logger_initialized = False
+
 class QueueLogHandler(logging.Handler):
-    def __init__(self, q, batch_size=10, flush_interval=5):
+    def __init__(self, q: queue.Queue, batch_size: int = 10, flush_interval: int = 5) -> None:
         super().__init__()
         self.queue = q
         self.batch = []
@@ -29,7 +32,7 @@ class QueueLogHandler(logging.Handler):
         self.last_flush = time.time()
         self.hash_chain = hashlib.sha256(b'initial_seed').hexdigest()
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         msg = self.format(record)
         self.batch.append(msg)
         current_time = time.time()
@@ -39,59 +42,75 @@ class QueueLogHandler(logging.Handler):
            current_time - self.last_flush >= self.flush_interval:
             self._flush_batch()
 
-    def _flush_batch(self):
+    def _flush_batch(self) -> None:
         # Cryptographic chaining for tamper evidence
         chain_hash = self.hash_chain
         for msg in self.batch:
-            chain_hash = hashlib.sha256(f"{chain_hash}{msg}".encode()).hexdigest()
-            self.queue.put(f"{msg} | hash_chain:{chain_hash[:8]}")
-        
+            chain_hash = hashlib.sha256(chain_hash.encode('utf-8') + msg.encode('utf-8')).hexdigest()
+            self.queue.put((chain_hash, msg))
+        self.hash_chain = chain_hash
         self.batch.clear()
         self.last_flush = time.time()
 
-def get_logger(name="SLAI-Core", file_level=logging.DEBUG, console_level=logging.INFO, enable_queue=True, log_dir="logs"):
+def get_logger(name: str) -> logging.Logger:
+    """
+    Retrieves or creates a logger with the given name, ensuring only one instance exists.
+    """
+    global _logger_initialized, log_queue
     logger = logging.getLogger(name)
-    logger.setLevel(min(file_level, console_level))  # Root logger level
+    logger.setLevel(logging.INFO)  # Set default level
 
-    if not logger.handlers:
-        os.makedirs(os.path.join(log_dir, "sessions"), exist_ok=True)
-        session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        logger.anomaly_detector = AnomalyDetector(window_size=200, sigma=2.5)
+    if not _logger_initialized:
+        # Only initialize once
+        _logger_initialized = True
+        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
+        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    #if not logger.handlers:
+    #    os.makedirs(os.path.join(log_dir, "sessions"), exist_ok=True)
+    #    session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    #    logger.anomaly_detector = AnomalyDetector(window_size=200, sigma=2.5)
 
         # Rotating app-wide log
-        rotating_handler = RotatingHandler(os.path.join(log_dir, "app.log"), maxBytes=5_000_000, backupCount=2)
-        rotating_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-        rotating_handler.setLevel(file_level)
-        logger.addHandler(rotating_handler)
+    #    rotating_handler = RotatingHandler(os.path.join(log_dir, "app.log"), maxBytes=5_000_000, backupCount=2)
+    #    rotating_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+    #    rotating_handler.setLevel(file_level)
+    #    logger.addHandler(rotating_handler)
 
         # Per-session log
-        session_handler = logging.FileHandler(os.path.join(log_dir, "sessions", f"session_{session_id}.log"))
-        session_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-        session_handler.setLevel(file_level)
-        logger.addHandler(session_handler)
+    #    session_handler = logging.FileHandler(os.path.join(log_dir, "sessions", f"session_{session_id}.log"))
+    #    session_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+    #    session_handler.setLevel(file_level)
+    #    logger.addHandler(session_handler)
 
         # Console stream
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-        console_handler.setLevel(console_level)
-        logger.addHandler(console_handler)
+    #    console_handler = logging.StreamHandler(sys.stdout)
+    #    console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+    #    console_handler.setLevel(console_level)
+    #    logger.addHandler(console_handler)
 
         # Real-time Queue handler (optional for GUI)
-        if enable_queue:
-            queue_handler = QueueLogHandler(log_queue)
-            queue_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-            queue_handler.setLevel(console_level)
-            logger.addHandler(queue_handler)
+    #    if enable_queue:
+    #        queue_handler = QueueLogHandler(log_queue)
+    #        queue_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+    #        queue_handler.setLevel(console_level)
+    #        logger.addHandler(queue_handler)
 
-        original_handle = logger.handle
+    #    original_handle = logger.handle
 
-        def wrapped_handle(record):
-            if logger.anomaly_detector.analyze(record):
-                logger.warning("Anomalous error pattern detected!", extra={'origin': 'security'})
-            return original_handle(record)
+    #    def wrapped_handle(record):
+    #        if logger.anomaly_detector.analyze(record):
+    #            logger.warning("Anomalous error pattern detected!", extra={'origin': 'security'})
+    #        return original_handle(record)
         
-        logger.handle = wrapped_handle
+    #    logger.handle = wrapped_handle
 
+        file_handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    
     return logger
 
 def get_log_queue():
@@ -196,7 +215,8 @@ class AnomalyDetector:
         return self._check_anomaly()
 
     def _update_stats(self):
-        intervals = [t2-t1 for t1,t2 in zip(self.error_counts, self.error_counts[1:])]
+        errors = list(self.error_counts)
+        intervals = [t2 - t1 for t1, t2 in zip(errors, errors[1:])]
         if intervals:
             self.mean = statistics.mean(intervals)
             self.std = statistics.stdev(intervals) if len(intervals) > 1 else 0
