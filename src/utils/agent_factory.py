@@ -6,7 +6,6 @@ import psutil
 import importlib
 import tracemalloc
 import numpy as np
-import logging as logger, logging
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List
@@ -27,6 +26,9 @@ from src.agents.planning_agent import PlanningAgent
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
 from models.slai_lm_registry import SLAILMManager
+from logs.logger import get_logger
+
+logger = get_logger("Agent Factory")
 
 class AgentMetaData:
     __slots__ = ['name', 'class_name', 'module_path', 'required_params']
@@ -158,14 +160,18 @@ class AgentFactory:
 
     def _safe_create_evaluation_agent(self, config):
         try:
-            init_args = config.get("init_args", {})
+            # Merge system config with agent-specific settings
+            full_config = {
+                **self.shared_resources.get('config', {}),
+                **config.get("init_args", {})
+            }
             return EvaluationAgent(
                 shared_memory=self.shared_resources.get("shared_memory"),
                 agent_factory=self,
-                **init_args
+                config=full_config  # Pass validated config
             )
         except Exception as e:
-            logging.warning(f"Failed to instantiate EvaluationAgent: {e}")
+            logger.warning(f"Failed to instantiate EvaluationAgent: {str(e)}")
             return None
 
     @memory_profile
@@ -235,7 +241,7 @@ class AgentFactory:
                 **init_args
                 )
 
-        logging.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
+        logger.info(f"[AgentFactory] Using fallback for unregistered agent type: {agent_type}")
         return self._create_fallback_agent(agent_type, config)
                   
     def reconfigure_from_metrics(self, metrics: Dict[str, Any]):
@@ -358,7 +364,7 @@ class AgentFactory:
                     )
                     
             except Exception as e:
-                logging.warning(f"Agent discovery failed for {agent_file}: {str(e)}")
+                logger.warning(f"Agent discovery failed for {agent_file}: {str(e)}")
         
         pickle.dump(self.agent_registry, cache_path.open('wb'))
 
@@ -575,7 +581,7 @@ class AgentFactory:
             import transformers  # noqa
             return True
         except ImportError:
-            logging.warning("Transformers not installed, text capabilities limited")
+            logger.warning("Transformers not installed, text capabilities limited")
             return False
 
     def _init_text_model(self, config: Dict) -> Any:
@@ -584,24 +590,6 @@ class AgentFactory:
             model_id = config.get("text_model_id", "gpt2")
             return AutoModelForCausalLM.from_pretrained(model_id)
         return None
-
-#    def _init_rl_algorithm(self, config: Dict) -> Any:
-#        algorithm = config.get("algorithm", "rl").lower()
-#        try:
-#            if algorithm == "maml":
-#                from src.agents.learning import maml_rl
-#                return maml_rl.MAMLTrainer(config)
-#            elif algorithm == "rsi":
-#                from src.agents.learning import rsi
-#                return rsi.RSITrainer(config)
-#            elif algorithm == "dqn":
-#                from src.agents.learning import dqn
-#                return dqn.DQNAgent(config)
-#            else:
-#                from src.agents.learning import rl_agent
-#                return rl_agent.RLAgent(config)
-#        except ImportError as e:
-#            raise RuntimeError(f"RL component import failed: {str(e)}")
 
     def _init_audio_encoder(self, config: Dict) -> Any:
         """
