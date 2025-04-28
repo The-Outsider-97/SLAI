@@ -5,7 +5,7 @@ from src.agents.perception.modules.attention import EfficientAttention
 from src.agents.perception.modules.feedforward import FeedForward  
 
 class Transformer:
-    def __init__(self, num_layers=6, embed_dim=512, num_heads=8, ff_dim=2048):
+    def __init__(self, num_layers=6, embed_dim=512, num_heads=8, ff_dim=2048, num_styles=14):
         self.layers = [
             {
                 'attention': EfficientAttention(embed_dim, num_heads),
@@ -16,6 +16,7 @@ class Transformer:
             for _ in range(num_layers) 
         ]
         self.positional_encoding = self._init_positional_encoding(embed_dim)
+        self.style_embeddings = Parameter(np.random.randn(num_styles, embed_dim) * 0.02)
 
     def parameters(self):
         params = [self.positional_encoding]
@@ -43,10 +44,13 @@ class Transformer:
         pe[:, 1::2] = np.cos(position * div_term)
         return Parameter(pe)  # (max_len, d_model)
 
-    def forward(self, x):
+    def forward(self, x, style_id):
         """Implements transformer encoder forward pass"""
         seq_len = x.shape[1]
         x += self.positional_encoding.data[np.newaxis, :seq_len, :]
+
+        style_emb = self.style_embeddings.data[style_id]
+        style_emb = np.expand_dims(style_emb, axis=0)
         
         for layer in self.layers:
             # Self-attention sublayer
@@ -58,6 +62,7 @@ class Transformer:
             # Feed-forward sublayer
             residual = x
             x = TensorOps.layer_norm(x + layer['norm2'].data)
+            x += style_emb[:, np.newaxis, :]
             x = layer['ff'].forward(x)
             x = residual + x
             
