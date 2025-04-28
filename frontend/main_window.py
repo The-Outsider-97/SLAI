@@ -4,22 +4,32 @@ import torch
 import logging
 import subprocess
 import json
+import re
 import random
 import getpass
 import queue
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque
 
 from src.utils.async_task_report import run_in_thread
 from src.agents.collaborative_agent import CollaborativeAgent
+from logs.logging_handler import QtLogHandler
+from src.utils.agent_factory import AgentFactory
+from src.utils.system_optimizer import SystemOptimizer
+from models.music.music_editor import MusicEditor
+from models.musician import Musician
 
+from PyQt5.QtWidgets import QMessageBox, QInputDialog, QLineEdit
 from torch.nn.functional import cosine_similarity # Assuming this and REFERENCE_EMBEDDINGS/QUERIES are defined elsewhere if needed
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtWidgets import (QWidget, QLabel, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout,
-                             QComboBox, QFrame, QSizePolicy, QFileDialog, QStackedWidget,
+                             QComboBox, QFrame, QSizePolicy, QFileDialog, QStackedWidget, QDialog,
                              QSplitter, QApplication) # Added QStackedWidget, QSplitter, QApplication
 from PyQt5.QtGui import QFont, QPixmap, QImage, QIcon, QTextCursor, QColor, QPainter
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QVariantAnimation, QSize, QThread
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QVariantAnimation, QSize, QThread
 
+# === Configuration ===
+STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
 REFERENCE_QUERIES = [
     "What is the capital of France?",
     "Explain Newton's second law.",
@@ -49,8 +59,6 @@ class PromptThread(QThread):
         result = self.agent.generate(self.prompt, self.task_data)
         self.result_ready.emit(result)
 
-from src.utils.agent_factory import AgentFactory
-from src.utils.system_optimizer import SystemOptimizer
 try:
     from src.agents.collaborative_agent import CollaborativeAgent
     try:
@@ -133,9 +141,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, collaborative_agent, shared_memory, log_queue=None, metric_queue=None, shared_resources=None, optimizer=None):
         super().__init__()
         self.shared_memory = shared_memory
+        if not self.shared_memory.get('evaluation_metrics'):
+            self.shared_memory.set('evaluation_metrics', {
+                'hazards': [],
+                'operational_time': 0,
+                'successes': 0,
+                'failures': 0
+            })
         self.collaborative_agent = collaborative_agent
         self.optimizer = optimizer
         self.factory = AgentFactory(config=None, shared_resources=shared_resources, optimizer=optimizer)
+        self.current_musician_model = None
+
+        # Setup QtLogHandler
+        self.qt_log_handler = QtLogHandler()
+        self.qt_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(self.qt_log_handler)
+        logging.getLogger().setLevel(logging.INFO)
 
         self._init_base_ui()
         self._deferred_ui_setup()
@@ -177,7 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-family: 'Times New Roman', Times, serif; /* Added fallback */
             }
             QTextEdit, QLineEdit {
-                background-color: #1e1e1e; /* Slightly lighter background for inputs */
+                background-color: #0e0e0e; /* Slightly lighter background for inputs */
                 border: 1px solid gray;
                 border-radius: 6px;
                 padding: 5px;
@@ -232,8 +254,8 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QTextEdit#logPanel { /* Style for log panel */
                  font-family: Consolas, monospace; /* Monospace for logs */
-                 font-size: 12px;
-                 background-color: #111; /* Darker bg for logs */
+                 font-size: 15px;
+                 /* background-color: #111; Darker bg for logs */
             }
             QStackedWidget > QWidget { /* Style widgets inside stacked widget */
                  background-color: #1e1e1e;
@@ -264,7 +286,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Left Panel (60%) ---
         self.left_widget = QWidget()
         self.left_panel_layout = QVBoxLayout(self.left_widget)
-        self.left_panel_layout.setContentsMargins(20, 32, 10, 20)
+        self.left_panel_layout.setContentsMargins(75, 32, 10, 20)
         self.left_panel_layout.setSpacing(1)
         self.main_splitter.addWidget(self.left_widget)
 
@@ -283,6 +305,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_splitter.setSizes([int(total_width * 0.6), int(total_width * 0.4)])
 
         self.greetUser()
+
+        from models.training.shared_signals import training_signals#, verification_emitter
+        # Access embedding data through:
+        training_signals.embedding_data
+
     def handle_evaluation_update(self, metrics):
         """Process evaluation metrics from EvaluationAgent"""
         self.visualizer.update_metrics(metrics)
@@ -291,6 +318,102 @@ class MainWindow(QtWidgets.QMainWindow):
         if (datetime.now() - self.last_visual_update).total_seconds() > 0.066:
             self.update_visualizations()
             self.last_visual_update = datetime.now()
+
+    def show_approval_dialog(self, word, entry, entry_type):
+        from models.training.shared_signals import training_signals
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Approve {word}")
+        layout = QVBoxLayout()
+
+        # Display core entry info
+        header = QLabel(f"Processing: {word} ({entry_type})")
+        layout.addWidget(header)
+
+        # Create approval queue
+        approval_queue = deque(
+            [('synonym', s) for s in entry['synonyms']] +
+            [('related', r) for r in entry['related_terms']])
+
+        def process_next():
+            if not approval_queue:
+                dialog.accept()
+                return
+
+            current_type, current_item = approval_queue.popleft()
+            prompt = QLabel(f"Approve {current_type}: '{current_item}'?")
+            input_field = QLineEdit()
+            input_field.setPlaceholderText("y/n or enter correction")
+
+            def handle_response():
+                decision = input_field.text().strip().lower()
+                if decision in ('y', ''):
+                    # Keep original
+                    pass
+                elif decision == 'n':
+                    # Remove from entry
+                    if current_type == 'synonym':
+                        entry['synonyms'].remove(current_item)
+                    else:
+                        entry['related_terms'].remove(current_item)
+                else:  # User entered replacement
+                    if current_type == 'synonym':
+                        entry['synonyms'].append(decision)
+                    else:
+                        entry['related_terms'].append(decision)
+
+                # Clear current widgets
+                for w in [prompt, input_field, btn]:
+                    layout.removeWidget(w)
+                    w.deleteLater()
+
+                process_next()
+
+            btn = QPushButton("Submit")
+            btn.clicked.connect(handle_response)
+
+            layout.addWidget(prompt)
+            layout.addWidget(input_field)
+            layout.addWidget(btn)
+        
+        def handle_final_approval():
+            training_signals.batch_approved.emit(True)  # Signal approval
+            dialog.accept()
+    
+        final_btn = QPushButton("Finish Approval")
+        final_btn.clicked.connect(handle_final_approval)
+        layout.addWidget(final_btn)
+        
+        dialog.exec_()
+        self._save_approved_entry(word, entry)
+
+    def show_single_approval_prompt(self, item):
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(f"Approve {self.current_approval_queue['current_type']}")
+        dialog.setLabelText(
+            f"{self.current_approval_queue['word']} - {item}\n"
+            "Approve? [y/n] Or enter replacement:"
+        )
+        dialog.setTextValue("y")
+        dialog.accepted.connect(lambda: self.handle_approval_decision(dialog.textValue()))
+        dialog.exec_()
+
+    def handle_approval_decision(self, decision):
+        decision = decision.strip().lower()
+        current_type = self.current_approval_queue['current_type']
+
+        if decision == 'n':
+            # Remove item
+            pass
+        elif decision.startswith('y'):
+            # Keep original
+            self.current_approval_queue['entry'][current_type].append(
+                self.current_approval_queue['current_item']
+            )
+        else:
+            # Use replacement
+            self.current_approval_queue['entry'][current_type].append(decision)
+
+        self.process_next_approval_item()
 
     def initUI(self):
         # === Left Panel Content ===
@@ -345,7 +468,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.upload_media_button.clicked.connect(self.upload_media)
         input_area_layout.addWidget(self.upload_media_button)
 
-        # Download Button (New)
+        # Download Button
         self.download_button = QtWidgets.QPushButton() # Icon preferred
         self.download_button.setObjectName("downloadButton") # For styling
         self.download_button.setToolTip("Download Content/Logs") # Define action
@@ -397,22 +520,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_panel.setText("Real-time system logs will appear here...")
         self.right_tab_widget.addWidget(self.log_panel)
 
-        # Panel 2: Live Score Graph (Placeholder)
-        self.graph_panel = QLabel("Live Score Graph Placeholder")
-        self.graph_panel.setAlignment(Qt.AlignCenter)
-        self.graph_panel.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
-        self.right_tab_widget.addWidget(self.graph_panel)
+        # Panel 2: Live Training Logs
+        self.training_logs = QTextEdit("Training logs will appear here...")
+        self.training_logs.setReadOnly(True)
+        self.training_logs.setObjectName("trainingLogs")
+        self.training_logs.setStyleSheet("font-family: Consolas; font-size: 14px;")
+        self.right_tab_widget.addWidget(self.training_logs)
 
-        # Panel 3: Media Panel (Placeholder)
+        self.training_progress = QtWidgets.QProgressBar()
+        self.training_progress.setMaximum(100)
+        self.training_progress.setValue(0)
+        self.training_progress.setTextVisible(True)
+        self.training_progress.setFormat("%p% Complete")
+        self.right_panel_layout.addWidget(self.training_progress)
+
+        self.batch_counter = QLabel("Batch 0/0")
+        self.right_panel_layout.insertWidget(2, self.batch_counter)
+
+        # Panel 3: Music Editor Panel
+        #self.music_editor = QWidget()
+        #self.music_editor.setLayout(QVBoxLayout())
+        self.music_editor = MusicEditor()
+        self.right_tab_widget.addWidget(self.music_editor)
+
+        # Panel 4: Media Panel (Placeholder)
         self.media_panel = QLabel("Media Panel Placeholder (e.g., for images)")
         self.media_panel.setAlignment(Qt.AlignCenter)
         self.media_panel.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
         self.right_tab_widget.addWidget(self.media_panel)
-
-        # Panel 4: Monitor Panel
-        self.monitor_panel = QWidget()
-        self.monitor_panel.setLayout(QVBoxLayout())
-        self.right_tab_widget.addWidget(self.monitor_panel)
 
         # Panel 5: Risk & Reward Visualization Panel
         self.visualization_panel = QWidget()
@@ -450,37 +585,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_message.hide()
         self.right_panel_layout.addWidget(self.status_message)
 
-        # --- Example: Add buttons to switch right panels ---
+        # --- Add buttons to switch right panels ---
         switcher_layout = QHBoxLayout()
         log_btn = QPushButton("Logs")
-        graph_btn = QPushButton("Graph")
+        training_btn = QPushButton("Training Logs")
+        music_editor_btn = QPushButton("Music Editor")
         media_btn = QPushButton("Media")
-        monitor_btn = QPushButton("Monitoring")
         viz_btn = QPushButton("Eval Charts")
         log_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(0))
-        graph_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(1))
-        media_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(2))
-        monitor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(3))
+        training_btn.setText("Training Logs")
+        training_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(1))
+        music_editor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(2))
+        music_editor_index = self.right_tab_widget.indexOf(self.music_editor)
+        music_editor_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(music_editor_index))
+        media_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(3))
         viz_btn.clicked.connect(lambda: self.right_tab_widget.setCurrentIndex(4))
         switcher_layout.addWidget(log_btn)
-        switcher_layout.addWidget(graph_btn)
+        switcher_layout.addWidget(training_btn)
+        switcher_layout.addWidget(music_editor_btn)
         switcher_layout.addWidget(media_btn)
-        switcher_layout.addWidget(monitor_btn)
         switcher_layout.addWidget(viz_btn)
         switcher_layout.addStretch()
         self.right_panel_layout.insertLayout(1, switcher_layout) # Insert above the stack
+
+# === Sidebar Buttons (Vertical, Circular, Flush Left with Unique Icons) ===
+        self.sidebar_buttons_container = QWidget(self.left_widget)
+        self.sidebar_buttons_container.setGeometry(10, 100, 50, 350)
+        self.sidebar_buttons_container.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.sidebar_buttons_container.setStyleSheet("background: transparent;")
+
+        sidebar_layout = QVBoxLayout(self.sidebar_buttons_container)
+        sidebar_layout.setSpacing(20)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+
+        buttons = [
+            ("User's info", "user", "frontend/assets/user.png", "frontend/assets/user_active.png"),
+            ("Researcher Model", "research", "frontend/assets/research.png", "frontend/assets/research_active.png"),
+            ("Musician Model", "music", "frontend/assets/musician.png", "frontend/assets/musician_active.png"),
+            ("Training Model", "train", "frontend/assets/training.png", "frontend/assets/training_active.png"),
+            ("Auditor Model", "audit", "frontend/assets/auditor.png", "frontend/assets/auditor_active.png")
+        ]
+
+        self.sidebar_button_map = {}
+        self.active_sidebar_button = None
+
+        for label, key, icon_path, checked_icon_path in buttons:
+            btn = QPushButton()
+            btn.setToolTip(label)
+            btn.setFixedSize(50, 50)
+            btn.setCheckable(True)
+            btn.setIcon(QIcon(icon_path))
+            btn.setIconSize(QSize(40, 40))
+            btn.setStyleSheet("""
+                QPushButton {
+                    border-radius: 20px;
+                    background-color: gold;
+                    color: black;
+                }
+                QPushButton:checked {
+                    background-color: black;
+                    color: gold;
+                    border: 0.5px solid gold;
+                }
+            """)
+            btn.clicked.connect(lambda checked, k=key, l=label, b=btn, i=icon_path, ci=checked_icon_path: self.toggle_sidebar_button(k, l, b, i, ci))
+            sidebar_layout.addWidget(btn)
+            self.sidebar_button_map[key] = btn
+
+        self.sidebar_buttons_container.raise_()
+
+
+        # === Slide Animation Setup ===
+        self.slide_anim = QPropertyAnimation(self.left_widget, b"pos")
+        self.slide_anim.setDuration(400)
+        self.slide_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def post_to_output_area(self, message: str, tag: str = "System"):
+        """Post a formatted message to the output area."""
+        formatted = f"<font color='gold'>[{tag}]</font> {message}<br>"
+        self.output_area.append(formatted)
 
     def update_visualizations(self):
         """Update all visualization elements"""
         if not self.visualization_panel.isVisible():
             return
-    
+
         # Get current panel size
         panel_size = self.visualization_panel.size()
         chart_width = max(360, panel_size.width() - 20)
         chart_height = max(240, panel_size.height() // 3 - 10)
         chart_size = QtCore.QSize(chart_width, chart_height)
-    
+
         # Update charts
         try:
             self.vis_tradeoff.setPixmap(
@@ -491,7 +686,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.visualizer.render_temporal_chart(chart_size, 'operational_times'))
         except Exception as e:
             logging.error(f"Visualization update failed: {str(e)}")
-    
+
     # Add resize handler
     def resizeEvent(self, event):
         """Handle window resizing for proper visualization scaling"""
@@ -521,7 +716,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else: greeting = "Good night, "
 
         # Get the username
-        
         try: username = getpass.getuser()
         except Exception: username = "User"
         greeting += username + ","
@@ -571,15 +765,19 @@ class MainWindow(QtWidgets.QMainWindow):
         run_in_thread(self._load_agents_and_finalize_ui)
 
     def _load_agents_and_finalize_ui(self):
+        import yaml
         try:
+            # Load config.yaml
+            with open("config.yaml", "r") as f:
+                config = yaml.safe_load(f)
+            
             self.agent_factory = AgentFactory(
                 shared_resources={
                     "shared_memory": self.shared_memory,
-                    "optimizer": self.optimizer
+                    "config": config  # Pass full config
                 },
                 optimizer=self.optimizer
             )
-
             self.collaborative_agent = CollaborativeAgent(
                 shared_memory=self.shared_memory,
                 agent_factory=self.agent_factory,
@@ -587,26 +785,337 @@ class MainWindow(QtWidgets.QMainWindow):
                 config_path="config.yaml"
             )
 
+            from models.auditor import IdleAuditManager
+            from src.agents.evaluation_agent import EvaluationAgent
+
+            self.evaluation_agent = EvaluationAgent(
+                shared_memory=self.shared_memory,
+                agent_factory=self.factory
+            )
+            self.idle_audit = IdleAuditManager(
+                shared_memory=self.shared_memory,
+                agent_factory=self.agent_factory,
+                agent=self.evaluation_agent,
+                target_path=".",
+                idle_threshold=120
+            )
+            self.idle_audit.start()
+
+            # Link audit signal to display in log panel
+            if hasattr(self.idle_audit.auditor, 'audit_signal'):
+                self.idle_audit.auditor.audit_signal.connect(lambda path, msg: self.log_panel.append(msg))
+            
+            # Optional: Change status light on audit fail
+            def audit_status_feedback(path, msg):
+                if "Undefined" in msg or "anomaly" in msg or "Parse error" in msg:
+                    self.set_status_indicator("critical")
+                else:
+                    self.set_status_indicator("warning")
+            
+            self.idle_audit.auditor.audit_signal.connect(audit_status_feedback)
+
             # If you want to pass these back to the UI thread later, use QMetaObject
             print("[MainWindow] AgentFactory + CollaborativeAgent loaded successfully.")
 
         except Exception as e:
             logging.error(f"[MainWindow] Failed to load agents in thread: {e}")
 
-    def play_audio(self, audio_path):
-        """Plays the selected audio file."""
-        # Basic audio playback (Needs more robust implementation)
-        try:
-            os.system(f"start {audio_path}")  # Simple play (Windows only)
-            self.status_message.setText(f"Playing: {os.path.basename(audio_path)}")
-            self.status_message.show()
-            QTimer.singleShot(3000, self.status_message.hide)
-        except Exception as e:
-            self.status_message.setText(f"Failed to play audio: {e}")
-            self.status_message.show()
-            QTimer.singleShot(3000, self.status_message.hide)
+#========================Sidebar button ===================================
+    def toggle_sidebar_button(self, model_key, label, button, normal_icon_path, checked_icon_path):
+        if model_key != "audit":
+            if self.active_sidebar_button and self.active_sidebar_button != button:
+                self.active_sidebar_button.setChecked(False)
+                self.active_sidebar_button.setIcon(QIcon(normal_icon_path))
 
-  
+            button.setChecked(True)
+            button.setIcon(QIcon(checked_icon_path))
+            self.active_sidebar_button = button
+            self.load_model(model_key, label, button, normal_icon_path, checked_icon_path)  # Pass all arguments
+            return
+        # Special handling for Auditor Model
+        reply = QMessageBox.question(
+            self, 'Start Audit?',
+            "Do you want to start the audit now?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.start_audit_now()
+        else:
+            self.schedule_audit()
+
+    def start_audit_now(self):
+        """Immediately start the audit process"""
+        from models.auditor import CodeAuditor
+        self.auditor = CodeAuditor("src/")
+        issues = self.auditor.run_audit()
+        new_issues = self.auditor.log_issues(issues)
+        self.show_status_message(f"Audit completed. Found {len(new_issues)} issues.", 5000)
+        self.output_area.append(f"<font color='gold'>[AUDIT]</font> Scan completed with {len(new_issues)} findings.<br>")
+
+    def schedule_audit(self):
+        """Schedule audit for later time"""
+        options = ["Specific Time (HH:MM:SS)", "Countdown (MMM:SS)"]
+        choice, ok = QInputDialog.getItem(
+            self, "Schedule Audit",
+            "Select scheduling method:", options, 0, False
+        )
+        
+        if not ok:
+            return
+
+        if choice == options[0]:  # Specific time
+            time_str, ok = QInputDialog.getText(
+                self, "Enter Time",
+                "Enter audit time (24h format HH:MM:SS):",
+                text=datetime.now().strftime("%H:%M:%S")
+            )
+            if ok and self.validate_time_format(time_str):
+                self.schedule_at_specific_time(time_str)
+        
+        else:  # Countdown
+            time_str, ok = QInputDialog.getText(
+                self, "Enter Duration",
+                "Enter countdown (MMM:SS):",
+                text="005:00"  # Default 5 minutes
+            )
+            if ok and self.validate_countdown_format(time_str):
+                self.schedule_countdown(time_str)
+
+    def validate_time_format(self, time_str):
+        """Validate HH:MM:SS format"""
+        if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$', time_str):
+            QMessageBox.warning(self, "Invalid Format", "Please use HH:MM:SS 24-hour format")
+            return False
+        return True
+
+    def validate_countdown_format(self, time_str):
+        """Validate MMM:SS format"""
+        if not re.match(r'^\d{3}:[0-5][0-9]$', time_str):
+            QMessageBox.warning(self, "Invalid Format", "Please use MMM:SS format (e.g. 132:45)")
+            return False
+        return True
+
+    def schedule_at_specific_time(self, time_str):
+        """Schedule audit for specific clock time"""
+        now = datetime.now()
+        target_time = datetime.strptime(time_str, "%H:%M:%S").time()
+        target_datetime = datetime.combine(now.date(), target_time)
+        
+        if target_datetime < now:
+            target_datetime += timedelta(days=1)  # Schedule for next day
+        
+        delay_seconds = (target_datetime - now).total_seconds()
+        self.show_status_message(f"Audit scheduled for {time_str}", 3000)
+        QtCore.QTimer.singleShot(int(delay_seconds * 1000), self.start_audit_now)
+
+    def schedule_countdown(self, time_str):
+        """Schedule audit after countdown duration"""
+        minutes, seconds = map(int, time_str.split(':'))
+        total_seconds = minutes * 60 + seconds
+        self.show_status_message(f"Audit scheduled in {minutes}m {seconds}s", 3000)
+        QtCore.QTimer.singleShot(total_seconds * 1000, self.start_audit_now)
+
+    def load_model(self, model_key, label, button, normal_icon_path, checked_icon_path):
+        """Load the selected model"""
+        from models.slai_lm import get_shared_slailm
+        base_model = get_shared_slailm(self.shared_memory, agent_factory=self.factory)
+        self.current_musician_model = None
+
+        # Researcher Model
+        if model_key == "research":
+            from models.research_model import ResearchModel
+            model = ResearchModel(shared_memory=self.shared_memory, agent_factory=self.factory)
+            self.agent = model
+            self.show_status_message(f"{label} loaded.", 3000)
+
+        # Musician Model
+        elif model_key == "music":
+            from models.musician import Musician
+            model = Musician(shared_memory=self.shared_memory, agent_factory=self.factory,
+                             expert_level="beginner", instrument="piano", parent=self)
+            if getattr(model, 'defer_setup', False):
+                model.interactive_setup()
+
+            self.current_musician_model = model # <<< Store the instance
+            self.agent = model # <<< Set Musician as the active agent (or handle differently if needed)
+            self.show_status_message(f"{label} loaded. Editor connected.", 3000)
+
+            # <<< --- CONNECT SIGNALS --- >>>
+            if self.music_editor and self.current_musician_model:
+                print("Connecting MusicEditor signals to Musician slots...")
+                self.post_to_output_area("Connecting MusicEditor signals to Musician slots...", "Musician Model")
+                # Connect editor's generateRequested signal to musician's slot
+                self.music_editor.generateRequested.connect(self.current_musician_model.handle_generate_request)
+                # Connect editor's tempoChanged signal to musician's slot
+                self.music_editor.tempoChanged.connect(self.current_musician_model.handle_tempo_change)
+                # Add connections for other signals here
+                # e.g., self.music_editor.keyChanged.connect(self.current_musician_model.handle_key_change)
+                print("Connections established.")
+                self.post_to_output_area("Connections established.", "Musician Model")
+            else:
+                print("Warning: MusicEditor or Musician model not available for connection.")
+                self.post_to_output_area("Connecting MusicEditor signals to Musician slots...", "Musician Model")
+                logging.warning("MusicEditor or Musician model not available for connection.")
+    
+            level, ok1 = QInputDialog.getItem(
+                self, "Musician Model Setup", "Select your musical experience level:",
+                ["Beginner", "Intermediate", "Advanced"], 0, False)
+            if not ok1:
+                return
+    
+            instrument, ok2 = QInputDialog.getItem(
+                self, "Musician Model Setup", "Select your instrument:",
+                ["Piano", "Guitar", "Violin", "Cello", "Bass", "Drum", "Vocalist"], 0, False)
+            if not ok2:
+                return
+    
+            # Create Musician with collected parameters
+            model = Musician(
+                shared_memory=self.shared_memory,
+                agent_factory=self.factory,
+                expert_level=level.lower(),
+                instrument=instrument.lower(),
+                parent=self
+            )
+            self.current_musician_model = model
+            self.agent = model
+            self.post_to_output_area(f"{label} loaded. Editor connected.", "Musician Model")
+
+        # Training Model
+        elif model_key == "train":
+            from models.train import SLAITrainer
+
+            class TrainerThread(QThread):
+                def __init__(self, factory, parent=None):
+                    super().__init__(parent)
+                    self.factory = factory
+
+                def run(self):
+                    from src.collaborative.shared_memory import SharedMemory
+                    from src.agents.perception_agent import PerceptionAgent
+                    from models.slai_lm import get_shared_slailm
+
+                    dummy_memory = SharedMemory()
+                    dummy_agent = PerceptionAgent(
+                        config={"modalities": ["text"]},
+                        shared_memory=dummy_memory,
+                        agent_factory=self.factory
+                    )
+                    dummy_agent.slai_lm = get_shared_slailm(dummy_memory, self.factory)
+                    trainer = SLAITrainer(dummy_agent, dummy_memory, "dummy target", "dummy response", self.factory)
+                    trainer.run()
+
+            self.trainer_thread = TrainerThread(factory=self.factory)
+            
+            # ✅ Connect correct training signal
+            from models.training.shared_signals import training_signals
+            training_signals.approval_request.connect(self.show_approval_dialog)
+            training_signals.batch_continuation.connect(self.update_batch_counter)
+            training_signals.log_message.connect(self.training_logs.append)
+
+            training_signals.batch_continuation.connect(
+                lambda p, r: self.training_progress.setValue(int((p/len(words))*100)))
+            
+            self.trainer_thread.start()
+            self.right_tab_widget.setCurrentIndex(1)
+            self.show_status_message(f"{label} loaded. Training started in background.", 3000)
+            self.post_to_output_area(f"{label} loaded. Training started in background.", "Training Model")
+
+    def update_batch_counter(self, current, total):
+        from models.traiing.synonym_trainer import BATCH_SIZE
+        self.batch_counter.setText(f"Processing: Batch {current//BATCH_SIZE+1}/{(total//BATCH_SIZE)+1}")
+
+    def handle_approval_prompt(self, word, item, category):
+        from models.train import log_emitter
+        decision, ok = QInputDialog.getText(self, f"{category.capitalize()} Approval", f"{word}: Approve or correct '{item}'?")
+        if ok:
+            log_emitter.approval_result.emit(item, decision.strip().lower())
+        
+    def _save_approved_entry(self, word, entry):
+        """Save approved entry to structured wordlist"""
+        try:
+            with open(STRUCTURED_WORDLIST_PATH, 'r+', encoding='utf-8') as f:
+                data = json.load(f)
+                data['words'][word] = entry
+                f.seek(0)
+                json.dump(data, f, indent=2)
+                f.truncate()
+                
+            self.output_area.append(
+                f"{word}:\n"
+                f"  pos: {entry['pos']}\n"
+                f"  synonyms: {entry['synonyms']}\n"
+                f"  related_terms: {entry['related_terms']}\n"
+                "✓ Entry saved\n" + "-"*40
+            )
+        except Exception as e:
+            self.log_panel.append(f"Error saving {word}: {str(e)}")
+
+    def handle_batch_continuation(self, continue_info):
+        from models.training.shared_signals import training_signals
+        msg = (
+            f"Processed {continue_info['processed']} words\n"
+            f"Remaining: {continue_info['remaining']}\n"
+            "Continue to next batch?"
+        )
+        
+        # Show dialog with Continue/Cancel buttons
+        choice = QMessageBox.question(
+            self, 
+            "Continue Training?",
+            msg,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        # Emit signal back to trainer thread
+        training_signals.batch_continuation_result.emit(choice == QMessageBox.Yes)
+#===========================================================================================
+
+    def load_audio(self, file_path):
+        from models.music.audio_utils import AudioUtils
+        return AudioUtils.reshape_for_model(AudioUtils.load_audio(file_path))
+    
+    def analyze_audio(self, audio_path):
+        waveform = self.load_audio(audio_path)
+        input_dict = {'audio': waveform}
+        if hasattr(self.agent, 'forward'):
+            embedding = self.agent.forward(input_dict)
+            self.output_area.append(f"<b>Audio Embedding:</b><br>{embedding}")
+
+    def play_audio(self, audio_path):
+        """Add buffer size validation"""
+        try:
+            # Validate file first
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError
+    
+            # Use dedicated audio thread
+            self.audio_thread = QtCore.QThread()
+            self.audio_worker = AudioWorker(audio_path)
+            self.audio_worker.moveToThread(self.audio_thread)
+            self.audio_thread.started.connect(self.audio_worker.play)
+            self.audio_thread.start()
+    
+        except Exception as e:
+            logging.error(f"Audio playback failed: {str(e)}")
+            self.show_status_message(f"Audio error: {str(e)}", 3000)
+    
+    class AudioWorker(QtCore.QObject):
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+    
+        def play(self):
+            try:
+                # Use pydub for better buffer management
+                from pydub import AudioSegment
+                sound = AudioSegment.from_file(self.path)
+                sound.export("temp.wav", format="wav")
+                os.system("start temp.wav")
+            except Exception as e:
+                logging.error(str(e))
+
     def handle_response(self, text):
         self.stop_loading_animation()
         current_output = self.tabs[self.tab_stack.currentIndex()]
@@ -719,15 +1228,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_status_message(f"Displayed image: {os.path.basename(image_path)}", 3000)
 
     def download_content(self):
+        """Exports chat and system session data into a styled PDF using generate_pdf_report."""
+        from bs4 import BeautifulSoup
+        from frontend.templates.generate_pdf_report import generate_pdf_report
+
         # Calculate session duration
         session_duration = datetime.now() - self.session_start_time
         hours, remainder = divmod(session_duration.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)
-
-        from bs4 import BeautifulSoup  # Add this import at the top of the file
-
-        """Exports chat and system session data into a styled PDF using generate_pdf_report."""
-        from frontend.templates.generate_pdf_report import generate_pdf_report
 
         logs_dir = os.path.join("reports", "session_reports")
         os.makedirs(logs_dir, exist_ok=True)
@@ -744,61 +1252,79 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            # Collect dynamic chat logs and sanitize HTML
-            chat_text = self.output_area.toHtml()
-            
-            # Convert HTML to plain text and strip all tags
-            soup = BeautifulSoup(chat_text, "html.parser")
-            clean_text = soup.get_text('\n')  # Convert <br> to newlines
-            
-            # Additional cleanup for HTML entities and special characters
-            clean_text = clean_text.replace('&nbsp;', ' ').replace('<', '[').replace('>', ']')
-            
-            # Capitalize first letter of each line
-            cleaned_lines = []
-            for line in clean_text.split('\n'):
-                if line.strip():
-                    cleaned_lines.append(line[0].upper() + line[1:])
-                else:
-                    cleaned_lines.append('')
+            from models.research_model import ResearchModel
+            if isinstance(self.agent, ResearchModel):
+                output = self.agent.run("EXPORT LAST PROMPT")  # Adjust this if prompt is cached differently
+                research_data = {
+                    "summary": output["summary"],
+                    "response": output["response"],
+                    "sources": output["sources"],
+                    "time_taken": output["time_taken"],
+                    "follow_up_question": output["follow_up_question"],
+                    "agent_trace": output["agent_trace"],
+                    "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "generated_by": getpass.getuser(),
+                    "country": "Netherlands",
+                    "watermark_logo_path": "frontend/assets/logo1.png",
+                    "cover_logo_path": "frontend/assets/logo.png",
+                }
+                generate_research_pdf_report(save_path, "Research Result", research_data)
+            else:
+                # Collect dynamic chat logs and sanitize HTML
+                chat_text = self.output_area.toHtml()
+                
+                # Convert HTML to plain text and strip all tags
+                soup = BeautifulSoup(chat_text, "html.parser")
+                clean_text = soup.get_text('\n')  # Convert <br> to newlines
+                
+                # Additional cleanup for HTML entities and special characters
+                clean_text = clean_text.replace('&nbsp;', ' ').replace('<', '[').replace('>', ']')
+                
+                # Capitalize first letter of each line
+                cleaned_lines = []
+                for line in clean_text.split('\n'):
+                    if line.strip():
+                        cleaned_lines.append(line[0].upper() + line[1:])
+                    else:
+                        cleaned_lines.append('')
 
-            # Build data structure expected by generate_pdf_report
-            data = {
-                "chat_history": '\n'.join(cleaned_lines),  # Use sanitized text
-                "executive_summary": "This report summarizes the SLAI session performance and system activity.",
-                "user_id": getpass.getuser(),
-                "interaction_count": len(self.response_times),
-                "total_duration": f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}",
-                "avg_response_time": f"{sum(self.response_times)/len(self.response_times):.2f}s" if self.response_times else "N/A",
-                "min_response_time": f"{min(self.response_times):.2f}s" if self.response_times else "N/A",
-                "max_response_time": f"{max(self.response_times):.2f}s" if self.response_times else "N/A",
-                "session_uptime": str(datetime.now() - self.session_start_time).split('.')[0],
-                "memory_peak": f"{self.memory_peak:.2f} GB",
-                "risk_triggered": self.risk_trigger_count,
-                "safe_ai": self.safe_ai_count,
-                "errors": self.error_count,
-                "modules_used": ", ".join(
-                    set(agent.__class__.__name__ for agent in self.agent.agent_network.values())) 
-                        if hasattr(
-                            self.agent, 
-                            "agent_network") 
-                            else 
-                            "CollaborativeAgent",
-                "export_format": "PDF",
-                "risk_logs": "No critical risks were triggered during the session.",
-                "recommendations": "Maintain active monitoring of SLAI response time.",
-                "log_file_path": "N/A",
-                "chat_export_path": "N/A",
-                "notes": "Auto-generated report from SLAI desktop session.",
-                "date_range": f"{self.session_start_time.strftime('%Y-%m-%d')} to {datetime.now().strftime('%Y-%m-%d')}",
-                "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "generated_by": getpass.getuser(),
-                "country": "Netherlands",
-                "watermark_logo_path": "frontend/assets/logo1.png",
-                "cover_logo_path": "frontend/assets/logo.png",
-            }
+                # Build data structure expected by generate_pdf_report
+                data = {
+                    "chat_history": '\n'.join(cleaned_lines),  # Use sanitized text
+                    "executive_summary": "This report summarizes the SLAI session performance and system activity.",
+                    "user_id": getpass.getuser(),
+                    "interaction_count": len(self.response_times),
+                    "total_duration": f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}",
+                    "avg_response_time": f"{sum(self.response_times)/len(self.response_times):.2f}s" if self.response_times else "N/A",
+                    "min_response_time": f"{min(self.response_times):.2f}s" if self.response_times else "N/A",
+                    "max_response_time": f"{max(self.response_times):.2f}s" if self.response_times else "N/A",
+                    "session_uptime": str(datetime.now() - self.session_start_time).split('.')[0],
+                    "memory_peak": f"{self.memory_peak:.2f} GB",
+                    "risk_triggered": self.risk_trigger_count,
+                    "safe_ai": self.safe_ai_count,
+                    "errors": self.error_count,
+                    "modules_used": ", ".join(
+                        set(agent.__class__.__name__ for agent in self.agent.agent_network.values())) 
+                            if hasattr(
+                                self.agent, 
+                                "agent_network") 
+                                else 
+                                "CollaborativeAgent",
+                    "export_format": "PDF",
+                    "risk_logs": "No critical risks were triggered during the session.",
+                    "recommendations": "Maintain active monitoring of SLAI response time.",
+                    "log_file_path": "N/A",
+                    "chat_export_path": "N/A",
+                    "notes": "Auto-generated report from SLAI desktop session.",
+                    "date_range": f"{self.session_start_time.strftime('%Y-%m-%d')} to {datetime.now().strftime('%Y-%m-%d')}",
+                    "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "generated_by": getpass.getuser(),
+                    "country": "Netherlands",
+                    "watermark_logo_path": "frontend/assets/logo1.png",
+                    "cover_logo_path": "frontend/assets/logo.png",
+                }
 
-            generate_pdf_report(save_path, data)
+                generate_pdf_report(save_path, data)
             self.show_status_message(f"PDF report saved: {os.path.basename(save_path)}", 4000)
 
         except Exception as e:
