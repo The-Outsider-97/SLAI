@@ -20,3 +20,11 @@ class TensorOps:
     @staticmethod
     def he_init(shape, fan_in):
         return np.random.randn(*shape) * math.sqrt(2.0 / fan_in)
+
+    @staticmethod
+    def xavier_init(shape, fan_in=None):
+        if fan_in is None:
+            fan_in = shape[0]
+        limit = math.sqrt(6 / fan_in)
+        return np.random.uniform(-limit, limit, size=shape).astype(np.float32)
+
