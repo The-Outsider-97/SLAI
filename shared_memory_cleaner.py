@@ -1,7 +1,6 @@
 import time
 import threading
 import psutil
-from prometheus_client import Counter, Gauge
 from logs.logger import get_logger
 
 logger = get_logger(__name__)
@@ -63,13 +62,27 @@ class SharedMemoryCleaner(threading.Thread):
         return len(expired_keys)
 
     def _adjust_interval(self, cleaned_keys):
-        """Adaptively adjust cleaning interval based on pressure."""
+        """Adaptively adjust cleaning interval based on expired keys and system load."""
+        cpu_usage = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory()
+
+        # Adjust based on expired keys (already working)
         if cleaned_keys > self.target_keys_per_minute:
-            # Too many expired items → clean more aggressively
             self.interval = max(self.min_interval, self.interval * 0.8)
         elif cleaned_keys < self.target_keys_per_minute * 0.5:
-            # Too few expired items → relax cleaning
             self.interval = min(self.max_interval, self.interval * 1.2)
+
+        # New: Adjust based on CPU and memory pressure
+        if cpu_usage > 85:
+            logger.warning(f"[Cleaner] High CPU load detected ({cpu_usage}%). Slowing cleaner.")
+            self.interval = min(self.max_interval, self.interval * 1.5)
+        
+        if memory.percent > 85:
+            logger.warning(f"[Cleaner] High memory usage detected ({memory.percent}%). Speeding up cleaner.")
+            self.interval = max(self.min_interval, self.interval * 0.7)
+
+        # Clamp interval just to be safe
+        self.interval = max(self.min_interval, min(self.interval, self.max_interval))
 
     def _maybe_reset_metrics(self):
         """Reset metrics tracking every minute."""
