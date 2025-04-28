@@ -1,6 +1,6 @@
 """
 Provides a thread-safe, in-memory shared storage mechanism with features
-tailored for AI model coordination or data sharing within a single process.
+tailored for AI model coordination and data sharing within a single process.
 """
 
 import heapq
