@@ -25,8 +25,8 @@ class FeedForward:
         # Initialize parameters with configurable scheme
         init_fn = {
             'he': TensorOps.he_init,
-            'xavier': TensorOps.xavier_init,
-            'lecun': TensorOps.lecun_init
+            'xavier': TensorOps.xavier_uniform,
+            'lecun': TensorOps.lecun_normal
         }.get(initializer, TensorOps.he_init)
 
         # First linear transformation
