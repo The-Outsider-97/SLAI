@@ -3,7 +3,6 @@ from PyQt5.QtCore import QTimer
 #from PyQt5.QtGui import 
 from datetime import datetime, timedelta
 import re
-import QtCore
 
 class AuditScheduler:
     def __init__(self, parent, output_callback, status_callback):
