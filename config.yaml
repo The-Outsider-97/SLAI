@@ -48,6 +48,13 @@ agent-network:
     class: KnowledgeAgent
     path: src.agents.knowledge_agent
     init_args: {}
+    cache_size: 1500
+    similarity_threshold: 0.25
+    ontology:
+      max_depth: 3
+      inherit_types: true
+    rules:
+      apply_during_retrieval: true
 
   learning:
     class: LearningAgent
