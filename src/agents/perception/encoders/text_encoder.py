@@ -1,6 +1,8 @@
 import math
 import numpy as np
 
+from typing import List
+
 from src.agents.perception.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer  
 
@@ -66,6 +68,16 @@ class TextEncoder:
         }
         if transformer_weights:
             self.transformer.load_pretrained(transformer_weights)
+
+    def load_glove_embeddings(self, glove_path: str, vocab: List[str]):
+        """Load GloVe vectors and assign to the embedding matrix"""
+        import json
+        with open(glove_path, 'r') as f:
+            glove_data = json.load(f)
+        
+        for idx, word in enumerate(vocab):
+            if word in glove_data:
+                self.embedding.data[idx] = np.array(glove_data[word])
 
     def forward(self, x, style_id=0):
         """Forward pass with dropout and dynamic sequence handling"""
