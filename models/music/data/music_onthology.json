@@ -1,0 +1,305 @@
+{
+    "nodes": {
+        "instrument": {
+            "piano": {
+                "is_a": ["keyboard_instrument"],
+                "has_part": ["keys", "pedals", "soundboard"],
+                "has_technique": ["sight_reading", "finger_independence", "pedaling"],
+                "used_in": ["classical", "jazz", "pop"]
+            },
+            "guitar": {
+                "is_a": ["string_instrument"],
+                "has_part": ["fretboard", "pickups", "soundhole"],
+                "has_technique": ["strumming", "fingerpicking", "bending"],
+                "used_in": ["rock", "blues", "flamenco"]
+            },
+            "violin": {
+                "is_a": ["string_instrument"],
+                "has_part": ["bow", "bridge", "chinrest"],
+                "has_technique": ["vibrato", "pizzicato", "double_stops"],
+                "used_in": ["classical", "folk", "bluegrass"]
+            }
+        },
+        "music_theory": {
+            "harmony": {
+                "related_to": ["chord_progressions", "voice_leading", "counterpoint", "tonality", "modulation", "scales", "intervals", "chord", "modal interchange"],
+                "requires_skill": ["ear_training", "keyboard_proficiency", "theory_analysis"]
+            },
+            "melody": {
+                "related_to": ["contour", "phrasing", "ornamentation", "scales", "modes", "countermelody"],
+                "developed_through": ["sight_singing", "improvisation"]
+            },
+            "rhythm": {
+                "related_to": ["meter", "syncopation", "polyrhythm", "phrasing", "metric modulation"],
+                "found_in": ["drumming", "dance_music", "afrobeat"]
+            },
+            "counterpoint": {
+                    "related_to": ["harmony", "melody", "voice_leading"],
+                    "requires_skill": ["species_counterpoint", "ear_training"]
+            },
+            "scales": {
+                "related_to": ["modes", "melody", "harmony", "improvisation"],
+                "requires_skill": ["instrument_familiarity", "scale_practice"]
+            },
+            "chord_progressions": {
+                "related_to": ["harmony", "modulation", "tonality", "chord"],
+                "requires_skill": ["keyboard_proficiency", "ear_training"]
+            },
+            "interval": {
+                "related_to": ["harmony", "melody", "scales", "chord"],
+                "requires_skill": ["ear_training", "sight_singing", "instrument_tuning"]
+            },
+            "dynamics": {
+                "related_to": ["expression", "articulation"],
+                "requires_skill": ["dynamic_control", "interpretation"]
+            },
+            "articulation": {
+                "related_to": ["expression", "phrasing", "dynamics"],
+                "requires_skill": ["bowing_techniques", "tonguing", "attack_precision"]
+            },
+            "form": {
+                "related_to": ["theme and variation", "structure", "phrasing"],
+                "requires_skill": ["composition", "analysis"]
+            },
+            "timbre": {
+                "related_to": ["orchestration", "texture", "instrumentation"],
+                "requires_skill": ["instrument_familiarity", "tone_production"]
+            },
+            "texture": {
+                "related_to": ["harmony", "counterpoint", "orchestration"],
+                "requires_skill": ["arranging", "ensemble_balance"]
+            },
+            "transposition": {
+                "related_to": ["scales", "modulation", "intervals"],
+                "requires_skill": ["sight_transposing", "interval_recognition"]
+            },
+            "modulation": {
+                "related_to": ["harmony", "tonality", "chord_progressions"],
+                "requires_skill": ["theory_analysis", "ear_training"]
+            },
+            "orchestration": {
+                "related_to": ["timbre", "texture", "instrumentation"],
+                "requires_skill": ["instrumentation_knowledge", "arranging", "score_reading"]
+            },
+            "notation": {
+                "related_to": ["theory_analysis", "composition", "sight_reading"],
+                "requires_skill": ["music_writing", "symbol_recognition"]
+            },
+            "syncopation": {
+                "related_to": ["rhythm", "polyrhythm"],
+                "requires_skill": ["rhythmic_precision", "timing"]
+            },
+            "polyrhythm": {
+                "related_to": ["rhythm", "syncopation", "metric_modulation"],
+                "requires_skill": ["rhythmic_independence", "coordination"]
+            },
+            "cadence": {
+                "related_to": ["harmony", "chord_progressions", "tonality"],
+                "requires_skill": ["theory_analysis", "ear_training"]
+            },
+            "ornamentation": {
+                "related_to": ["melody", "phrasing", "expression"],
+                "requires_skill": ["expressive_playing", "historical_performance_practice"]
+            },
+            "pitch": {
+                "related_to": ["melody", "harmony", "interval"],
+                "requires_skill": ["ear_training", "intonation_control"]
+            },
+            "modes": {
+                "related_to": ["scales", "melody", "modal_interchange"],
+                "requires_skill": ["scale_practice", "mode_identification"]
+            },
+            "consonance": {
+                "related_to": ["harmony", "counterpoint", "chord"],
+                "requires_skill": ["ear_training", "harmonic_analysis"]
+            },
+            "dissonance": {
+                "related_to": ["harmony", "counterpoint", "chromaticism"],
+                "requires_skill": ["ear_training", "harmonic_resolution"]
+            },
+            "chord": {
+                "related_to": ["harmony", "chord_progressions", "intervals"],
+                "requires_skill": ["voicing", "inversion_recognition"]
+            },
+            "expression": {
+                "related_to": ["dynamics", "articulation", "phrasing"],
+                "requires_skill": ["dynamic_control", "emotional_interpretation"]
+            },
+            "tempo": {
+                "related_to": ["rhythm", "meter", "phrasing"],
+                "requires_skill": ["tempo_control", "metronome_practice"]
+            },
+            "meter": {
+                "related_to": ["rhythm", "phrasing"],
+                "requires_skill": ["sight_reading", "counting"]
+            },
+            "phrasing": {
+                "related_to": ["melody", "rhythm"],
+                "requires_skill": ["breath_control", "expression"]
+            },
+            "tonality": {
+                "related_to": ["harmony", "modulation", "scales"],
+                "requires_skill": ["ear_training", "theory_analysis"]
+            },
+            "atonality":  {
+                "related_to": ["harmony", "chromaticism", "twelve-tone technique", "aleatoric music"],
+                "requires_skill": ["atonal_hearing", "advanced_theory_analysis"]
+            },  
+            "voice leading": {
+                "related_to": ["harmony", "counterpoint"],
+                "requires_skill": ["theory_analysis", "keyboard_proficiency"]
+            },
+            "chromaticism": {
+                "related_to": ["harmony", "melody", "modulation", "atonality", "microtonality"],
+                "requires_skill": ["ear_training", "sight_reading"]
+            },
+            "improvisation": {
+                "related_to": ["melody", "scales", "expression"],
+                "requires_skill": ["scale_practice", "ear_training"]
+            },
+            "theme and variation": {
+                "related_to": ["melody", "form", "improvisation"],
+                "requires_skill": ["variation_techniques", "melodic_development"]
+            },
+            "countermelody": {
+                "related_to": ["melody", "counterpoint"],
+                "requires_skill": ["melodic_invention", "polyphonic_hearing"]
+            },
+            "quartal harmony": {
+                "related_to": ["harmony", "modal_interchange", "jazz_harmony"],
+                "requires_skill": ["voicing_fourths", "harmonic_analysis"]
+            },
+            "metric modulation": {
+                "related_to": ["rhythm", "polyrhythm", "tempo"],
+                "requires_skill": ["rhythmic_precision", "advanced_timing"]
+            },
+            "aleatoric music": {
+                "related_to": ["improvisation", "atonality", "contemporary_music"],
+                "requires_skill": ["performer_flexibility", "graphic_score_reading"]
+            },
+            "microtonality": {
+                "related_to": ["chromaticism", "intonation", "alternative_scales"],
+                "requires_skill": ["microtonal_ear_training", "tuning_sensitivity"]
+            },
+            "extended techniques": {
+                "related_to": ["orchestration", "timbre", "contemporary_music"],
+                "requires_skill": ["sound_exploration", "instrumental_mastery"]
+            },
+            "twelve-tone technique": {
+                "related_to": ["atonality", "serialism", "harmony"],
+                "requires_skill": ["row_construction", "strict_ordering"]
+            },
+            "isorhythm": {
+                "related_to": ["rhythm", "counterpoint", "medieval_music"],
+                "requires_skill": ["pattern_recognition", "rhythmic_composition"]
+            },
+            "hocket": {
+                "related_to": ["counterpoint", "rhythm", "medieval_music"],
+                "requires_skill": ["ensemble_coordination", "rhythmic_precision"]
+            },
+            "polytonality": {
+                "related_to": ["tonality", "harmony", "contemporary_music"],
+                "requires_skill": ["dual_key_perception", "harmonic_analysis"]
+            },
+            "spectral music": {
+                "related_to": ["harmony", "orchestration", "timbre"],
+                "requires_skill": ["overtone_analysis", "spectral_listening"]
+            },
+            "negative harmony": {
+                "related_to": ["harmony", "tonality", "modal_interchange"],
+                "requires_skill": ["inversion_thinking", "harmonic_transformation"]
+            },
+            "modal interchange": {
+                "related_to": ["harmony", "tonality", "chord_progressions"],
+                "requires_skill": ["mode_identification", "harmonic_analysis"]
+            },
+            "beat": {
+              "related_to": ["rhythm", "tempo", "meter"],
+              "requires_skill": ["timing", "pulse_recognition"]
+            },
+            "note": {
+              "related_to": ["pitch", "rhythm", "melody"],
+              "requires_skill": ["sight_reading", "ear_training"]
+            },
+            "bar": {
+              "related_to": ["meter", "rhythm", "phrasing"],
+              "requires_skill": ["counting", "time_signature_reading"]
+            },
+            "staff": {
+              "related_to": ["notation", "clef", "pitch"],
+              "requires_skill": ["music_reading", "notation_fluency"]
+            },
+            "clef": {
+              "related_to": ["staff", "notation", "instrument_range"],
+              "requires_skill": ["clef_recognition", "transposition"]
+            },
+            "scale": {
+              "related_to": ["modes", "melody", "harmony"],
+              "requires_skill": ["scale_practice", "mode_identification"]
+            },
+            "phrase": {
+              "related_to": ["melody", "rhythm", "form"],
+              "requires_skill": ["phrasing", "expression"]
+            }
+        },
+
+
+        "genre": {
+            "jazz": {
+                "subgenre_of": ["improvised_music"],
+                "uses": ["swing_rhythm", "extended_chords", "call_and_response"],
+                "associated_with": ["saxophone", "double_bass", "improvisation"]
+            },
+            "electronic": {
+                "subgenre_of": ["modern_music"],
+                "uses": ["synthesizers", "daw_software", "sidechain_compression"],
+                "associated_with": ["edm_festivals", "djing", "sound_design"]
+            }
+        },
+        "skill": {
+            "sight_reading": {
+                "improves": ["musical_fluency"],
+                "required_for": ["orchestral_performance", "session_musician"]
+            },
+            "improvisation": {
+                "developed_through": ["scale_practice", "ear_training"],
+                "critical_in": ["jazz", "blues", "indian_classical"]
+            }
+        },
+        "technology": {
+            "daw": {
+                "short_for": "Digital Audio Workstation",
+                "examples": ["Ableton", "Logic Pro", "FL Studio"],
+                "used_for": ["recording", "mixing", "mastering"]
+            },
+            "midi_controller": {
+                "types": ["keyboard", "pad_grid", "wind_controller"],
+                "connects_via": ["usb", "bluetooth"],
+                "controls": ["virtual_instruments", "effects_parameters"]
+            }
+        }
+    },
+    "relationships": [
+        {"from": "piano", "to": "classical", "type": "common_in_genre"},
+        {"from": "guitar", "to": "power_chords", "type": "uses_technique"},
+        {"from": "harmony", "to": "chord_progressions", "type": "governs"},
+        {"from": "jazz", "to": "improvisation", "type": "requires"},
+        {"from": "daw", "to": "electronic", "type": "enables_creation_of"},
+        {"from": "sight_reading", "to": "musical_fluency", "type": "strengthens"},
+        {"from": "improvisation", "to": "scale_practice", "type": "developed_through"},
+        {"from": "edm_festivals", "to": "djing", "type": "associated_with"},
+        {"from": "edm_festivals", "to": "sound_design", "type": "associated_with"},
+        {"from": "counterpoint", "to": "harmony", "type": "part_of"},
+        {"from": "scales", "to": "harmony", "type": "related_to"},
+        {"from": "chord_progressions", "to": "harmony", "type": "related_to"},
+        {"from": "intervals", "to": "harmony", "type": "related_to"},
+        {"from": "meter", "to": "rhythm", "type": "related_to"},
+        {"from": "syncopation", "to": "rhythm", "type": "related_to"},
+        {"from": "polyrhythm", "to": "rhythm", "type": "related_to"},
+        {"from": "tonality", "to": "music_theory", "type": "part_of"},
+        {"from": "polytonality", "to": "music_theory", "type": "part_of"},
+        {"from": "spectral music", "to": "music_theory", "type": "part_of"},
+        {"from": "negative harmony", "to": "music_theory", "type": "part_of"},
+        {"from": "modal interchange", "to": "music_theory", "type": "part_of"}
+    ]
+}
