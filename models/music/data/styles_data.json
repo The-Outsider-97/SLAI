@@ -1,0 +1,17 @@
+{
+    "jazz": "Jazz is characterized by improvisation, syncopation, swing rhythms, and harmonic complexity. Subgenres include bebop, cool jazz, and fusion. Key artists: Miles Davis, John Coltrane.",
+    "classical": "Classical music emphasizes formal structure, orchestration, and dynamics. Eras include Baroque (Bach), Romantic (Beethoven), and Modern (Stravinsky).",
+    "pop": "Pop music prioritizes catchy melodies, verse-chorus structure, and electronic production. Examples include singer-songwriter, synth-pop, and dance-pop.",
+    "blues": "Blues uses 12-bar progressions, blue notes, and call-and-response. Substyles: Delta blues, Chicago blues, and electric blues (B.B. King).",
+    "rock": "Rock features electric guitars, driving rhythms, and verse-chorus-bridge structures. Subgenres: classic rock, punk, grunge, and alternative.",
+    "folk": "Acoustic instrumentation and storytelling lyrics. Includes traditions like Americana, Celtic folk, and protest folk (Bob Dylan).",
+    "electronic": "Created using synthesizers and digital tools. Styles: house, techno, ambient, and EDM. Pioneers: Daft Punk, Aphex Twin.",
+    "hiphop": "Rhythmic vocals (rapping) over beats. Elements: sampling, turntablism. Subgenres: boom-bap, trap, lo-fi hiphop.",
+    "reggae": "Offbeat rhythms, bass-heavy grooves, and social themes. Variants: roots reggae (Bob Marley), dancehall, and dub.",
+    "country": "Story-driven lyrics with twangy guitars. Includes outlaw country (Johnny Cash), bluegrass, and modern Nashville pop-country.",
+    "metal": "High distortion, aggressive vocals, and complex riffing. Styles: thrash (Metallica), doom, black metal, and progressive metal.",
+    "funk": "Syncopated grooves, slap bass, and horn sections. Key figures: James Brown, Parliament-Funkadelic.",
+    "soul_rnb": "Emotional vocals over lush harmonies. Includes Motown (Aretha Franklin), neo-soul (Erykah Badu), and contemporary R&B.",
+    "latin": "Rhythms like salsa, bossa nova, and tango. Features percussion (congas, claves) and dance-oriented structures.",
+    "world": "Traditional music from global cultures: Indian ragas, West African polyrhythms, Indonesian gamelan, and Arabic maqam."
+}
