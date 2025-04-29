@@ -142,7 +142,6 @@ class MusicTheoryEngine:
 
 
     # --- Core Conversion & Utility Methods ---
-
     def _note_name_to_midi(self, note_name):
         """Converts note name (e.g., 'C#4') to MIDI pitch number."""
         try:
