@@ -243,6 +243,7 @@ alignment_thresholds:
 
 rollback:
   enabled: true
+  strategy: "git_versioned"
   backup_dir: "models/backups/"
 
 paths:
