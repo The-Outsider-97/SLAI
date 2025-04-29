@@ -3,9 +3,9 @@ BASE_INFRA.PY - Core Infrastructure Components
 Implements version control, rollback, and hyperparameter tuning foundations
 """
 
-import logging
 import subprocess
 import hashlib
+import logging
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -16,8 +16,9 @@ from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, d
 from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity
 from src.tuning.tuner import HyperparamTuner as BaseTuner
 from src.tuning.bayesian_search import BayesianSearch
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 logger.setLevel(logging.INFO)
 
 class RollbackSystem:
@@ -25,8 +26,8 @@ class RollbackSystem:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.backup_dir = Path(config['rollback']['backup_dir'])
-        self.model_dir = Path(config['paths']['models'])
+        self.backup_dir = Path(config.get('rollback', {}).get('backup_dir', 'models/backups/'))
+        self.model_dir = Path(config.get('paths', {}).get('models', 'models/'))
         self._verify_directories()
 
     def _verify_directories(self):
@@ -144,12 +145,16 @@ class InfrastructureManager:
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, Any]:
         """Load and validate configuration file"""
-        config_file = Path(config_path)
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-            
-        with open(config_file, 'r') as f:
-            return json.load(f)
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Validate required sections
+        required_sections = ['rollback', 'paths']
+        for section in required_sections:
+            if section not in config:
+                raise ValueError(f"Missing required config section: {section}")
+        
+        return config
 
     def automated_tuning_cycle(self):
         """Complete tuning cycle with safety mechanisms"""
