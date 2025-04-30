@@ -1,4 +1,5 @@
 import math
+import json
 import numpy as np
 
 from typing import List
@@ -17,6 +18,11 @@ class TextEncoder:
         positional_encoding="learned",
         max_seq_len=512
     ):
+        encoder = TextEncoder()
+        with open("data/embeddings/glove.6B.100d.json") as f:
+            glove_data = json.load(f)
+        vocab = list(glove_data.keys())  # Or your actual vocabulary list
+        encoder.load_glove_embeddings("data/embeddings/glove.6B.100d.json", vocab)
         self.embed_dim = embed_dim
         self.dropout_rate = dropout_rate
         self.training = True
