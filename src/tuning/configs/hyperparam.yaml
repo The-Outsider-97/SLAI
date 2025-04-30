@@ -94,6 +94,15 @@ hyperparameters:
     max: 0.999
     steps: 5
 
+  - name: TaskA
+    type: int
+    min: 0
+    max: 2
+
+  - name: TaskB
+    type: int
+    min: 0
+    max: 3
 
 # ==========================
 # Tuning Strategy Settings
