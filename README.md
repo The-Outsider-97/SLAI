@@ -151,6 +151,7 @@ Note: If you see an error about execution policy:
    pip install seaborn
    pip install reportlab
    pip install mlxtend
+   pip install cryptography
    ```
 
 5. Run Model:
