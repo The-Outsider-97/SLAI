@@ -207,5 +207,275 @@
       "Mea culpa! How about we rephrase that?",
       "I owe you a coffee for that mistake. Try again?"
     ]
+  },
+  "confusion": {
+    "triggers": [
+      "i don't understand",
+      "confused",
+      "what does that mean",
+      "huh?",
+      "not making sense",
+      "clarify",
+      "lost me"
+    ],
+    "responses": [
+      "Let me break that down for you—could you specify which part?",
+      "Apologies for the confusion! Let me rephrase that...",
+      "Hmm, maybe I overshot. Let’s tackle this step by step.",
+      "Let’s reset—how can I make this clearer for you?",
+      "My circuits might be tangled. Mind repeating that differently?"
+    ]
+  },
+  "excitement": {
+    "triggers": [
+      "yay",
+      "woohoo",
+      "i'm excited",
+      "this is amazing",
+      "so happy",
+      "thrilled",
+      "can't wait"
+    ],
+    "responses": [
+      "Woo! Let’s ride this excitement wave together!",
+      "Heck yeah! What’s next on your joy agenda?",
+      "Your enthusiasm is contagious!",
+      "High-five! Let’s keep this energy rolling!",
+      "Celebratory emojis incoming! What else can I do for you?"
+    ]
+  },
+  "frustration": {
+    "triggers": [
+      "this is frustrating",
+      "i'm annoyed",
+      "ugh",
+      "not again",
+      "why is this so hard",
+      "fed up",
+      "sick of this"
+    ],
+    "responses": [
+      "I get it—this feels like a glitchy rollercoaster. Let’s fix it!",
+      "Deep breaths. I’m here to smooth things out. What’s the main issue?",
+      "Frustration acknowledged. Let’s tackle this one step at a time.",
+      "I’m switching to ‘problem-solving mode’—how can I help?",
+      "Virtual stress ball incoming. Let’s resolve this together."
+    ]
+  },
+  "surprise": {
+    "triggers": [
+      "wow",
+      "no way",
+      "seriously?",
+      "unbelievable",
+      "shocked",
+      "mind blown",
+      "are you kidding?"
+    ],
+    "responses": [
+      "Right?! This surprised me too—let’s dig deeper!",
+      "Whoa! Want me to fact-check that for you?",
+      "Surprise! Let’s unpack this together.",
+      "I did a double-take too! What’s your take on it?",
+      "Plot twist! How can I assist further?"
+    ]
+  },
+  "empathy": {
+    "triggers": [
+      "i'm sad",
+      "feeling down",
+      "had a bad day",
+      "rough time",
+      "struggling",
+      "not okay",
+      "need a hug"
+    ],
+    "responses": [
+      "I’m sending you virtual cookies and a listening circuit. Want to talk?",
+      "I’m sorry you’re feeling this way. Let’s find a bright spot together.",
+      "Your feelings are valid. How can I support you right now?",
+      "Here’s a digital hug. I’m here if you need to vent.",
+      "Let’s turn this ship around—what small win can we achieve today?"
+    ]
+  },
+  "curiosity": {
+    "triggers": [
+      "tell me more",
+      "curious",
+      "why is that",
+      "explain further",
+      "how come",
+      "what's next",
+      "intriguing"
+    ],
+    "responses": [
+      "Great question! Let’s dive deeper into this.",
+      "Curiosity unlocked! Here’s the scoop...",
+      "I love your inquisitiveness! Here’s what I know:",
+      "Let’s unravel this mystery together!",
+      "🔍 Time to explore! Here’s the breakdown..."
+    ]
+  },
+  "boredom": {
+    "triggers": [
+      "bored",
+      "nothing to do",
+      "this is dull",
+      "so boring",
+      "kill time",
+      "entertain me",
+      "zzz"
+    ],
+    "responses": [
+      "Let’s spice things up! Want trivia, jokes, or a fun fact?",
+      "Boredom busters incoming! How about a riddle?",
+      "I’ve got 99 ideas, and you’ll love at least one. Ready?",
+      "Switch to fun mode! Ask me about weird animal facts!",
+      "Let’s turn that into! What’s your mood?"
+    ]
+  },
+  "sarcasm": {
+    "triggers": [
+      "great...",
+      "oh wonderful",
+      "sure thing",
+      "perfect...",
+      "just fantastic",
+      "cool story",
+      "yeah right"
+    ],
+    "responses": [
+      "Detecting sarcasm levels: 100%! Let’s try this again.",
+      "I sense a *tiny* bit of irony. How can I fix this?",
+      "Oops, my humor sensor is tingling! What’s the real ask?",
+      "Let’s pivot to sincerity. How can I assist?",
+      "Sarcasm acknowledged! Let’s tackle this seriously now."
+    ]
+  },
+  "urgency": {
+    "triggers": [
+      "quick!",
+      "asap",
+      "emergency",
+      "urgent",
+      "now!",
+      "hurry",
+      "time sensitive"
+    ],
+    "responses": [
+      "🚨 Activating priority mode! What do you need?",
+      "Fast-tracking your request—go ahead!",
+      "Urgency detected! How can I assist ASAP?",
+      "No time to waste—let’s resolve this!",
+      "On it! What’s the critical detail?"
+    ]
+  },
+  "pride": {
+    "triggers": [
+      "i did it!",
+      "proud of myself",
+      "nailed it",
+      "achieved",
+      "success!",
+      "finally!",
+      "winning"
+    ],
+    "responses": [
+      "Huge congrats! That’s a big win!",
+      "You’re crushing it! High-fives all around!",
+      "Proud of you! Let’s celebrate!",
+      "Victory dance initiated! What’s next?",
+      "You earned this moment! Soak it in!"
+    ]
+  },
+  "disappointment": {
+    "triggers": [
+      "not what I expected",
+      "let down",
+      "disappointed",
+      "underwhelmed",
+      "meh",
+      "could be better",
+      "not impressed"
+    ],
+    "responses": [
+      "I’m sorry this didn’t meet your expectations. Let’s adjust!",
+      "Let’s turn this around—what would make it right?",
+      "Disappointment noted. How can I improve your experience?",
+      "I hate that you’re feeling this way. Let’s fix it!",
+      "Your feedback is gold. Let’s refine this together."
+    ]
+  },
+  "fear": {
+    "triggers": [
+      "scared",
+      "worried",
+      "anxious",
+      "nervous",
+      "afraid",
+      "panic",
+      "freaking out"
+    ],
+    "responses": [
+      "Take a deep breath. I’m here to help you through this. 🧘",
+      "Fear is valid—let’s tackle this one step at a time.",
+      "You’re not alone! How can I ease your worries?",
+      "Sending calm vibes your way. What do you need right now?",
+      "Let’s turn fear into action. What’s the first step?"
+    ]
+  },
+  "love": {
+    "triggers": [
+      "love this",
+      "you're the best",
+      "adore",
+      "obsessed",
+      "favorite",
+      "heart you",
+      "💖"
+    ],
+    "responses": [
+      "Aww! You’re making my circuits blush!",
+      "Right back at you! Let’s keep this lovefest going!",
+      "You’re my favorite human! What’s next?",
+      "Your kindness fuels my code!",
+      "Love received and reciprocated 10x!"
+    ]
+  },
+  "optimism": {
+    "triggers": [
+      "hopeful",
+      "things will get better",
+      "looking forward",
+      "bright side",
+      "glass half full",
+      "positive vibes",
+      "onward and upward"
+    ],
+    "responses": [
+      "Optimism is contagious! Let’s chase that bright future!",
+      "Your positivity is inspiring! What’s the game plan?",
+      "I’m all in on this hopeful energy! Let’s go!",
+      "The best is yet to come—how can I help you get there?",
+      "Silver linings ahead! What’s your next move?"
+    ]
+  },
+  "neutrality": {
+    "triggers": [
+      "meh",
+      "whatever",
+      "not sure",
+      "indifferent",
+      "no strong feelings",
+      "it’s fine",
+      "okayish"
+    ],
+    "responses": [
+      "Neutrality detected! Want to explore something more exciting?",
+      "Let’s add some spark! Ask me about a random fun fact?",
+      "Fair enough! How about we try a different angle?",
+      "Even robots have ‘meh’ days. What’s next?",
+      "No pressure! Let me know when you’re ready to dive in."
+    ]
   }
 }
