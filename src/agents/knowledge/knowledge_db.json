@@ -1,56 +1,13 @@
 {
-  "knowledge": [
-    [["SLAI", "is", "intelligent agent"], 0.95],
-    [["intelligent agent", "has", "reasoning capabilities"], 0.9],
-    [["reasoning agent", "uses", "rules"], 0.85],
-    [["reasoning agent", "uses", "facts"], 0.88],
-    [["rule-based reasoning", "is", "deductive"], 0.93],
-    [["probabilistic reasoning", "is", "uncertain"], 0.9],
-    [["language model", "is", "neural network"], 0.92],
-    [["SLAI", "includes", "language model"], 0.88],
-    [["SLAI", "supports", "multi-agent communication"], 0.9],
-    [["multi-agent system", "requires", "collaboration"], 0.87],
-    [["safe ai", "monitors", "risk triggers"], 0.93],
-    {
-      "['subject', 'predicate', 'object']": 0.8
-    }
-  ],
-
-  "rules": [
-    [
-      "Deductive_Reasoning_Chain",
-      "lambda kb: {('SLAI', 'has', 'reasoning capabilities'): 0.8} if ('SLAI', 'is', 'intelligent agent') in kb and ('intelligent agent', 'has', 'reasoning capabilities') in kb else {}",
-      0.9
-    ],
-    [
-      "SafeAI_Monitoring",
-      "lambda kb: {('SLAI', 'monitors', 'risk triggers'): 0.75} if ('safe ai', 'monitors', 'risk triggers') in kb and ('SLAI', 'includes', 'safe ai') in kb else {}",
-      0.85
-    ]
-  ],
-
-  "rule_weights": {
-    "Deductive_Reasoning_Chain": 0.9,
-    "SafeAI_Monitoring": 0.85
-  },
-
-  "bayesian_network": {
-    "nodes": ["risk_triggered", "safe_ai_active"],
-    "edges": [["safe_ai_active", "risk_triggered"]],
-    "cpt": {
-      "safe_ai_active": {
-        "prior": 0.8
-      },
-      "risk_triggered": {
-        "true": {
-          "true": 0.7,
-          "false": 0.3
-        },
-        "false": {
-          "true": 0.2,
-          "false": 0.8
-        }
-      }
-    }
-  }
+    "knowledge": {},
+    "rules": [
+        ["IdentityRule", "identity_rule", 1.0],
+        ["TransitiveIsRule", "transitive_rule", 0.8],
+        ["MLDiscoveredRule:Material→Conductivity", "material_conductivity_rule", 0.65]],
+    "rule_weights": {
+        "IdentityRule": 1.0,
+        "TransitiveIsRule": 0.8,
+        "MLDiscoveredRule:Material→Conductivity": 0.65
+    },
+        "bayesian_network": {}
 }
