@@ -150,6 +150,7 @@ Note: If you see an error about execution policy:
    pip install sounddevice
    pip install seaborn
    pip install reportlab
+   pip install mlxtend
    ```
 
 5. Run Model:
