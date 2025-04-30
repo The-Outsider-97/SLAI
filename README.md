@@ -152,6 +152,7 @@ Note: If you see an error about execution policy:
    pip install reportlab
    pip install mlxtend
    pip install cryptography
+   pip install sentence_transformers
    ```
 
 5. Run Model:
