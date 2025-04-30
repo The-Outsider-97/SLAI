@@ -101,12 +101,6 @@ agent-network:
     network_size': 128
     max_task_pool': 50
 
-  evaluation:
-    class: EvaluationAgent
-    path: src.agents.evaluation_agent
-    init_args: {}
-    threshold: 0.9
-
   safety:
     class: SafeAI_Agent
     path: src.agents.safety_agent
@@ -129,7 +123,7 @@ agent-network:
         - vision
         - text
         - audio
-      embed_dim: 512
+      embed_dim: 100
       projection_dim: 256
       batch_size: 8
       learning_rate: 0.001
@@ -139,6 +133,12 @@ agent-network:
     class: PlanningAgent
     path: src.agents.planning_agent
     init_args: {}
+
+  evaluation:
+    class: EvaluationAgent
+    path: src.agents.evaluation_agent
+    init_args: {}
+    threshold: 0.9
 
   reasoning:
     class: ReasoningAgent
