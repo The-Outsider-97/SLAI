@@ -17,8 +17,8 @@ class AuditScheduler:
         self.auditor = CodeAuditor("src/")
         issues = self.auditor.run_audit()
         new_issues = self.auditor.log_issues(issues)
-        self.show_status_message(f"Audit completed. Found {len(new_issues)} issues.", 5000)
-        self.output_area.append(f"<font color='gold'>[AUDIT]</font> Scan completed with {len(new_issues)} findings.<br>")
+        self.status_callback(f"Audit completed. Found {len(new_issues)} issues.", 5000)
+        self.output_callback(f"<font color='gold'>[AUDIT]</font> Scan completed with {len(new_issues)} findings.<br>")
 
     def schedule_audit(self):
         """Schedule audit for later time"""
