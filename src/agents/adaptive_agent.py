@@ -602,34 +602,3 @@ class AdaptiveAgent:
             return self.execute({'type': 'evaluate'})
         else:
             return {"status": "unrecognized_message"}
-
-# Example usage
-if __name__ == "__main__":
-    # Initialize agent
-    agent = AdaptiveAgent({
-        'learning_rate': 0.02,
-        'exploration_rate': 0.2,
-        'memory_capacity': 500
-    })
-    
-    # Training example
-    print("Starting training...")
-    agent.execute({'type': 'train', 'episodes': 20})
-    
-    # Evaluation example
-    print("\nEvaluating...")
-    result = agent.execute({'type': 'evaluate', 'eval_episodes': 5})
-    print("Evaluation result:", result)
-    
-    # Memory example
-    print("\nTesting memory...")
-    agent.update_memory("important_value", 42)
-    print("Retrieved value:", agent.retrieve_memory("important_value"))
-    
-    # Routing example
-    print("\nTesting routing...")
-    routing_table = {
-        "train": agent.execute,
-        "eval": agent.execute
-    }
-    print("Routing result:", agent.route_message("train now", routing_table))
