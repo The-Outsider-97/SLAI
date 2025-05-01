@@ -29,6 +29,12 @@ class DeadlineAwareScheduler(TaskScheduler):
             'backoff_factor': 1.5
         }
         self.task_history = defaultdict(list)
+        #self.agent.route_message({
+        #    'message_id': '123',
+        #    'content': 'urgent_task',
+        #    'ttl': 30,  # 30 second deadline
+        #    'metadata': {'priority': 2}
+        #})
 
     def schedule(self,
                  tasks: List[Dict],
