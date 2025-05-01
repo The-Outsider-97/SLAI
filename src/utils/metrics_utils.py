@@ -1,14 +1,13 @@
-import logging
 import numpy as np
 from typing import Dict, Any, Tuple, List
 
-from src.utils.agent_factory import AgentFactory
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 class MetricBridge:
     from src.utils.system_optimizer import SystemOptimizer
+    from src.utils.agent_factory import AgentFactory
     """New class to handle feedback routing"""
     def __init__(self, agent_factory: AgentFactory, optimizer: SystemOptimizer):
         self.factory = agent_factory
