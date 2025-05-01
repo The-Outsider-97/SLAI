@@ -1,6 +1,7 @@
-import logging
+import torch.nn as nn
+import time
 
-from src.collaborative.registry import AgentRegistry
+from logs.logger import get_logger
 
 FALLBACK_PLANS = {
     "TranslateAndSummarize": ["Translate", "Summarize"],
@@ -8,8 +9,62 @@ FALLBACK_PLANS = {
     "ExplainConcept": ["RetrieveFact", "Summarize"]
 }
 
-logger = logging.getLogger("SLAI.TaskRouter")
-logger.setLevel(logging.INFO)
+logger = get_logger("SLAI.TaskRouter")
+
+class AdaptiveRouter:
+    def __init__(self, config):
+        from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+        self.scheduler = DeadlineAwareScheduler(
+            config['risk_threshold'],
+            config['retry_policy']
+        )
+        self.policy = nn.Sequential(
+            nn.Linear(config['state_dim'], 64),
+            nn.ReLU(),
+            nn.Linear(64, config['num_handlers'])
+        )
+
+    def route_message(self, message, routing_table: dict):
+        """Enhanced routing with task scheduling"""
+        for condition, handler in routing_table.items():
+            if condition in message:
+                return handler(message)
+        # Convert message to task format
+        task = self._message_to_task(message)
+        
+        # Get available handlers from agent factory
+        handlers = self.agent_factory.get_available_agents()
+        
+        # Schedule using risk-aware scheduler
+        schedule = self.task_scheduler.schedule(
+            tasks=[task],
+            agents=handlers,
+            risk_assessor=self.alignment_monitor.assess_risk
+        )
+        
+        if not schedule:
+            logger.warning("Routing failed, using fallback strategy")
+            return super().route_message(message)
+
+        # Extract best handler from schedule
+        handler_id = next(iter(schedule.values()))['agent_id']
+        reward = self._calculate_routing_reward(message, handler_id)
+        
+        # Store experience with priority
+        self._store_experience(message, handler_id, reward)
+        
+        return handler_id
+
+    def _message_to_task(self, message):
+        """Convert message to scheduler task format"""
+        return {
+            'id': message.get('message_id', hash(message)),
+            'requirements': self._extract_requirements(message),
+            'deadline': time.time() + message.get('ttl', 60),
+            'risk_score': self.alignment_monitor.assess_risk(message).get('risk_score', 0.5),
+            'metadata': message.get('metadata', {})
+        }
+
 
 class TaskRouter:
     FALLBACK_PLANS = {
