@@ -153,6 +153,7 @@ Note: If you see an error about execution policy:
    pip install mlxtend
    pip install cryptography
    pip install sentence_transformers
+   pip install restrictedpython
    ```
 
 5. Run Model:
