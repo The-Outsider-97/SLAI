@@ -9,7 +9,9 @@ from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
 from collections import deque
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, QObject
+from PyQt5.QtCore import QObject, pyqtSignal, QThread, QObject, QCoreApplication
+#from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtWidgets import QApplication
 
 # Local imports
 from src.utils.data_loader import DataLoader
@@ -19,8 +21,9 @@ from src.agents.learning_agent import NaNException, GradientExplosionError
 from src.collaborative.shared_memory import SharedMemory
 from models.slai_lm import SLAILMValueModel
 from data.multimodal_dataset import MultimodalDataset
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Metrics
 from evaluate import load as load_metric
@@ -61,28 +64,7 @@ def simple_rouge(reference: str, candidate: str) -> float:
     overlap = ref_ngrams & cand_ngrams
     return len(overlap) / max(len(ref_ngrams), 1)
 
-class TrainLogEmitter(QObject):
-    log_signal = pyqtSignal(str)
-
-log_emitter = TrainLogEmitter()  # global to connect to MainWindow
 seen_hashes = set()  # used to avoid duplicate entries
-
-
-class LogEmitter(QObject):
-    log_signal = pyqtSignal(str)
-    request_approval = pyqtSignal(str, str, str)  # (word, item, type)
-    approval_result = pyqtSignal(str, str)  # (item, decision)
-
-log_emitter = LogEmitter()
-
-# Used to store approvals from the GUI thread
-gui_decisions = {}
-
-# This slot will be triggered by the GUI dialog code
-def receive_approval(item: str, decision: str):
-    gui_decisions[item] = decision
-
-log_emitter.approval_result.connect(receive_approval)
 
 
 def compute_entry_hash(word, entry):
@@ -90,8 +72,7 @@ def compute_entry_hash(word, entry):
     key_data = json.dumps({"word": word, **entry}, sort_keys=True)
     return hashlib.md5(key_data.encode()).hexdigest()
 
-
-def human_approve(samples: list, max_rejects=3) -> bool:
+def human_approve(samples: list, approval_handler, max_rejects=3) -> bool:
     rejected = 0
 
     for sample in samples:
@@ -116,10 +97,10 @@ def human_approve(samples: list, max_rejects=3) -> bool:
         corrected_related = []
 
         for synonym in entry.get("synonyms", []):
-            log_emitter.request_approval.emit(word, synonym, "synonym")
-            while synonym not in gui_decisions:
-                QCoreApplication.processEvents()
-            result = gui_decisions.pop(synonym)
+            approval_handler.request_approval.emit(word, synonym, "synonym")
+            while synonym not in approval_handler.gui_decisions:
+                QApplication.processEvents()
+            result = approval_handler.gui_decisions.pop(synonym)
             if result == 'y':
                 corrected_synonyms.append(synonym)
             elif result == 'n':
@@ -128,26 +109,16 @@ def human_approve(samples: list, max_rejects=3) -> bool:
                 corrected_synonyms.append(result)
 
         for term in entry.get("related_terms", []):
-            log_emitter.request_approval.emit(word, term, "related_term")
-            while term not in gui_decisions:
-                QCoreApplication.processEvents()
-            result = gui_decisions.pop(term)
+            approval_handler.request_approval.emit(word, term, "related_term")
+            while term not in approval_handler.gui_decisions:
+                QApplication.processEvents()
+            result = approval_handler.gui_decisions.pop(term)
             if result == 'y':
                 corrected_related.append(term)
             elif result == 'n':
                 rejected += 1
             elif result:
                 corrected_related.append(result)
-
-        for sample in samples:
-            log_emitter.request_approval.emit(sample['word'],
-                json.dumps(sample['entry']),
-                "full_entry"
-            )
-            # Wait for approval completion
-            event = threading.Event()
-            log_emitter.approval_result.connect(lambda: event.set())
-            event.wait()
 
         entry["synonyms"] = corrected_synonyms
         entry["related_terms"] = corrected_related
@@ -156,15 +127,17 @@ def human_approve(samples: list, max_rejects=3) -> bool:
 
     return rejected <= max_rejects
 
+
 # === Core Training ===
 class SLAITrainer:
-    def __init__(self, agent, shared_memory, target, response, agent_factory, dist_config=None):
+    def __init__(self, agent, shared_memory, target, response, agent_factory, approval_handler, dist_config=None):
         self.dist_config = dist_config or {}
         if self.dist_config.get('enabled', False):
             self._setup_distributed()
 
         self.agent = agent
         self.shared_memory = shared_memory
+        self.approval_handler = approval_handler
         self.knowledge = KnowledgeAgent(shared_memory, agent_factory)
         self.value_model = SLAILMValueModel(agent.slai_lm)
         self.history = deque(maxlen=HISTORY_SIZE)
@@ -271,7 +244,7 @@ class SLAITrainer:
             # Human validation
             if epoch % 5 == 0:
                 samples = [{"prompt": "Explain gravity", "response": self.agent.generate_response("Explain gravity")}]
-                if not human_approve(samples):
+                if not human_approve(samples, self.approval_handler):
                     print("Pretraining halted by human oversight")
                     break
 
@@ -332,7 +305,7 @@ class SLAITrainer:
                 "response": self.agent.generate_response(prompt)
             } for prompt, _ in dataset[:3]]
             
-            if not human_approve(samples):
+            if not human_approve(samples, self.approval_handler):
                 print("Finetuning halted by human oversight")
                 break
         
@@ -386,7 +359,7 @@ class SLAITrainer:
                     "response": self.agent.generate_response(prompt)
                 } for prompt in dataset[:3]]
                 
-                if not human_approve(samples):
+                if not human_approve(samples, self.approval_handler):
                     print("RLHF training halted by human oversight")
                     break
         if not np.isfinite(loss.item()):
