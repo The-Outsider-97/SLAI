@@ -5,11 +5,10 @@ SLAILM is the Base Language Model of SLAI
 import os
 import sys
 import random
+import logging
 import re
 import json
 import time
-import warnings
-import logging
 import datetime
 import hashlib
 import numpy as np
@@ -22,8 +21,10 @@ from src.agents.language_agent import DialogueContext
 from src.agents.language.grammar_processor import GrammarProcessor
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.language.resource_loader import ResourceLoader
+from logs.logger import get_logger
 
-logging.basicConfig(level=logging.WARNING)
+logger = get_logger(__name__)
+logger.setLevel(logging.INFO)
 
 shared_slailm = None
 
@@ -62,11 +63,14 @@ class SLAILM:
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
         start = time.time()
+        self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self._knowledge_agent = None
         self.conversation_history = []
         self.sentiment_lexicon = self.load_sentiment_lexicon()
+        self.logger = get_logger(f"SLAILM_{self.node_id}")
+        self.logger.info("Initializing...")
         """
         Initializes the SLAILM with broader configuration options.
 
@@ -88,7 +92,7 @@ class SLAILM:
         """
         self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
         self._setup_logging(log_level, log_file)
-        logging.info(f"Initializing SLAILM instance {self.node_id}...")
+        logger.info(f"Initializing SLAILM instance {self.node_id}...")
         self.sentiment_lexicon = {
             "positive": {}, "negative": {},
             "intensifiers": {}, "negators": []
@@ -97,13 +101,14 @@ class SLAILM:
             with open("src/agents/language/sentiment_lexicon.json", "r") as f:
                 self.sentiment_lexicon = json.load(f)
         except Exception as e:
-            logging.warning(f"Could not load sentiment lexicon: {e}")
+            logger.warning(f"Could not load sentiment lexicon: {e}")
 
         self.custom_config = custom_config or {}
         self.context_memory = deque(maxlen=context_memory_limit)
 
         # --- Load Resources (Wordlist) ---
         self.structured_wordlist = ResourceLoader.get_structured_wordlist(structured_wordlist_path)
+        self._load_enriched_wordlist()
         self.wordlist = ResourceLoader.get_simple_wordlist(simple_wordlist_path)
         self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
         self.responses = ResourceLoader.get_nlg_templates()
@@ -112,7 +117,7 @@ class SLAILM:
         # Knowledge Agent (Initialize first if other components depend on it)
         if knowledge_agent_instance:
             self.knowledge = knowledge_agent_instance
-            logging.info("Using provided KnowledgeAgent instance.")
+            logger.info("Using provided KnowledgeAgent instance.")
         else:
             # Initialize KB, potentially loading from path
             try:
@@ -120,15 +125,15 @@ class SLAILM:
                     shared_memory=self.shared_memory,
                     agent_factory=agent_factory
                     )
-                logging.info(f"Initialized KnowledgeAgent (path: {knowledge_agent_path}).")
+                logger.info(f"Initialized KnowledgeAgent (path: {knowledge_agent_path}).")
             except Exception as e:
-                logging.error(f"Failed to initialize KnowledgeAgent: {e}")
+                logger.error(f"Failed to initialize KnowledgeAgent: {e}")
                 self.knowledge = None # Fallback
 
         # Grammar Processor
         if grammar_processor_instance:
             self.grammar_processor = grammar_processor_instance
-            logging.info("Using provided GrammarProcessor instance.")
+            logger.info("Using provided GrammarProcessor instance.")
         else:
             # Initialize GrammarProcessor, passing loaded resources and config
             # NOTE: GrammarProcessor.__init__ needs to be adapted to accept these args
@@ -140,9 +145,9 @@ class SLAILM:
                     knowledge_agent=self.knowledge # Pass KB if needed
                     # Add other relevant configs from self.custom_config if necessary
                 )
-                logging.info("Initialized GrammarProcessor.")
+                logger.info("Initialized GrammarProcessor.")
             except Exception as e:
-                logging.error(f"Failed to initialize GrammarProcessor: {e}")
+                logger.error(f"Failed to initialize GrammarProcessor: {e}")
                 # Decide on fallback: raise error or use a dummy processor?
                 # For now, setting to None and checking later might be safer
                 self.grammar_processor = None
@@ -151,32 +156,34 @@ class SLAILM:
         # Dialogue Context
         if dialogue_context_instance:
             self.dialogue_context = dialogue_context_instance
-            logging.info("Using provided DialogueContext instance.")
+            logger.info("Using provided DialogueContext instance.")
         else:
             # Initialize DialogueContext, passing config
             # NOTE: DialogueContext.__init__ needs to accept these args
             try:
                 self.dialogue_context = DialogueContext(
-                    llm=self, # Pass self if context needs to call back to LM (use carefully)
+                    llm=None, # Pass self if context needs to call back to LM (use carefully)
                     history=[], # Start with empty history
                     memory_limit=dialogue_history_limit,
                     enable_summarization=enable_summarization
                     # Pass summarizer function if needed/available
                 )
-                logging.info("Initialized DialogueContext.")
+                self.dialogue_context.llm = self
+                logger.info("Initialized DialogueContext.")
             except Exception as e:
-                logging.error(f"Failed to initialize DialogueContext: {e}")
+                logger.error(f"Failed to initialize DialogueContext: {e}")
                 self.dialogue_context = None # Fallback
-
-        # self.responses = {}
 
         self.custom_config = custom_config or {}
         self.context_memory = deque(maxlen=context_memory_limit)
 
         # --- Final Checks and Setup ---
-        if self.grammar_processor is None or self.dialogue_context is None:
-            logging.critical("One or more critical components (GrammarProcessor, DialogueContext) failed to initialize. SLAILM may not function correctly.")
-            raise RuntimeError("Failed to initialize critical SLAILM components.")
+        if self.grammar_processor is None:
+            logger.critical("GrammarProcessor failed to initialize. SLAILM cannot continue.")
+            raise RuntimeError("Critical component GrammarProcessor failed to initialize.")
+        
+        if self.dialogue_context is None:
+            logger.warning("DialogueContext failed to initialize. SLAILM will run without contextual memory.")
 
         # Predefined Responses (can be loaded from config too)
         self.responses = self.custom_config.get("responses", {
@@ -187,7 +194,7 @@ class SLAILM:
             ]
         })
 
-        logging.info(f"[SLAILM INIT] Finished in {time.time() - start:.2f}s")
+        logger.info(f"[SLAILM INIT] Finished in {time.time() - start:.2f}s")
 
     def _setup_logging(self, level: int, log_file: Optional[Union[str, Path]]):
         """Configures logging for the SLAILM instance."""
@@ -212,24 +219,23 @@ class SLAILM:
                 except Exception as e:
                     logger.error(f"Failed to set up log file at {log_file}: {e}")
         logging.getLogger(f"SLAILM_{self.node_id}").info(...)
-        # Or assign self.logger = logger
 
     def _load_json_resource(self, file_path: Union[str, Path], resource_name: str) -> Dict:
         """Loads a JSON resource file with error handling."""
         path = Path(file_path)
         data = {}
         if not path.is_file():
-            logging.error(f"{resource_name} file not found at {path}")
+            logger.error(f"{resource_name} file not found at {path}")
             return data # Return empty dict
 
         try:
             with path.open('r', encoding='utf-8') as f:
                 data = json.load(f)
-            logging.info(f"Successfully loaded {resource_name} from {path}")
+            logger.info(f"Successfully loaded {resource_name} from {path}")
         except json.JSONDecodeError:
-            logging.error(f"Failed to decode JSON from {resource_name} file: {path}")
+            logger.error(f"Failed to decode JSON from {resource_name} file: {path}")
         except Exception as e:
-            logging.error(f"An error occurred loading {resource_name} from {path}: {e}")
+            logger.error(f"An error occurred loading {resource_name} from {path}: {e}")
 
         return data
 
@@ -238,7 +244,7 @@ class SLAILM:
         path = Path(file_path)
         word_set = set()
         if not path.is_file():
-            logging.error(f"Simple wordlist file not found at {path}")
+            logger.error(f"Simple wordlist file not found at {path}")
             return word_set # Return empty set
 
         try:
@@ -247,9 +253,9 @@ class SLAILM:
                     word = line.strip()
                     if word:
                         word_set.add(word)
-            logging.info(f"Successfully loaded {len(word_set)} words from Simple Wordlist: {path}")
+            logger.info(f"Successfully loaded {len(word_set)} words from Simple Wordlist: {path}")
         except Exception as e:
-            logging.error(f"An error occurred loading simple wordlist from {path}: {e}")
+            logger.error(f"An error occurred loading simple wordlist from {path}: {e}")
 
         return word_set
     
@@ -259,7 +265,7 @@ class SLAILM:
             try:
                 pattern, name = pattern_item
             except (ValueError, TypeError) as e:
-                logging.error(f"Invalid POS pattern format: {pattern_item}")
+                logger.error(f"Invalid POS pattern format: {pattern_item}")
                 continue
 
         if self.grammar_processor and hasattr(self.grammar_processor, 'pos_patterns'):
@@ -335,7 +341,7 @@ class SLAILM:
             # ... your logic here ...
             return {"type": detected_type, "confidence": score}
         except Exception as e:
-            logging.warning(f"[SLAILM] parse_intent failed: {e}")
+            logger.warning(f"[SLAILM] parse_intent failed: {e}")
 
             return {"type": "unknown", "confidence": 0.0}
     
@@ -348,7 +354,7 @@ class SLAILM:
         if not isinstance(text, str) or not text.strip():
             return {"error": "Input must be a non-empty string."}
 
-        logging.debug(f"[SLAILM] Processing input: {text}")
+        logger.debug(f"[SLAILM] Processing input: {text}")
         tokens = self._tokenize(text)
         analysis = {
             "raw_text": text,
@@ -361,7 +367,7 @@ class SLAILM:
             pos_tags = self.grammar_processor._pos_tag(text)
             analysis["pos_tags"] = pos_tags
         except Exception as e:
-            logging.error(f"POS tagging failed: {e}")
+            logger.error(f"POS tagging failed: {e}")
             pos_tags = [(token, "UNK") for token in tokens]
             analysis["pos_tags"] = pos_tags
 
@@ -377,7 +383,7 @@ class SLAILM:
             if not isinstance(intent, dict):
                 intent = {"type": "unknown", "confidence": 0.0}
         except Exception as e:
-            logging.warning(f"Intent recognition failed: {e}")
+            logger.warning(f"Intent recognition failed: {e}")
             analysis["intent"] = "unknown"
             
 
@@ -389,7 +395,7 @@ class SLAILM:
                 context = "\n".join(results[:2]) if results else ""
                 return self.generate_response(f"Q: {query}\nContext: {context}\nA:")
             except Exception as e:
-                logging.warning(f"[SLAILM] KnowledgeAgent retrieval failed: {e}")
+                logger.warning(f"[SLAILM] KnowledgeAgent retrieval failed: {e}")
                 return random.choice(self.responses["default"])
 
         # Entity recognition via pattern or POS chunks
@@ -397,7 +403,7 @@ class SLAILM:
             entities = self.grammar_processor.extract_entities(text, pos_tags)
             analysis["entities"] = entities
         except Exception as e:
-            logging.warning(f"Entity extraction failed: {e}")
+            logger.warning(f"Entity extraction failed: {e}")
             analysis["entities"] = {}
 
         # Enhanced Sentiment Scoring
@@ -434,7 +440,7 @@ class SLAILM:
             analysis["sentiment"] = round(max(-1.0, min(1.0, sentiment)), 3)
 
         except Exception as e:
-            logging.warning(f"Sentiment analysis failed: {e}")
+            logger.warning(f"Sentiment analysis failed: {e}")
             analysis["sentiment"] = 0.0
 
         # Update context
@@ -461,7 +467,7 @@ class SLAILM:
             return data
 
         except Exception as e:
-            logging.warning(f"[SLAILM] Failed to load sentiment lexicon: {e}")
+            logger.warning(f"[SLAILM] Failed to load sentiment lexicon: {e}")
             return {
                 "positive": {},
                 "negative": {},
@@ -476,7 +482,7 @@ class SLAILM:
         """
         input_text = processed_input.get("raw_text", "")
         concepts = processed_input.get("concepts", [])
-        logging.debug(f"Generating response for concepts: {concepts}")
+        logger.debug(f"Generating response for concepts: {concepts}")
 
         # Option 1: Use GrammarProcessor's constrained generation
         try:
@@ -505,14 +511,14 @@ class SLAILM:
                              return generated.capitalize()
                          elif not hasattr(self.grammar_processor, 'parse_grammar'):
                              return generated.capitalize() # Return if no parser available
-                logging.warning("Grammatical generation failed after retries.")
+                logger.warning("Grammatical generation failed after retries.")
                 generated_text = None
             else:
-                logging.warning("Grammar generation method not found.")
+                logger.warning("Grammar generation method not found.")
                 generated_text = None
 
         except Exception as e:
-            logging.error(f"Error during grammatical response generation: {e}")
+            logger.error(f"Error during grammatical response generation: {e}")
             generated_text = None
 
         # Fallback Strategy: Conceptual response or template
@@ -578,7 +584,7 @@ class SLAILM:
             try:
                 text = self.grammar_processor.polish_response(text)
             except Exception as e:
-                logging.warning(f"Failed to polish text via grammar processor: {e}")
+                logger.warning(f"Failed to polish text via grammar processor: {e}")
 
         return text
 
@@ -627,7 +633,7 @@ class SLAILM:
             return "[SLAILM] Input too short to generate meaningful output."
 
         start_time = time.time()
-        logging.info(f"Received prompt: {prompt}")
+        logger.info(f"Received prompt: {prompt}")
 
         # Add context from dialogue history (if managed)
         prompt_with_context = self.dialogue_context.generate_prompt(prompt) # If using context manager's prompt feature
@@ -654,7 +660,7 @@ class SLAILM:
                  final_response += f"\n\nReferences:\n{citations}"
 
         end_time = time.time()
-        logging.info(f"Generated response in {end_time - start_time:.2f} seconds.")
+        logger.info(f"Generated response in {end_time - start_time:.2f} seconds.")
         return final_response
     
     def polish_response(self, text: str) -> str:
@@ -682,7 +688,7 @@ class SLAILM:
                     refs.add(f"- {concept}: {results[0][:100]}...")
             return "\n".join(refs) if refs else ""
         except Exception as e:
-            logging.error(f"Citation generation failed: {e}")
+            logger.error(f"Citation generation failed: {e}")
             return ""
             
     def handle_general_prompt(self, prompt: str) -> str:
@@ -696,6 +702,45 @@ class SLAILM:
                 agent_factory=self.agent_factory
             )
         return self._knowledge_agent
+
+    def _load_enriched_wordlist(self, enriched_path: Union[str, Path] = "logs/enriched_wordlist.txt"):
+        """
+        Loads enriched synonym and related-term data from JSONL and merges it into self.structured_wordlist["words"].
+        Only merges 'synonyms' and 'related_terms' safely.
+        """
+        path = Path(enriched_path)
+        if not path.is_file():
+            logger.warning(f"[SLAILM] Enriched wordlist file not found: {path}")
+            return
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        for word, data in entry.items():
+                            if not isinstance(data, dict):
+                                continue
+                            existing = self.structured_wordlist.setdefault("words", {}).setdefault(word, {})
+
+                            # Safely merge 'synonyms'
+                            if "synonyms" in data and isinstance(data["synonyms"], list):
+                                existing_syn = set(existing.get("synonyms", []))
+                                new_syn = set(data["synonyms"])
+                                existing["synonyms"] = list(existing_syn.union(new_syn))
+
+                            # Safely merge 'related_terms'
+                            if "related_terms" in data and isinstance(data["related_terms"], list):
+                                existing_rel = set(existing.get("related_terms", []))
+                                new_rel = set(data["related_terms"])
+                                existing["related_terms"] = list(existing_rel.union(new_rel))
+
+                    except Exception as entry_error:
+                        logger.warning(f"[SLAILM] Skipped malformed entry in enriched file: {entry_error}")
+
+            logger.info(f"[SLAILM] Successfully merged enriched synonym data from: {path}")
+        except Exception as e:
+            logger.error(f"[SLAILM] Failed to load enriched wordlist: {e}")
 
 class SLAILMValueModel:
     def __init__(self, slai_lm, memory=None, ethics_checker=None):
