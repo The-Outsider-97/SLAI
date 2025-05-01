@@ -1,4 +1,9 @@
-# ===== main.py - SLAI Core Launcher =====
+# ===== SLAI Core Launcher =====
+import shutil
+import distutils.spawn
+
+distutils.spawn.find_executable = lambda name: shutil.which(name)
+
 import os
 import sys
 import yaml
@@ -18,7 +23,6 @@ from src.utils.system_optimizer import SystemOptimizer
 from src.agents.collaborative_agent import CollaborativeAgent
 from frontend.startup_screen import StartupScreen # no-audit
 from frontend.main_window import MainWindow # no-audit
-
 
 # Configure logging early to capture all events
 logger = get_logger("SLAI-Launcher")
