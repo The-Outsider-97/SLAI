@@ -2,10 +2,67 @@ import math
 import json
 import numpy as np
 
-from typing import List
+from typing import List, Tuple
+from pathlib import Path
+from sklearn.metrics.pairwise import cosine_similarity
 
 from src.agents.perception.utils.common import TensorOps, Parameter
-from src.agents.perception.modules.transformer import Transformer  
+from src.agents.perception.modules.transformer import Transformer
+from logs.logger import get_logger
+
+logger = get_logger(__name__)
+
+#==========================
+# Embeddings using GloVe
+#==========================
+EMBEDDING_PATH = "data/embeddings/glove.6B.100d.json"
+MAX_SYNONYMS = 5
+MAX_RELATED = 5
+
+def load_embeddings(path: str) -> dict:
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Embedding file {path} not found!")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def generate_from_embeddings(word: str, embedding_lookup: dict, topn=10) -> Tuple[List[str], List[str]]:
+    if word not in embedding_lookup:
+        return [], []
+    word_vec = np.array(embedding_lookup[word]).reshape(1, -1)
+
+    # Ensure all vectors are numpy arrays
+    valid_embeddings = {
+        other: np.array(vec)
+        for other, vec in embedding_lookup.items()
+        if other != word and isinstance(vec, list) and len(vec) == word_vec.shape[1] # Basic check
+    }
+    if not valid_embeddings:
+        return [], []
+
+    other_words = list(valid_embeddings.keys())
+    other_vecs = np.array(list(valid_embeddings.values()))
+
+    try:
+        similarities = cosine_similarity(word_vec, other_vecs)[0]
+        # Create word-score pairs
+        scores = {other_words[i]: similarities[i] for i in range(len(other_words))}
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+        synonyms = [w for w, score in ranked[:MAX_SYNONYMS] if score > 0.6] # Add threshold?
+        related = [w for w, score in ranked[MAX_SYNONYMS : MAX_SYNONYMS + MAX_RELATED] if score > 0.4] # Add threshold?
+
+        return synonyms, related
+    except Exception as e:
+        logger.error(f"Error in cosine similarity for '{word}': {e}")
+        return [], []
+
+class EmbeddingManager:
+    def __init__(self, path):
+        self.embeddings = load_embeddings(path)
+
+    def get_similar(self, word, topn=10):
+        return generate_from_embeddings(word, self.embeddings, topn)
+# =======================
 
 class TextEncoder:
     def __init__(
