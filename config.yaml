@@ -19,6 +19,11 @@ agent-network:
     learning_rate: 0.02
     exploration_rate: 0.2
     memory_capacity: 500
+    replay_capacity: 100000
+    priority_alpha: 0.6
+    experience_staleness_days: 1
+    per_beta: 0.4
+    risk_threshold: 0.7
 
   alignment:
     class: AlignmentAgent
