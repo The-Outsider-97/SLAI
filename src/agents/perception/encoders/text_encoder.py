@@ -11,25 +11,27 @@ class TextEncoder:
     def __init__(
         self,
         vocab_size=50257,
-        embed_dim=512,
+        embed_dim=100,
         num_layers=6,
         num_heads=8,
         dropout_rate=0.1,
         positional_encoding="learned",
         max_seq_len=512
     ):
-        encoder = TextEncoder()
-        with open("data/embeddings/glove.6B.100d.json") as f:
+        with open("data/embeddings/glove.6B.100d.json", encoding="utf-8") as f:
             glove_data = json.load(f)
-        vocab = list(glove_data.keys())  # Or your actual vocabulary list
-        encoder.load_glove_embeddings("data/embeddings/glove.6B.100d.json", vocab)
-        self.embed_dim = embed_dim
-        self.dropout_rate = dropout_rate
-        self.training = True
 
         # Token embeddings
         self.embedding = Parameter(np.random.randn(vocab_size, embed_dim) * 0.02)
-        
+
+        vocab = list(glove_data.keys())
+        self.vocab = {word: idx for idx, word in enumerate(vocab)}
+        self.unk_token_id = self.vocab.get("<unk>", 0)
+        self.load_glove_embeddings("data/embeddings/glove.6B.100d.json", vocab)
+        self.embed_dim = embed_dim
+        self.dropout_rate = dropout_rate
+        self.training = True
+ 
         # Positional embeddings
         self.positional_encoding = positional_encoding
         if positional_encoding == "learned":
@@ -78,7 +80,7 @@ class TextEncoder:
     def load_glove_embeddings(self, glove_path: str, vocab: List[str]):
         """Load GloVe vectors and assign to the embedding matrix"""
         import json
-        with open(glove_path, 'r') as f:
+        with open(glove_path, 'r', encoding="utf-8") as f:
             glove_data = json.load(f)
         
         for idx, word in enumerate(vocab):
