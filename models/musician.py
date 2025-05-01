@@ -397,6 +397,9 @@ class Musician(QObject):
 
     def generate(self, prompt, task_data=None):
         """ Unified interface to match CollaborativeAgent for compatibility with PromptThread """
+        if not isinstance(prompt, str):
+            logger.error(f"Invalid prompt type passed to generate: {type(prompt)}")
+            return "Error: Prompt must be a string."
         logger.info("Musician: generate() called.")
         try:
             result = self.process_text(prompt)
