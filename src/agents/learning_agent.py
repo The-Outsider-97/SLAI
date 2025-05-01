@@ -23,6 +23,7 @@ import os, sys
 import warnings
 import functools
 import numpy as np
+import torch.nn as nn
 import gymnasium as gym
 
 from collections import deque, defaultdict, OrderedDict
@@ -101,6 +102,16 @@ class LearningAgent(BaseAgent):
         self.strategy_weights = np.array([0.25]*4)  # [RL, DQN, MAML, RSI]
         self.prediction_weights = self.config.get('prediction_weights', [0.25, 0.25, 0.25, 0.25])
         self.performance_history = deque(maxlen=1000)
+
+        self.embedding_buffer = deque(maxlen=512)  # store latest 512 embeddings
+
+        self.policy_net = nn.Sequential(
+            nn.Linear(512, 256),  # input_dim (embeddings) → hidden_dim
+            nn.ReLU(),
+            nn.Linear(256, 2)    # hidden_dim → num_classes (binary: 0 or 1)
+        )
+        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=1e-3)
+        self.loss_fn = nn.CrossEntropyLoss()
 
     @property
     def performance_metrics(self):
@@ -227,6 +238,53 @@ class LearningAgent(BaseAgent):
             learning_rate=0.001,
             discount_factor=0.95
         )
+
+    def observe(self, embedding):
+        """Store live embeddings into buffer."""
+        if isinstance(embedding, np.ndarray):
+            embedding = torch.tensor(embedding, dtype=torch.float32)
+        if embedding.dim() == 2:
+            embedding = embedding.squeeze(0)  # (1, 256) → (256,)
+        self.embedding_buffer.append(embedding)
+    
+    def train_from_embeddings(self):
+        """Train a small supervised task on buffered embeddings."""
+        if not hasattr(self, 'embedding_buffer') or len(self.embedding_buffer) < 16:
+            return  # Not enough data yet
+    
+        batch = list(self.embedding_buffer)  # Grab batch
+        inputs = np.stack(batch)  # shape: (batch_size, feature_dim)
+    
+        # Move to tensor
+        inputs = torch.FloatTensor(inputs)
+    
+        # Simulate prediction targets
+        targets = torch.randint(0, 2, (inputs.shape[0],))  # Random 0/1 labels
+        targets = targets.long()
+    
+        # Forward pass
+        preds = self.policy_net(inputs)
+        loss = self.loss_fn(preds, targets)
+    
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+    
+        logger.info(f"[LearningAgent] Trained on {len(batch)} embeddings. Loss: {loss.item():.4f}")
+        self.embedding_buffer.clear()
+
+    def update_from_embeddings(self, inputs, targets):
+        """Train directly from embeddings without full transition tuples."""
+        if inputs.shape[0] == 0:
+            return 0.0
+    
+        preds = self.policy_net.forward(inputs)
+        loss = np.mean((preds - targets)**2)  # Simple MSE
+    
+        self.policy_net.backward(inputs, targets, learning_rate=self.lr)
+    
+        return loss
 
     def _create_task_variation(self):
         import copy
