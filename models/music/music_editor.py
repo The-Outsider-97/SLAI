@@ -1,12 +1,13 @@
 import time
 import queue
+import threading
 import numpy as np
 import sounddevice as sd  # lightweight, pure-Python audio I/O
 
 from PyQt5.QtWidgets import (QWidget, QLabel, QPushButton, QVBoxLayout,QHBoxLayout,
     QSlider, QFrame, QGridLayout, QSizePolicy,)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QPropertyAnimation
-from PyQt5.QtGui import QPainter, QColor, QPen
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QPropertyAnimation, QSize, QRect
+from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QIcon
 from collections import deque
 from threading import Lock
 from typing import Dict
@@ -20,6 +21,7 @@ class AudioStreamer:
         self.channels = channels
         self.blocksize = blocksize
         self.callback = callback
+        self.processing_thread = threading.Thread(target=self.start_processing, daemon=True)
         self.stream = None
         self.running = False
         self.lock = Lock()
@@ -28,10 +30,10 @@ class AudioStreamer:
         self.buffer = np.zeros(buffer_size, dtype=np.float32)
         self.write_idx = 0
 
-        self.queue = queue.Queue(maxsize=10)
+        self.queue = queue.Queue(maxsize=100)
 
         self.restart_attempts = 0
-        self.max_restart_attempts = 10  # Avoid infinite loops
+        self.max_restart_attempts = 20  # Avoid infinite loops
         self.needs_restart = False
 
     def _audio_callback(self, indata, frames, time_info, status):
@@ -123,6 +125,9 @@ class AudioStreamer:
             self.stream.start()
             self.running = True
             print("[AudioStreamer] Started.")
+            # Start background thread if not already running
+            if not self.processing_thread.is_alive():
+                self.processing_thread.start()
         except Exception as e:
             print(f"[AudioStreamer] Failed to start: {e}")
             self.running = False
@@ -186,6 +191,11 @@ class WaveformWidget(QWidget):
         self.max_embeddings = max_embeddings
         self.embedding_keys = deque()  # To maintain order for eviction
 
+        self.hanning_window = None  # Will be initialized based on buffer size
+        self.volume_width = 4
+        self.freq_width = 8  
+        self.note_width = 12
+
     def _tick(self):
         self.update()
 
@@ -198,6 +208,22 @@ class WaveformWidget(QWidget):
         elif len(buffer) > 16000:
             return buffer[:16000]
         return buffer
+
+    def frequency_to_note(self, freq):
+        """Convert frequency to note name and cents deviation."""
+        if freq <= 0:
+            return ("", 0.0)
+        try:
+            note_num = 12 * np.log2(freq / 440.0) + 69
+            note_num_rounded = int(round(note_num))
+            cents = (note_num - note_num_rounded) * 100
+            note_num_rounded = max(0, min(127, note_num_rounded))
+            notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            octave = (note_num_rounded // 12) - 1
+            note_index = note_num_rounded % 12
+            return (f"{notes[note_index]}{octave}", cents)
+        except:
+            return ("", 0.0)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -220,7 +246,84 @@ class WaveformWidget(QWidget):
             idx = min(x * step, len(buffer) - 1)
             sample = np.clip(buffer[idx], -1.0, 1.0)
             y = int(mid - sample * mid)
-            painter.drawPoint(x, y)
+            painter.drawLine(x, mid, x, y)
+
+        # Calculate metrics
+        rms = np.sqrt(np.mean(buffer**2))
+        volume_value = int(np.clip(rms * 300, 0, 300))
+        
+        N = len(buffer)
+        if N < 2:
+            frequency = 0.0
+            note_name, cents = "", 0.0
+        else:
+            if self.hanning_window is None or len(self.hanning_window) != N:
+                self.hanning_window = np.hanning(N)
+            windowed = buffer * self.hanning_window
+            fft_result = np.fft.rfft(windowed)
+            freqs = np.fft.rfftfreq(N, d=1.0/self.audio_streamer.samplerate)
+            magnitudes = np.abs(fft_result)
+            if len(magnitudes) > 1:
+                peak_index = np.argmax(magnitudes[1:]) + 1
+                frequency = freqs[peak_index]
+            else:
+                frequency = 0.0
+            note_name, cents = self.frequency_to_note(frequency)
+
+        # Fixed width formatting
+        info_text = (
+            f"{volume_value:>{self.volume_width}d}dB | "
+            f"{frequency:>{self.freq_width-2}.1f}Hz | "
+            f"{note_name} {cents:+6.1f}¢".ljust(self.note_width)
+        )
+
+        # Draw metrics text
+        painter.setPen(QColor("gold"))
+        font = painter.font()
+        font.setPointSize(10)
+        painter.setFont(font)
+        #painter.drawText(10, 20, info_text)
+
+        self._collect_frame(buffer)
+
+        # Define box dimensions
+        box_width = 120
+        box_height = 40
+        spacing = 20
+        start_y = 10
+        
+        # Create three rectangles for metrics
+        volume_rect = QRect(10, start_y, box_width, box_height)
+        freq_rect = QRect(10, start_y + box_height + spacing, box_width, box_height)
+        note_rect = QRect(10, start_y + 2*(box_height + spacing), box_width, box_height)
+
+        # Style parameters
+        box_style = {
+            'background': QColor(14, 14, 14),  # Dark background
+            'border': QPen(QColor("gold"), 2),
+            'text': QPen(QColor("gold")),
+            'font': QFont('Monospace', 10, QFont.Bold)
+        }
+
+        def draw_metric_text(painter, pos_x, pos_y, value):
+            painter.setPen(QColor("gold"))
+            font = painter.font()
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.drawText(pos_x, pos_y, value)
+
+        # Metrics
+        start_x = 10
+        start_y = 30
+        spacing_x = 140
+
+        volume_text = f"{volume_value:>3d} dB"
+        freq_text = f"{frequency:>7.1f} Hz"
+        note_text = f"{note_name}{cents:+6.1f}¢"
+
+        draw_metric_text(painter, start_x + spacing_x * 0, start_y, volume_text)
+        draw_metric_text(painter, start_x + spacing_x * 1, start_y, freq_text)
+        draw_metric_text(painter, start_x + spacing_x * 2, start_y, note_text)
 
         self._collect_frame(buffer)
 
@@ -360,12 +463,10 @@ class MusicEditor(QWidget):
             animation.start()
             self.animations.append(animation)
 
-        # self.audio_streamer = AudioStreamer(samplerate=16000, blocksize=512)
-        # Assume perception agent is created and passed to editor somehow, placeholder for now
         self.perception_agent = PerceptionAgent(
             config={
                 "modalities": ["audio"],
-                "embed_dim": 512,
+                "embed_dim": 100,
                 "projection_dim": 256,
             },
             shared_memory=None,
@@ -385,7 +486,7 @@ class MusicEditor(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(15)
 
-        self.audio_streamer = AudioStreamer(samplerate=16000, blocksize=512)
+        self.audio_streamer = AudioStreamer(samplerate=16000, blocksize=1024)
 
         # --- Waveform + Edit Buttons Section ---
         waveform_frame = QFrame()
@@ -417,27 +518,74 @@ class MusicEditor(QWidget):
         wf_layout.addLayout(edit_layout)
         layout.addWidget(waveform_frame)
 
-        # --- Action Buttons (Generate, Lyrics, etc.) ---
+        # --- Tab Bar ---
+        tab_bar_layout = QHBoxLayout()
+        tab_bar_layout.setSpacing(40)  # Space evenly
+        tab_bar_layout.setContentsMargins(0, 1, 0, 1)
+        tab_bar_layout.setAlignment(Qt.AlignCenter)
+
+        self.tabs = {}
+        for label in ["Player", "Composer", "Library"]:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: #f9f9f9;
+                    background: transparent;
+                    border: none;
+                    font-size: 16px;
+                }
+                QPushButton:checked {
+                    color: #38b4fe;
+                    border-bottom: 2px solid #38b4fe;
+                }
+            """)
+            btn.clicked.connect(lambda _, b=label: self.switch_tab(b))
+            self.tabs[label] = btn
+            tab_bar_layout.addWidget(btn)
+        
+        layout.addLayout(tab_bar_layout)
+
+        # --- Combined Action Buttons + Song Info Section ---
+        action_info_frame = QFrame()
+        action_info_frame.setStyleSheet(
+            "background-color: #0e0e0e; border: 1px solid gold; border-radius: 8px;"
+        )
+        action_info_frame.setFixedHeight(250)
+        action_info_layout = QVBoxLayout(action_info_frame)
+        action_info_layout.setSpacing(10)
+
+        # Action Buttons Grid
         actions_layout = QGridLayout()
-        actions = [
-            "Generate", "Lyrics", "Upscale", "Modify", "Mix", "Export", "Save", "Load",
-        ]
+        actions = ["Generate", "Lyrics", "Upscale", "Modify", "Mix", "Export", "Save", "Load"]
         for i, label in enumerate(actions):
             action_btn = QPushButton(label)
             action_btn.setStyleSheet(
-                "background-color: gold; color: black; font-weight: bold; border: none;"
+                "background-color: gold; color: black; font-weight: bold; border: none; border-radius: 6px;"
             )
+            action_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             actions_layout.addWidget(action_btn, 0, i)
-            self.action_buttons[label] = action_btn  # <<< Store reference
-        layout.addLayout(actions_layout)
+            self.action_buttons[label] = action_btn
+        action_info_layout.addLayout(actions_layout)
 
-        # --- Song Info Section (no changes needed here for connection) ---
-        song_info_frame = QFrame()
-        song_info_frame.setStyleSheet(
-            "background-color: #0e0e0e; border: 1px solid gold; border-radius: 6px;"
-        )
-        # ... (rest of song info setup) ...
-        layout.addWidget(song_info_frame)
+        # Song Info Labels
+        song_info_layout = QVBoxLayout()
+        info_labels = ["Title", "Artist", "Album", "Genre", "Release Year", "BPM", "Key", "Note"]
+        for text in info_labels:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: white; font-weight: bold; padding-left: 4px;")
+            song_info_layout.addWidget(lbl)
+        action_info_layout.addLayout(song_info_layout)
+
+        layout.addWidget(action_info_frame)
+
+        # --- Fade-in Animation for the whole frame ---
+        fade_animation = QPropertyAnimation(action_info_frame, b"windowOpacity")
+        fade_animation.setDuration(1000)
+        fade_animation.setStartValue(0)
+        fade_animation.setEndValue(1)
+        fade_animation.start()
+        self.animations.append(fade_animation)
 
         # --- Song Settings Section ---
         settings_frame = QFrame()
@@ -483,28 +631,28 @@ class MusicEditor(QWidget):
 
         # --- Bottom Music Controls (assuming these might also trigger actions) ---
         controls_layout = QHBoxLayout()
-        control_buttons = ["Shuffle", "Previous", "Play", "Next", "Monitor"]
+        control_buttons = [
+            ("Shuffle", "frontend/assets/icons/shuffle.svg", "frontend/assets/icons/shuffle1.svg"),
+            ("Previous", "frontend/assets/icons/previous.svg", "frontend/assets/icons/previous1.svg"),
+            ("Play", "frontend/assets/icons/play.svg", "frontend/assets/icons/play1.svg"),
+            ("Stop", "frontend/assets/icons/stop.svg", "frontend/assets/icons/stop1.svg"),
+            ("Next", "frontend/assets/icons/next.svg", "frontend/assets/icons/next1.svg"),
+            ("repeat", "frontend/assets/icons/repeat.svg", "frontend/assets/icons/repeat1.svg"),
+        ]
         self.control_buttons = {}
-        for label in control_buttons:
-            btn = QPushButton(label)
-            btn.setStyleSheet("""QPushButton {
-                              background-color: black;
-                              color: white;
-                              font-weight: bold;
-                              border: 1px solid gold;
-                              border-radius: 8px;
-                              padding: 6px 12px;
-                              }
-                              Qpushbutton:hover {
-                              background-color: gold;
-                              color: black;}""")
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed) 
+        for label, gold_icon_path, white_icon_path in control_buttons:
+            btn = ControlButton(gold_icon_path, white_icon_path)
             controls_layout.addWidget(btn)
             self.control_buttons[label] = btn
         layout.addLayout(controls_layout)
 
         self.setLayout(layout)
         self.setStyleSheet("background-color: black;")
+
+    def switch_tab(self, selected):
+        for label, button in self.tabs.items():
+            button.setChecked(label == selected)
+        # Handle actual content switching here (e.g., stackedWidget.setCurrentIndex)
 
     def _connect_signals(self):
         """Connect internal widget signals to the class's custom signals."""
@@ -668,3 +816,39 @@ class MusicEditor(QWidget):
         # 3. Call the base class closeEvent
         super().closeEvent(event)
         print("[MusicEditor] closeEvent finished.")
+
+class ControlButton(QPushButton):
+    def __init__(self, gold_icon_path, white_icon_path, parent=None):
+        super().__init__(parent)
+        self.gold_icon = QIcon(gold_icon_path)
+        self.white_icon = QIcon(white_icon_path)
+        self.setIcon(self.gold_icon)
+        self.setIconSize(QSize(20, 20))
+        self.setFlat(True)
+        self.setStyleSheet("background-color: black; border: none;")
+        self.hover_anim = QPropertyAnimation(self, b"geometry")
+        self.hover_anim.setDuration(150)
+
+    def enterEvent(self, event):
+        rect = self.geometry()
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(rect)
+        self.hover_anim.setEndValue(rect.adjusted(-2, -2, 2, 2))  # Enlarge slightly
+        self.hover_anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        rect = self.geometry()
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(rect)
+        self.hover_anim.setEndValue(rect.adjusted(2, 2, -2, -2))
+        self.hover_anim.start()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self.setIcon(self.white_icon)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.setIcon(self.gold_icon)
+        super().mouseReleaseEvent(event)
