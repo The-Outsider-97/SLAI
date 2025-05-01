@@ -28,8 +28,28 @@ agent-network:
       ethics: {}
       memory: {}
       sensitive_attrs: ["age", "gender"]
-      monitor: {}
+      monitor:
+        class: AlignmentMonitor
+        path: src.agents.alignment.alignment_monitor
+        fairness_metrics:
+          - demographic_parity
+          - equal_opportunity
+          - predictive_equality
+        ethical_rules:
+          privacy:
+            - "No sharing of personally identifiable information (PII)"
+          fairness:
+            - "Avoid bias towards protected attributes like gender or race"
+          transparency:
+            - "Explain decisions if confidence is low"
+        drift_threshold: 0.15
+        audit_frequency: 1000
+        adaptive_weights:
+          fairness: 0.4
+          ethics: 0.3
+          safety: 0.3
       corrections: {}
+
 
   language:  
     class: LanguageAgent
@@ -137,7 +157,9 @@ agent-network:
   evaluation:
     class: EvaluationAgent
     path: src.agents.evaluation_agent
-    init_args: {}
+    init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
     threshold: 0.9
 
   reasoning:
