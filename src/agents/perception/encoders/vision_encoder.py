@@ -1,5 +1,7 @@
+
 import numpy as np
 import math
+from typing import Dict, Any
 
 from src.agents.perception.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer
@@ -15,40 +17,59 @@ class VisionEncoder:
         num_heads=8,
         dropout_rate=0.1,
         positional_encoding="learned",
-        dynamic_patching=True
+        dynamic_patching=True,
+        encoder_type: str = "transformer",
+        cnn_config: Dict[str, Any] = None
     ):
-        self.patch_size = patch_size
-        self.in_channels = in_channels
-        self.embed_dim = embed_dim
-        self.dropout_rate = dropout_rate
-        self.dynamic_patching = dynamic_patching
-        self.training = True
+        self.encoder_type = encoder_type
 
-        # Calculate initial number of patches
-        self.base_num_patches = (img_size // patch_size) ** 2
-        
-        # Projection layer (convolutional equivalent)
-        self.projection = Parameter(
-            TensorOps.he_init((in_channels * patch_size**2, embed_dim), 
-                            in_channels * patch_size**2)
-        )
-        
-        # Positional encoding system
-        self.positional_encoding = positional_encoding
-        if positional_encoding == "learned":
-            self.position_embed = Parameter(
-                np.random.randn(1, self.base_num_patches + 1, embed_dim) * 0.02
+        if self.encoder_type == "transformer":
+            self.patch_size = patch_size
+            self.in_channels = in_channels
+            self.embed_dim = embed_dim
+            self.dropout_rate = dropout_rate
+            self.dynamic_patching = dynamic_patching
+            self.training = True
+
+            # Calculate initial number of patches
+            self.base_num_patches = (img_size // patch_size) ** 2
+            
+            # Projection layer (convolutional equivalent)
+            self.projection = Parameter(
+                TensorOps.he_init((in_channels * patch_size**2, embed_dim), 
+                                in_channels * patch_size**2)
             )
-        elif positional_encoding == "sinusoidal":
-            self.position_embed = self._init_sinusoidal_encoding()
-        
-        self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
-        self.transformer = Transformer(
-            num_layers=num_layers,
-            embed_dim=embed_dim,
-            num_heads=num_heads
-        )
-        self._cache = {}
+            
+            # Positional encoding system
+            self.positional_encoding = positional_encoding
+            if positional_encoding == "learned":
+                self.position_embed = Parameter(
+                    np.random.randn(1, self.base_num_patches + 1, embed_dim) * 0.02
+                )
+            elif positional_encoding == "sinusoidal":
+                self.position_embed = self._init_sinusoidal_encoding()
+            
+            self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
+            self.transformer = Transformer(
+                num_layers=num_layers,
+                embed_dim=embed_dim,
+                num_heads=num_heads
+            )
+            self._cache = {}
+
+        elif self.encoder_type == "cnn":
+            # CNN-based feature extractor implementation
+            cnn_config = cnn_config or {}
+            self.input_size = cnn_config.get('input_size', (224, 224))
+            self.channels = cnn_config.get('channels', 3)
+            self.filters = cnn_config.get('filters', [
+                (11, 11, 96),    # Conv1: 11x11, 96 filters
+                (5, 5, 256),     # Conv2: 5x5, 256 filters
+                (3, 3, 384)      # Conv3: 3x3, 384 filters
+            ])
+            
+        else:
+            raise ValueError(f"Unknown encoder type: {self.encoder_type}")
 
     def _init_sinusoidal_encoding(self):
         """Sinusoidal positional encoding for vision patches"""
@@ -133,32 +154,111 @@ class VisionEncoder:
             axis=1
         )
 
+    def _cnn_forward(self, image: np.ndarray) -> np.ndarray:
+        """CNN-based feature extraction pipeline"""
+        features = image
+        channel_axis = -1
+        
+        # Conv1 Layer
+        features = self._conv2d(features, self.filters[0], stride=4, padding=2)
+        features = self._relu(features)
+        features = self._max_pool(features, 3, stride=2)
+        
+        # Conv2 Layer
+        features = self._conv2d(features, self.filters[1], padding=2)
+        features = self._relu(features)
+        features = self._max_pool(features, 3, stride=2)
+        
+        # Conv3 Layer
+        features = self._conv2d(features, self.filters[2])
+        features = self._relu(features)
+        
+        # Spatial Pyramid Pooling
+        features = self._spatial_pyramid_pooling(features)
+        
+        return features
+
+    def _conv2d(self, x, filters, stride=1, padding=0):
+        """2D Convolution implementation"""
+        H, W, C_in = x.shape
+        Fh, Fw, C_out = filters.shape[:3]
+        
+        H_out = (H - Fh + 2*padding) // stride + 1
+        W_out = (W - Fw + 2*padding) // stride + 1
+        
+        output = np.zeros((H_out, W_out, C_out))
+        for i in range(H_out):
+            for j in range(W_out):
+                h_start = i*stride - padding
+                w_start = j*stride - padding
+                receptive_field = x[h_start:h_start+Fh, w_start:w_start+Fw, :]
+                output[i,j] = np.sum(receptive_field * filters, axis=(0,1,2))
+        return output
+
+    def _spatial_pyramid_pooling(self, features):
+        """Spatial pyramid pooling implementation"""
+        levels = [1, 2, 4]
+        pooled = []
+        for level in levels:
+            H, W = features.shape[:2]
+            bin_h = H // level
+            bin_w = W // level
+            for i in range(level):
+                for j in range(level):
+                    pool_region = features[i*bin_h:(i+1)*bin_h, 
+                                        j*bin_w:(j+1)*bin_w]
+                    pooled.append(np.max(pool_region, axis=(0,1)))
+        return np.concatenate(pooled)
+
+    def _relu(self, x):
+        """ReLU activation implementation"""
+        return np.maximum(0, x)
+
+    def _max_pool(self, x, pool_size, stride):
+        """Max pooling implementation"""
+        H, W, C = x.shape
+        H_out = (H - pool_size) // stride + 1
+        W_out = (W - pool_size) // stride + 1
+        
+        output = np.zeros((H_out, W_out, C))
+        for i in range(H_out):
+            for j in range(W_out):
+                h_start = i*stride
+                w_start = j*stride
+                pool_region = x[h_start:h_start+pool_size, 
+                              w_start:w_start+pool_size, :]
+                output[i,j] = np.max(pool_region, axis=(0,1))
+        return output
+
     def forward(self, x, style_id=0):
-        """Forward pass with dynamic patching and dropout"""
-        x = self.extract_patches(x)
-        self._cache['input_shape'] = x.shape
-        
-        # Project patches
-        x = np.matmul(x, self.projection.data)
-        
-        # Apply dropout
-        if self.training and self.dropout_rate > 0:
-            mask = (np.random.rand(*x.shape) > self.dropout_rate).astype(np.float32)
-            x *= mask
-        
-        # Add CLS token
-        cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
-        x = np.concatenate((cls_tokens, x), axis=1)
-        
-        # Positional embeddings
-        if self.positional_encoding == "sinusoidal":
-            x += self.position_embed.data[:, :x.shape[1]]
+        if self.encoder_type == "transformer":
+            # Original transformer processing
+            x = self.extract_patches(x)
+            self._cache['input_shape'] = x.shape
+            
+            x = np.matmul(x, self.projection.data)
+            
+            if self.training and self.dropout_rate > 0:
+                mask = (np.random.rand(*x.shape) > self.dropout_rate).astype(np.float32)
+                x *= mask
+            
+            cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
+            x = np.concatenate((cls_tokens, x), axis=1)
+            
+            if self.positional_encoding == "sinusoidal":
+                x += self.position_embed.data[:, :x.shape[1]]
+            else:
+                x += self.position_embed.data[:, :x.shape[1]]
+            
+            x = self.transformer.forward(x, style_id)
+            return x
+            
+        elif self.encoder_type == "cnn":
+            # Process with CNN pipeline
+            return self._cnn_forward(x)
+            
         else:
-            x += self.position_embed.data[:, :x.shape[1]]
-        
-        # Transformer processing
-        x = self.transformer.forward(x, style_id)
-        return x
+            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
 
     def backward(self, dout):
         """Backprop through encoder"""
