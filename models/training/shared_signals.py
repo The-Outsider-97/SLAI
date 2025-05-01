@@ -6,6 +6,8 @@ class TrainingSignals(QObject):
     log_message = pyqtSignal(str)
     batch_continuation = pyqtSignal(int, int)  # processed, remaining
     batch_approved = pyqtSignal(bool)
+    batch_rejected = pyqtSignal(bool)
+    batch_status = pyqtSignal(str)
     
     # Embedding Signals
     embedding_update = pyqtSignal(dict)
