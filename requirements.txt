@@ -1,60 +1,96 @@
-# Core ML & DL
+Core ML & DL
 numpy>=1.23.0
 matplotlib>=3.7.0
 pyyaml>=6.0
 tensorflow
 opencv-python
+torch
+torchvision
+torchaudio
+scipy
+pillow
+pytesseract
 
-# Gym Environments for RL
+Gym Environments for RL
 gymnasium>=0.28.1
 gym
 
-# Evolutionary Algorithms
+Evolutionary Algorithms
 deap>=1.3.3
 
-# Hyperparameter Optimization
+Hyperparameter Optimization
 optuna>=3.1.0
 ray[tune]>=2.2.0
+scikit-optimize
 
-# Code Generation & Recursive Self-Improvement
+Code Generation & Recursive Self-Improvement
 transformers>=4.31.0
 accelerate>=0.21.0
+sentencepiece
+sentence-transformers
 
-# Sandbox / Safe Execution (optional for RSI)
+Sandbox / Safe Execution (optional for RSI)
 docker>=6.1.3
+restrictedpython
 
-# Testing & Dev Tools
+Testing & Dev Tools
 pytest>=7.3.0
 jupyterlab>=4.0.5
 pylint
 unittest
 pytest-cov
+watchdog
+selenium
+beautifulsoup4
+fastapi
+uvicorn
+flask
+graphviz
+gradio
 
-# Additional Runtime Utilities
+Additional Runtime Utilities
 psutil
 gputil
 PyQt5
 python-dotenv
 faiss-cpu
+joblib
+pyarrow
+pynvml
+robotexclusionrulesparser
+sounddevice
+cryptography
 
-# Statistical Visualization
+Statistical Visualization
 seaborn
 plotly
 statsmodels
+reportlab
+shap
 
-# Bayesian Optimization
-scikit-optimize
-
-# Text Processing
+Text Processing
 textstat
 ply
+nltk
+spacy
+tenacity
+rollback
 
-# Causal Inference
-causalinference
-
-# Machine Learning Utilities
+Machine Learning Utilities
 scikit-learn
 pandas
+langchain
+pydantic
+mlxtend
 
-# OpenAI Integration
+Evaluation & NLP Metrics
+evaluate
+bert-score
+rouge
+
+OpenAI Integration
 openai
+
+Misc Utilities
+deepmerge
+sentencepiece
