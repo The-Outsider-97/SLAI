@@ -729,10 +729,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Load random responses from JSON
         try:
-            json_path = os.path.join(os.path.dirname(__file__), "templates/nlg_templates_en.json")
+            json_path = os.path.join(os.path.dirname(__file__), "templates/nlg_greetings_templates_en.json")
             with open(json_path, "r", encoding="utf-8") as f:
                 responses = json.load(f)
-            random_response = random.choice(responses["greeting"]["responses"])
+            random_response = random.choice(responses["responses"])
             greeting_message = f"{greeting} {random_response}"
         except FileNotFoundError:
             greeting_message = greeting + " I hope you're having a good day."
