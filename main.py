@@ -41,25 +41,34 @@ def load_config(config_path: str = "config.yaml") -> dict:
             sys.exit(1)
     return _config_cache
 
-def initialize_core_components(config: dict) -> tuple:
+def initialize_core_components(config: dict) -> tuple[AgentFactory, SharedMemory]:
     """Initialize fundamental system components"""
-    shared_memory = SharedMemory()
+    shared_memory = SharedMemory(config['shared_resources']['memory'])
     shared_memory.configure(
         default_ttl=config.get('memory_ttl', 3600),
         max_versions=config.get('max_versions', 10)
     )
     optimizer = SystemOptimizer()
     
-    agent_factory = AgentFactory(
+    factory = AgentFactory(
         config=config,
         shared_resources={
             "shared_memory": shared_memory,
-            "optimizer": optimizer
-        },
-        optimizer=optimizer
+            "optimizer": SystemOptimizer()
+        }
     )
-    
-    return shared_memory, optimizer, agent_factory
+
+    # Parallel pre-initialization of critical agents
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(factory.get, agent): agent
+            for agent in config['preload_agents']
+        }
+        for future in concurrent.futures.as_completed(futures):
+            agent_name = futures[future]
+            logger.info(f"Preloaded {agent_name} agent")
+        
+    return shared_memory, optimizer, factory
 
 #def start_research_api():
 #    uvicorn.run("api.research_api:app", host="127.0.0.1", port=8000, log_level="info")
@@ -103,7 +112,7 @@ def main():
 
     # Parallelize memory and factory creation
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        shared_future = executor.submit(SharedMemory)
+        shared_future = executor.submit(SharedMemory, config['shared_resources'])
         optimizer_future = executor.submit(SystemOptimizer)
         
         shared_memory = shared_future.result()
