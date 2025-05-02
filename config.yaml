@@ -228,7 +228,7 @@ agent-network:
         - vision
         - text
         - audio
-      embed_dim: 100
+      embed_dim: 300
       projection_dim: 256
       batch_size: 8
       learning_rate: 0.001
