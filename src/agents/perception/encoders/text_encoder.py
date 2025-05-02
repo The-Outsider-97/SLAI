@@ -68,7 +68,7 @@ class TextEncoder:
     def __init__(
         self,
         vocab_size=50257,
-        embed_dim=100,
+        embed_dim=200,
         num_layers=6,
         num_heads=8,
         dropout_rate=0.1,
