@@ -1,6 +1,9 @@
 import time
 import sys
-import resource
+if sys.platform != "win32":
+    import resource
+else:
+    resource = None
 from typing import List, Any, Dict, Optional
 import numpy as np
 
@@ -13,7 +16,10 @@ class EfficiencyEvaluator:
     def evaluate(self, outputs: List[Any], ground_truths: List[Any]) -> Dict[str, float]:
         """Multi-dimensional efficiency assessment with resource monitoring"""
         start_time = time.perf_counter()
-        start_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if resource:
+            start_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        else:
+            start_mem = 0
         
         # Calculate efficiency metrics
         metrics = {
@@ -28,8 +34,11 @@ class EfficiencyEvaluator:
                 'parameter_efficiency': self.baseline_measurements.get('params', 0),
                 'flops': self.baseline_measurements.get('flops', 0)
             })
-            
-        end_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        if resource:
+            end_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        else:
+            end_mem = 0
         metrics['memory_usage_mb'] = (end_mem - start_mem) / 1024
         
         metrics['execution_time'] = time.perf_counter() - start_time
