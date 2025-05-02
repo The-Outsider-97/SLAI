@@ -55,7 +55,7 @@ class Monitoring:
         if platform.system() == 'Windows':
             return float(os.popen('wmic cpu get loadpercentage').read().split()[2])
         else:
-            return float(os.popen("top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\([0-9.]*\)%* id.*/\1/'").read().strip())
+            return float(os.popen(r"top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\([0-9.]*\)%* id.*/\1/'").read().strip())
 
     def _get_memory_usage(self):
         """Memory usage percentage without psutil"""
