@@ -466,7 +466,7 @@ class MusicEditor(QWidget):
         self.perception_agent = PerceptionAgent(
             config={
                 "modalities": ["audio"],
-                "embed_dim": 100,
+                "embed_dim": 512,
                 "projection_dim": 256,
             },
             shared_memory=None,
