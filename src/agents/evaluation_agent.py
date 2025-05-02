@@ -1,5 +1,5 @@
 """
-EVAL_AGENT.PY - Unified Evaluation Framework
+Unified Evaluation Framework
 Implements: Static Analysis, Behavioral Testing, Reward Modeling, and Multi-Objective Evaluation
 
 Key Features:
