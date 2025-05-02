@@ -8,13 +8,13 @@ from PyQt5.QtWidgets import (
     QWidget, QPushButton, QTextEdit, QVBoxLayout, QProgressBar, QLineEdit,
     QFrame, QScrollArea, QDialog, QHBoxLayout, QListWidgetItem, QLabel, QSizePolicy, QGridLayout # Keep QGridLayout if needed for future complex layouts
 )
-
+from models.training.shared_signals import training_signals, safe_connect
 from logs.logger import get_logger
 logger = get_logger(__name__)
 
-class TrainingSignals(QObject):
-    log_message = pyqtSignal(str)
-training_signals = TrainingSignals() # Replace with actual import
+#class TrainingSignals(QObject):
+#    log_message = pyqtSignal(str)
+#training_signals = TrainingSignals() # Replace with actual import
 
 STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
 
@@ -80,9 +80,9 @@ class LanguageEditor(QWidget):
         self.current_batch_data = {}
         self.last_batch_data = None # Keep for undo functionality
         # Connect log signals
-        self.editor_signals.log_message.connect(self.append_log) # Connect internal log signal
-        training_signals.log_message.connect(self.append_log) # Connect external log signal
-        training_signals.batch_status.connect(self.update_batch_status)
+        self.editor_signals.log_message.connect(self.append_log)
+        safe_connect(training_signals.log_message, self.append_log)
+        safe_connect(training_signals.batch_status, self.update_batch_status)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -151,6 +151,7 @@ class LanguageEditor(QWidget):
                 border: 1px solid #444;
                 border-radius: 4px;
                 padding: 5px;
+                font-size: 16px;
                 color: #eee;
             }
         """)
@@ -307,7 +308,7 @@ class LanguageEditor(QWidget):
             # Display POS - Assuming 'pos' exists in the entry dict
             pos_text = f"pos: [{', '.join(entry.get('pos', ['N/A']))}]" # Handle list or single string POS
             pos_label = QLabel(pos_text)
-            pos_label.setStyleSheet("color: #aaa; font-size: 14px; margin-bottom: 3px;")
+            pos_label.setStyleSheet("color: #aaa; font-size: 16px; margin-bottom: 3px;")
             pos_label.setWordWrap(True)
             card_layout.addWidget(pos_label)
 
@@ -423,12 +424,12 @@ class LanguageEditor(QWidget):
     def handle_edit_term(self, term_label):
         if term_label.isReadOnly():
             term_label.setReadOnly(False)
-            term_label.setStyleSheet("QLineEdit { background-color: #444; border: 1px solid #777; border-radius: 3px; padding: 1px 3px; color: white; }") # Indicate editing
+            term_label.setStyleSheet("QLineEdit { background-color: #444; border: 1px solid #777; border-radius: 3px; padding: 1px 3px; font-size: 16px; color: white; }") # Indicate editing
             term_label.setFocus()
         else:
             # Logic when editing is finished (e.g., Enter press or focus lost)
             term_label.setReadOnly(True)
-            term_label.setStyleSheet("QLineEdit { background-color: #2a2a2a; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; color: #f0f0f0; }")
+            term_label.setStyleSheet("QLineEdit { background-color: #2a2a2a; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; font-size: 16px; color: #f0f0f0; }")
             # Here you might want to emit the 'term_decision' signal with the new term
             # This requires knowing the original term. Storing it in the widget or using a closure might be needed.
             # For simplicity, we'll assume the decision is made via Keep/Reject after editing.
@@ -439,11 +440,11 @@ class LanguageEditor(QWidget):
 
         # Optionally update widget appearance (e.g., strike-through for reject)
         if decision == 'reject':
-             term_widget.setStyleSheet("QLineEdit { background-color: #ff3131; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; color: #777; text-decoration: line-through; }")
+             term_widget.setStyleSheet("QLineEdit { background-color: #2a2a2a; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; color: #777; text-decoration: line-through; }")
         elif final_decision != 'keep': # Modified and kept
-             term_widget.setStyleSheet("QLineEdit { background-color: #7ed957; border: 1px solid lightgreen; border-radius: 3px; padding: 1px 3px; color: lightgreen; }") # Indicate saved change
+             term_widget.setStyleSheet("QLineEdit { background-color: #2a2a2a; border: 1px solid lightgreen; border-radius: 3px; padding: 1px 3px; color: lightgreen; }") # Indicate saved change
         else: # Kept original
-             term_widget.setStyleSheet("QLineEdit { background-color: #00b51a; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; color: #00b51a; }") # Indicate kept
+             term_widget.setStyleSheet("QLineEdit { background-color: #2a2a2a; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; color: lightgreen; }") # Indicate kept
 
         term_widget.setReadOnly(True) # Ensure it's read-only after decision
 
@@ -457,6 +458,14 @@ class LanguageEditor(QWidget):
     # def cancel_add_term(self, grid_layout, row): ...
     # If you need interaction again, you'll need to redesign how it works with this layout.
     # Maybe double-clicking a card opens an edit dialog?
+
+    def search_entire_wordlist(self, search_text, all_word_entries):
+        search_text = search_text.strip().lower()
+        matched = [(word, entry) for word, entry in all_word_entries if search_text in word.lower()]
+        if matched:
+            self.display_batch(matched)
+        else:
+            self.append_log(f"No matches found for '{search_text}'.")
 
     def filter_cards(self, text):
         """Filter cards based on the word (header text)."""
@@ -525,10 +534,6 @@ class LanguageEditor(QWidget):
          except Exception as e:
              self.append_log(f"Error saving \"{word}\": {str(e)}")
              logger.error(f"Error saving {word} to {STRUCTURED_WORDLIST_PATH}: {e}", exc_info=True)
-
-
-    # load_entry might not be used directly if you load full batches now
-    # def load_entry(self, word: str, entry: dict): ... # Review if needed
 
     # These emit signals based on batch actions, ensure they work as intended
     # def emit_approve(self): self.approveBatchClicked.emit() # Example: Signal might not need data now
