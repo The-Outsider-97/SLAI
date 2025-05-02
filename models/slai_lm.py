@@ -220,14 +220,14 @@ class SLAILM:
         # Grammar Processor
         self.text_encoder = TextEncoder(
             vocab_size=len(self.structured_wordlist),           # Set based on your tokenizer or wordlist size
-            embed_dim=100,            # because glove.6B.100d
+            embed_dim=100,            # because glove.6B.200d
             num_layers=6,
             num_heads=8,
             dropout_rate=0.1,
             positional_encoding='learned',  # or 'sinusoidal'
             max_seq_len=512
         )
-        self.text_encoder.load_glove_embeddings("data/embeddings/glove.6B.100d.json", list(self.structured_wordlist.keys()))
+        self.text_encoder.load_glove_embeddings("data/embeddings/glove.6B.200d.json", list(self.structured_wordlist.keys()))
         if grammar_processor_instance:
             self.grammar_processor = grammar_processor_instance
             logger.info("Using provided GrammarProcessor instance.")
