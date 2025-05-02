@@ -15,6 +15,7 @@ from deployment.deployment_history import log_to_history, get_history
 from logs.logger import get_logger
 
 logger = get_logger(__name__)
+
 log_to_history(
     event_type="merge",
     user="rsi_process",
@@ -86,11 +87,6 @@ push_rsi_update(
         "behavioral_passed": behavior_passed
     }
 )
-
-# Configure logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 
 def recursive_improvement_loop(task_description: str, iterations: int = 5):
     """
