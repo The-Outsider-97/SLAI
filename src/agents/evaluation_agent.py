@@ -33,7 +33,7 @@ from src.agents.evaluators.documentation import AuditTrail
 from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
 from src.agents.base_agent import BaseAgent
 from src.tuning.tuner import HyperparamTuner
-from src.utils.privacy_guard import PrivacyGuard
+from src.agents.safety.safety_guard import SafetyGuard
 from src.utils.interpretability import InterpretabilityHelper
 from logs.logger import get_logger
 
@@ -168,7 +168,7 @@ class EvaluationAgent(BaseAgent):
         sanitized = results.copy()
         for key in ["notes", "feedback"]:
             if key in sanitized:
-                sanitized[key] = PrivacyGuard.scrub(sanitized[key])
+                sanitized[key] = SafetyGuard.scrub(sanitized[key])
         return sanitized
 
     def _store_metrics(self, metrics: Dict) -> None:
