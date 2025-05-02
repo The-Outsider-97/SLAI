@@ -114,47 +114,7 @@ Note: If you see an error about execution policy:
 
 4. Install requirements:
    ```console
-   pip install torch torchvision torchaudio
    pip install -r requirements.txt
-   pip install pyyaml
-   pip install PyQt5
-   pip install psutil gputil
-   pip install ply
-   pip install textstat
-   pip install opencv-python
-   pip install matplotlib
-   pip install scipy
-   pip install watchdog
-   pip install deepmerge
-   pip install joblib
-   pip install pandas
-   pip install pyarrow
-   pip install spacy
-   pip install tenacity
-   pip install rollback
-   pip install statsmodels
-   pip install numpy scipy scikit-learn
-   pip install scikit-optimize
-   pip install shap
-   pip install nltk
-   pip install gymnasium
-   pip install beautifulsoup4
-   pip install fastapi uvicorn
-   pip install selenium
-   pip install pynvml
-   pip install robotexclusionrulesparser
-   pip install pytesseract pillow
-   pip install evaluate
-   pip install bert_score
-   pip install rouge_score
-   pip install sounddevice
-   pip install seaborn
-   pip install reportlab
-   pip install mlxtend
-   pip install cryptography
-   pip install sentence_transformers
-   pip install restrictedpython
-   pip install sentencepiece
    pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
 
    python -m nltk.downloader punkt
