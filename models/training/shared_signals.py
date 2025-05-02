@@ -1,4 +1,9 @@
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
+
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, Qt, QTimer
+def safe_connect(signal, target_slot):
+    signal.connect(lambda *args, **kwargs:
+        QTimer.singleShot(0, lambda: target_slot(*args, **kwargs))
+    )
 
 class TrainingSignals(QObject):
     # Synonym Trainer Signals
