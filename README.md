@@ -118,6 +118,7 @@ Note: If you see an error about execution policy:
    pip install music21
    pip install mido
    pip install tensorflow-cpu
+   pip install pypdf
    pip install -r requirements.txt
    pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
 
