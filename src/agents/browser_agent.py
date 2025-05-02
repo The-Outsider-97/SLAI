@@ -1,8 +1,6 @@
-import os, sys
+import os
 import time
 import random
-import logging
-import requests
 # import pytesseract
 import numpy as np
 
@@ -20,8 +18,9 @@ from src.agents.base_agent import BaseAgent
 from src.agents.browser.security import SecurityFeatures, exponential_backoff
 from src.agents.browser.workflow import WorkFlow
 from src.agents.browser.utils import Utility
+from logs.logger import get_logger
 
-logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # --------------------------
 # Core Configuration
@@ -65,6 +64,28 @@ class BrowserAgent(BaseAgent):
         self.session_context = DialogueContext()
         self.knowledge_cache = {}
         self.last_snapshot = None
+
+    def get_rendered_content(self):
+        return {
+            'html': self.driver.page_source,
+            'text': self.driver.find_element(By.TAG_NAME, 'body').text,
+            'screenshot': self._take_screenshot(),
+            'interactive_elements': self._detect_clickables()
+        }
+    
+    def execute_workflow(self, workflow_script):
+        """Execute predefined interaction patterns"""
+        workflow = WorkFlow(workflow_script)
+        while workflow.has_next():
+            step = workflow.next_step()
+            getattr(self, f"do_{step['action']}")(**step['params'])
+            
+    def do_scroll(self, pixels):
+        self.driver.execute_script(f"window.scrollBy(0, {pixels});")
+    
+    def do_click(self, selector):
+        element = self.driver.find_element(By.CSS_SELECTOR, selector)
+        ActionChains(self.driver).click(element).perform()
 
     def _init_browser(self):
         options = webdriver.ChromeOptions()
