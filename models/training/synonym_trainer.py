@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 # === Configuration ===
 STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
-EMBEDDING_PATH = "data/embeddings/glove.6B.100d.json"
+EMBEDDING_PATH = "data/embeddings/glove.6B.200d.json"
 FINAL_OUTPUT_PATH = Path("logs/enriched_wordlist_final.json")
 PROGRESS_PATH = Path("logs/progress.json")
 BATCH_SIZE = 10  # Ensure BATCH_SIZE is defined and > 0
