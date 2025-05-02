@@ -19,19 +19,16 @@ class PerceptionAgent(BaseAgent):
                  audio_encoder=None,
                  args=(),
                  kwargs={}):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory
-        )
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory)
         from src.agents.perception.encoders.vision_encoder import VisionEncoder
         from src.agents.perception.encoders.text_encoder import TextEncoder
         from src.agents.perception.encoders.audio_encoder import AudioEncoder
 
+        self.modalities = config.get('modalities', ['text'])
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = config
         self.pretrainer = self.PretrainingTasks(self)
-        self.modalities = config['modalities']
         self.encoders = OrderedDict()
         embed_dim = config.get('embed_dim', 512)
         projection_dim = config.get('projection_dim', 256)
@@ -127,7 +124,6 @@ class PerceptionAgent(BaseAgent):
         # Projection layer alignment
         if 'proj' in weights:
             self.projection.data = weights['proj']
-    
 
     def _collect_parameters(self):
         params = []
@@ -329,6 +325,13 @@ class PerceptionAgent(BaseAgent):
                 delta = np.mean((sequence_embeddings[i] - sequence_embeddings[i-1]) ** 2)
                 deltas.append(delta)
             return np.mean(deltas)
+        
+        def update_projection(self, rewards, lr):
+            if isinstance(rewards, list):
+                rewards = np.array(rewards)
+            grad = rewards.mean()  # Simplified reward-based scaling
+            self.projection.grad += grad * np.sign(self.projection.data)
+            self.projection.data -= lr * self.projection.grad
 
 class CrossModalAttention:
     def __init__(self, embed_dim):
@@ -477,55 +480,3 @@ class SLAILMAdapter:
         projected = np.matmul(multimodal_emb, self.projection.data)
         self.set_cache(multimodal_emb, projected)  # ensure cache is populated
         return TensorOps.layer_norm(projected) * self.layer_norm.data
-
-# Complete Example Usage
-if __name__ == "__main__":
-    config = {
-        'modalities': ['vision', 'text', 'audio'],
-        'embed_dim': 512,
-        'projection_dim': 256
-    }
-    
-    # Initialize agent with batch processing support
-#    agent = PerceptionAgent(config)
-    
-    # Example pretrained weights (ViT-Base compatible)
-#    pretrained_weights = {
-#        'conv_proj': np.random.randn(16, 16, 3, 512),  # (patch, patch, in_chans, embed_dim)
-#        'cls_token': np.random.randn(1, 1, 512),
-#        'pos_embed': np.random.randn(1, 197, 512),     # 14x14 patches + 1 cls token
-#        'transformer_encoder_0_attn_q_proj': np.random.randn(512, 512),
-        # ... other transformer weights
-#    }
-    
-    # Load vision encoder pretrained weights
-#    agent.load_pretrained('vision', pretrained_weights)
-    
-    # Create batch of inputs
-#    batch = {
-#        'vision': np.random.randn(8, 3, 224, 224),  # 8 RGB images
-#        'text': np.random.randint(0, 50257, (8, 77)) # 8 text sequences
-#    }
-    
-    # Forward pass
-#    latent = agent.forward(batch)
-    
-    # Compute dummy loss (MSE for example)
-#    target = np.random.randn(*latent.shape)
-#    loss = np.mean((latent - target) ** 2)
-#    print(f"Initial loss: {loss:.4f}")
-    
-    # Backward pass
-#    dout = 2 * (latent - target) / latent.size
-#    agent.backward(dout)
-    
-    # Parameter update (SGD)
-#    learning_rate = 1e-3
-#    for param in agent.params:
-#        param.data -= learning_rate * param.grad
-#        param.grad.fill(0)  # Reset gradients
-    
-    # Verify updated forward pass
-#    updated_latent = agent.forward(batch)
-#    updated_loss = np.mean((updated_latent - target) ** 2)
-#    print(f"Updated loss: {updated_loss:.4f}")
