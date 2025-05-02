@@ -1,13 +1,16 @@
-import logging
+
 import json
 import os
 import time
 import math
 import platform
+
 from collections import deque, defaultdict
 from datetime import datetime, timedelta
 
-logger = logging.getLogger('SafeAI.Monitoring')
+from logs.logger import get_logger
+
+logger = get_logger('SafeAI.Monitoring')
 
 class Monitoring:
     """Enhanced monitoring system with statistical process control"""
