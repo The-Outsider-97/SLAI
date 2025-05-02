@@ -1,18 +1,20 @@
 import logging
 import time
-from recursive_improvement.codegen.codegen import generate_code
-from recursive_improvement.unit_tests.test_generator import generate_unit_tests
-from recursive_improvement.sandbox.runner import run_code_and_tests
-from recursive_improvement.evaluators.static_analysis import static_analysis_bandit
-from recursive_improvement.evaluators.behavioral_tests import behavioral_test
-from recursive_improvement.evaluators.reward_function import calculate_reward
+from src.rsi.codegen.codegen import generate_code
+from src.rsi.unit_tests.test_generator import generate_unit_tests
+from src.rsi.sandbox.runner import run_code_and_tests
+from src.agents.evaluators.static_analysis import static_analysis_bandit
+from src.agents.evaluators.behavioral_tests import behavioral_test
+from src.agents.evaluators.reward_function import calculate_reward
 from monitoring.dashboard import push_rsi_update
 from deployment.git.rollback_handler import rollback_to_previous_release
 from deployment.git.branch_manager import create_branch, merge_branches, delete_branch, auto_name_branch
 from deployment.git.ci_cd_trigger import trigger_github_actions
 from deployment.deployment_logger import log_event
 from deployment.deployment_history import log_to_history, get_history
+from logs.logger import get_logger
 
+logger = get_logger(__name__)
 log_to_history(
     event_type="merge",
     user="rsi_process",
