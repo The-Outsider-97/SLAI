@@ -13,7 +13,7 @@ import datetime
 import threading
 
 from multiprocessing import Manager
-from typing import Tuple, Type, Any
+from typing import Tuple, Type, Any, Dict
 from collections import namedtuple, defaultdict, deque
 from logs.logger import get_logger
 
@@ -35,12 +35,22 @@ class SharedMemory:
     For IPC, consider using `multiprocessing.Manager` or external solutions
     like Redis or Memcached.
     """
+    _instance = None
 
-    def __init__(self, max_memory_mb=100, max_versions=10, ttl_check_interval=30, network_latency=0.0):
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+            cls._instance.__initialized = False
+        return cls._instance
+    
+    def __init__(self, config: Dict, max_memory_mb=100, max_versions=10, ttl_check_interval=30, network_latency=0.0):
         from src.collaborative.registry import AgentRegistry
         from src.collaborative.task_router import TaskRouter
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
+        if not self.__initialized:
+            self.__configure(config)
+            self.__initialized = True
         self.max_memory = max_memory_mb * 1024**2  # Convert MB to bytes
         self.current_memory = 0  # Track total memory used
         self.data = {}
@@ -80,6 +90,13 @@ class SharedMemory:
 
         # Start background cleanup thread
         self._start_expiration_cleaner()
+
+    def __configure(self, config: Dict):
+        """Single configuration entry point"""
+        self.data = {}
+        self.lock = threading.RLock()
+        self.max_size = config.get('max_memory_mb', 100) * 1024**2
+        self.current_usage = 0
 
 # ==============================
 #  2. Core Public API
