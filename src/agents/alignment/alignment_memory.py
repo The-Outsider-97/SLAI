@@ -7,7 +7,6 @@ Implements:
 - Intervention effect tracking
 """
 
-import logging
 import hashlib
 import numpy as np
 import pandas as pd
@@ -16,9 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from scipy.stats import pearsonr, entropy
 from sklearn.covariance import EmpiricalCovariance
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 @dataclass
 class MemoryConfig:
