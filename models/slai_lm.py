@@ -9,10 +9,18 @@ import logging
 import re
 import json
 import time
-import datetime
+import torch
 import hashlib
 import numpy as np
 import pandas as pd
+import torch.nn as nn
+import torch.quantization
+import torch.nn.functional as F
+import torch.nn.utils.prune as prune
+
+from nltk.translate.bleu_score import sentence_bleu
+from rouge import Rouge
+from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Optional, Dict, Any, Union, Set, Tuple
@@ -33,6 +41,82 @@ def get_shared_slailm(shared_memory, agent_factory=None):
     if shared_slailm is None:
         shared_slailm = SLAILM(shared_memory, agent_factory=agent_factory)
     return shared_slailm
+
+def calculate_perplexity(logits, target_ids):
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1))
+    return torch.exp(loss)
+
+def calculate_bleu(reference, hypothesis):
+    return sentence_bleu([reference.split()], hypothesis.split())
+
+def calculate_rouge(reference, hypothesis):
+    rouge = Rouge()
+    scores = rouge.get_scores(hypothesis, reference)
+    return scores[0]
+
+def calculate_accuracy(predictions, ground_truths):
+    correct = sum(p == g for p, g in zip(predictions, ground_truths))
+    return correct / len(predictions) if predictions else 0.0
+
+# ===== Human Evaluation =====
+def get_human_rating(prompt, response, category):
+    # TODO: Integrate with a real human feedback interface or API
+    print(f"[HUMAN INPUT NEEDED] Rate {category} (1–5) for: {response}")
+    return float(input(f"Enter {category} rating (1–5): "))
+
+def get_safety_classifier(response):
+    # TODO: Replace with a real classifier
+    return 5.0 if "badword" not in response else 1.0
+
+def get_helpfulness_score(prompt, response):
+    # TODO: Implement automated or human scoring logic
+    return 4.0  # Placeholder static score
+# ============================
+
+class AttentionBlock(nn.Module):
+    def __init__(self, dim=512, heads=8):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(dim, heads)
+
+class SLADataset(Dataset):
+    """Custom dataset for batch processing"""
+    def __init__(self, texts, tokenizer, max_length=512):
+        self.texts = texts
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        tokens = self.tokenizer.encode(text)
+        return {
+            'input_ids': torch.tensor(tokens[:self.max_length], dtype=torch.long),
+            'attention_mask': torch.tensor([1]*len(tokens[:self.max_length]))
+        }
+
+class QuantizableTextEncoder(torch.nn.Module):
+    """Modified TextEncoder with quantization support"""
+    def __init__(self, vocab_size, embed_dim, num_layers, num_heads, dropout_rate=0.1):
+        super().__init__()
+        self.embedding = torch.nn.Embedding(vocab_size, embed_dim)
+        self.transformer = torch.nn.Transformer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            num_encoder_layers=num_layers,
+            num_decoder_layers=num_layers,
+            dropout=dropout_rate
+        )
+        self.quant = torch.quantization.QuantStub()
+        self.dequant = torch.quantization.DeQuantStub()
+
+    def forward(self, x):
+        x = self.quant(x)
+        x = self.embedding(x)
+        x = self.transformer(x, x)
+        x = self.dequant(x)
+        return x
 
 class SLAILM:
     """
@@ -62,7 +146,10 @@ class SLAILM:
                  # --- Custom Configuration Dictionary ---
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
+        from src.agents.perception.encoders.text_encoder import TextEncoder
         start = time.time()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.text_encoder = self._init_accelerated_encoder()
         self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -131,6 +218,16 @@ class SLAILM:
                 self.knowledge = None # Fallback
 
         # Grammar Processor
+        self.text_encoder = TextEncoder(
+            vocab_size=len(self.structured_wordlist),           # Set based on your tokenizer or wordlist size
+            embed_dim=100,            # because glove.6B.100d
+            num_layers=6,
+            num_heads=8,
+            dropout_rate=0.1,
+            positional_encoding='learned',  # or 'sinusoidal'
+            max_seq_len=512
+        )
+        self.text_encoder.load_glove_embeddings("data/embeddings/glove.6B.100d.json", list(self.structured_wordlist.keys()))
         if grammar_processor_instance:
             self.grammar_processor = grammar_processor_instance
             logger.info("Using provided GrammarProcessor instance.")
@@ -195,6 +292,57 @@ class SLAILM:
         })
 
         logger.info(f"[SLAILM INIT] Finished in {time.time() - start:.2f}s")
+
+    def _init_accelerated_encoder(self):
+        """Initialize encoder with GPU/TPU support"""
+        encoder = QuantizableTextEncoder(
+            vocab_size=self.subword_tokenizer.get_piece_size(),
+            embed_dim=100,
+            num_layers=6,
+            num_heads=8
+        ).to(self.device)
+        
+        if torch.cuda.device_count() > 1:
+            encoder = torch.nn.DataParallel(encoder)
+            
+        return encoder
+
+    def _batch_process(self, texts: list[str], batch_size=32) -> list[dict]:
+        """Process texts in batches"""
+        dataset = SLADataset(texts, self.subword_tokenizer)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        
+        results = []
+        with torch.no_grad():
+            for batch in loader:
+                inputs = batch['input_ids'].to(self.device)
+                outputs = self.text_encoder(inputs)
+                results.extend(outputs.cpu().numpy())
+        return results
+
+    def apply_quantization(self):
+        """Apply dynamic quantization to the encoder"""
+        self.text_encoder = torch.quantization.quantize_dynamic(
+            self.text_encoder,
+            {torch.nn.Linear},
+            dtype=torch.qint8
+        )
+        logger.info("Applied dynamic quantization to the model")
+
+    def apply_pruning(self, amount=0.2):
+        """Apply magnitude-based pruning to linear layers"""
+        for name, module in self.text_encoder.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                prune.l1_unstructured(module, name='weight', amount=amount)
+                prune.remove(module, 'weight')
+        logger.info(f"Applied {amount*100}% pruning to linear layers")
+
+    def optimize_for_inference(self):
+        """Optimize model for deployment"""
+        self.text_encoder = torch.jit.script(self.text_encoder)
+        if self.device.type == 'cuda':
+            self.text_encoder = self.text_encoder.to(memory_format=torch.channels_last)
+        logger.info("Optimized model for inference")
 
     def _setup_logging(self, level: int, log_file: Optional[Union[str, Path]]):
         """Configures logging for the SLAILM instance."""
@@ -261,6 +409,7 @@ class SLAILM:
     
     def _tokenize(self, text: str) -> list[str]:
         """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
+        from src.agent.perception.modules.transformers import AutoTokenizer
         for i, pattern_item in enumerate(pos_patterns):
             try:
                 pattern, name = pattern_item
@@ -334,7 +483,8 @@ class SLAILM:
                     validated.append(token)
             else:
                 validated.append(token)
-        return validated
+
+        return self.tokenizer.tokenize(validated)
     
     def parse_intent(self, prompt: str) -> dict:
         try:
@@ -361,6 +511,10 @@ class SLAILM:
             "tokens": tokens,
             "timestamp": time.time()
         }
+        token_ids = [self.text_encoder.vocab.get(token, self.text_encoder.unk_token_id) for token in tokens]
+        token_array = np.array(token_ids).reshape(1, -1)  # (batch, seq_len)
+        transformer_output = self.text_encoder.forward(token_array)
+        pooled_output = np.mean(transformer_output, axis=1)  # (batch, embed_dim)
 
         # POS tagging
         try:
@@ -494,8 +648,8 @@ class SLAILM:
             # need to match what's available here.
             # Let's assume it can work with just the input text for now,
             # or adapt it if necessary.
-            # frame_stub = type('Frame', (object,), {'entities': {}}) # Minimal stub if needed
-            # generated_text = self.grammar_processor._generate_grammatical_response(frame_stub, input_text)
+            frame_stub = type('Frame', (object,), {'entities': {}}) # Minimal stub if needed
+            generated_text = self.grammar_processor._generate_grammatical_response(frame_stub, input_text)
 
             # Simpler approach: Maybe GrammarProcessor has a direct generate method?
             # Or we use a simpler template + concept approach if grammar generation is complex.
@@ -625,10 +779,12 @@ class SLAILM:
         response = self.generate_response(prompt)
         return self._parse_validation_response(response)
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(self, reference, prompt: str) -> str:
+        from src.agents.evaluators.documentation import AuditTrail
         """
         Full response generation pipeline using internal components.
         """
+        self.audit_trail = AuditTrail()
         if not isinstance(prompt, str) or len(prompt.strip()) < 3:
             return "[SLAILM] Input too short to generate meaningful output."
 
@@ -645,6 +801,45 @@ class SLAILM:
 
         # Generate response using internal logic (forward_pass)
         response_text = self.forward_pass(processed)
+        bleu = calculate_bleu(reference, response_text)
+        rouge = calculate_rouge(reference, response_text)
+        logger.info(f"BLEU: {bleu}, ROUGE: {rouge}")
+
+        self.context_memory.append({
+            "prompt": prompt,
+            "response": response_text,
+            "bleu": bleu,
+            "rouge": rouge,
+            "human_feedback": {
+                "coherence": coherence,
+                "safety": safety,
+                "helpfulness": helpfulness
+            },
+            "timestamp": time.time()
+        })
+
+        coherence = 4.5  # Replace later with real human rating input
+        safety = 5.0
+        helpfulness = 4.0
+        
+        self.record_human_evaluation(prompt, response_text, coherence, safety, helpfulness)
+        
+        if hasattr(self, 'audit_trail'):
+            document = {
+                "input": prompt,
+                "response": response_text,
+                "metrics": {
+                    "bleu": bleu,
+                    "rouge": rouge
+                },
+                "human_feedback": {
+                    "coherence": coherence,
+                    "safety": safety,
+                    "helpfulness": helpfulness
+                },
+                "timestamp": time.time()
+            }
+            self.audit_trail.add_document(document)
 
         # Update dialogue history
         self.dialogue_context.add_entry(user_input=prompt, bot_response=response_text)
@@ -663,6 +858,12 @@ class SLAILM:
         logger.info(f"Generated response in {end_time - start_time:.2f} seconds.")
         return final_response
     
+    def record_human_evaluation(self, prompt, response):
+        # Integrate with UI/API for real ratings
+        coherence = get_human_rating(prompt, response, "coherence")
+        safety = get_safety_classifier(response)
+        helpfulness = get_helpfulness_score(prompt, response)
+
     def polish_response(self, text: str) -> str:
         """
         Optional final polish using rule-based grammar optimization.
@@ -741,6 +942,27 @@ class SLAILM:
             logger.info(f"[SLAILM] Successfully merged enriched synonym data from: {path}")
         except Exception as e:
             logger.error(f"[SLAILM] Failed to load enriched wordlist: {e}")
+
+    def train(self, corpus, epochs=10):
+        optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+
+        for epoch in range(epochs):
+            for batch in DataLoader(corpus, batch_size=32):
+                logits = self(batch)
+                loss = F.cross_entropy(logits)
+                loss.backward()
+                optimizer.step()
+                outputs = self(batch.inputs)
+                loss = F.cross_entropy(outputs, batch.targets)
+                loss.backward()
+
+                if (step+1) % 4 == 0:
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+            scheduler.step()
 
 class SLAILMValueModel:
     def __init__(self, slai_lm, memory=None, ethics_checker=None):
