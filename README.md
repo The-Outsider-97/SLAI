@@ -156,6 +156,8 @@ Note: If you see an error about execution policy:
    pip install restrictedpython
    pip install sentencepiece
    pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
+
+   python -m nltk.downloader punkt
    ```
 
 5. Run Model:
