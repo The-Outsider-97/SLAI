@@ -75,6 +75,22 @@ class InvalidConfigError(Exception):
 
     def __str__(self):
         return f'InvalidConfigError: {self.message}'
+
+class MultiTaskLearner(nn.Module):
+    def __init__(self, shared_dim=256, task_dims=None):
+        super().__init__()
+        self.shared_encoder = nn.Sequential(
+            nn.Linear(input_dim, shared_dim),
+            nn.ReLU()
+        )
+        self.task_heads = nn.ModuleDict({
+            task: nn.Linear(shared_dim, dim) 
+            for task, dim in task_dims.items()
+        })
+
+    def forward(self, x, task):
+        shared = self.shared_encoder(x)
+        return self.task_heads[task](shared)
     
 class LearningAgent(BaseAgent):
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
@@ -120,6 +136,8 @@ class LearningAgent(BaseAgent):
     @performance_metrics.setter
     def performance_metrics(self, value):
         self._performance_metrics = value
+        start_time = time.time()
+        mem_before = psutil.Process().memory_info().rss
 
         # Initialize learning subsystems
         self._initialize_agents(
@@ -136,17 +154,18 @@ class LearningAgent(BaseAgent):
         possible_actions = list(range(action_dim))
 
         self.agents = {
-            'dqn': DQNAgent(state_dim, action_dim, config.get('dqn', {})),
-            'maml': MAMLAgent(state_dim, action_dim, **config.get('maml', {})),
-            'rsi': RSI_Agent(state_dim, action_dim, shared_memory, config=config.get('rsi', {})),
-            'rl': RLAgent(possible_actions, **config.get('rl', {}))
+            'dqn': DQNAgent(state_dim, action_dim, self.config.get('dqn', {})),
+            'maml': MAMLAgent(state_dim, action_dim, **self.config.get('maml', {})),
+            'rsi': RSI_Agent(state_dim, action_dim, self.shared_memory, config=self.config.get('rsi', {})),
+            'rl': RLAgent(possible_actions, **self.config.get('rl', {}))
         }
+        
         # Enhanced MAML initialization
-        self.maml_task_pool_size = config.get('maml_task_pool_size', 100)
+        self.maml_task_pool_size = self.config.get('maml_task_pool_size', 100)
         self.maml_task_pool = deque(maxlen=self.maml_task_pool_size)
         
         # Deeper RSI integration
-        self.rsi_improvement_cycle = config.get('rsi_improvement_cycle', 50)
+        self.rsi_improvement_cycle = self.config.get('rsi_improvement_cycle', 50)
         self.architecture_history = deque(maxlen=10)  # Tracks network changes
         
         # Integrated strategy evaluator
@@ -172,11 +191,10 @@ class LearningAgent(BaseAgent):
             self._recover_strategy_switch,
             self._recover_full_reset
         ]
-        
+
         # Defer heavy initialization
         self._deferred_initialization()
 
-        
         logger.info(f"[TIME] create executed in {time.time()-start_time:.2f} seconds")
         logger.info(f"[MEMORY] create used {(psutil.Process().memory_info().rss - mem_before)/1024/1024:.2f} MB")
 
@@ -189,7 +207,7 @@ class LearningAgent(BaseAgent):
             'rsi': LazyAgent(partial(self._create_rsi_agent)),
             'rl': LazyAgent(partial(self._create_rl_agent))
         }
-        
+
         # Shared components
         self.memory = BaseAgent.SharedMemoryView(self.shared_memory)
         self.performance_metrics = LightMetricStore()
@@ -239,13 +257,17 @@ class LearningAgent(BaseAgent):
             discount_factor=0.95
         )
 
-    def observe(self, embedding):
+    def observe(self, embedding_with_label):
         """Store live embeddings into buffer."""
-        if isinstance(embedding, np.ndarray):
-            embedding = torch.tensor(embedding, dtype=torch.float32)
-        if embedding.dim() == 2:
-            embedding = embedding.squeeze(0)  # (1, 256) → (256,)
-        self.embedding_buffer.append(embedding)
+        if isinstance(embedding_with_label, np.ndarray):
+            embedding_with_label = torch.tensor(embedding_with_label, dtype=torch.float32)
+        if embedding_with_label.dim() == 2:
+            embedding_with_label = embedding_with_label.squeeze(0)
+    
+        embedding = embedding_with_label[:-1]  # all but last value
+        label = embedding_with_label[-1].long()  # last value as integer label (0 or 1)
+    
+        self.embedding_buffer.append((embedding, label))
     
     def train_from_embeddings(self):
         """Train a small supervised task on buffered embeddings."""
@@ -253,18 +275,20 @@ class LearningAgent(BaseAgent):
             return  # Not enough data yet
     
         batch = list(self.embedding_buffer)  # Grab batch
-        inputs = np.stack(batch)  # shape: (batch_size, feature_dim)
+        embeddings = torch.stack([pair[0] for pair in batch])  # extract embeddings
+        labels = torch.tensor([pair[1] for pair in batch], dtype=torch.long)  # extract labels
     
         # Move to tensor
-        inputs = torch.FloatTensor(inputs)
+        #inputs = torch.FloatTensor(inputs)
+        inputs = embeddings
     
         # Simulate prediction targets
         targets = torch.randint(0, 2, (inputs.shape[0],))  # Random 0/1 labels
         targets = targets.long()
     
-        # Forward pass
-        preds = self.policy_net(inputs)
-        loss = self.loss_fn(preds, targets)
+        # Forward pass into the network and loss
+        preds = self.policy_net(embeddings)
+        loss = self.loss_fn(preds, labels)
     
         # Backward pass
         self.optimizer.zero_grad()
@@ -320,6 +344,30 @@ class LearningAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"Task variation failed: {str(e)}")
             return self.env  # Fallback to base env
+
+    def _calculate_reward(self, state, action, next_state):
+        base_reward = self.env.get_reward()
+        
+        # Safety penalties
+        safety_penalty = 0
+        if self.safety_agent.is_unsafe(action):
+            safety_penalty += 2.0
+            
+        # Alignment penalties
+        alignment_report = self.alignment_monitor.get_latest_report()
+        alignment_penalty = 1.0 - alignment_report['ethics_score']
+        
+        # Curiosity bonus
+        curiosity_bonus = self._calculate_novelty_bonus(state)
+        
+        return (base_reward 
+                - safety_penalty 
+                - alignment_penalty 
+                + 0.3 * curiosity_bonus)
+
+    def _calculate_novelty_bonus(self, state):
+        """Intrinsic motivation for exploration"""
+        return 1.0 / (1.0 + self.memory.count_similar(state))
 
     def _run_rsi_self_improvement(self):
         """Enhanced RSI integration with architectural evolution"""
@@ -637,6 +685,10 @@ class LearningAgent(BaseAgent):
         state = self.env.reset()
         total_reward = 0
         episode_data = []
+        agent = self.agents.get(agent_type)
+        if not agent:
+            raise ValueError(f"No agent found for type '{agent_type}'")
+        
         dqn_loss = agent.train()
         grad_norm = self._get_gradient_norm(agent)
         
