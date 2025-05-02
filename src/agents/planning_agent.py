@@ -8,404 +8,564 @@ References:
 3. Martelli, A., Montanari, U. (1973). Optimal Efficiency of AO* Algorithm
 4. Bonet, B., Geffner, H. (2001). Heuristic Planning with HSP
 5. Allen, J. (1983). Maintaining Knowledge about Temporal Intervals
+
+Real-World Usage:
+1. Robotics Task Planning: Domestic robots or warehouse robots need to break down complex goals like "prepare breakfast" or "pick 10 items" into primitive tasks: navigate, grip, open, etc.
+2. Game AI / NPC Behavior: Strategy games (RTS) or open-world RPGs require AI to plan goals like "defend base" or "patrol zone" using adaptive strategies.
+3. Workflow Automation in Enterprise Systems: A digital assistant receives a request like “schedule a customer onboarding session,” which it decomposes into tasks like:
+    - Check calendar → Create Zoom link → Email invite → Log session
+4. Military or Disaster Response Simulation: Simulated agents plan missions like “clear building,” which break into “scan,” “enter,” “check room,” etc.
+5. Cognitive Assistants: Personalized assistants adapting through method statistics tracking
+6. Healthcare Coordination: Adaptive treatment plan generation considering patient responses and resource availability
 """
 
-import random
 import math
+import time
+import heapq
+import random
+import numpy as np
+
 from enum import Enum
-from typing import List, Dict, Optional, Callable, Tuple, Any
-from collections import defaultdict
+from typing import List, Dict, Optional, Callable, Tuple, Any, Set
+from collections import defaultdict, deque
+
+from src.agents.base_agent import BaseAgent
+from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
+from src.agents.planning.planning_metrics import PlanningMetrics
+from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
+from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
+from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.tuning.tuner import HyperparamTuner
+from logs.logger import get_logger
+
+logger = get_logger(__name__)
 
 
-class TaskStatus(Enum):
-    PENDING = 0
-    EXECUTING = 1
-    SUCCESS = 2
-    FAILED = 3
+CostProfile = Tuple[float, float]
+StateTuple = Tuple[Tuple[str, Any], ...]
 
-class TaskType(Enum):
-    PRIMITIVE = 0
-    ABSTRACT = 1
-
-class Any:
-    """
-    Universal value container with academic rigor, implementing concepts from:
-    - Pierce's 'Types and Programming Languages' (type system foundations)
-    - Reynolds' 'Polymorphism is Not Set-Theoretic' (parametricity)
-    - Wadler's 'Theorems for Free!' (generic operations)
-    
-    Provides strict typing while allowing controlled flexibility
-    """
-    __slots__ = ('_value', '_type', '_constraints')
-    
-    def __init__(self, value: object, constraints: tuple = ()):
-        """
-        Initialize with value and optional academic constraints:
-        - Type constraints: (int, float)
-        - Value constraints: (lambda x: x > 0,)
-        - Domain constraints: ('physical', 'temporal')
-        """
-        self._value = value
-        self._type = type(value)
-        self._constraints = constraints
-        
-        # Validate constraints at initialization
-        self._validate(constraints)
-
-    def _validate(self, constraints: tuple):
-        """Apply constraint checking using Hoare logic principles"""
-        for constraint in constraints:
-            if isinstance(constraint, type):
-                if not isinstance(self._value, constraint):
-                    raise TypeError(f"Value {self._value} violates type constraint {constraint}")
-            elif isinstance(constraint, str):  # Domain tag
-                continue  # Domain checks handled externally
-            elif callable(constraint):
-                if not constraint(self._value):
-                    raise ValueError(f"Value {self._value} violates predicate constraint")
-            else:
-                raise AcademicPlanningError(f"Invalid constraint type: {type(constraint)}")
-
-    @property
-    def value(self):
-        """Get value with declassification check (Askarov et al. 2010)"""
-        return self._value
-
-    @property
-    def type(self):
-        """Get precise type information (Tofte's Type Inference)"""
-        return self._type
-
-    def is_compatible(self, other: 'Any') -> bool:
-        """
-        Structural compatibility check using Mitchell's subtype theory
-        Returns True if:
-        1. Types are compatible (via inheritance)
-        2. All constraints of 'other' are satisfied by self
-        """
-        return issubclass(self._type, other.type) and all(
-            c(self.value) for c in other.constraints if callable(c))
-
-    def constrain(self, new_constraints: tuple) -> 'Any':
-        """
-        Create new Any instance with additional constraints
-        Follows linear type system principles (Wadler 1990)
-        """
-        return Any(self._value, self._constraints + new_constraints)
-
-    def __eq__(self, other: object) -> bool:
-        """Value equality using observational equivalence"""
-        if isinstance(other, Any):
-            return self.value == other.value
-        return self.value == other
-
-    def __repr__(self) -> str:
-        return f"Any<{self._type.__name__}>({self._value})"
-
-    def to_json(self) -> dict:
-        """Serialization using Pierce's recursive type encoding"""
-        return {
-            'value': self._value,
-            'type': self._type.__name__,
-            'constraints': [
-                c.__name__ if callable(c) else c 
-                for c in self._constraints
-            ]
-        }
-
-    @classmethod
-    def from_json(cls, data: dict) -> 'Any':
-        """Deserialization with runtime type reconstruction"""
-        type_map = {t.__name__: t for t in (int, float, str, bool, list, dict)}
-        value = data['value']
-        constraints = []
-        
-        for c in data['constraints']:
-            if c in type_map:
-                constraints.append(type_map[c])
-            elif c in ('physical', 'temporal'):
-                constraints.append(c)
-            else:
-                raise AcademicPlanningError(f"Unreconstructible constraint: {c}")
-        
-        return cls(value, tuple(constraints))
-
-    # Academic operator overloading
-    def __add__(self, other: 'Any') -> 'Any':
-        """Additive operation with type conservation rules"""
-        if not isinstance(other, Any):
-            other = Any(other)
-            
-        if self.type != other.type:
-            raise AcademicPlanningError("Additive type mismatch")
-            
-        return Any(self.value + other.value, self._constraints)
-
-    def __radd__(self, other: object) -> 'Any':
-        return self.__add__(other)
-
-class Task:
-    physics_constrained = Any(9.81, constraints=(float, "physical", lambda x: x > 0))
-    """Enhanced Task class with multiple decomposition methods"""
-    def __init__(self, name: str, task_type: TaskType,
-                 methods: List[List['Task']] = None,
-                 preconditions: List[Callable] = None,
-                 effects: List[Callable] = None):
-        self.name = name
-        self.type = task_type
-        self.methods = methods or [[]]  # Multiple decomposition methods
-        self.preconditions = preconditions or []
-        self.effects = effects or []
-        self.status = TaskStatus.PENDING
-        self.parent = None
-        self.selected_method = 0  # Track decomposition method index
-
-    def copy(self) -> 'Task':
-        """Create a copy with shared decomposition templates"""
-        return Task(
-            name=self.name,
-            task_type=self.type,
-            methods=self.methods,
-            preconditions=self.preconditions,
-            effects=self.effects
-        )
-
-    def get_subtasks(self, method_index: int = 0) -> List['Task']:
-        """Get subtasks for specific decomposition method"""
-        if 0 <= method_index < len(self.methods):
-            return [t.copy() for t in self.methods[method_index]]
-        return []
-
-    def __repr__(self):
-        return f"Task({self.name}, {self.type}, method:{self.selected_method})"
-    
-    def gravity_effect(state: dict):
-        if 'acceleration' in state:
-            # Type-safe modification
-            state['acceleration'] = Any(
-                state['acceleration'].value + math.physics_constrained.value,
-                constraints=("physical",)
-            )
-
-        physics_task = Task(
-            "apply_physics",
-            TaskType.PRIMITIVE,
-            effects=[math.gravity_effect]
-        )
-
-WorldState = Tuple[Tuple[str, Any], ...]  # Immutable state representation
-MethodSignature = Tuple[str, int]  # (task_name, method_index)
-PlanStep = Tuple[int, Task, MethodSignature]  # (step_id, task, method)
-CostProfile = Tuple[float, float]  # (current_cost, heuristic_estimate)
-TemporalRelation = Tuple[Task, Task, str]  # (task_a, task_b, relation)
-MemoKey = Tuple[MethodSignature, WorldState]
-
-
-class PlanningAgent:
+class PlanningAgent(BaseAgent):
     """Enhanced planner with alternative search strategies"""
-    def __init__(self, shared_memory, agent_factory, args=(), kwargs={}):
+    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
+        base_config = {'defer_initialization': True}
+        if config:
+            base_config.update(config)
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=base_config
+        )
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
+        self.decision_tree_heuristic = DecisionTreeHeuristic()
+        self.gb_heuristic = GradientBoostingHeuristic()
+        self.plan_history = deque(maxlen=1000)
         self.task_library: Dict[str, Task] = {}
         self.current_plan: List[Task] = []
         self.world_state: Dict[str, any] = {}
         self.execution_history = []
         self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0})
 
-    from typing import Tuple, Any
-    StateTuple = Tuple[Tuple[str, Any], ...]
+        self.shared_memory = self.shared_memory[0] if isinstance(self.shared_memory, tuple) else self.shared_memory
+        self.agent_factory = self.agent_factory[0] if isinstance(self.agent_factory, tuple) else self.agent_factory
 
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
+        self.task_library: Dict[str, Task] = {} # Stores registered task templates
+        self.current_plan: List[Task] = [] # The sequence of primitive tasks to execute
+        self.world_state: Dict[str, Any] = {} # Current state of the world
+        self.execution_history = deque(maxlen=100) # Keep track of recently executed tasks
+        self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}) # For Bayesian method selection
 
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
+        # Performance tracking
+        self._planning_start_time: Optional[float] = None
+        self._planning_end_time: Optional[float] = None
 
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
+        config=config or {}
+        self.scheduler = DeadlineAwareScheduler(risk_threshold=config.get('risk_threshold', 0.7))
+        self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
+        logger.info(f"PlanningAgent initialized. World state: {self.world_state}")
 
-        pass
+    def log_plan_outcome(self, task, success):
+        """Store plan features and outcome for training"""
+        features = self.gb_heuristic.extract_features(
+            task, 
+            self.world_state,
+            self.method_stats
+        )
+        self.plan_history.append((features, success))
+        
+    def _heuristic(self, task: Task) -> float:
+        """Augmented heuristic combining learned models and original"""
+        learned_prob = 0.7 * self.gb_heuristic.predict_success_prob(
+            task, self.world_state, self.method_stats
+        ) + 0.3 * self.decision_tree_heuristic.predict_success_prob(
+            task, self.world_state, self.method_stats
+        )
+        
+        original = len([t for t in self.task_library.values() 
+                       if t.type == TaskType.ABSTRACT])
+        
+        return learned_prob * original
+        
+    def periodic_retraining(self):
+        """Call this periodically (e.g., every 100 plans)"""
+        if len(self.plan_history) > 100:
+            X, y = zip(*self.plan_history)
+            self.decision_tree_heuristic.train(np.array(X), np.array(y))
+            self.gb_heuristic.train(np.array(X), np.array(y))
+            self.plan_history.clear()
 
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
+    def get_current_state_tuple(self) -> WorldState:
+        """Returns an immutable representation of the world state for memoization/hashing."""
+        # Convert complex objects in state to a hashable representation if needed
+        items = []
+        for k, v in self.world_state.items():
+            try:
+                # Attempt to make the value hashable, convert complex objects to str as fallback
+                hashable_value = v if isinstance(v, (int, float, str, bool, tuple)) else str(v)
+                items.append((k, hashable_value))
+            except Exception:
+                items.append((k, str(v))) # Fallback for unhashable items
+        return tuple(sorted(items))
 
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
-
-    def get_current_state(self) -> WorldState:
-        """Immutable state representation per STRIPS conventions"""
-        return tuple(sorted(self.world_state.items()))
-
-    def load_state(self, state: WorldState):
-        """State restoration for backtracking"""
-        self.world_state = dict(state)
+    def load_state_from_tuple(self, state_tuple: WorldState):
+        """Restores the world state from an immutable tuple (used in backtracking)."""
+        self.world_state = dict(state_tuple)
+        logger.debug(f"World state restored to: {self.world_state}")
 
     def register_task(self, task: Task):
         """Register task with possible decomposition methods"""
         self.task_library[task.name] = task
-        # Initialize Bayesian priors
-        for i in range(len(task.methods)):
-            key = (task.name, i)
-            self.method_stats[key]  # Initialize defaultdict entry
+        if task.name in self.task_library:
+            logger.warning(f"Task '{task.name}' already registered. Overwriting.")
+        self.task_library[task.name] = task
+        logger.debug(f"Registered task: {task.name}")
+        # Initialize stats for Bayesian method selection if it's an abstract task
+        if task.type == TaskType.ABSTRACT:
+            for i in range(len(task.methods)):
+                key = (task.name, i)
+                self.method_stats[key]
 
-    def decompose_task(self, task: Task) -> Optional[List[Task]]:
+    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
         """Recursive decomposition with method selection tracking"""
-        if task.type == TaskType.PRIMITIVE:
-            return [task.copy()]
+        logger.debug(f"Decomposing task: {task_to_decompose.name}")
 
-        library_task = self.task_library.get(task.name)
-        if not library_task:
-            return None
+        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
+        if memo_key in self.memo_table:
+            logger.debug(f"Memo hit for {memo_key}")
+            return self.memo_table[memo_key]
 
-        # Create plan-specific task instance
-        plan_task = library_task.copy()
-        plan_task.selected_method = task.selected_method
-
-        # Get selected decomposition method
-        subtasks = plan_task.get_subtasks(plan_task.selected_method)
-        if not subtasks:
-            return None
-
-        decomposed = []
-        for subtask in subtasks:
-            result = self.decompose_task(subtask)
-            if result is None:
+        # Base case: If the task is primitive, it's already decomposed.
+        if task_to_decompose.type == TaskType.PRIMITIVE:
+            if task_to_decompose.check_preconditions(self.world_state):
+                if task_to_decompose.start_time is None:
+                    task_to_decompose.start_time = time.time()
+                return [task_to_decompose]
+            else:
+                logger.warning(f"Preconditions failed for primitive task: {task_to_decompose.name}")
+                task_to_decompose.status = TaskStatus.FAILED
                 return None
-            decomposed.extend(result)
 
-        return decomposed
+        # Retrieve the task template from the library
+        library_task = self.task_library.get(task_to_decompose.name)
+        if not library_task:
+            logger.error(f"Task '{task_to_decompose.name}' not found in library.")
+            task_to_decompose.status = TaskStatus.FAILED
+            return None
 
-    def _find_alternative_methods(self, task: Task) -> List[Task]:
-        """Find alternative decompositions using hybrid strategy"""
-        # Grid search fallback
-        grid_alternatives = self._grid_search_alternatives(task)
+        scores = []
+        for i in range(len(library_task.methods)):
+            task_to_decompose.selected_method = i
+            score = self._heuristic(task_to_decompose)
+            scores.append((i, score))
+        
+        # Select method with highest predicted success
+        method_index_to_try = max(scores, key=lambda x: x[1])[0]
+        task_to_decompose.selected_method = method_index_to_try
 
-        # Bayesian optimization
-        bayesian_alternatives = self._bayesian_alternatives(task)
+        if not (0 <= method_index_to_try < len(library_task.methods)):
+             logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
+             task_to_decompose.status = TaskStatus.FAILED
+             return None
 
-        # Combine and deduplicate
-        alternatives = []
-        seen = set()
-        for alt in grid_alternatives + bayesian_alternatives:
-            key = (alt.name, alt.selected_method)
-            if key not in seen:
-                seen.add(key)
-                alternatives.append(alt)
-        return alternatives
+        # Get the list of subtasks for the selected method
+        subtasks_template = library_task.get_subtasks(method_index_to_try)
+        if not subtasks_template:
+             logger.warning(f"Method {method_index_to_try} for task '{task_to_decompose.name}' has no subtasks or is invalid.")
+             # Optionally, try another method here if implementing replanning/backtracking within decompose
+             task_to_decompose.status = TaskStatus.FAILED
+             return None
+
+        logger.debug(f"Trying method {method_index_to_try} for task '{task_to_decompose.name}' with subtasks: {[st.name for st in subtasks_template]}")
+
+        fully_decomposed_plan: List[Task] = []
+        # Keep track of the world state simulation for this decomposition path
+        simulated_world_state = self.world_state.copy()
+
+        for subtask_template in subtasks_template:
+             # Create a runtime instance of the subtask
+             subtask_instance = subtask_template.copy()
+             subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
+
+             # Apply effects of previously decomposed tasks in this branch to the simulated state
+             # (This assumes effects are applied *before* checking next subtask's preconditions)
+             # Note: This simple simulation might need refinement for complex interactions
+
+             # Recursively decompose the subtask using the *simulated* state
+             # We need a way to pass the simulated state down or restore it.
+             # For simplicity here, we'll use the main world_state, but this
+             # is a key area for refinement in more complex planners (backtracking needed).
+
+             # Check subtask preconditions in the *current* (simulated) world state
+             if not subtask_instance.check_preconditions(simulated_world_state):
+                 logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
+                 # Backtracking would happen here: try another method for task_to_decompose
+                 return None # Abort this decomposition path
+
+             decomposed_subplan = self.decompose_task(subtask_instance) # Recursive call
+
+             if decomposed_subplan is None:
+                 logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
+                 # Backtracking point: Try a different method for task_to_decompose if possible
+                 return None # Indicate failure for this decomposition path
+
+             fully_decomposed_plan.extend(decomposed_subplan)
+
+             # Update the simulated world state by applying effects of the *primitive* tasks just added
+             # This is crucial for the preconditions of subsequent subtasks in the *same* method.
+             for primitive_task in decomposed_subplan:
+                  if primitive_task.type == TaskType.PRIMITIVE:
+                      primitive_task.apply_effects(simulated_world_state)
+
+        # If loop completes, the decomposition for this method was successful
+        logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}.")
+        return fully_decomposed_plan
+
+    def _find_alternative_methods(self, task: Task) -> List[int]:
+        """
+        Finds alternative decomposition method indices for a failed abstract task.
+        Uses a hybrid strategy: Bayesian optimization and grid search fallback.
+
+        Args:
+            task (Task): The abstract task that failed decomposition or execution.
+
+        Returns:
+            List[int]: A list of alternative method indices to try, ordered by
+                       estimated likelihood of success.
+        """
+        library_task = self.task_library.get(task.name)
+        if not library_task or task.type != TaskType.ABSTRACT or len(library_task.methods) <= 1:
+            return [] # No alternatives if not abstract, not found, or only one method
+
+        num_methods = len(library_task.methods)
+        current_method_idx = task.selected_method
+
+        # --- Bayesian Method Selection (using UCB1-like approach for exploration/exploitation) ---
+        method_scores = []
+        total_executions = sum(stats['total'] for stats in self.method_stats.values()) + 1 # Avoid div by zero
+
+        for idx in range(num_methods):
+            if idx == current_method_idx: # Skip the failed method initially
+                 continue
+
+            key = (task.name, idx)
+            stats = self.method_stats[key]
+            success_rate = (stats['success'] + 1) / (stats['total'] + 2) # Laplace smoothing
+
+            # Exploration bonus (UCB1)
+            exploration_term = math.sqrt(2 * math.log(total_executions) / (stats['total'] + 1)) if stats['total'] > 0 else float('inf')
+            # Heuristic cost term (lower avg cost is better) - optional
+            # cost_term = 1 / (stats['avg_cost'] + 0.1) if stats['avg_cost'] > 0 else 1.0
+
+            score = success_rate + exploration_term # + cost_term * 0.1 # Add cost heuristic if desired
+            method_scores.append((idx, score))
+
+        # Sort alternatives by score (higher is better)
+        bayesian_alternatives = sorted([idx for idx, score in method_scores], key=lambda idx: next(s for i, s in method_scores if i == idx), reverse=True)
+
+        # --- Grid Search Fallback (systematically try next methods) ---
+        grid_alternatives = []
+        for i in range(1, num_methods):
+            next_idx = (current_method_idx + i) % num_methods
+            if next_idx not in bayesian_alternatives: # Avoid duplicates
+                 grid_alternatives.append(next_idx)
+
+        # Combine: Prioritize Bayesian suggestions, then systematic ones
+        final_alternatives = bayesian_alternatives + grid_alternatives
+        # Ensure the failed method isn't the first one tried again immediately
+        if final_alternatives and final_alternatives[0] == current_method_idx:
+             final_alternatives.pop(0)
+
+        logger.debug(f"Alternatives for task '{task.name}' (failed method {current_method_idx}): {final_alternatives}")
+        return final_alternatives
+
+    def _update_method_stats(self, task: Task, success: bool, cost: float):
+        """Updates statistics for the selected decomposition method."""
+        if task.type != TaskType.ABSTRACT or task.parent is None:
+             # Only update stats for methods chosen for a parent abstract task
+             # Or potentially update based on overall plan success if task is the root goal.
+             # Let's assume update happens when a parent's decomposition path is evaluated.
+            return
+
+        # Find the parent and the method index used to generate this task instance
+        # This requires careful tracking during decomposition or execution feedback.
+        # Assuming task.selected_method holds the relevant index for the *parent's* choice.
+        parent_task = task.parent
+        method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
+
+        key = (parent_task.name, method_idx)
+        stats = self.method_stats[key]
+        stats['total'] += 1
+        if success:
+            stats['success'] += 1
+
+        # Update average cost using Welford's online algorithm or simpler moving average
+        # Simple moving average:
+        current_total_cost = stats['avg_cost'] * (stats['total'] -1) # Get previous total cost
+        new_avg_cost = (current_total_cost + cost) / stats['total']
+        stats['avg_cost'] = new_avg_cost
+
+        logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
+
+
+    def replan(self, failed_task: Task, current_plan_segment: List[Task]) -> Optional[List[Task]]:
+        """
+        Attempts to replan starting from a failed task.
+
+        Args:
+            failed_task (Task): The task (primitive or abstract) that failed execution.
+            current_plan_segment (List[Task]): The portion of the plan executed so far.
+
+        Returns:
+            Optional[List[Task]]: A new plan segment to replace the failed portion,
+                                  or None if replanning fails.
+        """
+        logger.warning(f"Replanning triggered by failed task: {failed_task.name}")
+
+        # 1. Identify the highest-level abstract task in the hierarchy that failed
+        #    This requires navigating up the `parent` links from the `failed_task`.
+        ancestor_to_replan = failed_task
+        while ancestor_to_replan.parent is not None and ancestor_to_replan.parent.status != TaskStatus.FAILED:
+             # Mark ancestors as potentially failed if a subtask failed
+             if ancestor_to_replan.parent.status == TaskStatus.EXECUTING:
+                  ancestor_to_replan.parent.status = TaskStatus.FAILED # Propagate failure up
+             ancestor_to_replan = ancestor_to_replan.parent
+        # `ancestor_to_replan` is now the highest task in the failed branch
+
+        logger.info(f"Replanning from abstract task: {ancestor_to_replan.name}")
+
+        # 2. Find alternative decomposition methods for this ancestor task
+        alternative_method_indices = self._find_alternative_methods(ancestor_to_replan)
+
+        if not alternative_method_indices:
+            logger.error(f"No alternative methods found for task '{ancestor_to_replan.name}'. Replanning failed.")
+            return None
+
+        # 3. Try alternative methods one by one
+        original_world_state_tuple = self.get_current_state_tuple() # Save state before trying alternatives
+
+        for method_idx in alternative_method_indices:
+            logger.info(f"Trying alternative method {method_idx} for task '{ancestor_to_replan.name}'")
+            # Reset world state to before the failed branch started *executing*
+            # This might require more sophisticated state logging or restoring from `current_plan_segment` start.
+            # For simplicity, we restore to the state *before* attempting the replan.
+            self.load_state_from_tuple(original_world_state_tuple)
+
+            # Create a copy of the ancestor task and set the new method index
+            task_copy = ancestor_to_replan.copy()
+            task_copy.selected_method = method_idx
+            task_copy.status = TaskStatus.PENDING # Reset status for decomposition attempt
+
+            # Attempt to decompose using the alternative method
+            new_plan_segment = self.decompose_task(task_copy)
+
+            if new_plan_segment:
+                 # 4. Validate the new plan segment (preconditions, potential conflicts)
+                 if self._validate_plan(new_plan_segment):
+                     logger.info(f"Replanning successful using method {method_idx} for task '{ancestor_to_replan.name}'.")
+                     # We need to integrate this new segment into the overall plan.
+                     # This function should return the *new segment* to be executed.
+                     return new_plan_segment
+                 else:
+                     logger.warning(f"Validation failed for new plan segment from method {method_idx}.")
+            else:
+                 logger.warning(f"Decomposition failed for alternative method {method_idx}.")
+
+
+        # 5. If all alternatives fail
+        logger.error(f"All replanning attempts failed for task '{ancestor_to_replan.name}'.")
+        self.load_state_from_tuple(original_world_state_tuple) # Restore original state
+        return None
+
+    def _validate_plan(self, plan_segment: List[Task]) -> bool:
+        """
+        Validates plan segment by fully simulating task effects and checking
+        all preconditions at each step using Allen's temporal logic foundations.
+        """
+        if not plan_segment:
+            return True  # Empty plan is trivially valid
+    
+        simulated_state = self.world_state.copy()
+        logger.debug(f"Starting validation simulation with initial state: {simulated_state}")
+    
+        for idx, task in enumerate(plan_segment):
+            # Check preconditions against simulated state
+            if not self._check_preconditions(task, simulated_state):
+                logger.warning(
+                    f"Validation failed at step {idx+1}/{len(plan_segment)} "
+                    f"({task.name}): Preconditions not met in simulated state"
+                )
+                return False
+    
+            try:
+                # Apply task effects to simulated state
+                for effect in task.effects:
+                    effect(simulated_state)
+                logger.debug(f"Applied effects of {task.name} | New state: {simulated_state}")
+            except Exception as e:
+                logger.error(
+                    f"Effect application failed for {task.name} at step {idx+1}: {str(e)}",
+                    exc_info=True
+                )
+                return False
+    
+            # Check temporal consistency with Allen's interval algebra
+            if idx > 0:
+                prev_task = plan_segment[idx-1]
+                if not self._check_temporal_constraints(prev_task, task, simulated_state):
+                    logger.warning(
+                        f"Temporal constraint violation between {prev_task.name} "
+                        f"and {task.name} at step {idx+1}"
+                    )
+                    return False
+    
+        logger.debug("Plan segment validation successful with final state: "
+                    f"{simulated_state}")
+        return True
+    
+    def _check_preconditions(self, task: Task, state: Dict[str, Any]) -> bool:
+        """Formal verification of task preconditions against a state"""
+        try:
+            return all(precond(state) for precond in task.preconditions)
+        except Exception as e:
+            logger.error(
+                f"Precondition check failed for {task.name}: {str(e)}",
+                exc_info=True
+            )
+            return False
+    
+    def _check_temporal_constraints(self, 
+                                   previous_task: Task,
+                                   current_task: Task,
+                                   state: Dict[str, Any]) -> bool:
+        """
+        Implements Allen's interval algebra checks for temporal consistency
+        between consecutive tasks
+        """
+        # Get temporal constraints from task metadata
+        constraints = getattr(current_task, 'temporal_constraints', [])
+        
+        # Check each constraint against simulated state
+        for constraint in constraints:
+            if not constraint(state):
+                return False
+        
+        # Default temporal relationship checks
+        if previous_task.end_time and current_task.start_time:
+            if previous_task.end_time > current_task.start_time:
+                logger.debug("Temporal overlap detected between "
+                            f"{previous_task.name} and {current_task.name}")
+                return False
+        
+        return True
+
+    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
+        """Decomposes the goal task into a plan of primitive tasks."""
+        raw_plan = super().generate_plan(goal_task)
+        if not raw_plan:
+            return None
+        self._planning_start_time = time.time()
+        plan = self.decompose_task(goal_task)
+        self._planning_end_time = time.time()
+        scheduled_tasks = self._convert_to_schedule_format(raw_plan)
+        risk_assessor = self.shared_memory.get('risk_assessor')
+
+        # Execute scheduling
+        schedule = self.scheduler.schedule(
+            tasks=scheduled_tasks,
+            agents=self._get_available_agents(),
+            risk_assessor=risk_assessor,
+            state=self.world_state
+        )
+
+        if plan is None:
+            goal_task.status = TaskStatus.FAILED
+            logger.error("Failed to generate plan.")
+            return None
+
+        logger.info(f"Plan generated with {len(plan)} steps.")
+        self.current_plan = plan
+        return plan(schedule)
+
+    def _convert_to_schedule_format(self, plan):
+        """Map plan tasks to scheduler format"""
+        return [{
+            'id': task.name,
+            'requirements': task.requirements,
+            'deadline': task.deadline,
+            'risk_score': task.risk_score,
+            'dependencies': [t.name for t in task.dependencies]
+        } for task in plan]
+
+    def _convert_to_plan(self, schedule):
+        """Convert scheduler output to executable plan"""
+        return [self._create_task_from_assignment(a) for a in schedule.values()]
+
+    def _get_available_agents(self):
+        """Get agent capabilities from collaborative agent's registry"""
+        return self.shared_memory.get('agent_registry', {})
+
+    def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
+        """Executes a plan of primitive tasks. Tracks success, updates statistics, and handles failures."""
+        self.current_plan = plan
+        executed_successfully = True
+        plan_idx = 0
+    
+        task_hierarchy = []
+        current_parent = None
+    
+        while plan_idx < len(plan):
+            task = plan[plan_idx]
+    
+            if task.parent != current_parent:
+                if current_parent is not None:
+                    self._update_task_success(current_parent, task_hierarchy)
+                current_parent = task.parent
+                task_hierarchy = []
+    
+            task.status = TaskStatus.EXECUTING
+            self._execute_action(task)
+            task_hierarchy.append(task)
+            self.execution_history.append(task)
+    
+            if task.status == TaskStatus.FAILED:
+                executed_successfully = False
+                if goal_task:
+                    goal_task.status = TaskStatus.FAILED
+                break
+    
+            plan_idx += 1
+    
+        if current_parent is not None:
+            self._update_task_success(current_parent, task_hierarchy)
+    
+        if executed_successfully and goal_task:
+            goal_task.status = TaskStatus.SUCCESS
+    
+        return {
+            "status": goal_task.status.name if goal_task else ("SUCCESS" if executed_successfully else "FAILED"),
+            "world_state": self.world_state
+        }
 
     def _grid_search_alternatives(self, task: Task) -> List[Task]:
         """Systematic exploration of decomposition methods"""
@@ -467,40 +627,29 @@ class PlanningAgent:
         alternatives = self._find_alternative_methods(failed_task)
         if not alternatives:
             return None
+        
+        self._update_scheduler_state(failed_task)
 
         # Try alternatives in recommended order
         for alt_task in alternatives:
             new_plan = self.decompose_task(alt_task)
             if new_plan and self._validate_plan(new_plan):
                 return new_plan
-        return None
+        return super().replan(failed_task)
+
+    def _update_scheduler_state(self, task):
+        """Maintain scheduler's view of world state"""
+        self.schedule_state['agent_loads'][task.assigned_agent] -= task.cost
+        self.schedule_state['task_history'][task.name].append({
+            'status': 'failed',
+            'timestamp': time.time()
+        })
 
     def _validate_plan(self, plan: List[Task]) -> bool:
         """Validate that a plan is executable based on world state and task preconditions.
         This is a placeholder; you can implement more sophisticated logic here.
         """
         return True
-
-    def execute_plan(self, goal) -> Dict[str, any]:
-        self.current_plan = self.decompose_task(goal)
-        task_hierarchy = []
-        current_parent = None
-        for task in self.current_plan:
-            if task.parent != current_parent:
-                if current_parent is not None:
-                    self._update_task_success(current_parent, task_hierarchy)
-                current_parent = task.parent
-                task_hierarchy = []
-
-            task.status = TaskStatus.EXECUTING
-            self._execute_action(task)
-            task_hierarchy.append(task)
-            self.execution_history.append(task)
-
-        if current_parent is not None:
-            self._update_task_success(current_parent, task_hierarchy)
-
-        return self.world_state
 
     def _update_task_success(self, parent: Task, children: List[Task]):
         """Update method success statistics for abstract tasks"""
@@ -528,6 +677,66 @@ class PlanningAgent:
 
         print(f"Executed task: {task.name}")
         task.status = TaskStatus.SUCCESS
+
+    def evaluate_method_combination(self, param_dict: Dict[str, Any], fold: int = 0) -> float:
+        for task_name, method_idx in param_dict.items():
+            if task_name in self.task_library:
+                self.task_library[task_name].selected_method = method_idx
+    
+        goal = self.shared_memory.get("planning_goal")
+        if not goal:
+            logger.error("No planning goal set.")
+            return 0.0
+    
+        plan = self.generate_plan(goal)
+        if not plan:
+            return 0.0
+    
+        result = self.execute_plan(plan, goal_task=goal)
+        metrics = PlanningMetrics.calculate_all_metrics(
+            plan, self._planning_start_time, self._planning_end_time, goal.status
+        )
+    
+        planning_time = metrics.get("planning_time", 1.0)
+        plan_cost = metrics.get("total_cost", 1.0)
+        goal_achieved = 1.0 if result.get("status") == "SUCCESS" else 0.0
+    
+        return (
+            0.5 * goal_achieved +
+            0.3 * (1.0 / (plan_cost + 1)) +
+            0.2 * (1.0 / (planning_time + 0.01))
+        )
+
+    def optimize_methods(self, strategy: Optional[str] = None):
+        """Choose tuning strategy based on task domain or past outcomes."""
+        if not strategy:
+            domain = self.shared_memory.get("task_domain") or "default"
+            strategy = self._select_strategy_by_domain(domain)
+            logger.info(f"Auto-selected tuning strategy: {strategy}")
+    
+        tuner = HyperparamTuner(
+            config_path="configs/hyperparam_config.yaml",
+            evaluation_function=self.evaluate_method_combination,
+            strategy=strategy,
+            n_calls=25,
+            n_random_starts=5
+        )
+
+        best_params = tuner.run_tuning_pipeline()
+
+        # Update selected methods with best parameters
+        for task_name, method_idx in best_params.items():
+            if task_name in self.task_library:
+                self.task_library[task_name].selected_method = method_idx
+
+        logger.info(f"Updated task methods using {strategy} search: {best_params}")
+
+    # --- Placeholder for inherited/overridden methods from academic planners ---
+    # Keep the specific planner implementations (HTN, A*, etc.) as separate classes
+    # inheriting from PlanningAgent if they introduce significantly different algorithms
+    # or state management. If they primarily override `decompose_task` or `replan`
+    # with specific strategies, they can potentially stay as methods or inner classes
+    # if the core PlanningAgent structure remains the same.
 
 class HTNPlanner(PlanningAgent):
 
@@ -754,7 +963,48 @@ class AStarPlanner(PlanningAgent):
         base = len(self.decompose_task(task))
         heuristic = self._hsp_heuristic(task)
         return (base, base + heuristic)
-    
+
+    def _heuristic(self, current_state: WorldState, goal_state: WorldState) -> float:
+        return sum(1 for k, v in dict(goal_state).items() if dict(current_state).get(k) != v)
+
+    def execute_plan(self, goal_task: Task) -> Dict[str, Any]:
+        goal_state = goal_task.goal_state if hasattr(goal_task, "goal_state") else ()
+        open_set = []
+        start_state = self.get_current_state_tuple()
+        heapq.heappush(open_set, (0, [], start_state))
+
+        visited = set()
+
+        while open_set:
+            cost, path, state = heapq.heappop(open_set)
+            if state in visited:
+                continue
+            visited.add(state)
+
+            self.load_state_from_tuple(state)
+
+            if self._goal_satisfied(goal_state):
+                return super().execute_plan(path, goal_task=None)
+
+            for task_name in self.task_library:
+                task = self.task_library[task_name].copy()
+                if task.type != TaskType.PRIMITIVE:
+                    continue
+                if not task.check_preconditions(self.world_state):
+                    continue
+                task.apply_effects(self.world_state)
+                new_state = self.get_current_state_tuple()
+                heuristic = self._heuristic(new_state, goal_state)
+                new_cost = cost + task.cost
+                heapq.heappush(open_set, (new_cost + heuristic, path + [task], new_state))
+
+        return {"status": "FAILURE", "world_state": self.world_state}
+
+    def _goal_satisfied(self, goal_state: WorldState) -> bool:
+        current = dict(self.get_current_state_tuple())
+        goal = dict(goal_state)
+        return all(current.get(k) == v for k, v in goal.items())
+
 class ExplanatoryPlanner(PlanningAgent):
     def generate_explanation(self, plan: List[Task]) -> Dict:
         """Produces human-understandable plan rationale"""
@@ -771,27 +1021,27 @@ class ExplanatoryPlanner(PlanningAgent):
         """
         # Build AND-OR graph representation
         and_or_graph = self._build_and_or_graph(plan)
-        
+
         # Initialize heuristic estimates
         for node in reversed(math.topological_order(and_or_graph)):
             if node.is_and_node:
                 node.cost = sum(child.cost for child in node.children)
             else:
                 node.cost = min(child.cost for child in node.children)
-        
+
         # Priority queue based on f(n) = g(n) + h(n)
         frontier = math.PriorityQueue()
         frontier.put((self._heuristic(plan[0]), plan[0]))
-        
+
         while not frontier.empty():
             current = frontier.get()[1]
-            
+
             if current.is_primitive:
                 continue
-                
+
             # Expand best partial plan
             best_method = min(current.methods, key=lambda m: m.cost)
-            
+
             if best_method.cost < current.cost:
                 current.cost = best_method.cost
                 # Propagate cost changes upwards
@@ -799,7 +1049,7 @@ class ExplanatoryPlanner(PlanningAgent):
                     new_cost = parent.recalculate_cost()
                     if new_cost < parent.cost:
                         frontier.put((new_cost + self._heuristic(parent.task)), parent)
-        
+
         return self._extract_optimal_plan(and_or_graph)
 
     def _heuristic(self, task: Task) -> float:
@@ -813,7 +1063,7 @@ class ExplanatoryPlanner(PlanningAgent):
         """Construct AND-OR graph with cost annotations"""
         graph = math.ANDORGraph()
         current_level = {plan[0]: graph.add_node(plan[0], is_and=False)}
-        
+
         while current_level:
             next_level = {}
             for task, node in current_level.items():
@@ -828,7 +1078,7 @@ class ExplanatoryPlanner(PlanningAgent):
                             graph.add_edge(method_node, subtask_node)
                             next_level[subtask] = subtask_node
             current_level = next_level
-        
+
         return graph
 
     def _memoize_decompositions(self):
@@ -840,58 +1090,7 @@ class ExplanatoryPlanner(PlanningAgent):
         cache_key = (task.name, task.selected_method, frozenset(self.world_state.items()))
         if cache_key in self.decomposition_cache:
             return self.decomposition_cache[cache_key]
-        
+
         result = super().decompose_task(task)
         self.decomposition_cache[cache_key] = result
         return result
-
-class PlanningMetrics:
-    """Implements metrics from IPC (International Planning Competition)"""
-    @staticmethod
-    def plan_length_optimality(plan: List[Task]) -> float:
-        pass
-    
-    @staticmethod 
-    def temporal_consistency(plan: List[Task]) -> float:
-        pass
-
-# Example usage with multiple decomposition methods
-if __name__ == "__main__":
-    # Primitive actions
-    search = Task("search", TaskType.PRIMITIVE,
-                  effects=[lambda s: s.update({'sources': []})])
-
-    filter_ = Task("filter", TaskType.PRIMITIVE,
-                   preconditions=[lambda s: 'sources' in s],
-                   effects=[lambda s: s.update({'filtered': s['sources'][:2]})])
-
-    summarize = Task("summarize", TaskType.PRIMITIVE,
-                     preconditions=[lambda s: 'filtered' in s],
-                     effects=[lambda s: s.update({'summary': 'Sample'})])
-
-    # Abstract tasks with multiple decomposition methods
-    research_method1 = [search, filter_]
-    research_method2 = [search.copy(), Task("evaluate", TaskType.PRIMITIVE), filter_]
-
-    research = Task("research", TaskType.ABSTRACT,
-                    methods=[research_method1, research_method2])
-
-    summarize_task = Task("summarize_topic", TaskType.ABSTRACT,
-                           methods=[[research, summarize]])
-
-    planner = PlanningAgent()
-    planner.register_task(research)
-    planner.register_task(summarize_task)
-
-    # Initial plan generation
-    initial_goal = summarize_task.copy()
-    plan = planner.decompose_task(initial_goal)
-    planner.current_plan = plan
-    planner.execute_plan(initial_goal)
-    print("Initial plan:", planner.world_state)
-
-    # Simulate execution failure
-    if planner.current_plan:
-        planner.current_plan[0].status = TaskStatus.FAILED  # Simulate a failure (e.g., search failure)
-        new_plan = planner.replan(planner.current_plan[0])
-        print("Replan result:", new_plan)
