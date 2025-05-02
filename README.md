@@ -154,6 +154,7 @@ Note: If you see an error about execution policy:
    pip install cryptography
    pip install sentence_transformers
    pip install restrictedpython
+   pip install sentencepiece
    ```
 
 5. Run Model:
