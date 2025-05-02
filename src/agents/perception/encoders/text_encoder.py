@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 #==========================
 # Embeddings using GloVe
 #==========================
-EMBEDDING_PATH = "data/embeddings/glove.6B.100d.json"
+EMBEDDING_PATH = "data/embeddings/glove.6B.200d.json"
 MAX_SYNONYMS = 5
 MAX_RELATED = 5
 
@@ -75,7 +75,7 @@ class TextEncoder:
         positional_encoding="learned",
         max_seq_len=512
     ):
-        with open("data/embeddings/glove.6B.100d.json", encoding="utf-8") as f:
+        with open("data/embeddings/glove.6B.200d.json", encoding="utf-8") as f:
             glove_data = json.load(f)
 
         # Token embeddings
@@ -84,7 +84,7 @@ class TextEncoder:
         vocab = list(glove_data.keys())
         self.vocab = {word: idx for idx, word in enumerate(vocab)}
         self.unk_token_id = self.vocab.get("<unk>", 0)
-        self.load_glove_embeddings("data/embeddings/glove.6B.100d.json", vocab)
+        self.load_glove_embeddings("data/embeddings/glove.6B.200d.json", vocab)
         self.embed_dim = embed_dim
         self.dropout_rate = dropout_rate
         self.training = True
