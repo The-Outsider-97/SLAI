@@ -56,23 +56,20 @@ class ConfigLoader:
         xdg_config_home = os.getenv('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
         return os.path.join(xdg_config_home, 'slai', 'config.yaml')
 
-    def _load_config(self, path) -> Dict[str, Any]:
-        """Secure config loading with defense-in-depth measures"""
-        with open(path, 'r') as f:
-            return yaml.safe_load(f)
+    def _load_config(self, path=None) -> Dict[str, Any]:
+        """Secure config loading with fallback and merging."""
         try:
-            with open(self.config_path, 'r') as f:
+            effective_path = path or self.config_path
+            with open(effective_path, 'r') as f:
                 user_config = yaml.safe_load(f) or {}
-                
+    
             return self.merger.merge(
                 self._DEFAULT_CONFIG.copy(),
                 user_config
             )
-            
         except FileNotFoundError:
             self.logger.warning("No user config found, using defaults")
             return self._DEFAULT_CONFIG.copy()
-            
         except yaml.YAMLError as e:
             self.logger.error(f"Config syntax error: {str(e)}")
             raise RuntimeError("Invalid configuration syntax")

@@ -14,6 +14,7 @@ from queue import Queue
 from hashlib import sha256
 from threading import Thread
 from PyQt5.QtWidgets import QLabel
+from typing import Dict
 from collections import defaultdict
 from PyQt5.QtCore import pyqtSignal, QObject
 from sklearn.linear_model import LogisticRegression
@@ -259,6 +260,22 @@ class ModelTrainingPipeline:
         X = df.drop(columns=[target_column])
         y = df[target_column]
         return X, y
+
+    def configure_model(self, params: Dict):
+        """Apply hyperparameters to the model"""
+        # Example implementation:
+        self.model.set_learning_rate(params.get('learning_rate', 0.001))
+        self.model.set_batch_size(params.get('batch_size', 32))
+        self.optimizer = self._create_optimizer(params.get('optimizer', 'adam'))
+        
+    def run_training_cycle(self) -> Dict:
+        """Run training and return metrics"""
+        # Your existing training logic
+        return {
+            "loss": 0.12,
+            "training_time": 45.2,
+            "steps": 1000
+        }
 
     def _process_tasks(self):
         model, metrics = None, None

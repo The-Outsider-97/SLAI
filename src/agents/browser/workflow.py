@@ -1,27 +1,27 @@
 import time
 import random
+import logging
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from robotexclusionrulesparser import RobotExclusionRulesParser
-from src.agents.browser.security import SecurityFeatures
 from src.agents.browser.content import ContentHandling
 from src.agents.browser.utils import Utility
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Or DEBUG
+logger.info("Activating Research Mode with Browser Agent")
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 MAX_RETRIES = 5
+WINDOW_SIZE = (random.randint(1200, 1400), random.randint(800, 1000))
 
 class WorkFlow:
-    def init_browser():
-        options = webdriver.ChromeOptions()
-        options.add_argument(f"user-agent={USER_AGENT}")
-        options.add_argument("--headless")
-        return webdriver.Chrome(options=options)
+    def __init__(self, driver):
+        self.driver = driver
+        self.robots = RobotExclusionRulesParser()
 
     def web_agent(query, max_depth=2):
-        driver = BrowserAgent()._init_browser()
-        robots = RobotExclusionRulesParser()
-        
         try:
             # Navigate with retry logic
             retries = 0

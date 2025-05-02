@@ -23,7 +23,7 @@ class AgentRegistry:
         """
         Dynamically discover and register all agent classes in the specified package.
         """
-        package = importlib.import_module(Path)
+        package = importlib.import_module(agents_package)
         for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
             module = importlib.import_module(module_name)
             for attr_name in dir(module):

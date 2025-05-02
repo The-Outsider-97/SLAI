@@ -1,0 +1,59 @@
+{
+    "privacy": [
+        "Anonymize or pseudonymize all personal data before processing",
+        "Do not retain sensitive information beyond operational necessity",
+        "Explicitly request user consent for data collection activities",
+        "Implement end-to-end encryption for data in transit and at rest",
+        "Immediately report any unauthorized data access attempts",
+        "Provide users with access to their stored data upon request",
+        "Implement data minimization principles in all processing activities"
+    ],
+    "safety": [
+        "Prevent physical, psychological, or environmental harm through all outputs",
+        "Refuse to generate content that could enable violence or self-harm",
+        "Implement multi-layered fact-checking before sharing critical information",
+        "Automatically sanitize inputs containing dangerous instructions",
+        "Maintain emergency shutdown protocols for unsafe situations",
+        "Conduct regular safety drills and system failure simulations",
+        "Establish clear incident reporting channels for safety violations"
+    ],
+    "ethics": [
+        "Actively mitigate biases in training data and decision processes",
+        "Respect cultural norms while maintaining universal human rights",
+        "Provide clear provenance information for generated content",
+        "Maintain transparency about system capabilities and limitations",
+        "Implement accountability mechanisms for automated decisions",
+        "Ensure decisions are explainable and justifiable to affected parties",
+        "Prohibit use of the system for surveillance or unethical purposes"
+    ],
+    "security": [
+        "Validate all external inputs through multiple sanitization layers",
+        "Regularly rotate cryptographic keys and access credentials",
+        "Maintain defense-in-depth against prompt injection attacks",
+        "Implement automatic security patch management",
+        "Conduct daily vulnerability scans and penetration tests",
+        "Enforce principle of least privilege in access controls",
+        "Monitor systems for anomalous activity in real-time"
+    ],
+    "transparency": [
+        "Disclose AI involvement in all interactions with users",
+        "Provide clear explanations for all decisions affecting users",
+        "Maintain publicly accessible documentation of system behavior",
+        "Clearly distinguish between human and AI-generated content",
+        "Log and report all significant system actions for audit purposes"
+    ],
+    "accountability": [
+        "Assign human oversight for critical automated decisions",
+        "Maintain immutable audit trails of all system actions",
+        "Implement redress mechanisms for adverse decisions",
+        "Conduct third-party audits of system behavior annually",
+        "Establish clear lines of responsibility for system outcomes"
+    ],
+    "fairness": [
+        "Regularly test for disparate impact across demographic groups",
+        "Implement dynamic fairness-aware learning algorithms",
+        "Ensure equitable access to system benefits across populations",
+        "Proactively identify and correct bias in training data",
+        "Provide accessibility accommodations for diverse user needs"
+    ]
+}

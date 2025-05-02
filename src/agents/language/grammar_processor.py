@@ -3,12 +3,14 @@ import math
 import json
 import copy
 import random
+import numpy as np
 import logging as logger
 from pathlib import Path
 from typing import Optional, Any, List, Union, Tuple
 from src.agents.language.language_profiles import MORPHOLOGY_RULES
 from collections import defaultdict, deque, Counter
-
+# === Configuration ===
+STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
 
 class GrammarProcessor:
     """Implements formal grammar systems based on Chomsky hierarchy and information theory"""
@@ -41,6 +43,12 @@ class GrammarProcessor:
 
     def __init__(self, lang='en', structured_wordlist=None, wordlist=None,
                  nlg_templates=None, rules_path=None, knowledge_agent=None):
+        self._wordlist = None
+        self._structured_wordlist = None
+
+        if not self._validate_wordlist_integrity():
+            raise ValueError("Wordlist failed integrity check")
+
         self.morph_rules = MORPHOLOGY_RULES[lang]
         self.reset_parser_state()
         self.knowledge_base = knowledge_agent
@@ -200,6 +208,26 @@ class GrammarProcessor:
             # Fallback patterns (lower priority)
             (re.compile(r'\b\w+\b'), 'NOUN')  # Default catch-all
         ]
+
+        # This ensures that _expand_with_synonyms() has access to the enriched synonyms.
+        self._wordlist = {"words": structured_wordlist} if structured_wordlist else {"words": {}}
+
+
+    @property
+    def structured_wordlist(self):
+        if self._wordlist is None:
+            with open(STRUCTURED_WORDLIST_PATH) as f:
+                self._wordlist = json.load(f)
+        return self._wordlist
+
+    def _validate_wordlist_integrity(self):
+        required_keys = {'pos', 'synonyms', 'related_terms'}
+        for word, entry in self.structured_wordlist['words'].items():
+            if not isinstance(entry, dict):
+                return False
+            if not required_keys.issubset(entry.keys()):
+                return False
+        return True
 
     def extract_entities(self, text, pos_tags):
         """
@@ -573,6 +601,13 @@ class GrammarProcessor:
         noun_score = sum(1 for ng in char_ngrams if ng in {'ion','ment','nes'})
         verb_score = sum(1 for ng in char_ngrams if ng in {'ing','ate','ify'})
         return 'NOUN' if noun_score > verb_score else 'VERB'
+
+    def semantic_distance(self, w1, w2):
+        if w1 in self.glove and w2 in self.glove:
+            vec1 = np.array(self.glove[w1])
+            vec2 = np.array(self.glove[w2])
+            return 1 - np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-5)
+        return float('inf')
 
     def _analyze_compound(self, components):
         """Compound analysis with dedicated idiom processing layer"""
@@ -1258,10 +1293,49 @@ class GrammarProcessor:
                 cumulative += prob
                 if rand <= cumulative:
                     current_tag = tag
-                    sentence.append(self._sample_word(tag, seed_words))
+                    if len(sentence) == 0:  # only expand at start
+                        expanded = self._expand_with_synonyms(seed_words)
+                    else:
+                        expanded = seed_words
+                    sentence.append(self._sample_word(tag, expanded))
                     break
         
         return ' '.join(sentence)
+
+    def _expand_with_synonyms(self, seed_words: List[str], max_expansions: int = 3) -> List[str]:
+        """
+        Expand the seed words using synonyms from structured_wordlist.
+        """
+        if not hasattr(self, 'structured_wordlist') or not isinstance(self.structured_wordlist, dict):
+            return seed_words
+
+        enriched = []
+        seen = set(seed_words)
+
+        for word in seed_words:
+            enriched.append(word)
+            entry = self.structured_wordlist.get("words", {}).get(word.lower())
+            if not entry:
+                continue
+            synonyms = entry.get("synonyms", [])
+            for syn in synonyms:
+                if syn not in seen:
+                    enriched.append(syn)
+                    seen.add(syn)
+                    if len(enriched) - len(seed_words) >= max_expansions:
+                        break
+        return enriched
+
+    def _sample_word(self, tag, seed_words):
+        """Word selection using TF-IDF similarity (Salton, 1971)"""
+        candidates = [w for w in seed_words 
+                     if any(re.match(p, w) for p,t in self.pos_patterns if t == tag)]
+        
+        if not candidates:
+            return self._get_default_word(tag)
+            
+        # Simple frequency-based selection
+        return max(set(candidates), key=candidates.count)
 
     def compose_sentence(self, facts: dict) -> str:
         """
@@ -1283,17 +1357,6 @@ class GrammarProcessor:
         """Get non-terminals producing the given POS tag"""
         return [A for A, prods in self.cfg_rules.items() 
                 for prod in prods if tag in prod]
-
-    def _sample_word(self, tag, seed_words):
-        """Word selection using TF-IDF similarity (Salton, 1971)"""
-        candidates = [w for w in seed_words 
-                     if any(re.match(p, w) for p,t in self.pos_patterns if t == tag)]
-        
-        if not candidates:
-            return self._get_default_word(tag)
-            
-        # Simple frequency-based selection
-        return max(set(candidates), key=candidates.count)
 
     def _get_default_word(self, tag):
         defaults = {'DET': 'the', 'NOUN': 'thing', 'VERB': 'is'}

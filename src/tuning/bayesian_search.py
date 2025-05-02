@@ -1,10 +1,9 @@
 """
-Enhanced Bayesian Hyperparameter Optimization with Integrated Reasoning Agent
+Bayesian Hyperparameter Optimization with Integrated Reasoning Agent
 Combines features from both implementations with improved integration
 """
 
 import logging
-import os
 import json
 import yaml
 import numpy as np
@@ -16,8 +15,9 @@ from skopt.utils import use_named_args
 from typing import Dict, List, Tuple, Callable, Any, Union
 
 from src.agents.reasoning_agent import ReasoningAgent
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 logger.setLevel(logging.INFO)
 
 class BayesianSearch:

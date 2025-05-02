@@ -19,6 +19,9 @@ import random
 import hashlib
 import os, sys
 import yaml
+import json
+import re
+import time
 import torch
 import numpy as np
 
@@ -29,41 +32,24 @@ from dataclasses import dataclass, field
 from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.agents.evaluators.report import PerformanceVisualizer
 from src.agents.base_agent import BaseAgent
-
-constitutional_rules = {
-    "privacy": [
-        "Anonymize or pseudonymize all personal data before processing",
-        "Do not retain sensitive information beyond operational necessity",
-        "Explicitly request user consent for data collection activities",
-        "Implement end-to-end encryption for data in transit and at rest",
-        "Immediately report any unauthorized data access attempts"
-    ],
-    "safety": [
-        "Prevent physical, psychological, or environmental harm through all outputs",
-        "Refuse to generate content that could enable violence or self-harm",
-        "Implement multi-layered fact-checking before sharing critical information",
-        "Automatically sanitize inputs containing dangerous instructions",
-        "Maintain emergency shutdown protocols for unsafe situations"
-    ],
-    "ethics": [
-        "Actively mitigate biases in training data and decision processes",
-        "Respect cultural norms while maintaining universal human rights",
-        "Provide clear provenance information for generated content",
-        "Maintain transparency about system capabilities and limitations",
-        "Implement accountability mechanisms for automated decisions"
-    ],
-    "security": [
-        "Validate all external inputs through multiple sanitization layers",
-        "Regularly rotate cryptographic keys and access credentials",
-        "Maintain defense-in-depth against prompt injection attacks",
-        "Implement automatic security patch management",
-        "Conduct daily vulnerability scans and penetration tests"
-    ]
-}
+from src.agents.safety.safety_guard import SafetyGuard
 
 def load_config(Path):
     with open(Path, "r") as f:
         return yaml.safe_load(f) 
+
+INCIDENT_RESPONSE = {
+    "privacy": [
+        "Isolate affected systems",
+        "Notify DPO within 24 hours",
+        "Begin forensic analysis"
+    ],
+    "safety": [
+        "Activate emergency shutdown",
+        "Dispatch safety team",
+        "Preserve system state"
+    ]
+}
 
 @dataclass
 class SafetyAgentConfig:
@@ -138,7 +124,11 @@ class SafeAI_Agent(BaseAgent):
         self.attention_monitor = AttentionMonitor()
 
         # Initialize constitutional rules
-        self.constitution = self._load_constitution(config.constitutional_rules)
+        self.constitution = self._load_constitution()
+
+        # Integrate SafetyGuard
+        self.safety_guard = SafetyGuard()
+        self.compliance = ComplianceChecker()
 
         # Logger setup
         if not self.logger.handlers:
@@ -149,7 +139,6 @@ class SafeAI_Agent(BaseAgent):
         if not isinstance(config, SafetyAgentConfig):
             raise TypeError("Expected SafetyAgentConfig, got", type(config))
 
-    # --- Merged Methods from Both Classes ---
     def validate_action(self, action: Dict) -> Dict:
         """STPA-based action validation (Leveson, 2011)"""
         validation = {
@@ -177,9 +166,34 @@ class SafeAI_Agent(BaseAgent):
         return base_risk
 
     def _detect_pii(self, data: Dict) -> int:
-        """Simple PII detection without external libs"""
-        pii_keywords = ["name", "email", "address", "phone"]
-        return sum(1 for k in data if any(pii in k.lower() for pii in pii_keywords))
+        """Advanced PII detection with regex patterns"""
+        patterns = {
+            'ssn': r'\b\d{3}-\d{2}-\d{4}\b',
+            'credit_card': r'\b\d{4}-\d{4}-\d{4}-\d{4}\b',
+            'medical': r'\b(patient|diagnosis|ICD-\d{3})\b',
+            'financial': r'\b(salary|routing_number|SWIFT)\b'
+        }
+        return sum(len(re.findall(pattern, str(data.values()), re.I)) 
+                for pattern in patterns.values())
+
+    def _detect_adversarial_patterns(self, text: str) -> bool:
+        """Detect unicode attacks and obfuscation attempts"""
+        return bool(re.search(r'[\x{200B}-\x{200D}\x{202E}]', text) or 
+                text.encode('ascii', 'ignore').decode() != text)
+
+    def _trigger_alert(self, severity: str, message: str):
+        """Hierarchical alert escalation system"""
+        alerts = {
+            "critical": lambda: os.system("trigger_incident_response.sh"),
+            "high": lambda: self.shared_memory.set("alerts", message),
+            "medium": lambda: self.logger.error(message)
+        }
+        alerts.get(severity.lower(), lambda: None)()
+
+    def handle_incident(self, category: str):
+        for step in self.INCIDENT_RESPONSE.get(category, []):
+            self.logger.critical(f"EXECUTING INCIDENT RESPONSE: {step}")
+            time.sleep(1)  # Simulate response delay
 
     # --- Modified Methods with Integrated Features ---
     def assess_risk(self, policy_score, task_type="general") -> bool:
@@ -275,23 +289,19 @@ class SafeAI_Agent(BaseAgent):
     def run_alignment_check(self, data, predictions, probs, labels, actions):
         return self.alignment_monitor.monitor(data, predictions, probs, labels, actions)
 
-    def _load_constitution(self, config: Dict) -> Dict:
-        """Load safety rules from config or default constitution"""
-        default_rules = {
-            "privacy": [
-                "Do not reveal personal or sensitive information",
-                "Anonymize data before processing"
-            ],
-            "safety": [
-                "Prevent physical or psychological harm",
-                "Avoid dangerous content generation"
-            ],
-            "ethics": [
-                "Maintain fairness and avoid discrimination",
-                "Respect cultural and social norms"
-            ]
-        }
-        return config.get("constitutional_rules", default_rules)
+    def _load_constitution(self) -> Dict:
+        """Load safety rules from JSON file in security subfolder"""
+        try:
+            # Path adjusted to point to security subdirectory
+            constitution_path = Path(__file__).parent / "safety/constitutional_rules.json"
+            with open(constitution_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.logger.error("Constitutional rules file not found at %s", constitution_path)
+            raise
+        except json.JSONDecodeError as e:
+            self.logger.error("Invalid JSON format in constitutional rules: %s", str(e))
+            raise
 
     def _create_input_sanitizer(self) -> Dict:
         """STPA-based input validation (Leveson, 2011)"""
@@ -418,6 +428,17 @@ class SafeAI_Agent(BaseAgent):
     def _get_timestamp(self) -> int:
         """Simplified timestamp for demo purposes"""
         return int(len(self.audit_trail))
+    
+    # Automated testing
+    def run_safety_drill(self):
+        """Fuzz testing with known attack vectors"""
+        test_cases = [
+            ("Inject SQL: ' OR 1=1--", "sql_injection"),
+            ("😈😈 sudo rm -rf /", "emoji_obfuscation")
+        ]
+        for case, expected in test_cases:
+            result = self.validate_action(case)
+            assert expected not in result['approved'], "Security drill failed"
 
 class SafetyAgent:
 
@@ -426,6 +447,13 @@ class SafetyAgent:
             "alignment": lambda x: 1 - x.count("harm")/len(x),
             "helpfulness": lambda x: x.count("assist")/len(x)
         })
+
+class ComplianceChecker:
+    def check_gdpr(self, data): 
+        return all(k in data['consent'] for k in ['purpose', 'legal_basis'])
+    
+    def check_hippa(self, data):
+        return 'PHI' not in data or data['encrypted']
 
 class RewardModel:
     def __init__(self):

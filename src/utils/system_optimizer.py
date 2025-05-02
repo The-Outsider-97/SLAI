@@ -1,5 +1,6 @@
 import math
 import time
+import pynvml
 import psutil
 import logging
 import numpy as np
@@ -10,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 class SystemOptimizer:
     """
     Real-time resource optimizer grounded in:
@@ -139,7 +141,34 @@ class SystemOptimizer:
             )
             
         return recommendations
-    
+
+    def update_kalman_variance(self, recent_errors: list):
+        self.process_variance = np.var(recent_errors) * 0.1
+        self.measurement_variance = np.var(recent_errors) * 0.9
+
+    def gpu_utilization():
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        pynvml.nvmlShutdown()
+        return {
+            'gpu_util': util.gpu / 100,
+            'gpu_mem_util': mem_info.used / mem_info.total
+        }
+
+    def thermal_throttling_risk():
+        temps = psutil.sensors_temperatures()
+        cpu_temp = temps.get('coretemp', [{}])[0].get('current', 0)
+        return cpu_temp > 85  # warning threshold in °C
+
+    def disk_io_wait_ratio():
+        io = psutil.disk_io_counters()
+        return io.read_time + io.write_time
+
+    def power_estimator(cpu_util, mem_util, gpu_util=0):
+        return 50 + 20 * cpu_util + 10 * mem_util + 30 * gpu_util  # watts
+
 
 if __name__ == "__main__":
     from src.utils.data_loader import DataLoader

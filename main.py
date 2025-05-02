@@ -1,34 +1,31 @@
-# ===== main.py - SLAI Core Launcher =====
+# ===== SLAI Core Launcher =====
+import shutil
+import distutils.spawn
+
+distutils.spawn.find_executable = lambda name: shutil.which(name)
+
 import os
 import sys
-import logging
 import yaml
 import queue
+import logging
+import uvicorn
 import concurrent
+from threading import Thread
 from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication # no-audit
 
+from logs.logger import get_logger, get_log_queue
 from shared_memory_cleaner import SharedMemoryCleaner
 from src.collaborative.shared_memory import SharedMemory
 from src.utils.agent_factory import AgentFactory
 from src.utils.system_optimizer import SystemOptimizer
 from src.agents.collaborative_agent import CollaborativeAgent
-from frontend.startup_screen import StartupScreen
-from frontend.main_window import MainWindow
-
-
+from frontend.startup_screen import StartupScreen # no-audit
+from frontend.main_window import MainWindow # no-audit
 
 # Configure logging early to capture all events
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('logs/slai_core.log'),
-            logging.StreamHandler()
-        ]
-    )
-logger = logging.getLogger('SLAI-Launcher')
+logger = get_logger("SLAI-Launcher")
 
 _config_cache = None
 
@@ -44,25 +41,41 @@ def load_config(config_path: str = "config.yaml") -> dict:
             sys.exit(1)
     return _config_cache
 
-def initialize_core_components(config: dict) -> tuple:
+def initialize_core_components(config: dict) -> tuple[AgentFactory, SharedMemory]:
     """Initialize fundamental system components"""
-    shared_memory = SharedMemory()
+    shared_memory = SharedMemory(config['shared_resources']['memory'])
     shared_memory.configure(
         default_ttl=config.get('memory_ttl', 3600),
         max_versions=config.get('max_versions', 10)
     )
     optimizer = SystemOptimizer()
     
-    agent_factory = AgentFactory(
+    factory = AgentFactory(
         config=config,
         shared_resources={
             "shared_memory": shared_memory,
-            "optimizer": optimizer
-        },
-        optimizer=optimizer
+            "optimizer": SystemOptimizer()
+        }
     )
-    
-    return shared_memory, optimizer, agent_factory
+
+    # Parallel pre-initialization of critical agents
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(factory.get, agent): agent
+            for agent in config['preload_agents']
+        }
+        for future in concurrent.futures.as_completed(futures):
+            agent_name = futures[future]
+            logger.info(f"Preloaded {agent_name} agent")
+        
+    return shared_memory, optimizer, factory
+
+#def start_research_api():
+#    uvicorn.run("api.research_api:app", host="127.0.0.1", port=8000, log_level="info")
+
+#api_thread = Thread(target=start_research_api, daemon=True)
+#api_thread.start()
+#logger.info("SLAI Research API started on http://127.0.0.1:8000")
 
 def launch_ui(init_agents, components: dict):
     from PyQt5.QtWidgets import QSplashScreen
@@ -99,7 +112,7 @@ def main():
 
     # Parallelize memory and factory creation
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        shared_future = executor.submit(SharedMemory)
+        shared_future = executor.submit(SharedMemory, config['shared_resources'])
         optimizer_future = executor.submit(SystemOptimizer)
         
         shared_memory = shared_future.result()
@@ -119,7 +132,7 @@ def main():
     )
     
     # Create communication queues
-    log_queue = queue.Queue()
+    log_queue = get_log_queue()
     metric_queue = queue.Queue()
     
     # Prepare UI launch components
@@ -131,14 +144,13 @@ def main():
         'log_queue': log_queue,
         'metric_queue': metric_queue
     }
-    
+
     logger.info("Launching SLAI Interface")
     launch_ui(lambda: None, launch_components)
 
 class IdleMonitor:
     def __init__(self, idle_threshold=1800):  # 30 mins
         import time
-        from threading import Thread
         self.last_active = time.time()
         self.idle_threshold = idle_threshold
         self.running = True

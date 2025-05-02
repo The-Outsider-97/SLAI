@@ -1,0 +1,278 @@
+{
+  "harmony": {
+    "beginner": "Harmony is when different notes are played together to sound nice.",
+    "intermediate": "Harmony involves combining chords and notes to support the melody and define a song's emotional feeling.",
+    "advanced": "Harmony explores complex chordal relationships, voice leading, and tonal tension across progressions, including modal interchange, secondary dominants, and chromaticism."
+  },
+  "melody": {
+    "beginner": "Melody is the main tune of a song, the part you usually hum or sing.",
+    "intermediate": "Melody is a sequence of notes with rhythm and pitch that creates a musical line, often shaped with phrases and contours.",
+    "advanced": "Melody encompasses motivic development, phrasing, contour manipulation, and interaction with harmonic frameworks, employing techniques such as sequence, inversion, and fragmentation."
+  },
+  "rhythm": {
+    "beginner": "Rhythm is the beat that makes you tap your foot to music.",
+    "intermediate": "Rhythm organizes sounds and silences into patterns governed by meter, tempo, and subdivisions.",
+    "advanced": "Rhythm includes complex structures like polyrhythms, metric modulation, and advanced syncopation to create dynamic temporal variation."
+  },
+  "counterpoint": {
+    "beginner": "Counterpoint is when two or more tunes are played at the same time and sound good together.",
+    "intermediate": "Counterpoint is writing independent melodies that harmonize when combined, as in fugues and canons.",
+    "advanced": "Counterpoint involves advanced techniques like species counterpoint, invertible counterpoint, and strict contrapuntal rules from Renaissance and Baroque traditions."
+  },
+  "scales": {
+    "beginner": "A scale is a set of notes played in order, like the C major scale.",
+    "intermediate": "Scales are ordered sequences of pitches that form the basis of melodies and harmonies.",
+    "advanced": "Scales include modes, synthetic scales, and non-Western tunings, serving as frameworks for improvisation, composition, and modal interchange."
+  },
+  "chord_progressions": {
+    "beginner": "Chord progressions are groups of chords played one after another to make a song sound complete.",
+    "intermediate": "Chord progressions define a song's tonality and emotion, often using common patterns like I-IV-V or ii-V-I.",
+    "advanced": "Chord progressions can employ techniques like modal interchange, secondary dominants, tritone substitutions, and complex modulations to create sophisticated harmonic movement."
+  },
+  "intervals": {
+    "beginner": "An interval is the distance between two notes.",
+    "intermediate": "Intervals measure pitch distance and have names like third, fifth, or octave, classified as major, minor, perfect, etc.",
+    "advanced": "Intervals form the foundation of harmonic analysis, chord building, and voice leading, with attention to tuning systems like just intonation and equal temperament."
+  },
+  "dynamics": {
+    "beginner": "Dynamics tell how loud or soft the music should be.",
+    "intermediate": "Dynamics control volume changes and include markings like piano (soft) and forte (loud).",
+    "advanced": "Dynamics include nuanced expressive tools such as terraced dynamics, gradual crescendos/decrescendos, and interpretation based on historical performance practice."
+  },
+  "articulation": {
+    "beginner": "Articulation shows how notes should be played: short, smooth, or accented.",
+    "intermediate": "Articulation affects note length and attack, using techniques like staccato, legato, and accents.",
+    "advanced": "Articulation involves mastering micro-dynamics, phrasing intentions, bowings (strings), tonguings (winds), and historical practices for style authenticity."
+  },
+  "form": {
+    "beginner": "Form is how the parts of a song are put together, like verse and chorus.",
+    "intermediate": "Form organizes musical sections like ABA (ternary), AB (binary), or verse-chorus-bridge.",
+    "advanced": "Form includes sophisticated architectures like sonata-allegro, rondo, fugue, and through-composed structures, crucial for long-range compositional coherence."
+  },
+  "timbre": {
+    "beginner": "Timbre is why a guitar sounds different from a piano.",
+    "intermediate": "Timbre is the tone color or quality of sound shaped by instruments and techniques.",
+    "advanced": "Timbre results from harmonic spectra, attack transients, formants, and instrumental techniques, enabling composers to orchestrate rich textural palettes."
+  },
+  "texture": {
+    "beginner": "Texture is how many sounds are playing at once.",
+    "intermediate": "Texture refers to the layering of musical elements: monophony, homophony, or polyphony.",
+    "advanced": "Texture evolves through contrapuntal density, stratification, heterophony, and complex ensemble interplay across historical and global traditions."
+  },
+  "transposition": {
+    "beginner": "Transposition is moving a song higher or lower without changing how it sounds.",
+    "intermediate": "Transposition shifts music into a different key by moving every note the same interval.",
+    "advanced": "Transposition maintains intervallic relationships and can involve chromatic/diatonic techniques, with implications for instrument ranges and harmonic reinterpretations."
+  },
+  "modulation": {
+    "beginner": "Modulation is changing to a new key during a song.",
+    "intermediate": "Modulation uses pivot chords or direct shifts to move from one key to another.",
+    "advanced": "Modulation includes advanced techniques like enharmonic modulation, common-tone modulation, and abrupt chromatic shifts to heighten harmonic drama."
+  },
+  "orchestration": {
+    "beginner": "Orchestration is choosing which instruments play each part of the music.",
+    "intermediate": "Orchestration assigns musical lines to instruments based on timbre, range, and balance.",
+    "advanced": "Orchestration involves sophisticated blending, doubling, registral spacing, coloristic effects, and historical style conventions across classical and contemporary traditions."
+  },
+  "notation": {
+    "beginner": "Notation is writing down music so others can read and play it.",
+    "intermediate": "Notation uses staffs, clefs, noteheads, rests, and time signatures to represent music.",
+    "advanced": "Notation includes traditional, graphic, proportional, aleatoric, and microtonal systems, requiring literacy in specialized performance practices."
+  },
+  "syncopation": {
+    "beginner": "Syncopation is when the music feels like it's dancing off the beat.",
+    "intermediate": "Syncopation accents weak beats or offbeats to create rhythmic interest and groove.",
+    "advanced": "Syncopation manipulates metrical displacement, hemiola, cross-rhythms, and anticipatory phrasing in genres like jazz, funk, and contemporary classical."
+  },
+  "polyrhythm": {
+    "beginner": "Polyrhythm is when two different rhythms happen at the same time.",
+    "intermediate": "Polyrhythm layers contrasting rhythms, like 3 beats against 4 beats.",
+    "advanced": "Polyrhythm explores complex rhythmic independence, nested tuplets, and cross-metric modulation, expanding temporal dimensions in music."
+  },
+  "cadence": {
+    "beginner": "A cadence is a musical full stop or comma.",
+    "intermediate": "Cadences are chord progressions that end phrases or sections, like authentic or plagal cadences.",
+    "advanced": "Cadences include deceptive resolutions, half cadences, Phrygian cadences, and intricate voice-leading techniques, critical in tonal and post-tonal music."
+  },
+  "ornamentation": {
+    "beginner": "Ornamentation adds fancy notes to make the music prettier.",
+    "intermediate": "Ornamentation uses trills, mordents, turns, and grace notes to embellish melodies.",
+    "advanced": "Ornamentation requires mastery of historical performance styles, improvisatory embellishment, and expressive nuance tailored to specific eras and regions."
+  },
+  "pitch": {
+    "beginner": "Pitch is how high or low a sound is.",
+    "intermediate": "Pitch refers to the perceived frequency of a sound, determining its placement on the musical scale.",
+    "advanced": "Pitch involves precise frequency measurement, microtonal divisions, and tuning systems like equal temperament, just intonation, and meantone."
+  },
+  "modes": {
+    "beginner": "Modes are like different types of scales with their own moods.",
+    "intermediate": "Modes are scales derived from shifting the tonic within a parent scale, each having distinct interval patterns and emotional colors.",
+    "advanced": "Modes encompass diatonic (Ionian, Dorian, Phrygian, etc.), synthetic, and modal interchange applications, influencing harmonic function and melodic construction."
+  },
+  "consonance": {
+    "beginner": "Consonance is when two notes sound nice together.",
+    "intermediate": "Consonance refers to intervals or chords that sound stable and pleasant due to simple frequency ratios.",
+    "advanced": "Consonance analysis involves psychoacoustic factors, historical shifts (from perfect consonances to thirds), and contextual dependency in tonal and post-tonal music."
+  },
+  "dissonance": {
+    "beginner": "Dissonance is when two notes sound tense or clashing.",
+    "intermediate": "Dissonance involves intervals or chords that create tension and need resolution, often enriching musical expression.",
+    "advanced": "Dissonance is contextually defined, manipulated through suspensions, appoggiaturas, and in atonal practices, embraced without obligatory resolution."
+  },
+  "chord": {
+    "beginner": "A chord is when you play a few notes together.",
+    "intermediate": "A chord is a group of three or more notes sounded together, forming harmonies like major, minor, diminished, or augmented.",
+    "advanced": "Chord structures expand into extended (7th, 9th, 13th), altered, and quartal/quintal voicings, crucial for advanced harmonic language in jazz and modern classical music."
+  },
+  "expression": {
+    "beginner": "Expression is making music sound happy, sad, or exciting.",
+    "intermediate": "Expression in music involves dynamics, tempo fluctuations, articulation, and phrasing to convey emotion.",
+    "advanced": "Expression encompasses detailed interpretative techniques, rhetorical phrasing, historical stylistic practices, and performer-conductor collaborative shaping in complex ensemble works."
+  },
+  "tempo": {
+    "beginner": "Tempo is how fast or slow a piece of music is played.",
+    "intermediate": "Tempo defines the speed of the beat and is measured in beats per minute (BPM).",
+    "advanced": "Tempo fluctuations, including rubato, accelerando, and ritardando, provide expressive flexibility and structural nuance in performance."
+  },
+  "meter": {
+    "beginner": "Meter is how we group beats together in music, like 4 beats in a measure.",
+    "intermediate": "Meter organizes rhythms into repeating patterns, defined by time signatures like 4/4 or 3/4.",
+    "advanced": "Meter encompasses simple, compound, asymmetrical, and additive groupings, influencing phrasing, accentuation, and cross-rhythmic structures."
+  },
+  "phrasing": {
+    "beginner": "Phrasing is how music is shaped into sentences, making it sound natural.",
+    "intermediate": "Phrasing structures musical ideas into coherent units with tension, climax, and resolution.",
+    "advanced": "Phrasing involves subtle timing shifts, articulation control, breath management, and dynamic shading to create expressive interpretations."
+  },
+  "tonality": {
+    "beginner": "Tonality is when music sounds centered around a main note or chord.",
+    "intermediate": "Tonality organizes music around a tonic and a hierarchy of chords and scales.",
+    "advanced": "Tonality includes modulation, modal mixture, and chromatic alterations, defining large-scale harmonic direction and tonal centers."
+  },
+  "atonality": {
+    "beginner": "Atonality is music without a clear home note or key.",
+    "intermediate": "Atonality avoids traditional key centers and uses all twelve tones equally.",
+    "advanced": "Atonality employs techniques like twelve-tone serialism, pitch-class sets, and non-functional harmonic systems in modernist music."
+  },
+  "voice leading": {
+    "beginner": "Voice leading is moving smoothly from one chord to another.",
+    "intermediate": "Voice leading connects individual musical lines between chords in a smooth, logical way.",
+    "advanced": "Voice leading involves minimization of motion, hidden parallels, and contrapuntal techniques critical for harmonic and linear coherence."
+  },
+  "chromaticism": {
+    "beginner": "Chromaticism is adding extra notes outside the main scale.",
+    "intermediate": "Chromaticism introduces notes outside the key to create color, tension, and richness.",
+    "advanced": "Chromaticism spans tonicization, modal borrowing, secondary dominants, enharmonic modulations, and complex post-tonal frameworks."
+  },
+  "improvisation": {
+    "beginner": "Improvisation is making up music as you go.",
+    "intermediate": "Improvisation involves spontaneously creating melodies and harmonies based on musical structures.",
+    "advanced": "Improvisation encompasses motivic development, harmonic substitution, advanced modal and scalar approaches, and stylistic authenticity across genres."
+  },
+  "theme and variation": {
+    "beginner": "Theme and variation is taking a tune and changing it in fun ways.",
+    "intermediate": "Theme and variation form presents a main idea that is repeated and altered in rhythm, harmony, melody, or style.",
+    "advanced": "Theme and variation includes intricate transformations such as augmentation, diminution, inversion, reharmonization, and recomposition techniques."
+  },
+  "countermelody": {
+    "beginner": "A countermelody is a second tune that plays along with the main one.",
+    "intermediate": "A countermelody complements the main melody by adding an independent, often contrasting line.",
+    "advanced": "Countermelodies involve careful contrapuntal design, registral spacing, rhythmic independence, and thematic interplay to enrich musical texture."
+  },
+  "quartal harmony": {
+    "beginner": "Quartal harmony builds chords using fourths instead of the usual thirds.",
+    "intermediate": "Quartal harmony stacks perfect and augmented fourths to create modern sounding chords often used in jazz and impressionistic music.",
+    "advanced": "Quartal harmony employs fourth-based voicings to produce non-triadic sonorities, influencing modal jazz, 20th-century classical music, and expansive harmonic textures."
+  },
+  "metric modulation": {
+    "beginner": "Metric modulation is when the beat feels like it changes speed during a song.",
+    "intermediate": "Metric modulation shifts the tempo by reinterpreting subdivisions to create smooth or abrupt tempo changes.",
+    "advanced": "Metric modulation realigns perceived beats via complex proportional relationships between note groupings, enabling intricate polyrhythmic and polymetric structures."
+  },
+  "aleatoric music": {
+    "beginner": "Aleatoric music lets some parts be random or decided by the performer.",
+    "intermediate": "Aleatoric music includes chance elements, letting performers influence timing, dynamics, or even pitches.",
+    "advanced": "Aleatoric techniques introduce controlled indeterminacy, ranging from performer choice within bounded frameworks to completely stochastic compositions."
+  },
+  "microtonality": {
+    "beginner": "Microtonality uses notes between the regular notes you hear on a piano.",
+    "intermediate": "Microtonality divides the octave into intervals smaller than the standard semitone, exploring new sonic possibilities.",
+    "advanced": "Microtonality explores alternative tuning systems (like 19-TET, 31-TET), just intonation, spectral tunings, and cultural pitch systems beyond 12-TET."
+  },
+  "extended techniques": {
+    "beginner": "Extended techniques are special ways to make unusual sounds on instruments.",
+    "intermediate": "Extended techniques involve non-traditional methods like bowing behind the bridge or singing while playing.",
+    "advanced": "Extended techniques include multiphonics, prepared instruments, percussive articulation, and sound sculpture methods, expanding the timbral vocabulary of instruments."
+  },
+  "twelve-tone technique": {
+    "beginner": "Twelve-tone technique uses all twelve notes equally without picking a main one.",
+    "intermediate": "Twelve-tone technique organizes music using ordered series of the twelve chromatic pitches (tone rows).",
+    "advanced": "Twelve-tone serialism employs strict operations of prime, inversion, retrograde, and retrograde-inversion transformations to structure atonal compositions systematically."
+  },
+  "isorhythm": {
+    "beginner": "Isorhythm is repeating a rhythm over and over, even if the melody changes.",
+    "intermediate": "Isorhythm combines a repeating rhythmic pattern (talea) with a separate melodic pattern (color) at different lengths.",
+    "advanced": "Isorhythmic techniques drive complex medieval motets and modern minimalist structures through systematic rhythmic cycles independent of melodic repetition."
+  },
+  "hocket": {
+    "beginner": "Hocket is when different instruments take turns playing parts of a melody really fast.",
+    "intermediate": "Hocket splits a melodic line between two or more voices to create a syncopated texture.",
+    "advanced": "Hocket involves intricate interlocking rhythmic articulation, emblematic of medieval motet construction and adapted in contemporary minimalist and African polyphonic traditions."
+  },
+  "polytonality": {
+    "beginner": "Polytonality is when two songs in different keys happen at the same time.",
+    "intermediate": "Polytonality layers two or more distinct key centers simultaneously, creating complex harmonic textures.",
+    "advanced": "Polytonality manipulates multiple tonal centers through strategic registral placement, rhythmic independence, and pitch-class set considerations to produce harmonic ambiguity or layered tonality."
+  },
+  "spectral music": {
+    "beginner": "Spectral music makes sounds based on analyzing the inside parts of a sound.",
+    "intermediate": "Spectral music uses the overtone series and sound spectra to create harmony and form.",
+    "advanced": "Spectral composition leverages Fourier analysis, psychoacoustics, and microtonal tuning derived from natural resonance patterns to construct evolving harmonic landscapes."
+  },
+  "negative harmony": {
+    "beginner": "Negative harmony flips music upside down around a center note.",
+    "intermediate": "Negative harmony mirrors chords and melodies around a tonal axis to create inversions of harmonic function.",
+    "advanced": "Negative harmony reinterprets functional relationships by inverting pitch axes across diatonic collections, generating novel yet symmetrical harmonic substitutions and progressions."
+  },
+  "modal interchange": {
+    "beginner": "Modal interchange is borrowing chords from a related scale.",
+    "intermediate": "Modal interchange uses chords from parallel modes to add color and emotion to a progression.",
+    "advanced": "Modal interchange employs modal borrowing, pivot modulations, and hybrid scales to enrich tonal palettes, enabling harmonic expansion and ambiguity."
+  },
+  "beat": {
+    "beginner": "A beat is the steady pulse you feel in music, like your heartbeat.",
+    "intermediate": "A beat is the basic unit of time in music, organizing rhythmic patterns and tempo.",
+    "advanced": "A beat serves as the fundamental temporal reference point, enabling subdivisions, metric accents, syncopations, and complex rhythmic structures across various musical styles."
+  },
+  "note": {
+    "beginner": "A note is a single sound in music, like one tap or one clap.",
+    "intermediate": "A note represents a musical sound with a specific pitch and duration, fundamental to melody and harmony.",
+    "advanced": "A note encapsulates pitch, timbre, and dynamic information, serving as an atomic element for melodic, harmonic, and textural organization within diverse compositional frameworks."
+  },
+  "bar": {
+    "beginner": "A bar is a group of beats that go together, like a small music box.",
+    "intermediate": "A bar, or measure, is a segment of time defined by a given number of beats, indicated by a time signature.",
+    "advanced": "A bar structures rhythmic content within metric frameworks, facilitating phrasing, accentuation, syncopation, and hierarchical organization in both simple and complex metrical systems."
+  },
+  "staff": {
+    "beginner": "A staff is the five lines where music notes are written.",
+    "intermediate": "A staff provides a visual framework for pitch and rhythm notation using five lines and four spaces.",
+    "advanced": "The staff system encodes multi-dimensional musical information, supporting clef-specific pitch mappings, polyphonic layering, and advanced notational techniques across tonal and post-tonal traditions."
+  },
+  "clef": {
+    "beginner": "A clef is a symbol that tells you which notes go on which lines.",
+    "intermediate": "A clef assigns specific pitches to lines and spaces on the staff, like treble or bass clef.",
+    "advanced": "Clefs function as pitch reference frameworks, modulating staff mappings to accommodate transposition, instrumental ranges, and historical notational practices."
+  },
+  "scale": {
+    "beginner": "A scale is a group of notes played in order, like going up or down stairs.",
+    "intermediate": "A scale is an ordered set of pitches ascending or descending according to specific intervallic patterns.",
+    "advanced": "Scales define tonal and modal systems, underpinning melodic construction, harmonic function, improvisation strategies, and modal interchange across diverse musical idioms."
+  },
+  "phrase": {
+    "beginner": "A phrase is like a musical sentence made of notes.",
+    "intermediate": "A phrase is a musical idea, typically four to eight bars long, that expresses a complete thought.",
+    "advanced": "Phrases embody hierarchical structuring of melodic material, employing motivic development, rhythmic cadences, and expressive contouring to establish formal and emotional coherence."
+  }
+}
+  

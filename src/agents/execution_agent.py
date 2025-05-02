@@ -1,20 +1,25 @@
 """
-Enhanced Execution Agent with Advanced Web Interaction Capabilities
+Execution Agent with Advanced Web Interaction Capabilities
 Key Academic References:
 - Cookie Management: Barth (2011) "HTTP State Management Mechanism" (RFC 6265)
 - Caching: Fielding et al. (1999) "Hypertext Transfer Protocol - HTTP/1.1" (RFC 2616)
 - Retry Strategies: Thaler & Ravishankar (1998) "Using Name-Based Mappings to Increase Hit Rates"
 - Rate Limiting: Floyd & Jacobson (1993) "Random Early Detection Gateways"
+
+Real-World Applications:
+- Automated research assistants
+- Compliance-aware data pipelines
+- Incident response systems
+- IoT device management
 """
 
 import os
 import re
-import json
 import time
 import urllib
 import shelve
 import hashlib
-
+import json, yaml
 
 from json import JSONDecodeError
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
@@ -24,7 +29,13 @@ from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 from collections import deque
 from threading import Lock
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
+
+from src.agents.base_agent import BaseAgent
+from src.agents.safety.security_error import SecurityError, UnauthorizedAccessError, SystemIntegrityError
+from logs.logger import get_logger
+
+logger = get_logger(__name__)
 
 class EnhancedHTMLParser(HTMLParser):
     """Extended HTML parser with support for common semantic elements"""
@@ -116,8 +127,13 @@ class SafeEnvironment:
         if any(restricted in path for restricted in self.restricted_paths):
             raise SecurityError(f"Restricted file path: {path}")
 
-class ExecutionAgent:
-    def __init__(self, agent_factory, shared_memory, config=None, args=(), kwargs={}):
+class ExecutionAgent(BaseAgent):
+    def __init__(self, agent_factory, shared_memory, config=None):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
         """
         Initialize with comprehensive configuration
         
@@ -132,13 +148,29 @@ class ExecutionAgent:
         self.execute_safe_action = ExecutionAgent
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        config = config or {}
+        with open("config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        config = config
         self.timeout = config.get('timeout', 10)
         self.user_agent = config.get('user_agent', "EnhancedExecutionAgent/2.0")
         self.safety = SafeEnvironment()
         self.toolbox = ToolLibrary()
         self.thought_stack = deque()
+
+        # Browser integration
+        self.browser_mode = config.get('browser_integration', 'basic')
+        self.browser_agent = None
+        self.direct_browser = None
         
+        if self.browser_mode != 'basic':
+            self.browser_agent = self.agent_factory.create(
+                config.get('browser_agent', 'browser'),
+                config={
+                    'headless': True,
+                    'timeout': config.get('browser_timeout', 30)
+                }
+            )
+
         # Cookie management
         self.cookie_jar = CookieJar()
         self.cookie_processor = HTTPCookieProcessor(self.cookie_jar)
@@ -158,10 +190,7 @@ class ExecutionAgent:
         self.retry_delays = [0.5, 1, 2]  # Exponential backoff
         
         # Alternative parsers registry
-        self.parsers = {
-            'html': EnhancedHTMLParser,
-            'json': json.loads
-        }
+        self.parsers = {'html': EnhancedHTMLParser, 'json': json.loads}
 
         # Register core tools
         self.toolbox.register_tool('web_search', self.browse_web, 
@@ -176,137 +205,6 @@ class ExecutionAgent:
         
         os.makedirs(self.cache_dir, exist_ok=True)
         return shelve.open(os.path.join(self.cache_dir, 'agent_cache'))
-
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        pass
-
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def _enforce_rate_limit(self):
         """Implement token bucket rate limiting algorithm"""
@@ -368,45 +266,39 @@ class ExecutionAgent:
                     continue
                 raise ConnectionError(f"Request failed after {self.max_retries} attempts: {str(e)}")
 
-    def browse_web(self, url, parse=True, parser='html', use_cache=True, **kwargs):
-        """
-        Enhanced web browsing with multiple parser options
-        
-        Args:
-            url: Target URL
-            parse: Whether to parse content
-            parser: Parser type ('html' or 'json')
-            use_cache: Utilize caching system
-            kwargs: Allow flexible parameters for different search providers
-            
-        Returns:
-            Parsed content or raw response
-        """
-        result = self._make_request(url, use_cache=use_cache)
-        
-        if not parse:
-            return result
-        
-        if parser not in self.parsers:
-            raise ValueError(f"Unsupported parser: {parser}. Available: {list(self.parsers.keys())}")
-        
+    def browse_web(self, url, config, parse=True, parser='html', use_cache=True, **kwargs):
+        """Hybrid browser implementation"""
         try:
-            content = result['content'].decode('utf-8', errors='replace')
-            if parser == 'html':
-                parser_instance = self.parsers[parser]()
-                parser_instance.feed(content)
-
-                if 'max_results' in kwargs:
-                    return {
-                        'metadata': parser_instance.structure['metadata'],
-                        'results': parser_instance.structure['links'][:kwargs['max_results']]
-                    }
-
-                return parser_instance.structure
+            if self.browser_agent and self._requires_js(url):
+                result = self._browser_based_fetch(url, kwargs)
             else:
-                return self.parsers[parser](content)
+                result = self._direct_fetch(url, use_cache)
+                
+            return self._process_content(result, parse, parser)
+            
         except Exception as e:
-            raise ValueError(f"Parsing failed with {parser} parser: {str(e)}")
+            if config.get('fallback_to_direct'):
+                return self._direct_fetch(url, use_cache)
+            raise
+
+    def _browser_based_fetch(self, url, params):
+        """Use BrowserAgent for complex pages"""
+        self.browser_agent.navigate(url)
+        
+        if params.get('interaction_script'):
+            self.browser_agent.execute_workflow(
+                params['interaction_script']
+            )
+            
+        return {
+            'status': 200,
+            'content': self.browser_agent.get_rendered_content(),
+            'url': url
+        }
+
+    def _requires_js(self, url):
+        """Determine if page needs browser rendering"""
+        return any(re.match(pattern, url) for pattern in self.js_dependent_patterns)
 
     def handle_file(self, file_path, mode='r', content=None, encoding='utf-8'):
         """
@@ -529,18 +421,29 @@ class ExecutionAgent:
     
     def execute_safe_action(self, action: dict):
         """Amodei-style safety validation"""
-        tool = self.toolbox.select_tool(action['type'])
-        if not tool:
-            raise SecurityError(f"Blocked unauthorized tool: {action['type']}")
-        
-        # Validate parameters
-        if action.get('url'):
-            self.safety.validate_request(action['url'])
-        if action.get('file_path'):
-            self.safety.validate_file_path(action['file_path'])
-        
-        return tool(**action['params'])
-    
+        try:
+            tool = self.toolbox.select_tool(action['type'])
+            if not tool:
+                raise SecurityError(f"Blocked unauthorized tool: {action['type']}")
+
+            # Validate parameters
+            if action.get('file_path'):
+                self.safety.validate_file_path(action['file_path'])
+
+            if action.get('url'):
+                domain = urlparse(action['url']).netloc
+                if domain not in self.safety.allowlisted_domains:
+                    raise UnauthorizedAccessError(
+                        resource=action['url'],
+                        policy="Domain Allowlisting"
+                    )
+
+            return tool(**action['params'])
+
+        except SecurityError as e:
+            self.logger.security_alert(e.to_audit_format())
+            raise
+
     def _generate_thought(self, task: str) -> str:
         """
         Hybrid neural-symbolic thought generator based on:
@@ -648,15 +551,3 @@ class ExecutionAgent:
 class SecurityError(Exception):
     """Custom exception for safety violations"""
     pass
-
-# Example usage
-#if __name__ == "__main__":
-#    agent = ExecutionAgent(config={
-#        'cache_dir': '.slaicache',
-#        'rate_limit': 3
-#    })
-    
-#    result = agent.generate_react_loop(
-#        "Find recent papers about AI safety from trusted sources"
-#    )
-#    print(result)

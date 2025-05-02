@@ -7,7 +7,6 @@ Implements real-time alignment auditing through:
 - Counterfactual fairness analysis (Kusner et al., 2017)
 """
 
-import logging
 import hashlib
 import shap
 import numpy as np
@@ -24,9 +23,9 @@ from src.agents.alignment.fairness_evaluator import FairnessEvaluator
 from src.agents.alignment.ethical_constraints import EthicalConstraints
 from src.agents.alignment.counterfactual_auditor import CounterfactualAuditor
 from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 @dataclass
 class MonitorConfig:
@@ -44,6 +43,15 @@ class MonitorConfig:
         'ethics': 0.3,
         'safety': 0.3
     })
+
+    def __post_init__(self):
+        """Validate configuration"""
+        valid_metrics = {'demographic_parity', 'equal_opportunity', 'predictive_equality'}
+        if any(metric not in valid_metrics for metric in self.fairness_metrics):
+            raise ValueError(f"Invalid fairness metric. Valid options: {valid_metrics}")
+            
+        if sum(self.adaptive_weights.values()) != 1.0:
+            raise ValueError("Adaptive weights must sum to 1.0")
 
 class AlignmentMonitor:
     """

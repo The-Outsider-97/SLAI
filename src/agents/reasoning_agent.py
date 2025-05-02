@@ -6,6 +6,14 @@ Features:
 - Advanced NLP capabilities
 - Probabilistic reasoning
 - Multiple inference methods
+
+Real-World Usage:
+1. Healthcare Decision Support: Detect conflicting treatment plans (e.g., drug interactions) using contradiction thresholds.
+2. Legal Tech: Audit contracts for logical inconsistencies or unenforceable clauses.
+3. Content Moderation: Identify contradictory claims in user-generated content.
+4. Financial Fraud Detection: Flag transactional contradictions (e.g., "purchases" in two countries simultaneously).
+5. AI Tutoring Systems: Check student answers against domain knowledge (e.g., physics/math rules).
+
 """
 
 import json
@@ -47,19 +55,20 @@ class ReasoningAgent(BaseAgent):
     """
     Initialize the Reasoning Agent with learning capabilities.
     """
-    def __init__(self, shared_memory, agent_factory, tuple_key,
+    def __init__(self, shared_memory, agent_factory, tuple_key: Tuple = ("subject", "predicate", "object"), config=None,
                  storage_path: str = "src/agents/knowledge/knowledge_db.json",
                  contradiction_threshold=0.25,
                  rule_validation: Dict = None,
                  nlp_integration: Dict = None,
                  inference: Dict = None,
                  llm: Any = None,
-                 language_agent: Any = None,
-                 args=(), kwargs={}):
+                 language_agent: Any = None):
         super().__init__(
             shared_memory=shared_memory,
-            agent_factory=agent_factory
+            agent_factory=agent_factory,
+            config=config
         )
+        self.tuple_key = tuple_key
         self.hypothesis_graph = defaultdict(
             lambda: {
                 'nodes': set(),
@@ -819,5 +828,3 @@ class ReasoningAgent(BaseAgent):
         if max_conf > 0:
             for edge in self.hypothesis_graph[root_key]['edges']:
                 self.hypothesis_graph[root_key]['edges'][edge] /= max_conf
-
-# if __name__ == "__main__":

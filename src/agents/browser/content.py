@@ -22,3 +22,11 @@ class ContentHandling:
             return abstract.replace("Abstract: ", "")
         except:
             return driver.find_element(By.TAG_NAME, "body").text[:1000]
+        
+    def _postprocess_if_special(self, result, driver):
+        url = result.get("link", "")
+        if url.endswith(".pdf"):
+            result["text"] = self.handle_pdf(url)
+        elif "arxiv.org" in url:
+            result["text"] = self.handle_arxiv(driver)
+        return result

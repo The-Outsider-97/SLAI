@@ -2,16 +2,13 @@ import os, sys
 import logging
 import json
 import yaml
-import torch
-import numpy as np
-from pathlib import Path
+
 from src.tuning.grid_search import GridSearch
 from src.tuning.bayesian_search import BayesianSearch
 from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
+from logs.logger import get_logger
 
-# from src.agents.evaluation_agent import EvaluationAgent
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 logger.setLevel(logging.INFO)
 
 class HyperparamTuner:
@@ -94,30 +91,3 @@ class HyperparamTuner:
         best_params = self.optimizer.run_search()
         logger.info("Hyperparameter tuning completed. Best parameters: %s", best_params)
         return best_params
-
-
-if __name__ == "__main__":
-    args = parser.parse_args()
-    logging.info("Starting tuner with strategy: %s", args.strategy)
-
-    try:
-        tuner = HyperparamTuner(
-            config_path=None,  # Leave None to auto-generate
-            evaluation_function=EvaluationAgent,
-            strategy='grid',
-            config_format='yaml'
-          )  # Choose output format if generating
-        grid_search = GridSearch(
-            config_file="src/tuning/configs/grid_config.json",
-            evaluation_function=rl_agent_evaluate,
-            reasoning_agent=ReasoningAgent(),
-            n_jobs=8,
-            cross_val_folds=5
-        )
-
-        best_params = grid_search.run_search()
-        best = tuner.run_tuning_pipeline()
-        print("Best parameters:", best)
-    except Exception as e:
-        logging.error("Tuning failed: %s", str(e))
-        sys.exit(1)

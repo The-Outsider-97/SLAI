@@ -2,15 +2,57 @@ import os, sys
 import yaml
 import json
 import heapq
-import logging
 import numpy as np
 import random
 from collections import deque, defaultdict
 from threading import Lock
 from datetime import datetime, timedelta
 from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
+from logs.logger import get_logger
 
-logger = logging.getLogger("DistributedReplayBuffer")
+logger = get_logger("DistributedReplayBuffer")
+
+class ExperienceReplayManager:
+    def __init__(self, buffer, policy_net, batch_size=32):
+        self.buffer = buffer
+        self.policy_net = policy_net
+        if len(self.replay_buffer) < batch_size:
+            return
+        batch = self.replay_buffer.sample(
+            batch_size,
+            strategy='prioritized',
+            beta=self.per_beta
+        )
+        # Unpack batch components
+        states, actions, rewards, next_states, dones = batch
+        
+        # Calculate importance sampling weights
+        weights = (len(self.replay_buffer) * self.replay_buffer.probs) ** -self.per_beta
+        weights /= weights.max()
+
+        # Train on batch
+        losses = []
+        for idx, (state, action, reward, next_state) in enumerate(zip(states, actions, rewards, next_states)):
+            # Update network with importance weighting
+            td_error = self._update_policy(state, action, reward, next_state)
+            losses.append(td_error)
+            
+            # Update priorities in buffer
+            new_priority = abs(td_error) + self.per_epsilon
+            self.replay_buffer.update_priorities([idx], [new_priority])
+
+        # Logging and memory consolidation
+        self._consolidate_memory()
+        logger.info(f"Prioritized replay complete. Avg loss: {np.mean(losses):.4f}")
+
+    def sample_batch(self, batch_size):
+        # Prioritized sampling logic
+        pass
+
+    def update_priorities(self, indices, errors):
+        # Priority update logic
+        pass
+
 
 class DistributedReplayBuffer:
     def __init__(self, capacity=100_000, seed=None, 

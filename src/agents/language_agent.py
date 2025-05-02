@@ -2,14 +2,13 @@ import os, sys
 import re
 import nltk
 import json
-import time
 import math
 import random
 import pickle
-import hashlib
 import logging
 import datetime
 import ply.lex as lex
+import numpy as np
 import multiprocessing as mp
 
 from textstat import textstat
@@ -19,12 +18,27 @@ from collections import deque, defaultdict, OrderedDict
 from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
 from functools import partial
 from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.perception.encoders.text_encoder import TextEncoder
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.base_agent import BaseAgent
 from src.utils.slailm_loader import get_slailm
 
+@dataclass 
+class LinguisticFrame:
+    """Structured representation of language acts (inspired by Speech Act Theory)"""
+    intent: str
+    entities: Dict[str, str]
+    sentiment: float  # Range [-1, 1]
+    modality: str  # From Nuyts (2005) modality taxonomy
+    confidence: float  # [0, 1]
+
+    # Validation
+    def __post_init__(self):
+        self.confidence = min(1.0, max(0.0, self.confidence))
+        self.sentiment = min(1.0, max(-1.0, self.sentiment))
+
 class DialogueContext:
-    def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None):
+    def __init__(self, llm=None, history=None, summary=None, memory_limit=1000, enable_summarization=True, summarizer=None, encoder=None):
         """
         Manages dialogue memory, optionally summarizes long histories.
 
@@ -42,6 +56,26 @@ class DialogueContext:
         self.memory_limit = memory_limit
         self.enable_summarization = enable_summarization
         self.summarizer = summarizer or self.default_summarizer
+        self.encoder = encoder or TextEncoder()
+        #self.nlu = EnhancedNLU(wordlist_path="src/agents/language/wordlist_en.json")
+        self.vocab = {word: idx for idx, word in enumerate(self.encoder.vocab)}  # Or load externally
+        self.unk_token_id = self.vocab.get("<unk>", 0)  # Use 0 or a reserved ID
+
+    def get_frame(self, user_input: str) -> LinguisticFrame:
+        nlu_data = self.nlu.analyze(user_input)
+        deps = nlu_data["dependencies"]
+        verbs = [rel.head for rel in deps if rel.relation == "root"]
+        objects = [rel.dependent for rel in deps if rel.relation in {"dobj", "nsubj"}]
+        return LinguisticFrame(
+            intent=verbs[0] if verbs else "unknown",
+            entities={
+                "dependency_heads": [rel.head for rel in deps],
+                "objects": objects
+            },
+            sentiment=0.0,
+            modality="none",
+            confidence=1.0
+        )
 
     def add(self, message: str):
         """Add a message to the history and optionally summarize."""
@@ -72,6 +106,8 @@ class DialogueContext:
 
     def default_summarizer(self, messages: list, existing_summary: str = None) -> str:
         """Basic summarizer using SLAILM."""
+        if self.llm is None or not hasattr(self.llm, "generate"):
+            return "Summary: " + " | ".join(messages[-3:])
         context = ""
         if existing_summary:
             context += f"Previous summary:\n{existing_summary}\n\n"
@@ -91,19 +127,26 @@ class DialogueContext:
         # Fallback summary
         return "Summary: " + " | ".join(messages[-3:])
 
-@dataclass 
-class LinguisticFrame:
-    """Structured representation of language acts (inspired by Speech Act Theory)"""
-    intent: str
-    entities: Dict[str, str]
-    sentiment: float  # Range [-1, 1]
-    modality: str  # From Nuyts (2005) modality taxonomy
-    confidence: float  # [0, 1]
+    def encode_context(self) -> Optional[np.ndarray]:
+        """Return a dense embedding of the current dialogue context."""
+        if not self.encoder:
+            return None
+        context_text = self.get_context()
+        tokens = self.tokenize_text(context_text)
+        token_ids = self.tokens_to_ids(tokens)
+        if len(token_ids) < 512:
+            token_ids += [self.unk_token_id] * (512 - len(token_ids))
+        else:
+            token_ids = token_ids[:512]
+        return self.encoder.forward(np.array([token_ids]))
 
-    # Validation
-    def __post_init__(self):
-        self.confidence = min(1.0, max(0.0, self.confidence))
-        self.sentiment = min(1.0, max(-1.0, self.sentiment))
+    def tokenize_text(self, text: str) -> List[str]:
+        """Simple whitespace tokenizer (replace if you have a better one)."""
+        return text.lower().split()
+
+    def tokens_to_ids(self, tokens: List[str]) -> List[int]:
+        """Dummy tokenizer - replace with real vocab if available."""
+        return [self.vocab.get(token, self.unk_token_id) for token in tokens]
 # --------------------------
 # Independent Modules
 # --------------------------
@@ -963,6 +1006,7 @@ class Wordlist:
         return self._validate_grapheme_phoneme(word)
 
     def _check_morphology(self, word: str) -> bool:
+        from src.agents.language.language_profiles import MORPHOLOGY_RULES
         """Morphological validation using language-specific rules"""
         lang = self.metadata.get('language', 'en')
         rules = MORPHOLOGY_RULES.get(lang, {})
@@ -1675,17 +1719,67 @@ class NLUEngine:
 # --------------------------
 # Enhanced NLU Components
 # --------------------------
+
+@dataclass
+class DependencyRelation:
+    head: str
+    relation: str
+    dependent: str
+
 class EnhancedNLU(NLUEngine):
     """Implements advanced NLU techniques from recent research"""
-    from src.agents.language.nlp_utils import CoreferenceResolver, ShallowDependencyParser
-    def __init__(self, wordlist_path: str):
+    def __init__(self, wordlist_path: str, lang='en'):
+        from src.agents.language.nlp_utils import CoreferenceResolver, ShallowDependencyParser
         super().__init__(wordlist_path)
         self.coref_resolver = CoreferenceResolver()
-        self.dependency_parser = ShallowDependencyParser()
+        self.dependency_parser = ShallowDependencyParser(lang=lang)
         
         # Add psycholinguistic features
         self.lexical_diversity = lex()
         self.readability = textstat()
+
+    def resolve_coreferences(self, text: str, context_history: Optional[deque] = None) -> str:
+        """
+        Resolve pronouns to antecedents using rule-based coreference resolution.
+
+        Args:
+            text (str): Input sentence or paragraph.
+            context_history (deque): Optional rolling window of previous text.
+
+        Returns:
+            str: Text with resolved pronouns.
+        """
+        return self.coref.resolve(text, history=context_history)
+
+    def parse_dependencies(self, text: str) -> List[DependencyRelation]:
+        """
+        Perform shallow dependency parsing on text.
+
+        Args:
+            text (str): Raw sentence or phrase.
+
+        Returns:
+            List[DependencyRelation]: Parsed syntactic relations.
+        """
+        tokens = self.parser._tokenize_pos_tag(text)
+        return self.parser._apply_rules(tokens)
+
+    def analyze(self, text: str) -> Dict[str, Any]:
+        """
+        Run full NLU pipeline: coref resolution + dependency parsing.
+
+        Returns:
+            {
+                "resolved_text": str,
+                "dependencies": List[DependencyRelation]
+            }
+        """
+        resolved = self.resolve_coreferences(text)
+        dependencies = self.parse_dependencies(resolved)
+        return {
+            "resolved_text": resolved,
+            "dependencies": dependencies
+        }
 
     def parse(self, text: str) -> LinguisticFrame:
         """Enhanced parsing pipeline with multiple processing stages"""
@@ -1814,32 +1908,10 @@ class NLGEngine:
             text = ' '.join(text.split()[:15]) + '...'
         return text
 
-class KnowledgeCache:
-    """Lightweight cache with LRU eviction policy"""
-    def __init__(self, max_size: int = 100):
-        self.cache = OrderedDict()
-        self.max_size = max_size
-
-    def get(self, key: str) -> Optional[Any]:
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return None
-
-    def set(self, key: str, value: Any) -> None:
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.max_size:
-            self.cache.popitem(last=False)
-
-    def hash_query(self, query: str) -> str:
-        """Semantic hashing for similar queries (simplified)"""
-        return hashlib.md5(query.encode()).hexdigest()
-
 class LanguageAgent(BaseAgent):
     def __init__(self, *, shared_memory, agent_factory, grammar, context, slai_lm,
-                 config=None, dialogue_context=None, args=(), kwargs={}):
+                 config=None, dialogue_context=None, args=(), **kwargs):
+        from src.agents.knowledge.knowledge_cache import KnowledgeCache
         if not slai_lm:
             raise ValueError("LanguageAgent requires an LLM instance.")
         self.slai_lm = slai_lm
@@ -1848,13 +1920,11 @@ class LanguageAgent(BaseAgent):
         self.config = config or {}
         super().__init__(shared_memory, agent_factory, config)
 
-        self.llm = slai_lm or get_slailm(shared_memory, agent_factory)
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.dialogue_context = dialogue_context
         self.grammar_processor = self._init_grammar_processor()
         self.sentiment_lexicon = self._load_sentiment_lexicon()
-
 
         # NLU and Wordlist
         wordlist_path = self.config.get("wordlist_path")
@@ -1889,6 +1959,8 @@ class LanguageAgent(BaseAgent):
         self.responses = self.config.get("responses", {
             "default": ["I am processing your input."]
         })
+
+        self.llm = slai_lm or get_slailm(shared_memory, agent_factory)
 
     def _init_grammar_processor(self, grammar_processor=None):
         # GrammarProcessor setup
