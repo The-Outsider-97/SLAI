@@ -115,6 +115,7 @@ Note: If you see an error about execution policy:
 4. Install requirements:
    ```console
    pip install -r requirements.txt
+   pip install pyyaml
    pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
 
    python -m nltk.downloader punkt
