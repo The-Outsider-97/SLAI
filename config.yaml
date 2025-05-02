@@ -12,30 +12,59 @@ run:
   output_dir: "logs/"
   plots_dir: "plots/"
 
+preload_agents:
+  - adaptive
+  - alignment
+  - evaluation
+  - execution
+  - language
+  - learning
+  - knowledge
+  - safety
+  - perception
+  - planning
+  - reasoning
+
+shared_resources:
+  memory:
+    class: SharedMemory
+    path: src.collaborative.shared_memory
+    init_args:
+      max_memory_mb: 500
+      ttl_check_interval: 30
+      
 agent-network:
   adaptive:
+    inherits: base
     class: AdaptiveAgent
     path: src.agents.adaptive_agent
-    learning_rate: 0.02
-    exploration_rate: 0.2
-    memory_capacity: 500
-    replay_capacity: 100000
-    priority_alpha: 0.6
-    experience_staleness_days: 1
-    per_beta: 0.4
-    risk_threshold: 0.7
+    init_args:
+      state_dim: 10
+      num_actions: 2
+      learning_rate: 0.02
+      exploration_rate: 0.2
+      memory_capacity: 500
+      episodic_capacity: 1000
+      replay_capacity: 100000
+      priority_alpha: 0.6
+      experience_staleness_days: 7
+      per_beta: 0.4
+      risk_threshold: 0.7
+      semantic_decay_rate: 0.95    # <-- For decay-based forgetting
+      min_memory_strength: 0.1
+    requires: [shared_memory]  
 
   alignment:
+    inherits: base
     class: AlignmentAgent
     path: src.agents.alignment_agent
     init_args:
       value_model: {}
       ethics: {}
       memory: {}
+      corrections: {}
       sensitive_attrs: ["age", "gender"]
       monitor:
-        class: AlignmentMonitor
-        path: src.agents.alignment.alignment_monitor
         fairness_metrics:
           - demographic_parity
           - equal_opportunity
@@ -53,13 +82,56 @@ agent-network:
           fairness: 0.4
           ethics: 0.3
           safety: 0.3
-      corrections: {}
+    requires: [shared_memory]
 
+  browser:
+    inherits: base
+    class: BrowserAgent
+    path: src.agents.browser_agent
+    interaction_script:
+      - action: "scroll"
+        params: {pixels: 500}
+      - action: "click"
+        params: {selector: ".load-more"}
+      - action: "wait"
+        params: {seconds: 2}
+    init_args:
+      headless: true
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      captcha_strategy: "auto-retry"
+      max_retries: 3
+      browser_timeout: 30
+    requires: [reasoning, language, learning]
 
-  language:  
+  evaluation:
+    inherits: base
+    class: EvaluationAgent
+    path: src.agents.evaluation_agent
+    init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+    threshold: 0.9
+    requires: [shared_memory]
+
+  execution:
+    inherits: base
+    class: ExecutionAgent
+    path: src.agents.execution_agent
+    init_args:
+      browser_integration: "enhanced"  # [basic|enhanced|full]
+      browser_agent: "browser"
+      fallback_to_direct: true
+    requires: [browser, safety]
+
+  language:
+    inherits: base  
     class: LanguageAgent
     path: src.agents.language_agent
-    init_args: {}
+    init_args:
+      agent_factory: ${agent_factory}
+      grammar: ${grammar}
+      context: ${context}
+      slai_lm: ${slai_lm}
     llm: SLAILM()  
     history: []  
     summary: null  
@@ -68,20 +140,10 @@ agent-network:
     summarizer: null
     readonly_wordlist: true
     disable_synonym_training: true
-
-  knowledge:
-    class: KnowledgeAgent
-    path: src.agents.knowledge_agent
-    init_args: {}
-    cache_size: 1500
-    similarity_threshold: 0.25
-    ontology:
-      max_depth: 3
-      inherit_types: true
-    rules:
-      apply_during_retrieval: true
+    requires: [shared_memory]
 
   learning:
+    inherits: base
     class: LearningAgent
     path: src.agents.learning_agent
     init_args:
@@ -125,8 +187,24 @@ agent-network:
     optimized_mode': True
     network_size': 128
     max_task_pool': 50
+    requires: [shared_memory]
+
+  knowledge:
+    inherits: base
+    class: KnowledgeAgent
+    path: src.agents.knowledge_agent
+    init_args: {}
+    cache_size: 1500
+    similarity_threshold: 0.25
+    ontology:
+      max_depth: 3
+      inherit_types: true
+    rules:
+      apply_during_retrieval: true
+    requires: [shared_memory]
 
   safety:
+    inherits: base
     class: SafeAI_Agent
     path: src.agents.safety_agent
     init_args:
@@ -139,8 +217,10 @@ agent-network:
         security: 0.01
       audit_level: 3
       enable_rlhf: true
+    requires: [shared_memory]
 
   perception:
+    inherits: base
     class: PerceptionAgent
     path: src.agents.perception_agent
     init_args:
@@ -153,21 +233,16 @@ agent-network:
       batch_size: 8
       learning_rate: 0.001
       epochs: 20
+    requires: [shared_memory]
 
   planning:
+    inherits: base
     class: PlanningAgent
     path: src.agents.planning_agent
     init_args: {}
 
-  evaluation:
-    class: EvaluationAgent
-    path: src.agents.evaluation_agent
-    init_args:
-      shared_memory: ${shared_memory}
-      agent_factory: ${agent_factory}
-    threshold: 0.9
-
   reasoning:
+    inherits: base
     class: ReasoningAgent
     path: src.agents.reasoning_agent
     init_args:
@@ -193,6 +268,15 @@ agent-network:
       fallback:
         enable_llm_fallback: true         # Integrate with LanguageAgent
         llm_temperature: 0.3
+    requires: [shared_memory]
+
+  base:
+    abstract: true
+    class: BaseAgent
+    path: src.agents.base_agent
+    init_args:
+      logging_level: INFO
+      max_retries: 3
 
 training:
   num_samples: 500
