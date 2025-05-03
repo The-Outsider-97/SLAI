@@ -1,6 +1,6 @@
-
-import numpy as np
 import math
+import torch
+import torch.nn as nn
 from typing import Dict, Any
 
 from src.agents.perception.utils.common import TensorOps, Parameter
@@ -44,12 +44,12 @@ class VisionEncoder:
             self.positional_encoding = positional_encoding
             if positional_encoding == "learned":
                 self.position_embed = Parameter(
-                    np.random.randn(1, self.base_num_patches + 1, embed_dim) * 0.02
+                    torch.randn(1, self.base_num_patches + 1, embed_dim) * 0.02
                 )
             elif positional_encoding == "sinusoidal":
                 self.position_embed = self._init_sinusoidal_encoding()
             
-            self.cls_token = Parameter(np.random.randn(1, 1, embed_dim) * 0.02)
+            self.cls_token = Parameter(torch.randn(1, 1, embed_dim) * 0.02)
             self.transformer = Transformer(
                 num_layers=num_layers,
                 embed_dim=embed_dim,
@@ -70,17 +70,19 @@ class VisionEncoder:
             
         else:
             raise ValueError(f"Unknown encoder type: {self.encoder_type}")
-
-    def _init_sinusoidal_encoding(self):
-        """Sinusoidal positional encoding for vision patches"""
-        num_patches = self.base_num_patches
-        position = np.arange(num_patches + 1)[:, np.newaxis]
-        div_term = np.exp(np.arange(0, self.embed_dim, 2) * 
-                   -(math.log(10000.0) / self.embed_dim))
-        pe = np.zeros((num_patches + 1, self.embed_dim))
-        pe[1:, 0::2] = np.sin(position[1:] * div_term)  # Skip CLS token
-        pe[1:, 1::2] = np.cos(position[1:] * div_term)
-        return Parameter(pe[np.newaxis, :, :])
+    def _init_sinusoidal_encoding(self, max_len, embed_dim, device):
+        if self.positional_encoding == "sinusoidal":
+             pe = torch.zeros(1, max_len, embed_dim, device=device)
+             position = torch.arange(0, max_len, dtype=torch.float, device=device).unsqueeze(1)
+             div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim))
+             pe[0, :, 0::2] = torch.sin(position * div_term)
+             pe[0, :, 1::2] = torch.cos(position * div_term)
+             # Make it a non-learnable buffer or Parameter(..., requires_grad=False)
+             return Parameter(pe, requires_grad=False)
+        elif self.positional_encoding == "learned":
+             return Parameter(torch.randn(1, max_len, embed_dim) * 0.02) # Add batch dim
+        else:
+             raise ValueError("Positional encoding must be 'sinusoidal' or 'learned'")
 
     def extract_patches(self, x):
         """Handle dynamic input sizes with optional padding"""
@@ -94,7 +96,7 @@ class VisionEncoder:
             # Pad if not divisible
             pad_h = (self.patch_size - (h % self.patch_size)) % self.patch_size
             pad_w = (self.patch_size - (w % self.patch_size)) % self.patch_size
-            x = np.pad(x, ((0,0), (0,0), 
+            x = torch.pad(x, ((0,0), (0,0), 
                       (0,pad_h), (0,pad_w)))
             h_patches = (h + pad_h) // self.patch_size
             w_patches = (w + pad_w) // self.patch_size
@@ -149,12 +151,12 @@ class VisionEncoder:
             mode='bilinear'
         )
         new_pe = new_pe.reshape(1, new_num_patches, self.embed_dim)
-        self.position_embed.data = np.concatenate(
+        self.position_embed.data = torch.concatenate(
             [self.position_embed.data[:, :1, :], new_pe], 
             axis=1
         )
 
-    def _cnn_forward(self, image: np.ndarray) -> np.ndarray:
+    def _cnn_forward(self, image: torch.Tensor) -> torch.Tensor:
         """CNN-based feature extraction pipeline"""
         features = image
         channel_axis = -1
@@ -186,13 +188,13 @@ class VisionEncoder:
         H_out = (H - Fh + 2*padding) // stride + 1
         W_out = (W - Fw + 2*padding) // stride + 1
         
-        output = np.zeros((H_out, W_out, C_out))
+        output = torch.zeros((H_out, W_out, C_out))
         for i in range(H_out):
             for j in range(W_out):
                 h_start = i*stride - padding
                 w_start = j*stride - padding
                 receptive_field = x[h_start:h_start+Fh, w_start:w_start+Fw, :]
-                output[i,j] = np.sum(receptive_field * filters, axis=(0,1,2))
+                output[i,j] = torch.sum(receptive_field * filters, axis=(0,1,2))
         return output
 
     def _spatial_pyramid_pooling(self, features):
@@ -207,12 +209,12 @@ class VisionEncoder:
                 for j in range(level):
                     pool_region = features[i*bin_h:(i+1)*bin_h, 
                                         j*bin_w:(j+1)*bin_w]
-                    pooled.append(np.max(pool_region, axis=(0,1)))
-        return np.concatenate(pooled)
+                    pooled.append(torch.max(pool_region, axis=(0,1)))
+        return torch.concatenate(pooled)
 
     def _relu(self, x):
         """ReLU activation implementation"""
-        return np.maximum(0, x)
+        return torch.maximum(0, x)
 
     def _max_pool(self, x, pool_size, stride):
         """Max pooling implementation"""
@@ -220,14 +222,14 @@ class VisionEncoder:
         H_out = (H - pool_size) // stride + 1
         W_out = (W - pool_size) // stride + 1
         
-        output = np.zeros((H_out, W_out, C))
+        output = torch.zeros((H_out, W_out, C))
         for i in range(H_out):
             for j in range(W_out):
                 h_start = i*stride
                 w_start = j*stride
                 pool_region = x[h_start:h_start+pool_size, 
                               w_start:w_start+pool_size, :]
-                output[i,j] = np.max(pool_region, axis=(0,1))
+                output[i,j] = torch.max(pool_region, axis=(0,1))
         return output
 
     def forward(self, x, style_id=0):
@@ -236,14 +238,14 @@ class VisionEncoder:
             x = self.extract_patches(x)
             self._cache['input_shape'] = x.shape
             
-            x = np.matmul(x, self.projection.data)
+            x = torch.matmul(x, self.projection.data)
             
             if self.training and self.dropout_rate > 0:
-                mask = (np.random.rand(*x.shape) > self.dropout_rate).astype(np.float32)
+                mask = (torch.random.rand(*x.shape) > self.dropout_rate).astype(torch.float32)
                 x *= mask
             
-            cls_tokens = np.tile(self.cls_token.data, (x.shape[0], 1, 1))
-            x = np.concatenate((cls_tokens, x), axis=1)
+            cls_tokens = torch.tile(self.cls_token.data, (x.shape[0], 1, 1))
+            x = torch.concatenate((cls_tokens, x), axis=1)
             
             if self.positional_encoding == "sinusoidal":
                 x += self.position_embed.data[:, :x.shape[1]]
@@ -266,12 +268,12 @@ class VisionEncoder:
         d_patch_tokens = d_x[:, 1:, :]  # Skip CLS token
         
         # Gradient for projection
-        d_proj = np.matmul(
+        d_proj = torch.matmul(
             self._cache['input_shape'].transpose(0, 2, 1),
             d_patch_tokens.reshape(-1, self.embed_dim))
         self.projection.grad += d_proj.sum(axis=0)
         
-        return np.matmul(d_patch_tokens, self.projection.data.T)
+        return torch.matmul(d_patch_tokens, self.projection.data.T)
 
     def parameters(self):
         return [self.projection, self.cls_token, self.position_embed] + \
