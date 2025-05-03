@@ -7,7 +7,8 @@ Perception Agent:
 - Gradient infrastructure
 """
 
-import numpy as np
+import torch
+import torch.nn as nn
 import math
 from collections import OrderedDict
 
@@ -23,6 +24,7 @@ class PerceptionAgent(BaseAgent):
         from src.agents.perception.encoders.vision_encoder import VisionEncoder
         from src.agents.perception.encoders.text_encoder import TextEncoder
         from src.agents.perception.encoders.audio_encoder import AudioEncoder
+        from src.agents.perception.modules.transformer import Generator
 
         self.modalities = config.get('modalities', ['text'])
         self.shared_memory = shared_memory
@@ -32,6 +34,15 @@ class PerceptionAgent(BaseAgent):
         self.encoders = OrderedDict()
         embed_dim = config.get('embed_dim', 512)
         projection_dim = config.get('projection_dim', 256)
+        if 'text' in self.encoders:
+            self.generator = Generator(
+                text_encoder=self.encoders['text'],
+                tokenizer=self.encoders['text'].tokenizer,
+                vocab_size=self.encoders['text'].tokenizer.vocab_size,
+                hidden_dim=self.encoders['text'].embed_dim
+            )
+        else:
+            self.generator = None
 
         
         if 'vision' in self.modalities:
@@ -44,19 +55,19 @@ class PerceptionAgent(BaseAgent):
         audio_weights = {}
         for layer in range(6):
             audio_weights.update({
-                f'transformer_encoder_{layer}_attn_q_proj': np.random.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_k_proj': np.random.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_v_proj': np.random.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_out_proj': np.random.randn(512, 512),
-                f'transformer_encoder_{layer}_ffn_w1': np.random.randn(512, 2048),
-                f'transformer_encoder_{layer}_ffn_w2': np.random.randn(2048, 512),
-                f'transformer_encoder_{layer}_norm1': np.ones(512),
-                f'transformer_encoder_{layer}_norm2': np.ones(512),
+                f'transformer_encoder_{layer}_attn_q_proj': torch.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_k_proj': torch.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_v_proj': torch.randn(512, 512),
+                f'transformer_encoder_{layer}_attn_out_proj': torch.randn(512, 512),
+                f'transformer_encoder_{layer}_ffn_w1': torch.randn(512, 2048),
+                f'transformer_encoder_{layer}_ffn_w2': torch.randn(2048, 512),
+                f'transformer_encoder_{layer}_norm1': torch.ones(512),
+                f'transformer_encoder_{layer}_norm2': torch.ones(512),
             })
         audio_weights.update({
-            'conv_proj': np.random.randn(512, 1, 400),
-            'cls_token': np.random.randn(1, 1, 512),
-            'pos_embed': np.random.randn(1, 41, 512),
+            'conv_proj': torch.randn(512, 1, 400),
+            'cls_token': torch.randn(1, 1, 512),
+            'pos_embed': torch.randn(1, 41, 512),
         })
         converted = self.convert_audio_weights(audio_weights)
         prefixed = {f'transformer_{k}': v for k, v in converted.items()}
@@ -69,6 +80,7 @@ class PerceptionAgent(BaseAgent):
 
         # Initialize gradients
         self.params = self._collect_parameters()
+        
 
     def convert_audio_weights(self, weights):
         """Convert custom audio weights to HF-style for all layers"""
@@ -142,12 +154,33 @@ class PerceptionAgent(BaseAgent):
             embeddings[modality] = encoder.forward(inputs[modality])
         fused = self.fusion.forward(embeddings)
         self._cache = {'fused': fused}
-        return np.matmul(TensorOps.layer_norm(fused), self.projection.data)
+        if self.generator:
+            prompt = self.config.get('generation_prompt', "Default prompt")
+            if self.config.get('enable_generation', False):
+                generated_text, log_prob = self.generator.beam_search_generate(
+                    prompt=prompt,
+                    max_length=self.config.get('gen_max_length', 50),
+                    beam_width=self.config.get('beam_width', 5),
+                    temperature=self.config.get('temperature', 1.0),
+                    top_k=self.config.get('top_k', 0),
+                    top_p=self.config.get('top_p', 0.0),
+                    repetition_penalty=self.config.get('repetition_penalty', 1.2)
+                )
+            else:
+                generated_text = self.generator.generate(
+                    prompt=prompt,
+                    max_length=self.config.get('gen_max_length', 50),
+                    temperature=self.config.get('temperature', 1.0),
+                    top_k=self.config.get('top_k', 0),
+                    top_p=self.config.get('top_p', 0.0)
+                )
+            self._cache['generated_text'] = generated_text
+        return torch.matmul(TensorOps.layer_norm(fused), self.projection.data)
 
     def backward(self, dout):
         # Backward through projection layer
-        d_fused = np.matmul(dout, self.projection.data.T)
-        self.projection.grad += np.matmul(
+        d_fused = torch.matmul(dout, self.projection.data.T)
+        self.projection.grad += torch.matmul(
             TensorOps.layer_norm(self._cache['fused']).T,
             dout
         )
@@ -160,6 +193,9 @@ class PerceptionAgent(BaseAgent):
             encoder.backward(d_embeddings[modality])
         
         return None  # Final gradients stored in parameters
+
+    def get_generated_output(self):
+        return self._cache.get('generated_text', None)
 
     def align_with_slailm(self, slailm_instance):
         """Create bidirectional gradient pathways between perception and LLM"""
@@ -184,20 +220,20 @@ class PerceptionAgent(BaseAgent):
 
     def save_params(self, path):
         weights = {f"param_{i}": param.data for i, param in enumerate(self.params)}
-        np.savez(path, **weights)
+        torch.savez(path, **weights)
 
     def load_params(self, path):
-        weights = np.load(path)
+        weights = torch.load(path)
         for i, param in enumerate(self.params):
             key = f"param_{i}"
             if key in weights:
                 param.data[:] = weights[key]
 
     def track_param_metrics(self):
-        norms = [np.linalg.norm(p.data) for p in self.params]
-        grads = [np.linalg.norm(p.grad) for p in self.params]
-        self.performance_metrics['param_norms'].append(float(np.mean(norms)))
-        self.performance_metrics['grad_norms'].append(float(np.mean(grads)))
+        norms = [torch.linalg.norm(p.data) for p in self.params]
+        grads = [torch.linalg.norm(p.grad) for p in self.params]
+        self.performance_metrics['param_norms'].append(float(torch.mean(norms)))
+        self.performance_metrics['grad_norms'].append(float(torch.mean(grads)))
 
     class PretrainingTasks:
         """Multimodal pretraining objectives for perception agent"""
@@ -299,7 +335,7 @@ class PerceptionAgent(BaseAgent):
         # Helper methods placeholder
         def _apply_masking(self, data, mode):
             """Apply modality-specific masking pattern"""
-            mask = np.random.rand(*data.shape) < self.masking_ratio
+            mask = torch.rand(*data.shape) < self.masking_ratio
             masked = data.copy()
             masked[mask] = 0
             return masked, mask
@@ -307,14 +343,14 @@ class PerceptionAgent(BaseAgent):
         def _calc_reconstruction_loss(self, reconstructed, original, mask):
             """Calculate reconstruction loss with masking"""
             diff = (reconstructed - original) * mask
-            return np.mean(diff ** 2)
+            return torch.mean(diff ** 2)
 
         def _calc_crossmodal_similarity(self, emb1, emb2):
             """Compute contrastive similarity between modalities"""
             # Cosine similarity
-            norm1 = np.linalg.norm(emb1, axis=1, keepdims=True)
-            norm2 = np.linalg.norm(emb2, axis=1, keepdims=True)
-            similarity = np.sum(emb1 * emb2, axis=1) / (norm1 * norm2 + 1e-8)
+            norm1 = torch.linalg.norm(emb1, axis=1, keepdims=True)
+            norm2 = torch.linalg.norm(emb2, axis=1, keepdims=True)
+            similarity = torch.sum(emb1 * emb2, axis=1) / (norm1 * norm2 + 1e-8)
             loss = 1 - similarity.mean()
             return {"similarity": similarity.mean(), "contrastive_loss": loss}
 
@@ -322,15 +358,15 @@ class PerceptionAgent(BaseAgent):
             """Calculate temporal coherence loss"""
             deltas = []
             for i in range(1, len(sequence_embeddings)):
-                delta = np.mean((sequence_embeddings[i] - sequence_embeddings[i-1]) ** 2)
+                delta = torch.mean((sequence_embeddings[i] - sequence_embeddings[i-1]) ** 2)
                 deltas.append(delta)
-            return np.mean(deltas)
+            return torch.mean(deltas)
         
         def update_projection(self, rewards, lr):
             if isinstance(rewards, list):
-                rewards = np.array(rewards)
+                rewards = torch.Tensor(rewards)
             grad = rewards.mean()  # Simplified reward-based scaling
-            self.projection.grad += grad * np.sign(self.projection.data)
+            self.projection.grad += grad * torch.sign(self.projection.data)
             self.projection.data -= lr * self.projection.grad
 
 class CrossModalAttention:
@@ -343,17 +379,17 @@ class CrossModalAttention:
         return [self.query, self.key, self.value]
 
     def forward(self, modality1, modality2):
-        q = np.matmul(modality1, self.query.data)
-        k = np.matmul(modality2, self.key.data)
-        v = np.matmul(modality2, self.value.data)
+        q = torch.matmul(modality1, self.query.data)
+        k = torch.matmul(modality2, self.key.data)
+        v = torch.matmul(modality2, self.value.data)
         
-        attn_scores = np.matmul(q, k.T) / math.sqrt(self.query.data.shape[-1])
+        attn_scores = torch.matmul(q, k.T) / math.sqrt(self.query.data.shape[-1])
         attn_probs = self._softmax(attn_scores)
-        return np.matmul(attn_probs, v)
+        return torch.matmul(attn_probs, v)
 
     def _softmax(self, x):
-        max_x = np.max(x, axis=-1, keepdims=True)
-        exp_x = np.exp(x - max_x)
+        max_x = torch.max(x, axis=-1, keepdims=True)
+        exp_x = torch.exp(x - max_x)
         return exp_x / exp_x.sum(axis=-1, keepdims=True)
 
 class MultimodalMetrics:
@@ -363,7 +399,7 @@ class MultimodalMetrics:
         Compute L2 norm-based importance score per modality.
         Returns dict of normalized scores.
         """
-        norms = {k: np.linalg.norm(v, axis=-1).mean() for k, v in embeddings.items()}
+        norms = {k: torch.linalg.norm(v, axis=-1).mean() for k, v in embeddings.items()}
         total = sum(norms.values())
         return {k: v / total for k, v in norms.items()}
 
@@ -379,8 +415,8 @@ class MultimodalMetrics:
             for j in range(i+1, len(keys)):
                 a = features[keys[i]]
                 b = features[keys[j]]
-                sim = np.sum(a * b, axis=-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1) + 1e-8)
-                matrix[f'{keys[i]}-{keys[j]}'] = np.mean(sim)
+                sim = torch.sum(a * b, axis=-1) / (torch.linalg.norm(a, axis=-1) * torch.linalg.norm(b, axis=-1) + 1e-8)
+                matrix[f'{keys[i]}-{keys[j]}'] = torch.mean(sim)
         return matrix
 
     @staticmethod
@@ -391,7 +427,7 @@ class MultimodalMetrics:
         """
         stability = {}
         for k, v in embeddings.items():
-            norm_diff = np.abs(np.diff(np.linalg.norm(v, axis=-1))).mean()
+            norm_diff = torch.abs(torch.diff(torch.linalg.norm(v, axis=-1))).mean()
             stability[k] = norm_diff
         return stability
 
@@ -403,7 +439,7 @@ class MultimodalFusion:
         self.modal_weights = OrderedDict()
         self._shapes = {}
         self.cross_attn = CrossModalAttention(embed_dim)
-        self.gating_weights = Parameter(np.ones(len(self.modalities)))  # Dynamic
+        self.gating_weights = Parameter(torch.ones(len(self.modalities)))  # Dynamic
         self.dropout_rate = dropout_rate
         self.masking_prob = masking_prob
         self.training = True
@@ -421,12 +457,12 @@ class MultimodalFusion:
         # Dropout + Gating
         for idx, (modality, tensor) in enumerate(embeddings.items()):
             if modality not in self.modal_weights:
-                self.modal_weights[modality] = Parameter(np.array([1.0]))
+                self.modal_weights[modality] = Parameter(torch.Tensor([1.0]))
     
             # Drop modality
-            if self.training and np.random.rand() < self.masking_prob:
+            if self.training and torch.rand() < self.masking_prob:
                 self._mask_flags[modality] = True
-                tensor = np.zeros_like(tensor)
+                tensor = torch.zeros_like(tensor)
             else:
                 self._mask_flags[modality] = False
     
@@ -434,7 +470,7 @@ class MultimodalFusion:
     
             # Apply dropout
             if self.training and self.dropout_rate > 0:
-                dropout_mask = (np.random.rand(*pooled_mod.shape) > self.dropout_rate).astype(np.float32)
+                dropout_mask = (torch.rand(*pooled_mod.shape) > self.dropout_rate).astype(torch.float32)
                 pooled_mod *= dropout_mask
     
             weight = self.modal_weights[modality].data
@@ -450,12 +486,12 @@ class MultimodalFusion:
         grads = {}
         for modality, input_tensor in self._cached_inputs.items():
             B, T, D = input_tensor.shape
-            grad = np.repeat(d_fused[:, None, :], T, axis=1) * self.modal_weights[modality].data
+            grad = torch.repeat(d_fused[:, None, :], T, axis=1) * self.modal_weights[modality].data
             grads[modality] = grad
 
             if not self._mask_flags.get(modality, False):
                 pooled_input = input_tensor.mean(axis=1)  # shape (B, D)
-                d_alpha = np.sum(pooled_input * d_fused) / len(self._cached_inputs)
+                d_alpha = torch.sum(pooled_input * d_fused) / len(self._cached_inputs)
                 self.modal_weights[modality].grad += d_alpha
 
         return grads
@@ -466,7 +502,7 @@ class MultimodalFusion:
 class SLAILMAdapter:
     def __init__(self, perception_dim, llm_dim):
         self.projection = Parameter(TensorOps.he_init((perception_dim, llm_dim), perception_dim))
-        self.layer_norm = Parameter(np.ones(llm_dim))
+        self.layer_norm = Parameter(torch.ones(llm_dim))
         self._cache = {}  # initially empty
 
     def parameters(self):
@@ -477,6 +513,6 @@ class SLAILMAdapter:
         self._cache['projected'] = projected
 
     def forward(self, multimodal_emb):
-        projected = np.matmul(multimodal_emb, self.projection.data)
+        projected = torch.matmul(multimodal_emb, self.projection.data)
         self.set_cache(multimodal_emb, projected)  # ensure cache is populated
         return TensorOps.layer_norm(projected) * self.layer_norm.data
