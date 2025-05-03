@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, Tuple
 from src.agents.language.language_profiles import MORPHOLOGY_RULES
 from collections import defaultdict, deque, Counter
+
 # === Configuration ===
 STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
 
@@ -1209,8 +1210,12 @@ class GrammarProcessor:
             (re.compile(r'\b\w+\b'), 'NOUN')  # Catch-all
         ])
 
-    def parse_grammar(self, sentence, max_length=20):
+    def parse_grammar(self, text, unk_count, sentence, max_length=20):
         """CYK parser with length limiting and fail-fast"""
+        if unk_count / len(tokens) > 0.3:
+            logger.warning("High unknown token rate; reprocessing with GrammarProcessor.")
+            tokens = self.grammar_processor.retokenize(text)
+        
         words = re.findall(r'\b\w+\b', sentence.lower())
         n = len(words)
 
