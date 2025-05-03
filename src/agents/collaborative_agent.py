@@ -151,6 +151,10 @@ class CollaborativeAgent(BaseAgent):
         self.scheduler = DeadlineAwareScheduler()
         self.learning_subsystems = {}
 
+    def get_slai_lm(self):
+        from models.slai_lm import get_shared_slailm
+        return get_shared_slailm(self.shared_memory, agent_factory=self.agent_factory)
+
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
         self.performance_metrics.update({
