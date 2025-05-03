@@ -4,18 +4,15 @@ import distutils.spawn
 
 distutils.spawn.find_executable = lambda name: shutil.which(name)
 
-import os
 import sys
 import yaml
 import queue
 import logging
-import uvicorn
 import concurrent
 from threading import Thread
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication # no-audit
 
-from logs.logger import get_logger, get_log_queue
 from shared_memory_cleaner import SharedMemoryCleaner
 from src.collaborative.shared_memory import SharedMemory
 from src.utils.agent_factory import AgentFactory
@@ -23,8 +20,8 @@ from src.utils.system_optimizer import SystemOptimizer
 from src.agents.collaborative_agent import CollaborativeAgent
 from frontend.startup_screen import StartupScreen # no-audit
 from frontend.main_window import MainWindow # no-audit
+from logs.logger import get_logger, get_log_queue
 
-# Configure logging early to capture all events
 logger = get_logger("SLAI-Launcher")
 
 _config_cache = None
@@ -86,7 +83,7 @@ def launch_ui(init_agents, components: dict):
     app = QApplication([])
     app.setStyle('Fusion')
 
-    # 👇 Launches MainWindow after startup screen completes
+    # Launches MainWindow after startup screen completes
     def start_main_ui():
         main_window = MainWindow(
             collaborative_agent=components["collaborative_agent"],
@@ -129,6 +126,20 @@ def main():
         agent_network=config.get("agent-network"),
         config_path="config.yaml",
         risk_threshold=config.get('risk_threshold', 0.35)
+    )
+
+    slai_lm = collaborative_agent.get_slai_lm()
+
+    # Get actual Numpy components
+    model_to_save = slai_lm.text_encoder
+    tokenizer = slai_lm.tokenizer
+
+    slai_lm.checkpoint_manager.save(
+        model_to_save,
+        tokenizer,
+        metadata={"init": "fresh"},
+        version="initial",
+        format="npz"
     )
     
     # Create communication queues
