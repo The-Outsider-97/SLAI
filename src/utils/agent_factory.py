@@ -3,11 +3,10 @@ __version__ = "1.7.0"
 
 import threading
 import importlib
-import numpy as np
+import torch
+import inspect 
 
 from contextlib import contextmanager
-from pathlib import Path
-from inspect import Parameter
 # from restricted_env import RestrictedPython
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List, Type
@@ -127,11 +126,22 @@ class AgentFactory:
         self.instance_cache[agent_name] = agent_instance
 
     def create(self, agent_name: str, config: Dict = None):
-        cls = self._import_class(f"{self.registry[agent_name]['path']}.{self.registry[agent_name]['class']}")
-        init_args = self.registry[agent_name].get('config', {})
+        agent_info = self.registry[agent_name]
+        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
+        
+        # Filter parameters to only those accepted by the class constructor
+        init_args = agent_info.get('config', {})
         if config:
             init_args.update(config)
-        return cls(**init_args)
+            
+        # Get valid constructor parameters
+        init_params = inspect.signature(cls.__init__).parameters
+        filtered_args = {
+            k: v for k, v in init_args.items() 
+            if k in init_params
+        }
+        
+        return cls(**filtered_args)
 
     def _check_text_deps(self) -> bool:
         try:
@@ -278,9 +288,9 @@ class MetricsAdapter:
             # Agent-type specific constraints
             if 'risk_threshold' in key and 'safety' in agent_types:
                 bound = 0.5 if 'medical' in agent_types else 0.4
-                bounded[key] = np.clip(value, -bound, bound)
+                bounded[key] = torch.clip(value, -bound, bound)
             else:
-                bounded[key] = np.clip(value, -self.max_rate, self.max_rate)
+                bounded[key] = torch.clip(value, -self.max_rate, self.max_rate)
         return bounded
 
     def update_factory_config(self, 
