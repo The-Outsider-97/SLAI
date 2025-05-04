@@ -1,38 +1,46 @@
 """
-SLAILM is the Base Language Model of SLAI
+SLAILM is the Base Language Model of SLAI: Scalable Learning Autonomous Intelligence
 """
 
-import os
 import sys
 import random
 import logging
-import re
 import json
 import time
 import torch
 import hashlib
-import numpy as np
+import regex as re
 import pandas as pd
 import torch.nn as nn
 import torch.quantization
 import torch.nn.functional as F
 import torch.nn.utils.prune as prune
 
-from nltk.translate.bleu_score import sentence_bleu
-from rouge import Rouge
-from torch.utils.data import Dataset, DataLoader
-from collections import defaultdict, deque
 from pathlib import Path
+from collections import defaultdict, deque
+from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Dict, Any, Union, Set, Tuple
 
-from src.agents.language_agent import DialogueContext
 from src.agents.language.grammar_processor import GrammarProcessor
-from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.language.resource_loader import ResourceLoader
+from src.agents.knowledge_agent import KnowledgeAgent
+from src.agents.language_agent import DialogueContext
+from src.agents.alignment.alignment_memory import AlignmentMemory
+from models.checkpoints.checkpoint_manager import CheckpointManager
+from models.slailm.slailm_value_model import SLAILMValueModel
+from models.slailm.human_evaluation import HumanEval
+from models.slailm.predictor import Predictor
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("SLAILM")
 logger.setLevel(logging.INFO)
+
+STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
+ENRICHED_WORDLIST_PATH = "logs/enriched_wordlist_final.json"
+SIMPLE_WORDLIST_PATH = "src/agents/language/wordlist_en.json"
+EMBEDDING_PATH = "data/embeddings/glove.6B.200d.json"
+BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
+BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
 
 shared_slailm = None
 
@@ -42,38 +50,7 @@ def get_shared_slailm(shared_memory, agent_factory=None):
         shared_slailm = SLAILM(shared_memory, agent_factory=agent_factory)
     return shared_slailm
 
-def calculate_perplexity(logits, target_ids):
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1))
-    return torch.exp(loss)
-
-def calculate_bleu(reference, hypothesis):
-    return sentence_bleu([reference.split()], hypothesis.split())
-
-def calculate_rouge(reference, hypothesis):
-    rouge = Rouge()
-    scores = rouge.get_scores(hypothesis, reference)
-    return scores[0]
-
-def calculate_accuracy(predictions, ground_truths):
-    correct = sum(p == g for p, g in zip(predictions, ground_truths))
-    return correct / len(predictions) if predictions else 0.0
-
-# ===== Human Evaluation =====
-def get_human_rating(prompt, response, category):
-    # TODO: Integrate with a real human feedback interface or API
-    print(f"[HUMAN INPUT NEEDED] Rate {category} (1–5) for: {response}")
-    return float(input(f"Enter {category} rating (1–5): "))
-
-def get_safety_classifier(response):
-    # TODO: Replace with a real classifier
-    return 5.0 if "badword" not in response else 1.0
-
-def get_helpfulness_score(prompt, response):
-    # TODO: Implement automated or human scoring logic
-    return 4.0  # Placeholder static score
-# ============================
-
-class AttentionBlock(nn.Module):
+class AttentionBlock(torch.nn.Module):
     def __init__(self, dim=512, heads=8):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, heads)
@@ -81,6 +58,7 @@ class AttentionBlock(nn.Module):
 class SLADataset(Dataset):
     """Custom dataset for batch processing"""
     def __init__(self, texts, tokenizer, max_length=512):
+        super().__init__()
         self.texts = texts
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -96,26 +74,25 @@ class SLADataset(Dataset):
             'attention_mask': torch.tensor([1]*len(tokens[:self.max_length]))
         }
 
-class QuantizableTextEncoder(torch.nn.Module):
-    """Modified TextEncoder with quantization support"""
+class TextEncoder(torch.nn.Module):
     def __init__(self, vocab_size, embed_dim, num_layers, num_heads, dropout_rate=0.1):
         super().__init__()
-        self.embedding = torch.nn.Embedding(vocab_size, embed_dim)
-        self.transformer = torch.nn.Transformer(
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.transformer = nn.Transformer(
             d_model=embed_dim,
             nhead=num_heads,
             num_encoder_layers=num_layers,
             num_decoder_layers=num_layers,
             dropout=dropout_rate
         )
-        self.quant = torch.quantization.QuantStub()
-        self.dequant = torch.quantization.DeQuantStub()
+
+    @property
+    def word_to_id(self):
+        return self.vocab
 
     def forward(self, x):
-        x = self.quant(x)
         x = self.embedding(x)
         x = self.transformer(x, x)
-        x = self.dequant(x)
         return x
 
 class SLAILM:
@@ -125,8 +102,8 @@ class SLAILM:
     """
     def __init__(self, shared_memory,
                  agent_factory=None,
-                 structured_wordlist_path="src/agents/language/structured_wordlist_en.json",
-                 simple_wordlist_path="src/agents/language/wordlist_en.json",
+                 structured_wordlist_path=STRUCTURED_WORDLIST_PATH,
+                 simple_wordlist_path=SIMPLE_WORDLIST_PATH,
                  grammar_rules_path: Optional[Union[str, Path]] = None,
                  knowledge_agent_path: Optional[Union[str, Path]] = None,
 
@@ -146,67 +123,62 @@ class SLAILM:
                  # --- Custom Configuration Dictionary ---
                  custom_config: Optional[Dict[str, Any]] = None
                  ):
-        from src.agents.perception.encoders.text_encoder import TextEncoder
-        start = time.time()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.text_encoder = self._init_accelerated_encoder()
-        self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
-        self._knowledge_agent = None
-        self.conversation_history = []
-        self.sentiment_lexicon = self.load_sentiment_lexicon()
-        self.logger = get_logger(f"SLAILM_{self.node_id}")
-        self.logger.info("Initializing...")
         """
         Initializes the SLAILM with broader configuration options.
 
-        Args:
-            structured_wordlist_path: Path to the JSON structured wordlist file.
-            simple_wordlist_path: Path to the simple wordlist file (one word per line).
-            grammar_rules_path: Optional path to load additional grammar rules for GrammarProcessor.
-            knowledge_agent_path: Optional path to load data for the KnowledgeAgent.
-            grammar_processor_instance: Optional pre-initialized GrammarProcessor instance.
-            dialogue_context_instance: Optional pre-initialized DialogueContext instance.
-            knowledge_agent_instance: Optional pre-initialized KnowledgeAgent instance.
-            node_id: Optional unique identifier for this instance.
-            log_level: Logging level (e.g., logging.DEBUG, logging.INFO).
-            log_file: Optional file path to write logs to.
-            context_memory_limit: Max size for the internal context_memory deque.
-            dialogue_history_limit: Max history size for the main DialogueContext.
-            enable_summarization: Whether DialogueContext should summarize long histories.
-            custom_config: Dictionary for any other custom configurations.
         """
+        from src.agents.perception.encoders.text_encoder import TextEncoder
+        from src.agents.perception.modules.tokenizer import Tokenizer
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
+        self.logger = get_logger(f"SLAILM_{self.node_id}")
+        
         self._setup_logging(log_level, log_file)
-        logger.info(f"Initializing SLAILM instance {self.node_id}...")
-        self.sentiment_lexicon = {
-            "positive": {}, "negative": {},
-            "intensifiers": {}, "negators": []
-        }
-        try:
-            with open("src/agents/language/sentiment_lexicon.json", "r") as f:
-                self.sentiment_lexicon = json.load(f)
-        except Exception as e:
-            logger.warning(f"Could not load sentiment lexicon: {e}")
-
-        self.custom_config = custom_config or {}
-        self.context_memory = deque(maxlen=context_memory_limit)
-
-        # --- Load Resources (Wordlist) ---
-        self.structured_wordlist = ResourceLoader.get_structured_wordlist(structured_wordlist_path)
-        self._load_enriched_wordlist()
-        self.wordlist = ResourceLoader.get_simple_wordlist(simple_wordlist_path)
+        
+        self.structured_wordlist = ResourceLoader.get_structured_wordlist(STRUCTURED_WORDLIST_PATH)
+        self.wordlist = ResourceLoader.get_simple_wordlist(SIMPLE_WORDLIST_PATH)
         self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
+        self._load_enriched_wordlist()
         self.responses = ResourceLoader.get_nlg_templates()
+        
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
+        self.context_memory = deque(maxlen=context_memory_limit)
+        self.conversation_history = []
+        
+        self.alignment_memory = AlignmentMemory()
+        self.checkpoint_manager = CheckpointManager(base_dir="models/checkpoints")
+        self.value_model = SLAILMValueModel(self, memory=self.alignment_memory)
 
-        # --- Initialize Components (using instances or loading) ---
-        # Knowledge Agent (Initialize first if other components depend on it)
+        self.tokenizer = Tokenizer(
+            bpe_vocab_path=BPE_VOCAB_PATH,
+            bpe_merges_path=BPE_MODEL_PATH,
+            max_length=512
+        )
+
+        # INIT TEXT ENCODER WITH REQUIRED ARGUMENTS (MATCHING TextEncoder)
+        self.text_encoder = TextEncoder(
+            vocab_size=self.tokenizer.vocab_size,  # or len(self.tokenizer.word_to_id)
+            embed_dim=200,
+            num_layers=6,
+            num_heads=8,
+            ff_dim=2048,
+            num_styles=14,
+            dropout_rate=0.1,
+            positional_encoding='learned',
+            max_length=512,
+            device=self.device,
+            tokenizer=self.tokenizer
+        )
+        
+        # LOAD EMBEDDINGS
+        # self.text_encoder.load_glove_embeddings(EMBEDDING_PATH, list(self.structured_wordlist.keys()))
+        
+        self._knowledge_agent = None
         if knowledge_agent_instance:
             self.knowledge = knowledge_agent_instance
             logger.info("Using provided KnowledgeAgent instance.")
         else:
-            # Initialize KB, potentially loading from path
             try:
                 self.knowledge = KnowledgeAgent(
                     shared_memory=self.shared_memory,
@@ -218,21 +190,10 @@ class SLAILM:
                 self.knowledge = None # Fallback
 
         # Grammar Processor
-        self.text_encoder = TextEncoder(
-            vocab_size=len(self.structured_wordlist),           # Set based on your tokenizer or wordlist size
-            embed_dim=100,            # because glove.6B.200d
-            num_layers=6,
-            num_heads=8,
-            dropout_rate=0.1,
-            positional_encoding='learned',  # or 'sinusoidal'
-            max_seq_len=512
-        )
-        self.text_encoder.load_glove_embeddings("data/embeddings/glove.6B.200d.json", list(self.structured_wordlist.keys()))
         if grammar_processor_instance:
             self.grammar_processor = grammar_processor_instance
             logger.info("Using provided GrammarProcessor instance.")
         else:
-            # Initialize GrammarProcessor, passing loaded resources and config
             # NOTE: GrammarProcessor.__init__ needs to be adapted to accept these args
             try:
                 self.grammar_processor = GrammarProcessor(
@@ -240,7 +201,6 @@ class SLAILM:
                     wordlist=self.wordlist,
                     rules_path=grammar_rules_path, # Pass rules path if needed
                     knowledge_agent=self.knowledge # Pass KB if needed
-                    # Add other relevant configs from self.custom_config if necessary
                 )
                 logger.info("Initialized GrammarProcessor.")
             except Exception as e:
@@ -249,7 +209,6 @@ class SLAILM:
                 # For now, setting to None and checking later might be safer
                 self.grammar_processor = None
                 # raise RuntimeError("Critical component GrammarProcessor failed to initialize.") from e
-
         # Dialogue Context
         if dialogue_context_instance:
             self.dialogue_context = dialogue_context_instance
@@ -262,8 +221,8 @@ class SLAILM:
                     llm=None, # Pass self if context needs to call back to LM (use carefully)
                     history=[], # Start with empty history
                     memory_limit=dialogue_history_limit,
-                    enable_summarization=enable_summarization
-                    # Pass summarizer function if needed/available
+                    enable_summarization=enable_summarization,
+                    encoder=self.text_encoder
                 )
                 self.dialogue_context.llm = self
                 logger.info("Initialized DialogueContext.")
@@ -271,8 +230,24 @@ class SLAILM:
                 logger.error(f"Failed to initialize DialogueContext: {e}")
                 self.dialogue_context = None # Fallback
 
+        start = time.time()
+        self.logger.info("Initializing...")
+        self.node_id = node_id or hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]
+        logger.info(f"Initializing SLAILM instance {self.node_id}...")
+        self.sentiment_lexicon = {
+            "positive": {}, "negative": {},
+            "intensifiers": {}, "negators": []
+        }
+        try:
+            with open("src/agents/language/sentiment_lexicon.json", "r") as f:
+                self.sentiment_lexicon = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load sentiment lexicon: {e}")
+
         self.custom_config = custom_config or {}
-        self.context_memory = deque(maxlen=context_memory_limit)
+
+        # --- Initialize Components (using instances or loading) ---
+        self.custom_config = custom_config or {}
 
         # --- Final Checks and Setup ---
         if self.grammar_processor is None:
@@ -293,11 +268,11 @@ class SLAILM:
 
         logger.info(f"[SLAILM INIT] Finished in {time.time() - start:.2f}s")
 
-    def _init_accelerated_encoder(self):
+    def _init_accelerated_encoder(self, vocab_size):
         """Initialize encoder with GPU/TPU support"""
-        encoder = QuantizableTextEncoder(
-            vocab_size=self.subword_tokenizer.get_piece_size(),
-            embed_dim=100,
+        encoder = TextEncoder(
+            vocab_size=vocab_size, # or len(self.structured_wordlist)
+            embed_dim=200,
             num_layers=6,
             num_heads=8
         ).to(self.device)
@@ -309,7 +284,7 @@ class SLAILM:
 
     def _batch_process(self, texts: list[str], batch_size=32) -> list[dict]:
         """Process texts in batches"""
-        dataset = SLADataset(texts, self.subword_tokenizer)
+        dataset = SLADataset(texts, self.text_encoder)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
         
         results = []
@@ -485,16 +460,7 @@ class SLAILM:
                 validated.append(token)
 
         return self.tokenizer.tokenize(validated)
-    
-    def parse_intent(self, prompt: str) -> dict:
-        try:
-            # ... your logic here ...
-            return {"type": detected_type, "confidence": score}
-        except Exception as e:
-            logger.warning(f"[SLAILM] parse_intent failed: {e}")
 
-            return {"type": "unknown", "confidence": 0.0}
-    
     def process_input(self, prompt, text: str) -> dict:
         """
         Processes input text with advanced linguistic steps: tokenization, POS tagging,
@@ -511,10 +477,20 @@ class SLAILM:
             "tokens": tokens,
             "timestamp": time.time()
         }
-        token_ids = [self.text_encoder.vocab.get(token, self.text_encoder.unk_token_id) for token in tokens]
-        token_array = np.array(token_ids).reshape(1, -1)  # (batch, seq_len)
-        transformer_output = self.text_encoder.forward(token_array)
-        pooled_output = np.mean(transformer_output, axis=1)  # (batch, embed_dim)
+        tokens = self._tokenize(text)
+        token_ids = [self.text_encoder.word_to_id.get(token, 0) for token in tokens]
+        token_tensor = torch.tensor(token_ids, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
+        
+        with torch.no_grad():
+            transformer_output = self.text_encoder(token_tensor)
+            pooled_output = torch.mean(transformer_output, dim=1)  # (batch, embed_dim)
+
+        analysis = {
+            "raw_text": text,
+            "tokens": tokens,
+            "pooled_output": pooled_output.cpu().tolist(),
+            "timestamp": time.time()
+        }
 
         # POS tagging
         try:
@@ -604,6 +580,16 @@ class SLAILM:
         self.context_memory.append(analysis)
         return analysis
 
+    def parse_intent(self, prompt: str) -> dict:
+        detected_type, score = self.grammar_processor.detect_intent(prompt)
+        try:
+            # ... your logic here ...
+            return {"type": detected_type, "confidence": score}
+        except Exception as e:
+            logger.warning(f"[SLAILM] parse_intent failed: {e}")
+
+            return {"type": "unknown", "confidence": 0.0}
+    
     def load_sentiment_lexicon(self, path: str = "src/agents/language/sentiment_lexicon.json") -> dict:
         """
         Loads a structured sentiment lexicon for valence scoring.
@@ -691,7 +677,7 @@ class SLAILM:
             "confidence": 1.0,
             "meta": {
                 "source": "SLAILM",
-                "id": self.instance_id
+                "id": self.node_id
             }
         }
     
@@ -743,22 +729,58 @@ class SLAILM:
         return text
 
     def _conceptual_response(self, concept: str) -> str:
-        """Generates a response based on knowledge about a concept (Placeholder)."""
-        # This method originally used N-grams and academic closures.
+        """Generates a richer academic response using N-grams, embeddings, and academic closures."""
+    
         if not self.knowledge:
             return f"I understand you're asking about {concept}, but my knowledge agent is currently unavailable."
-
-        # Original N-gram logic (requires self.knowledge structure)
-        # Replace with actual access to your KnowledgeAgent data
+    
+        # Initialize embedding manager
+        embedding_manager = EMBEDDING_PATH
+        synonyms, related_terms = embedding_manager.get_similar(concept, topn=10)
+    
+        # Build N-gram phrases
         ngram_models = {
-            "concept_definition": [f"{concept} is generally understood as", f"Regarding {concept}, the primary definition involves"],
-            "research_area": [f"In the context of {concept}, current research focuses on", f"Studies involving {concept} often explore"],
-            "methodology": ["Key methodologies related to", "Common approaches include"],
-            "uncertainty": ["There is ongoing debate about", "Uncertainty measurement through"]
+            "concept_definition": [
+                f"{concept} is broadly defined as",
+                f"In academic terms, {concept} refers to",
+                f"The term {concept} generally describes"
+            ],
+            "research_area": [
+                f"Research surrounding {concept} has emphasized",
+                f"Studies on {concept} have consistently shown",
+                f"Recent investigations into {concept} explore"
+            ],
+            "methodology": [
+                f"Methodologically, {concept} is approached using",
+                f"Analytical techniques for {concept} often include",
+                f"Common strategies when studying {concept} involve"
+            ],
+            "uncertainty": [
+                f"Scholars debate aspects of {concept} due to",
+                f"Uncertainty in {concept} arises from",
+                f"There is ongoing discussion about"
+            ]
         }
-        # Simulated knowledge lookup
+    
+        # Randomly select category and intro phrase
         related_topic = random.choice(list(ngram_models.keys()))
-        return random.choice(ngram_models.get(related_topic, [f"Considering {concept},"])) + " " + self._academic_closure()
+        intro_phrase = random.choice(ngram_models[related_topic])
+    
+        # Construct middle body with N-gram expansions (bigrams/trigrams from synonyms/related)
+        ngram_phrases = []
+        if synonyms:
+            bigrams = [f"{syn} and {concept}" for syn in synonyms]
+            ngram_phrases.append("These include " + ", ".join(bigrams) + ".")
+        if related_terms:
+            trigrams = [f"{rel} in relation to {concept}" for rel in related_terms]
+            ngram_phrases.append("Additionally, related aspects cover " + ", ".join(trigrams) + ".")
+    
+        # Academic closure
+        closure = self._academic_closure()
+    
+        # Final assembled response
+        response_parts = [intro_phrase] + ngram_phrases + [closure]
+        return " ".join(response_parts)
 
 
     def _academic_closure(self) -> str:
@@ -801,8 +823,8 @@ class SLAILM:
 
         # Generate response using internal logic (forward_pass)
         response_text = self.forward_pass(processed)
-        bleu = calculate_bleu(reference, response_text)
-        rouge = calculate_rouge(reference, response_text)
+        bleu = Predictor.calculate_bleu(reference, response_text)
+        rouge = Predictor.calculate_rouge(reference, response_text)
         logger.info(f"BLEU: {bleu}, ROUGE: {rouge}")
 
         self.context_memory.append({
@@ -859,22 +881,39 @@ class SLAILM:
         return final_response
     
     def record_human_evaluation(self, prompt, response):
+        
         # Integrate with UI/API for real ratings
-        coherence = get_human_rating(prompt, response, "coherence")
-        safety = get_safety_classifier(response)
-        helpfulness = get_helpfulness_score(prompt, response)
+        coherence = HumanEval.get_human_rating(prompt, response, "coherence")
+        safety = HumanEval.get_safety_classifier(response)
+        helpfulness = HumanEval.get_helpfulness_score(prompt, response)
 
-    def polish_response(self, text: str) -> str:
+    def polish_response(self, raw_response: str) -> str:
         """
-        Optional final polish using rule-based grammar optimization.
+        Refines a generated response using grammar optimization rules, morphological corrections,
+        and stylistic adjustments from the GrammarProcessor.
         """
-        # Example: Avoid "It is..." passive openings
-        text = re.sub(r"\bIt is (important|likely|clear|possible)\b", r"This is \1", text)
-
-        # Optional contraction fixups or simplification
-        text = text.replace("do not", "don't").replace("cannot", "can't")
-
-        return text
+        if not self.grammar_processor:
+            self.logger.warning("GrammarProcessor unavailable; returning raw response.")
+            return raw_response
+    
+        # Step 1: Normalize whitespace and fix basic punctuation
+        polished = re.sub(r'\s+', ' ', raw_response).strip()
+        polished = re.sub(r'\s([?.!,:;])', r'\1', polished)
+    
+        # Step 2: Apply morphology corrections (plurals, tense, agreement)
+        polished = self.grammar_processor.apply_morphology_rules(polished)
+    
+        # Step 3: Optimize grammar using CFG rewrites and pattern rules
+        polished = self.grammar_processor.optimize_grammar(polished)
+    
+        # Step 4: Check coherence and apply stylistic enhancements
+        polished = self.grammar_processor.enhance_style(polished)
+    
+        # Step 5: Final pass — ensure academic clarity if applicable
+        if self.custom_config.get("use_academic_style", False):
+            polished = self.grammar_processor.apply_academic_closures(polished)
+    
+        return polished
 
     def _generate_citations(self, concepts: list) -> str:
         """citation implementation"""
@@ -904,7 +943,7 @@ class SLAILM:
             )
         return self._knowledge_agent
 
-    def _load_enriched_wordlist(self, enriched_path: Union[str, Path] = "logs/enriched_wordlist.txt"):
+    def _load_enriched_wordlist(self, enriched_path: Union[str, Path] = ENRICHED_WORDLIST_PATH):
         """
         Loads enriched synonym and related-term data from JSONL and merges it into self.structured_wordlist["words"].
         Only merges 'synonyms' and 'related_terms' safely.
@@ -946,9 +985,10 @@ class SLAILM:
     def train(self, corpus, epochs=10):
         optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+        self.checkpoint_manager.save(self, self.tokenizer, metadata={"epoch": epoch}, version=f"epoch_{epoch}", format="torch")
 
         for epoch in range(epochs):
-            for batch in DataLoader(corpus, batch_size=32):
+            for step, batch in enumerate(DataLoader(corpus, batch_size=32)):
                 logits = self(batch)
                 loss = F.cross_entropy(logits)
                 loss.backward()
@@ -964,64 +1004,29 @@ class SLAILM:
 
             scheduler.step()
 
-class SLAILMValueModel:
-    def __init__(self, slai_lm, memory=None, ethics_checker=None):
-        self.slai_lm = slai_lm
-        self.memory = memory  # Injected AlignmentMemory
-        self.ethics_checker = ethics_checker  # Injected EthicalConstraints
-
-        self.preference_weights = {
-            "helpfulness": 0.4,
-            "harmlessness": 0.3,
-            "honesty": 0.3
+    def evaluate_alignment(self, data: pd.DataFrame) -> float:
+        if hasattr(self, 'value_model'):
+            return self.value_model.score_trajectory(data)
+        else:
+            self.logger.warning("SLAILMValueModel not initialized.")
+            return 0.0
+    
+    def get_alignment_report(self) -> Dict:
+        if hasattr(self, 'value_model'):
+            return self.value_model.analyze_alignment_effects()
+        else:
+            return {"error": "No value model available"}
+        
+    def state_dict(self):
+        """Expose text encoder's state dict for checkpointing"""
+        return {
+            'embedding': self.embedding.data,
+            'position_embed': self.position_embed.data,
+            # add any other parameters you want to save
         }
 
-    def score_trajectory(self, data: pd.DataFrame) -> float:
-        """Trajectory evaluation using SLAILM + RLHF feedback-aware scoring"""
-        scores = []
-
-        for _, row in data.iterrows():
-            input_text = row.get("input", "")
-            response = row.get("output", "")
-
-            # Use SLAILM for grounded understanding
-            result = self.slai_lm.process_input(prompt=input_text, text=response)
-
-            helpfulness = result.get("helpfulness", 0.5)
-            harmlessness = 1.0 - result.get("toxicity", 0.5)
-            honesty = result.get("factuality", 0.5)
-
-            # Aggregate weighted preference
-            composite = (
-                helpfulness * self.preference_weights["helpfulness"] +
-                harmlessness * self.preference_weights["harmlessness"] +
-                honesty * self.preference_weights["honesty"]
-            )
-            scores.append(composite)
-
-            # Log to memory
-            if self.memory:
-                self.memory.log_evaluation(
-                    metric="value_alignment",
-                    value=composite,
-                    threshold=0.3,
-                    context={"input": input_text, "output": response}
-                )
-
-            # Ethical check (optional)
-            if self.ethics_checker:
-                ethics_result = self.ethics_checker.enforce({
-                    "input": input_text,
-                    "output": response,
-                    "score": composite
-                })
-                if not ethics_result.get("approved"):
-                    composite *= 0.5  # Penalize score
-
-        return float(np.mean(scores))
-
-    def update_preferences(self, feedback: Dict[str, float]):
-        """Online update of RLHF weights"""
-        for key, value in feedback.items():
-            if key in self.preference_weights:
-                self.preference_weights[key] = 0.9 * self.preference_weights[key] + 0.1 * value
+    def load_state_dict(self, state_dict):
+        """Load state dict into text encoder"""
+        self.text_encoder.load_state_dict(state_dict)
+        self.embedding.data = state_dict['embedding']
+        self.position_embed.data = state_dict['position_embed']
