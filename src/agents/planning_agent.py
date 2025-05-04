@@ -26,7 +26,7 @@ import random
 import numpy as np
 
 from enum import Enum
-from typing import List, Dict, Optional, Callable, Tuple, Any, Set
+from typing import List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
 from src.agents.base_agent import BaseAgent
@@ -35,6 +35,7 @@ from src.agents.planning.planning_metrics import PlanningMetrics
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
 from src.tuning.tuner import HyperparamTuner
 from logs.logger import get_logger
 
@@ -84,6 +85,22 @@ class PlanningAgent(BaseAgent):
         self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
         logger.info(f"PlanningAgent initialized. World state: {self.world_state}")
+
+        # Task head registry
+        self.task_heads = {
+            'classification': ClassificationHead,
+            'regression': RegressionHead,
+            'seq2seq': Seq2SeqHead
+        }
+
+    def configure_task_head(self, task_type: str, **kwargs):
+        """Dynamically attach task heads based on current plan"""
+        if task_type not in self.task_heads:
+            raise ValueError(f"Unsupported task type: {task_type}")
+            
+        # Get transformer instance from text encoder
+        transformer = self.shared_memory['text_encoder'].transformer
+        return self.task_heads[task_type](transformer, **kwargs)
 
     def log_plan_outcome(self, task, success):
         """Store plan features and outcome for training"""
