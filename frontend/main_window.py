@@ -166,7 +166,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.error_count = 0
         self.risk_trigger_count = 0
         self.safe_ai_count = 0
-        shared_resources = {"log_path": "logs/", "memory_limit": 1000}
+        shared_resources = {"log_path": "logs/", "memory_limit": 1000, "shared_memory": self.shared_memory, "agent_factory": self.factory}
         optimizer = SystemOptimizer()
         self.agent = self.collaborative_agent
         self.setWindowTitle("SLAI Launcher")
@@ -787,7 +787,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.collaborative_agent = CollaborativeAgent(
                 shared_memory=self.shared_memory,
                 agent_factory=self.agent_factory,
-                agent_network={},
+                agent_network=self.agent_factory.registry,
                 config_path="config.yaml"
             )
 
