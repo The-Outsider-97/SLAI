@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 import soundfile as sf
 import os
 from scipy.signal import resample
@@ -23,7 +23,7 @@ class AudioUtils:
             waveform = resample(waveform, num_samples)
 
         # Ensure waveform is float32
-        waveform = waveform.astype(np.float32)
+        waveform = waveform.astype(torch.float32)
 
         return waveform
 
@@ -35,7 +35,7 @@ class AudioUtils:
         """
         if len(waveform) < target_length:
             pad_width = target_length - len(waveform)
-            waveform = np.pad(waveform, (0, pad_width), mode='constant')
+            waveform = torch.pad(waveform, (0, pad_width), mode='constant')
         else:
             waveform = waveform[:target_length]
 
