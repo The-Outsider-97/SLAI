@@ -1,4 +1,4 @@
-import os, sys
+
 import re
 import nltk
 import json
@@ -8,7 +8,8 @@ import pickle
 import logging
 import datetime
 import ply.lex as lex
-import numpy as np
+import torch
+import torch.nn as nn
 import multiprocessing as mp
 
 from textstat import textstat
@@ -17,11 +18,19 @@ from dataclasses import dataclass, field, asdict
 from collections import deque, defaultdict, OrderedDict
 from typing import Dict, Tuple, Optional, List, Any, OrderedDict, Union, Set, Iterable, Callable
 from functools import partial
+
 from src.agents.language.grammar_processor import GrammarProcessor
+from src.agents.language.language_profiles import NLPProfiles
 from src.agents.perception.encoders.text_encoder import TextEncoder
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.base_agent import BaseAgent
 from src.utils.slailm_loader import get_slailm
+from logs.logger import get_logger
+
+logger = get_logger("Language Agent")
+logger.setLevel(logging.INFO)
+
+LOAD_CONFIG_PATH = "src/agents/language/nlp_config.json"
 
 @dataclass 
 class LinguisticFrame:
@@ -43,7 +52,7 @@ class DialogueContext:
         Manages dialogue memory, optionally summarizes long histories.
 
         Args:
-            llm: Reference to the language model (e.g., SLAILM)
+            llm: Reference to the language model SLAILM
             history (list): List of previous messages.
             summary (str): Optional summary of long-past context.
             memory_limit (int): Max number of messages to keep before summarizing.
@@ -58,20 +67,15 @@ class DialogueContext:
         self.summarizer = summarizer or self.default_summarizer
         self.encoder = encoder or TextEncoder()
         #self.nlu = EnhancedNLU(wordlist_path="src/agents/language/wordlist_en.json")
-        self.vocab = {word: idx for idx, word in enumerate(self.encoder.vocab)}  # Or load externally
-        self.unk_token_id = self.vocab.get("<unk>", 0)  # Use 0 or a reserved ID
+        self.vocab = self.encoder.tokenizer.word_to_id  # Directly use tokenizer's vocabulary
+        self.unk_token_id = self.encoder.tokenizer.unk_token_id  # Use tokenizer's UNK ID
 
     def get_frame(self, user_input: str) -> LinguisticFrame:
         nlu_data = self.nlu.analyze(user_input)
         deps = nlu_data["dependencies"]
-        verbs = [rel.head for rel in deps if rel.relation == "root"]
-        objects = [rel.dependent for rel in deps if rel.relation in {"dobj", "nsubj"}]
         return LinguisticFrame(
-            intent=verbs[0] if verbs else "unknown",
-            entities={
-                "dependency_heads": [rel.head for rel in deps],
-                "objects": objects
-            },
+            intent=intent,
+            entities=entities,
             sentiment=0.0,
             modality="none",
             confidence=1.0
@@ -127,7 +131,7 @@ class DialogueContext:
         # Fallback summary
         return "Summary: " + " | ".join(messages[-3:])
 
-    def encode_context(self) -> Optional[np.ndarray]:
+    def encode_context(self) -> Optional[torch.Tensor]:
         """Return a dense embedding of the current dialogue context."""
         if not self.encoder:
             return None
@@ -138,7 +142,7 @@ class DialogueContext:
             token_ids += [self.unk_token_id] * (512 - len(token_ids))
         else:
             token_ids = token_ids[:512]
-        return self.encoder.forward(np.array([token_ids]))
+        return self.encoder.forward(torch.Tensor([token_ids]))
 
     def tokenize_text(self, text: str) -> List[str]:
         """Simple whitespace tokenizer (replace if you have a better one)."""
@@ -1032,10 +1036,10 @@ class Wordlist:
             return False
         
         # Language-specific additional checks
-        if lang == 'es':
-            return self._validate_spanish_morphology(word)
-        elif lang == 'pap':
-            return self._validate_papiamento_morphology(word)
+#        if lang == 'es':
+#            return self._validate_spanish_morphology(word)
+#        elif lang == 'pap':
+#            return self._validate_papiamento_morphology(word)
 
         # Affix validation
         affix_rules = rules.get('allowed_affixes', {})
@@ -1059,43 +1063,43 @@ class Wordlist:
         
         return True
 
-    def _validate_spanish_morphology(self, word: str) -> bool:
-        """Spanish-specific morphological checks"""
-        # Check for required vowels in every syllable
-        if not re.search(r'[aeiouáéíóúü]', word.lower()):
-            return False
+#    def _validate_spanish_morphology(self, word: str) -> bool:
+#        """Spanish-specific morphological checks"""
+#        # Check for required vowels in every syllable
+#        if not re.search(r'[aeiouáéíóúü]', word.lower()):
+#            return False
         
         # Validate consonant clusters
-        for cluster in ['tl', 'dl', 'tn']:  # Invalid in Spanish
-            if cluster in word.lower():
-                return False
+#        for cluster in ['tl', 'dl', 'tn']:  # Invalid in Spanish
+#            if cluster in word.lower():
+#                return False
         
         # Check verb endings
-        if len(word) > 2:
-            ending = word[-2:].lower()
-            if ending in {'ar', 'er', 'ir'}:
-                stem = word[:-2]
-                return stem in self.data or self._validate_spanish_stem(stem)
+#        if len(word) > 2:
+#            ending = word[-2:].lower()
+#            if ending in {'ar', 'er', 'ir'}:
+#                stem = word[:-2]
+#                return stem in self.data or self._validate_spanish_stem(stem)
         
-        return True
+#        return True
 
-    def _validate_papiamento_morphology(self, word: str) -> bool:
-        """Papiamento-specific morphological checks"""
-        # Check for common particles
-        rules = self._get_morphology_rules('pap')
-        if any(word.startswith(p) for p in rules['common_particles']):
-            return True
+#    def _validate_papiamento_morphology(self, word: str) -> bool:
+#        """Papiamento-specific morphological checks"""
+#        # Check for common particles
+#        rules = self._get_morphology_rules('pap')
+#        if any(word.startswith(p) for p in rules['common_particles']):
+#            return True
         
         # Validate verb constructions
-        if any(word.startswith(vm) for vm in rules['verb_markers']):
-            verb_part = word[2:] if word.startswith(('ta','lo')) else word[1:]
-            return self.validate_word(verb_part)
+#        if any(word.startswith(vm) for vm in rules['verb_markers']):
+#           verb_part = word[2:] if word.startswith(('ta','lo')) else word[1:]
+#            return self.validate_word(verb_part)
         
         # Check for characteristic affixes
-        if word.endswith('nan'):  # Plural marker
-            return self.validate_word(word[:-3])
-        
-        return True
+#        if word.endswith('nan'):  # Plural marker
+#            return self.validate_word(word[:-3])
+
+#        return True
 
     def _validate_contractions(self, word: str, lang: str) -> bool:
         """Handle language-specific contractions"""
@@ -1454,6 +1458,7 @@ class TypoHandler:
 class NLUEngine:
     """Rule-based semantic parser with fallback patterns"""
     def __init__(self, path: str):
+        from src.agents.language.language_profiles import patterns_and_weights
         try:
             from src.agents.language.resource_loader import ResourceLoader
             word_data = ResourceLoader.get_structured_wordlist()
@@ -1463,82 +1468,10 @@ class NLUEngine:
 
         # structured_words = word_data.get("words", word_data)  # fallback if top-level structure is flat
 
-        # Hierarchical intent recognition system with pattern clusters
-        self.intent_weights = {
-            'information_request': {
-                'patterns': [
-                    # Primary patterns (high specificity)
-                    (r'^(what|where|when|how)\s+(is|are|does)\s+the?\b', 2.5),
-                    (r'explain\s+(the\s+)?(concept|process|idea)\b', 2.4),
-                    
-                    # Secondary patterns (medium specificity)
-                    (r'\b(define|describe|elaborate)\s+on\b', 2.0),
-                    (r'\b(meaning|significance)\s+of\b', 1.8),
-                    
-                    # Tertiary patterns (contextual)
-                    (r'\b(can\s+you|could\s+you)\s+clarify\b', 1.6),
-                ],
-                'exclusions': [
-                    r'\b(how\s+to|tutorial|guide)\b',  # Exclude instructional queries
-                ],
-                'context_requirements': {
-                    'required_pos': ['NOUN', 'PROPN'],
-                    'proximity_window': 3  # Words within 3 positions
-                }
-            },
-            'action_request': {
-                'patterns': [
-                    # Imperative structures
-                    (r'^(please|kindly|urgently)\s+(execute|run|perform)\b', 2.8),
-                    (r'\b(start|stop|restart)\s+the\s+process\b', 2.7),
-                    
-                    # Modal verb constructions
-                    (r'\b(must|should)\s+(be\s+)?(initiated|terminated)\b', 2.5),
-                    (r'\b(initiate|terminate)\s+immediately\b', 2.6),
-                ],
-                'context_requirements': {
-                    'required_verbs': ['execute', 'run', 'start', 'stop'],
-                    'dependency_relations': ['dobj', 'xcomp']  # Verb-object relations
-                }
-            },
-            # ... other intents ...
-        }
-        
-        # Entity recognition system with composable patterns
-        self.entity_patterns = {
-            'temporal': {
-                'components': {
-                    'date': r'\d{4}-\d{2}-\d{2}',
-                    'relative': r'(today|tomorrow|next\s+\w+)',
-                    'time': r'\d{1,2}:\d{2}\s?(?:AM|PM)?'
-                },
-                'pattern': r'(?:{date}|{relative}|{time})',
-                'pos_constraints': ['NOUN', 'ADV'],
-                'validation': self._validate_temporal,
-                'priority': 1
-            },
-            'quantitative': {
-                'components': {
-                    'number': r'\b\d+(?:\.\d+)?\b',
-                    'unit': r'(kg|ml|m|cm|Hz|W)'
-                },
-                'pattern': r'{number}\s*{unit}',
-                'pos_constraints': ['NUM', 'ADJ'],
-                'validation': self._validate_quantity,
-                'priority': 2
-            },
-            'technical': {
-                'components': {
-                    'protocol': r'(HTTP|FTP|SSH)',
-                    'code': r'[A-Z]{3}-\d{4}',
-                    'version': r'\bv?\d+\.\d+(?:\.\d+)?\b'
-                },
-                'pattern': r'({protocol}/\d\.\d|{code}|{version})',
-                'pos_constraints': ['PROPN', 'NOUN'],
-                'validation': self._validate_technical,
-                'priority': 3
-            }
-        }
+
+        # Intent patterns & weights
+        self.entity_patterns = patterns_and_weights()
+        self.intent_weights = patterns_and_weights()
 
         # Sentiment lexicon (word: polarity_score)
         self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
@@ -1925,6 +1858,9 @@ class LanguageAgent(BaseAgent):
         self.dialogue_context = dialogue_context
         self.grammar_processor = self._init_grammar_processor()
         self.sentiment_lexicon = self._load_sentiment_lexicon()
+        self.profiles = NLPProfiles()
+        self.intent_patterns = self.profiles.get_intents()
+        self.entity_patterns = self.profiles.get_entities()
 
         # NLU and Wordlist
         wordlist_path = self.config.get("wordlist_path")
@@ -1961,6 +1897,32 @@ class LanguageAgent(BaseAgent):
         })
 
         self.llm = slai_lm or get_slailm(shared_memory, agent_factory)
+
+    def _detect_intent(self, text):
+        highest_score = 0
+        best_intent = "unknown"
+        for intent_name, details in self.intent_patterns.items():
+            for pattern_entry in details["patterns"]:
+                if isinstance(pattern_entry, list):
+                    pattern, weight = pattern_entry
+                else:
+                    pattern, weight = pattern_entry, 1.0
+                if re.search(pattern, text, re.IGNORECASE):
+                    if weight > highest_score:
+                        highest_score = weight
+                        best_intent = intent_name
+        return best_intent
+
+    def _detect_entities(self, text):
+        found_entities = {}
+        for entity_type, entity_data in self.entity_patterns.items():
+            components = entity_data.get("components", {})
+            for comp_name, comp_pattern in components.items():
+                if re.search(comp_pattern, text, re.IGNORECASE):
+                    if entity_type not in found_entities:
+                        found_entities[entity_type] = []
+                    found_entities[entity_type].append(comp_name)
+        return found_entities
 
     def _init_grammar_processor(self, grammar_processor=None):
         # GrammarProcessor setup
@@ -2203,7 +2165,7 @@ class LanguageAgent(BaseAgent):
             response = result.get("text", str(result))
             return response
         except Exception as e:
-            logging.error(f"LanguageAgent failed to generate response: {e}")
+            logger.error(f"LanguageAgent failed to generate response: {e}")
             return "[Error generating response]"
 
     def parse_intent(self, user_input: str) -> str:
@@ -2467,23 +2429,3 @@ class LanguageAgent(BaseAgent):
         processed = self.process_input(prompt)
         response = self.generate(processed, self.dialogue_context, prompt)
         return {"type": "response", "input": prompt, "output": response}
-
-if __name__ == "__main__":
-    wl = Wordlist()
-    print("Loaded", len(wl.words), "words.")
-    
-    word = "recieve"
-    corrected, score = wl.correct_typo(word)
-    print(f"Typo correction: {word} → {corrected} (confidence: {score:.2f})")
-
-    frame = NLUEngine().parse("Can you explain the significance of quantum computing tomorrow?")
-    print("Parsed intent:", frame.intent)
-    print("Entities:", frame.entities)
-    print("Sentiment:", frame.sentiment)
-
-def validate_word(self, word: str) -> bool:
-    return (
-        self._check_orthography(word) and
-        self._check_morphology(word) and
-        self._check_phonotactics(word)  # Now with full implementation
-    )
