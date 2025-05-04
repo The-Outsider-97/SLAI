@@ -16,7 +16,7 @@ from profiling_utils import memory_profile, time_profile, start_memory_tracing, 
 from src.agents.language.grammar_processor import GrammarProcessor
 #from src.agents.language.resource_loader import ResourceLoader
 #from src.agents.adaptive_agent import AdaptiveAgent
-#from src.agents.alignment_agent import AlignmentAgent
+from src.agents.alignment_agent import AlignmentAgent
 #from src.agents.evaluation_agent import EvaluationAgent
 #from src.agents.execution_agent import ExecutionAgent
 #from src.agents.knowledge_agent import KnowledgeAgent
@@ -46,7 +46,11 @@ class AgentMetaData:
 class AgentFactory:
     def __init__(self, config: Dict, shared_resources: Dict):
         self.config = config
-        self.shared_resources = shared_resources
+        self.shared_resources = {
+            **shared_resources,
+            "shared_memory": shared_resources.get("shared_memory"),
+            "agent_factory": self
+            }
         self.registry = {}
         self.instance_cache = {}
         self.lock = threading.RLock()
@@ -98,15 +102,52 @@ class AgentFactory:
             for dep in agent_info['dependencies']
         }
     
-        if agent_name == "language":
+        # Import the actual class object
+        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
+    
+        # Safely inspect its __init__ parameters
+        init_params = cls.__init__.__code__.co_varnames
+
+        if agent_name == "safety":
             filtered_config = {
                 k: v for k, v in agent_info['config'].items()
-                if k in agent_info['class'].__init__.__code__.co_varnames
+                if k in init_params
             }
-            agent_instance = agent_info['class'](
+            # Convert config dict to SafetyAgentConfig dataclass
+            from src.agents.safety_agent import SafetyAgentConfig
+            safety_config = SafetyAgentConfig(**filtered_config)
+            agent_instance = cls(
+                agent_factory=self,
+                alignment_agent_cls=AlignmentAgent,  # Pass the class
+                config=safety_config,
+                **dependencies,
+                **self.shared_resources
+            )
+    
+        if agent_name == "language":
+            from src.agents.perception.encoders.text_encoder import TextEncoder
+
+            text_encoder = TextEncoder(
+                vocab_size=50016,          # e.g., BERT-size vocab or your own
+                embed_dim=200,             # embedding size
+                num_layers=6,             # transformer layers
+                num_heads=8,              # attention heads
+                ff_dim=2048,               # feedforward dim
+                num_styles=14,              # however many styles you use
+                dropout_rate=0.1,
+                positional_encoding="sinusoidal",
+                max_length=512,
+                device='cpu'               # or 'cuda' if available
+            )
+
+            filtered_config = {
+                k: v for k, v in agent_info['config'].items()
+                if k in init_params
+            }
+            agent_instance = cls(
                 agent_factory=self,
                 grammar=GrammarProcessor(),
-                context=DialogueContext(),
+                context=DialogueContext(encoder=text_encoder),
                 slai_lm=get_shared_slailm(self.shared_resources['memory'], self),
                 **filtered_config,
                 **dependencies,
@@ -115,9 +156,9 @@ class AgentFactory:
         else:
             filtered_config = {
                 k: v for k, v in agent_info['config'].items()
-                if k in agent_info['class'].__init__.__code__.co_varnames
+                if k in init_params
             }
-            agent_instance = agent_info['class'](
+            agent_instance = cls(
                 **filtered_config,
                 **dependencies,
                 **self.shared_resources
@@ -129,19 +170,33 @@ class AgentFactory:
         agent_info = self.registry[agent_name]
         cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
         
-        # Filter parameters to only those accepted by the class constructor
-        init_args = agent_info.get('config', {})
-        if config:
-            init_args.update(config)
-            
-        # Get valid constructor parameters
-        init_params = inspect.signature(cls.__init__).parameters
-        filtered_args = {
-            k: v for k, v in init_args.items() 
-            if k in init_params
+        # Get base parameters from factory
+        base_params = {
+            'shared_memory': self.shared_resources.get('shared_memory'),
+            'agent_factory': self
         }
         
-        return cls(**filtered_args)
+        # Merge configurations
+        init_args = agent_info.get('init_args', {})
+        if config and 'init_args' in config:
+            init_args.update(config['init_args'])
+        
+        # Get valid constructor parameters
+        init_params = inspect.signature(cls.__init__).parameters
+        
+        # Automatically inject required base parameters
+        final_args = {}
+        for param in init_params:
+            if param in base_params:
+                final_args[param] = base_params[param]
+            elif param in init_args:
+                final_args[param] = init_args[param]
+        
+        # Preserve explicit config parameters
+        if config:
+            final_args.update({k: v for k, v in config.items() if k != 'init_args'})
+        
+        return cls(**final_args)
 
     def _check_text_deps(self) -> bool:
         try:
