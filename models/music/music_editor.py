@@ -1,7 +1,8 @@
 import time
 import queue
 import threading
-import numpy as np
+import torch
+import torch.nn as nn
 import sounddevice as sd  # lightweight, pure-Python audio I/O
 
 from PyQt5.QtWidgets import (QWidget, QLabel, QPushButton, QVBoxLayout,QHBoxLayout,
@@ -26,8 +27,8 @@ class AudioStreamer:
         self.running = False
         self.lock = Lock()
 
-        self.audio_buffer = np.zeros((blocksize,), dtype=np.float32)
-        self.buffer = np.zeros(buffer_size, dtype=np.float32)
+        self.audio_buffer = torch.zeros((blocksize,), dtype=torch.float32)
+        self.buffer = torch.zeros(buffer_size, dtype=torch.float32)
         self.write_idx = 0
 
         self.queue = queue.Queue(maxsize=100)
@@ -57,11 +58,11 @@ class AudioStreamer:
         available = len(self.buffer) - self.write_idx
 
         if n > available:
-            self.buffer[self.write_idx:] = new_samples[:available]
-            self.buffer[:n - available] = new_samples[available:]
+            self.buffer[self.write_idx:] = torch.from_numpy(new_samples[:available])
+            self.buffer[:n - available] = torch.from_numpy(new_samples[available:])
             self.write_idx = n - available
         else:
-            self.buffer[self.write_idx:self.write_idx + n] = new_samples
+            self.buffer[self.write_idx:self.write_idx + n] = torch.from_numpy(new_samples)
             self.write_idx += n
 
         if self.callback:
@@ -146,11 +147,11 @@ class AudioStreamer:
 
     def get_buffer(self):
         with self.lock:
-            return np.copy(self.audio_buffer)
+            return nn.copy(self.audio_buffer)
 
 class WaveformWidget(QWidget):
     class PerceptionWorker(QThread):
-        finished = pyqtSignal(np.ndarray)
+        finished = pyqtSignal(torch.Tensor)
 
         def __init__(self, agent, buffer):
             super().__init__()
@@ -178,7 +179,7 @@ class WaveformWidget(QWidget):
         super().__init__(parent)
         self.audio_streamer = audio_streamer
         self.perception_agent = perception_agent
-        self.frame_buffer = np.zeros(16000, dtype=np.float32)
+        self.frame_buffer = torch.zeros(16000, dtype=torch.float32)
         self.frame_write_idx = 0
         self.active_worker = None
         self.worker_lock = Lock()
@@ -187,7 +188,7 @@ class WaveformWidget(QWidget):
         self.timer.start(30)  # ~33 FPS
 
 		# Embedding Memory
-        self.embedding_memory: Dict[str, np.ndarray] = {}
+        self.embedding_memory: Dict[str, torch.Tensor] = {}
         self.max_embeddings = max_embeddings
         self.embedding_keys = deque()  # To maintain order for eviction
 
@@ -202,7 +203,7 @@ class WaveformWidget(QWidget):
     def process_buffer(self, buffer):
         """Ensure buffer is exactly 16000 samples"""
         if len(buffer) < 16000:
-            padded = np.zeros(16000, dtype=np.float32)
+            padded = torch.zeros(16000, dtype=torch.float32)
             padded[: len(buffer)] = buffer
             return padded
         elif len(buffer) > 16000:
@@ -214,7 +215,7 @@ class WaveformWidget(QWidget):
         if freq <= 0:
             return ("", 0.0)
         try:
-            note_num = 12 * np.log2(freq / 440.0) + 69
+            note_num = 12 * torch.log2(freq / 440.0) + 69
             note_num_rounded = int(round(note_num))
             cents = (note_num - note_num_rounded) * 100
             note_num_rounded = max(0, min(127, note_num_rounded))
@@ -244,13 +245,13 @@ class WaveformWidget(QWidget):
 
         for x in range(w):
             idx = min(x * step, len(buffer) - 1)
-            sample = np.clip(buffer[idx], -1.0, 1.0)
+            sample = torch.clip(buffer[idx], -1.0, 1.0)
             y = int(mid - sample * mid)
             painter.drawLine(x, mid, x, y)
 
         # Calculate metrics
-        rms = np.sqrt(np.mean(buffer**2))
-        volume_value = int(np.clip(rms * 300, 0, 300))
+        rms = torch.sqrt(torch.mean(buffer**2))
+        volume_value = int(torch.clip(rms * 300, 0, 300))
         
         N = len(buffer)
         if N < 2:
@@ -258,13 +259,13 @@ class WaveformWidget(QWidget):
             note_name, cents = "", 0.0
         else:
             if self.hanning_window is None or len(self.hanning_window) != N:
-                self.hanning_window = np.hanning(N)
+                self.hanning_window = torch.hanning(N)
             windowed = buffer * self.hanning_window
-            fft_result = np.fft.rfft(windowed)
-            freqs = np.fft.rfftfreq(N, d=1.0/self.audio_streamer.samplerate)
-            magnitudes = np.abs(fft_result)
+            fft_result = torch.fft.rfft(windowed)
+            freqs = torch.fft.rfftfreq(N, d=1.0/self.audio_streamer.samplerate)
+            magnitudes = torch.abs(fft_result)
             if len(magnitudes) > 1:
-                peak_index = np.argmax(magnitudes[1:]) + 1
+                peak_index = torch.argmax(magnitudes[1:]) + 1
                 frequency = freqs[peak_index]
             else:
                 frequency = 0.0
@@ -368,7 +369,7 @@ class WaveformWidget(QWidget):
             self.active_worker.finished.connect(self._store_embedding)  # Connect the signal
             self.active_worker.start()
 
-    def _store_embedding(self, embedding: np.ndarray):
+    def _store_embedding(self, embedding: torch.Tensor):
         """Stores the generated embedding in memory."""
         embedding_key = (
             f"audio_frame_{time.time()}"  # Generate a unique key (e.g., timestamp)
@@ -383,7 +384,7 @@ class WaveformWidget(QWidget):
             f"(Memory size: {len(self.embedding_memory)})"
         )
 
-    def get_embedding(self, key: str) -> np.ndarray:
+    def get_embedding(self, key: str) -> torch.Tensor:
         """Retrieves an embedding from memory."""
         return self.embedding_memory.get(key)
 
@@ -781,7 +782,7 @@ class MusicEditor(QWidget):
             self.buffer[:part2] = new_samples[part1:]
             self.write_idx = part2
         else:
-            self.buffer[self.write_idx : self.write_idx + n] = new_samples
+            self.buffer[self.write_idx : self.write_idx + n] = torch.from_numpy(new_samples)
             self.write_idx += n
 
         if status:
