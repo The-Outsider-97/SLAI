@@ -20,7 +20,7 @@ from src.agents.browser.workflow import WorkFlow
 from src.agents.browser.utils import Utility
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Browser")
 
 # --------------------------
 # Core Configuration
@@ -28,8 +28,8 @@ logger = get_logger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SEARCH_DELAY = (0.1, 0.02)
 WINDOW_SIZE = (random.randint(1200, 1400), random.randint(800, 1000))
-SNAPSHOT_DIR = os.path.join("debug", "dom_snapshots")
-CAPTCHA_LOG_DIR = os.path.join("debug", "captcha_logs")
+SNAPSHOT_DIR = "logs/debug/dom_snapshots"
+CAPTCHA_LOG_DIR = "logs/debug/captcha_logs"
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(CAPTCHA_LOG_DIR, exist_ok=True)
 
@@ -53,9 +53,25 @@ class BrowserAgent(BaseAgent):
         self.agent_factory.shared_resources["llm"] = shared_llm
         self._init_agents()
         AGENT_CONFIGS = {
-            "reasoning": {"init_args": {"llm": shared_llm}},
-            "language": {},
-            "learning": {}
+            "reasoning": {
+                "init_args": {
+                    "llm": shared_llm,
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            },
+            "language": {
+                "init_args": {
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            },
+            "learning": {
+                "init_args": {
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            }
         }
         for agent_name, cfg in AGENT_CONFIGS.items():
             setattr(self, agent_name, self.agent_factory.create(agent_name, config=cfg))
@@ -160,13 +176,22 @@ class BrowserAgent(BaseAgent):
 
     # Agent Integration Helpers -------------------------------------
     def _init_agents(self):
+        from src.agents.language.grammar_processor import GrammarProcessor
+        from src.agents.perception.encoders.text_encoder import TextEncoder
+        from models.slai_lm import get_shared_slailm
         """Initialize all integrated agents in proper order"""
         shared_llm = self.agent_factory.shared_resources["llm"]
         
         self.reasoning = self.agent_factory.create('reasoning', config={
             "init_args": {"llm": shared_llm}
         })
-        self.nlp_processor = self.agent_factory.create('language', config={})
+        self.nlp_processor = self.agent_factory.create('language', config={
+            "init_args": {
+                "grammar": GrammarProcessor(),
+                "context": DialogueContext(encoder=TextEncoder()),
+                "slai_lm": get_shared_slailm(self.shared_memory, self.agent_factory)
+            }
+        })
         self.learner = self.agent_factory.create('learning', config={})
 
     def _content_to_facts(self, content):
