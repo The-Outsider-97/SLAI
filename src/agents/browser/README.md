@@ -1,4 +1,4 @@
-![Startup](frontend/assets/aba.png)
+![Startup](../../../frontend/assets/aba.png)
 
 # Agentic Browsing System Overview
 
