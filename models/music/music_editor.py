@@ -147,7 +147,7 @@ class AudioStreamer:
 
     def get_buffer(self):
         with self.lock:
-            return nn.copy(self.audio_buffer)
+            return self.audio_buffer.detach().clone()
 
 class WaveformWidget(QWidget):
     class PerceptionWorker(QThread):
