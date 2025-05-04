@@ -1,11 +1,11 @@
-import numpy as np
+import torch 
 import math
 from typing import Optional, Tuple
 
 class Parameter:
-    def __init__(self, data: np.ndarray):
+    def __init__(self, data: torch.Tensor):
         self.data = data
-        self.grad = np.zeros_like(data)
+        self.grad = torch.zeros_like(data)
         
     def zero_grad(self) -> None:
         """Reset gradients to zero"""
@@ -23,10 +23,10 @@ class TensorOps:
     # Normalization Operations
     # --------------------------
     @staticmethod
-    def layer_norm(x: np.ndarray, 
-                 eps: float = 1e-5,
-                 gamma: Optional[np.ndarray] = None,
-                 beta: Optional[np.ndarray] = None) -> np.ndarray:
+    def layer_norm(x: torch.Tensor,
+                   eps: float = 1e-5,
+                   gamma: Optional[torch.Tensor] = None,
+                   beta: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Enhanced layer normalization with optional affine transformation
         Args:
@@ -37,7 +37,7 @@ class TensorOps:
         """
         mean = x.mean(axis=-1, keepdims=True)
         var = x.var(axis=-1, keepdims=True)
-        x = (x - mean) / np.sqrt(var + eps)
+        x = (x - mean) / torch.sqrt(var + eps)
         
         if gamma is not None:
             x *= gamma
@@ -46,30 +46,30 @@ class TensorOps:
         return x
 
     @staticmethod
-    def instance_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+    def instance_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
         """Instance normalization for 4D tensors (B, C, H, W)"""
         mean = x.mean(axis=(2, 3), keepdims=True)
         var = x.var(axis=(2, 3), keepdims=True)
-        return (x - mean) / np.sqrt(var + eps)
+        return (x - mean) / torch.sqrt(var + eps)
 
     # --------------------------
     # Activation Functions
     # --------------------------
     @staticmethod
-    def gelu(x: np.ndarray) -> np.ndarray:
+    def gelu(x: torch.Tensor) -> torch.Tensor:
         """Gaussian Error Linear Unit"""
-        return 0.5 * x * (1 + np.tanh(math.sqrt(2/math.pi) * 
+        return 0.5 * x * (1 + torch.tanh(math.sqrt(2/math.pi) * 
                          (x + 0.044715 * x**3)))
 
     @staticmethod
-    def silu(x: np.ndarray) -> np.ndarray:
+    def silu(x: torch.Tensor) -> torch.Tensor:
         """Sigmoid Linear Unit (Swish)"""
         return x * TensorOps.sigmoid(x)
 
     @staticmethod
-    def mish(x: np.ndarray) -> np.ndarray:
+    def mish(x: torch.Tensor) -> torch.Tensor:
         """Mish: Self Regularized Non-Monotonic Activation"""
-        return x * np.tanh(np.log(1 + np.exp(x)))
+        return x * torch.tanh(torch.log1p(torch.exp(x)))
 
     # --------------------------
     # Initialization Methods
@@ -78,7 +78,7 @@ class TensorOps:
     def he_init(shape: Tuple[int], 
               fan_in: Optional[int] = None,
               mode: str = 'fan_in',
-              nonlinearity: str = 'relu') -> np.ndarray:
+              nonlinearity: str = 'relu', device='cpu') -> torch.Tensor:
         """
         Kaiming initialization with configurable mode/nonlinearity
         Args:
@@ -90,69 +90,61 @@ class TensorOps:
         fan = fan_in or shape[0]
         gain = math.sqrt(2.0) if nonlinearity == 'relu' else 1.0
         std = gain / math.sqrt(fan)
-        return np.random.randn(*shape) * std
+        return torch.randn(*shape, device=device) * std
 
     @staticmethod
-    def lecun_normal(shape: Tuple[int]) -> np.ndarray:
+    def lecun_normal(shape: Tuple[int]) -> torch.Tensor:
         """LeCun normal initialization (Variance scaling)"""
         scale = 1.0 / math.sqrt(shape[0])
-        return np.random.normal(0, scale, size=shape)
+        return torch.normal(0, scale, size=shape)
 
     @staticmethod
-    def xavier_uniform(shape: Tuple[int], 
-                     gain: float = 1.0) -> np.ndarray:
+    def xavier_uniform(shape: Tuple[int], gain: float = 1.0) -> torch.Tensor:
         """Xavier/Glorot uniform initialization"""
         limit = gain * math.sqrt(6.0 / sum(shape[:2]))
-        return np.random.uniform(-limit, limit, size=shape)
+        return torch.empty(*shape).uniform_(-limit, limit)
 
     # --------------------------
     # Tensor Operations
     # --------------------------
     @staticmethod
-    def interpolate(x: np.ndarray, 
-                  size: Tuple[int], 
-                  mode: str = 'bilinear') -> np.ndarray:
+    def interpolate(x: torch.Tensor, size: Tuple[int], mode: str = 'bilinear') -> torch.Tensor:
         """2D interpolation (nearest/bilinear)"""
         from scipy.ndimage import zoom
         factors = (1, 1) + tuple(s / xs for s, xs in zip(size, x.shape[-2:]))
         return zoom(x, factors, order=0 if mode == 'nearest' else 1)
 
     @staticmethod
-    def dropout(x: np.ndarray, 
-              p: float = 0.5,
-              training: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def dropout(x: torch.Tensor, p: float = 0.5, training: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
         """Inverted dropout with mask caching"""
         if not training or p == 0:
-            return x, np.ones_like(x)
+            return x, torch.ones_like(x)
         
-        mask = (np.random.rand(*x.shape) > p) / (1 - p)
+        mask = (torch.rand_like(x) > p).float() / (1 - p)
         return x * mask, mask
 
     @staticmethod
-    def attention_mask(lengths: np.ndarray, 
-                      max_len: int) -> np.ndarray:
+    def attention_mask(lengths: torch.Tensor, max_len: int) -> torch.Tensor:
         """Create boolean attention mask from sequence lengths"""
         batch_size = lengths.shape[0]
-        return np.arange(max_len) < lengths[:, None]
+        return torch.arange(max_len).expand(batch_size, max_len) < lengths.unsqueeze(1)
 
     # --------------------------
     # Utility Functions
     # --------------------------
     @staticmethod
-    def pad_sequence(x: np.ndarray, 
-                   max_len: int, 
-                   axis: int = 1) -> np.ndarray:
-        """Pad sequences to fixed length"""
+    def pad_sequence(x: torch.Tensor, max_len: int, axis: int = 1) -> torch.Tensor:
         pad_size = max_len - x.shape[axis]
         if pad_size <= 0:
             return x
-        pads = [(0, 0)] * x.ndim
-        pads[axis] = (0, pad_size)
-        return np.pad(x, pads)
+        pad_dims = [(0, 0)] * x.dim()
+        pad_dims[axis] = (0, pad_size)
+        pad_dims_flat = [dim for pair in reversed(pad_dims) for dim in pair]
+        return torch.nn.functional.pad(x, pad_dims_flat)
 
     @staticmethod
-    def sigmoid(x: np.ndarray) -> np.ndarray:
+    def sigmoid(x: torch.Tensor) -> torch.Tensor:
         """Numerically stable sigmoid"""
-        return np.where(x >= 0,
-                      1 / (1 + np.exp(-x)),
-                      np.exp(x) / (1 + np.exp(x)))
+        return torch.where(x >= 0,
+                      1 / (1 + torch.exp(-x)),
+                      torch.exp(x) / (1 + torch.exp(x)))
