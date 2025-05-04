@@ -63,19 +63,22 @@ graph LR
 
 | Component   | Minimum Requirement         | Recommended                                              |
 | ----------- | --------------------------- | -------------------------------------------------------- |
-| **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7)                              |
+| **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7) for intensive tasks.         |
 | **RAM**     | 16 GB                       | 32 GB (for multitasking)                                 |
 | **GPU**     | NVIDIA GTX 1060             | NVIDIA RTX 3060 or higher (for large tasks and training) |
 | **Storage** | 50 GB SSD                   | 100 GB SSD (for models + vector DBs + logs)              |
 
 ### Software
 
-- **OS:** Ubuntu 22.04+ / Windows 10+
+- **OS:** Ubuntu 22.04+ / Windows 10/11 (with WSL for Linux compatibility)
 - **Python:** 3.10+
 - **Dependencies:**
-  - `torch`, `transformers`, `sentence-transformers`, `faiss`, `gradio`
-  - `pydantic`, `langchain`, `openai` (optional)
-  - `graphviz`, `numpy`, `pandas`, `flask`, `uvicorn`
+   - Core libraries include 'torch' (PyTorch), 'transformers', 'sentence-transformers',
+   - 'faiss-cpu (or faiss-gpu)', 'numpy', 'pandas', and 'pydantic'. Optional tools: 'langchain',
+   - 'openai' (LLM APIs), 'gradio' (UI prototype), 'flask/uvicorn' (web services), 'graphviz' (visualizations).
+- **Additional Libraries:** For specialized features:
+  - 'librosa' (audio), 'music21' (music theory/MIDI), 'mido' (MIDI I/O), 'tensorflow-cpu' (optional ML tasks),
+  - 'pypdf' (PDF parsing), and 'nltk' (natural language; run nltk.download('punkt')).
 
 ---
 
