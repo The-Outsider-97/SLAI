@@ -12,43 +12,8 @@ run:
   output_dir: "logs/"
   plots_dir: "plots/"
 
-agent:
-  type: dqn
-  state_dim: 4
-  action_dim: 2
-  hidden_size: 128
-  learning_rate: 0.001
-  gamma: 0.99
-  epsilon: 1.0
-  epsilon_decay: 0.995
-  epsilon_min: 0.01
-  buffer_size: 10000
-  batch_size: 64
-  target_update_frequency: 100
-
-agent:
-  type: maml
-  state_size: 52
-  action_size: 3
-  hidden_size: 64
-  meta_lr: 0.001
-  inner_lr: 0.01
-  gamma: 0.99
-
-agent:
-  type: rsi
-  state_size: 52
-  action_size: 3
-  shared_memory: null  # Or pass a mock/dummy instance in agent_factory
-
-agent:
-  type: eval
-
 training:
   num_samples: 500
-
-evaluator:
-  threshold: 0.9
 
 # ==========================
 # Hyperparameters Definition
@@ -116,70 +81,3 @@ tuning:
 configs:
   bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
   grid_config: "hyperparam_tuning/example_grid_config.json"
-
-# ==========================
-# Thresholds and Alignment
-# ==========================
-
-alignment_thresholds:
-  bias_threshold: 0.1
-  reward_threshold: 70.0
-  statistical_parity: 0.1
-  equal_opportunity: 0.1
-  predictive_parity: 0.1
-  individual_fairness: 0.1
-
-rollback:
-  enabled: true
-  backup_dir: "models/backups/"
-
-retrain:
-  enabled: true
-  trigger_on_violation: true
-
-logging:
-  log_file: "logs/app.log"
-  level: INFO
-  rotate: true
-  max_size_mb: 50
-  backup_count: 10
-
-# ==========================
-# Security Settings
-# ==========================
-
-security:
-  encrypt_models: true
-  enable_threat_detection: true
-  adversarial_training: false
-  backup_on_threat: true
-
-# ==========================
-# Compliance & Ethics
-# ==========================
-compliance:
-  regulations:
-    - GDPR
-    - CCPA
-  enable_audit: true
-  anonymize_data: true
-  consent_management: true
-
-# ==========================
-# Monitoring & Drift
-# ==========================
-monitoring:
-  enable_monitoring: true
-  drift_detection:
-    enabled: true
-    threshold: 0.05
-  performance_monitoring:
-    interval_seconds: 300  # 5 minutes
-  alerting:
-    enable_alerts: true
-    alert_thresholds:
-      performance_drop: 0.1
-      bias_increase: 0.05
-
-paths:
-  data_source: "datasets/sample_dataset.csv"
