@@ -1,8 +1,3 @@
-# ==============================================
-# Unified Hyperparameter Tuning Configuration
-# Supports both Grid Search and Bayesian Search
-# ==============================================
-
 model:
   name: SLAI-Agent
   version: v1.6.2
@@ -130,7 +125,18 @@ agent-network:
     init_args:
       agent_factory: ${agent_factory}
       grammar: ${grammar}
-      context: ${context}
+      context:
+        encoder_params:
+          vocab_size: 50016
+          embed_dim: 200
+          num_layers: 6
+          num_heads: 8
+          ff_dim: 2048
+          num_styles: 14
+          dropout_rate: 0.1
+          positional_encoding: "sinusoidal"
+          max_length: 512
+          device: "cpu"
       slai_lm: ${slai_lm}
     llm: SLAILM()  
     history: []  
@@ -333,19 +339,6 @@ hyperparameters:
     type: int
     min: 1
     max: 4
-
-# ==========================
-# Tuning Strategy Settings
-# ==========================
-
-tuning:
-  strategy: bayesian         # options: bayesian, grid
-  n_calls: 20                # used for Bayesian
-  n_random_starts: 5         # used for Bayesian
-
-configs:
-  bayesian_config: "src/tuning/configs/bayesian_config.json"
-  grid_config: "src/tuning/configs/grid_config.json"
 
 # ==========================
 # Thresholds and Alignment
