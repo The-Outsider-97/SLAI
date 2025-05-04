@@ -1,3 +1,5 @@
+![Startup](frontend/assets/aba.png)
+
 # Agentic Browsing System Overview
 
 This system integrates a multi-agent architecture designed to autonomously plan, execute, and refine web-based research tasks. It combines a research-oriented language model (SLAI LM) with a Planning Agent and a Browser Agent, all coordinated to serve complex user queries efficiently.
