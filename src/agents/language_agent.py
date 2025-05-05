@@ -1458,7 +1458,7 @@ class TypoHandler:
 class NLUEngine:
     """Rule-based semantic parser with fallback patterns"""
     def __init__(self, path: str):
-        from src.agents.language.language_profiles import patterns_and_weights
+        from src.agents.language.language_profiles import NLPProfiles
         try:
             from src.agents.language.resource_loader import ResourceLoader
             word_data = ResourceLoader.get_structured_wordlist()
@@ -1470,8 +1470,8 @@ class NLUEngine:
 
 
         # Intent patterns & weights
-        self.entity_patterns = patterns_and_weights()
-        self.intent_weights = patterns_and_weights()
+        self.entity_patterns = NLPProfiles.get_entities()
+        self.intent_weights =NLPProfiles.get_intent ()
 
         # Sentiment lexicon (word: polarity_score)
         self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
