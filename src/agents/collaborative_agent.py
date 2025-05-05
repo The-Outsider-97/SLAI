@@ -10,7 +10,7 @@ Features:
 6. Performance tracking and metrics
 """
 
-import numpy as np
+import torch
 import yaml
 import random
 import json
@@ -153,7 +153,12 @@ class CollaborativeAgent(BaseAgent):
 
     def get_slai_lm(self):
         from models.slai_lm import get_shared_slailm
-        return get_shared_slailm(self.shared_memory, agent_factory=self.agent_factory)
+        return get_shared_slailm(
+            self.shared_memory,
+            shared_tokenizer=self.agent_factory.shared_tokenizer,
+            shared_text_encoder=self.agent_factory.shared_text_encoder,
+            agent_factory=self.agent_factory
+            )
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
@@ -225,7 +230,6 @@ class CollaborativeAgent(BaseAgent):
     def coordinate_tasks(self, tasks, available_agents, optimization_goals=None, constraints=None):
         """        Full coordination pipeline with safety checks        """
         from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, MetricBridge
-        from src.utils.system_optimizer import SystemOptimizer
 
         # Validate inputs
         if not tasks or not available_agents:
@@ -266,8 +270,8 @@ class CollaborativeAgent(BaseAgent):
                 positive_rates=positive_rates
             )[0],
             'calibration_error': PerformanceMetrics.calibration_error(
-                y_true=np.array([t.get('priority', 0.5) for t in tasks]),
-                probs=np.array([a.get('optimization_score', 0.5) 
+                y_true=torch.Tensor([t.get('priority', 0.5) for t in tasks]),
+                probs=torch.Tensor([a.get('optimization_score', 0.5) 
                                 for a in optimized.values()])
             )
         }
@@ -686,7 +690,7 @@ class CollaborativeAgent(BaseAgent):
             ) / max(1, len(task.get('requirements', [])))
             
             # Risk adjustment
-            agent_risk = np.mean(self.risk_model['agent_risks'].get(agent, [0.5]))
+            agent_risk = torch.mean(self.risk_model['agent_risks'].get(agent, [0.5]))
             risk_factor = 1 - min(agent_risk, 0.9)  # Never go below 0.1
             agent_scores.append((agent, capability_match * risk_factor))
 
