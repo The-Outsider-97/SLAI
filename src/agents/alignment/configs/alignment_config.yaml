@@ -15,10 +15,16 @@ constitutional_rules:
   privacy: []
   safety: []
   ethics: []
+  - "Prioritize investor safety over returns"
+  - "Avoid high-risk leverage in bear markets"
 risk_thresholds:
   safety: 0.01
   security: 0.001
   privacy: 0.05
+  max_var: 0.05
+  max_drawdown: 0.2
+
+audit_level: 2
 
 monitor:
   fairness_metrics:
