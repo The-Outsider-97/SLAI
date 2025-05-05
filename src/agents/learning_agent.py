@@ -95,7 +95,7 @@ class MultiTaskLearner(nn.Module):
 class LearningAgent(BaseAgent):
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
 
-    def __init__(self, shared_memory, agent_factory, slai_lm, safety_agent, env=None, config=None):
+    def __init__(self, shared_memory, agent_factory, slai_lm, safety_agent, env=None, config=None, text_encoder=None):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
@@ -114,6 +114,7 @@ class LearningAgent(BaseAgent):
         self.agent_factory = agent_factory
         self.safety_agent = safety_agent
         self.config = config or {}
+        self.text_encoder = text_encoder
         self.rl_algorithm = self.config.get("rl_algorithm", None)
         self.strategy_weights = np.array([0.25]*4)  # [RL, DQN, MAML, RSI]
         self.prediction_weights = self.config.get('prediction_weights', [0.25, 0.25, 0.25, 0.25])
