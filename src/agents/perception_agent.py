@@ -48,7 +48,7 @@ class PerceptionAgent(BaseAgent):
         if 'vision' in self.modalities:
             self.encoders['vision'] = VisionEncoder()
         if 'text' in self.modalities:
-            self.encoders['text'] = TextEncoder()
+            self.encoders['text'] = agent_factory.shared_text_encoder # or TextEncoder()
         if 'audio' in self.modalities:
             self.encoders['audio'] = AudioEncoder()
 
