@@ -18,12 +18,11 @@ Features:
 """
 
 import os, sys
-import numpy as np
+import torch
 import random
 from collections import deque
 import copy
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 from src.collaborative.shared_memory import SharedMemory
 
 # ====================== Neural Network Core ======================
@@ -32,12 +31,12 @@ class NeuralNetwork:
     
     def __init__(self, input_dim, output_dim, hidden_dim=128):
         # He initialization with ReLU
-        self.W1 = np.random.randn(input_dim, hidden_dim) * np.sqrt(2./input_dim)
-        self.b1 = np.zeros(hidden_dim)
-        self.W2 = np.random.randn(hidden_dim, hidden_dim) * np.sqrt(2./hidden_dim)
-        self.b2 = np.zeros(hidden_dim)
-        self.W3 = np.random.randn(hidden_dim, output_dim) * np.sqrt(2./hidden_dim)
-        self.b3 = np.zeros(output_dim)
+        self.W1 = torch.randn(input_dim, hidden_dim) * torch.sqrt(2./input_dim)
+        self.b1 = torch.zeros(hidden_dim)
+        self.W2 = torch.randn(hidden_dim, hidden_dim) * torch.sqrt(2./hidden_dim)
+        self.b2 = torch.zeros(hidden_dim)
+        self.W3 = torch.randn(hidden_dim, output_dim) * torch.sqrt(2./hidden_dim)
+        self.b3 = torch.zeros(output_dim)
 
         # Intermediate values for backprop
         self._cache = {}
@@ -45,9 +44,9 @@ class NeuralNetwork:
     def forward(self, X):
         """Forward pass with ReLU activation"""
         self._cache['z1'] = X @ self.W1 + self.b1
-        self._cache['a1'] = np.maximum(0, self._cache['z1'])  # ReLU
+        self._cache['a1'] = torch.maximum(0, self._cache['z1'])  # ReLU
         self._cache['z2'] = self._cache['a1'] @ self.W2 + self.b2
-        self._cache['a2'] = np.maximum(0, self._cache['z2'])
+        self._cache['a2'] = torch.maximum(0, self._cache['z2'])
         self._cache['out'] = self._cache['a2'] @ self.W3 + self.b3
         return self._cache['out']
 
@@ -59,19 +58,19 @@ class NeuralNetwork:
         # Output layer gradient
         dout = (out - y) * 2/m
         dW3 = self._cache['a2'].T @ dout
-        db3 = np.sum(dout, axis=0)
+        db3 = torch.sum(dout, axis=0)
         
         # Hidden layer 2 gradient
         da2 = dout @ self.W3.T
         dz2 = da2 * (self._cache['a2'] > 0)
         dW2 = self._cache['a1'].T @ dz2
-        db2 = np.sum(dz2, axis=0)
+        db2 = torch.sum(dz2, axis=0)
         
         # Hidden layer 1 gradient
         da1 = dz2 @ self.W2.T
         dz1 = da1 * (self._cache['a1'] > 0)
         dW1 = X.T @ dz1
-        db1 = np.sum(dz1, axis=0)
+        db1 = torch.sum(dz1, axis=0)
         
         # Parameter updates
         self.W3 -= learning_rate * dW3
@@ -143,11 +142,11 @@ class DQNAgent:
 
     def select_action(self, state, explore=True):
         """Epsilon-greedy action selection"""
-        if explore and np.random.rand() < self.epsilon:
-            return np.random.randint(self.action_dim)
+        if explore and torch.rand() < self.epsilon:
+            return torch.randint(self.action_dim)
         
-        q_values = self.policy_net.forward(np.array([state]))
-        return np.argmax(q_values[0])
+        q_values = self.policy_net.forward(torch.Tensor([state]))
+        return torch.argmax(q_values[0])
 
     def store_transition(self, *transition):
         self.memory.push(transition)
@@ -162,20 +161,20 @@ class DQNAgent:
         states, actions, rewards, next_states, dones = zip(*batch)
         
         # Convert to NumPy arrays
-        states = np.array(states)
-        actions = np.array(actions)
-        rewards = np.array(rewards)
-        next_states = np.array(next_states)
-        dones = np.array(dones)
+        states = torch.Tensor(states)
+        actions = torch.Tensor(actions)
+        rewards = torch.Tensor(rewards)
+        next_states = torch.Tensor(next_states)
+        dones = torch.Tensor(dones)
         
         # Calculate target Q-values
         current_q = self.policy_net.forward(states)
         next_q = self.target_net.forward(next_states)
-        max_next_q = np.max(next_q, axis=1)
+        max_next_q = torch.max(next_q, axis=1)
         target = current_q.copy()
         
         # Bellman equation update
-        batch_idx = np.arange(self.batch_size)
+        batch_idx = torch.arange(self.batch_size)
         target[batch_idx, actions] = rewards + (1 - dones) * self.gamma * max_next_q
         
         # Backpropagation
@@ -189,7 +188,7 @@ class DQNAgent:
         if self.train_step % self.target_update == 0:
             self.update_target_net()
         
-        return np.mean(np.square(current_q - target))
+        return torch.mean(torch.square(current_q - target))
 
 
 # ====================== Evolutionary Optimization ======================
@@ -209,10 +208,10 @@ class EvolutionaryTrainer:
     def _random_config(self):
         """Generate random hyperparameter configuration"""
         return {
-            'gamma': np.clip(np.random.normal(0.95, 0.02), 0.9, 0.999),
-            'epsilon_decay': np.clip(np.random.normal(0.995, 0.002), 0.99, 0.999),
-            'learning_rate': np.clip(10**np.random.uniform(-4, -2), 1e-4, 1e-2),
-            'hidden_size': np.random.choice([64, 128, 256]),
+            'gamma': torch.clip(torch.normal(0.95, 0.02), 0.9, 0.999),
+            'epsilon_decay': torch.clip(torch.normal(0.995, 0.002), 0.99, 0.999),
+            'learning_rate': torch.clip(10**torch.uniform(-4, -2), 1e-4, 1e-2),
+            'hidden_size': torch.choice([64, 128, 256]),
             'buffer_size': 10000,
             'batch_size': 64
         }
@@ -221,19 +220,19 @@ class EvolutionaryTrainer:
         """Apply Gaussian mutation to hyperparameters"""
         mutated = copy.deepcopy(config)
         
-        if np.random.rand() < self.mutation_rate:
-            mutated['gamma'] = np.clip(config['gamma'] + np.random.normal(0, 0.01), 0.9, 0.999)
+        if torch.rand() < self.mutation_rate:
+            mutated['gamma'] = torch.clip(config['gamma'] + torch.normal(0, 0.01), 0.9, 0.999)
         
-        if np.random.rand() < self.mutation_rate:
-            mutated['learning_rate'] = np.clip(
-                config['learning_rate'] * np.random.lognormal(0, 0.2), 1e-4, 1e-2)
+        if torch.rand() < self.mutation_rate:
+            mutated['learning_rate'] = torch.clip(
+                config['learning_rate'] * torch.lognormal(0, 0.2), 1e-4, 1e-2)
         
-        if np.random.rand() < self.mutation_rate:
-            mutated['epsilon_decay'] = np.clip(
-                config['epsilon_decay'] + np.random.normal(0, 0.003), 0.99, 0.999)
+        if torch.rand() < self.mutation_rate:
+            mutated['epsilon_decay'] = torch.clip(
+                config['epsilon_decay'] + torch.normal(0, 0.003), 0.99, 0.999)
         
-        if np.random.rand() < self.mutation_rate:
-            mutated['hidden_size'] = np.random.choice([64, 128, 256])
+        if torch.rand() < self.mutation_rate:
+            mutated['hidden_size'] = torch.choice([64, 128, 256])
         
         return mutated
 
@@ -250,7 +249,7 @@ class EvolutionaryTrainer:
                 episode_reward += reward
                 state = next_state
             total_rewards.append(episode_reward)
-        return np.mean(total_rewards)
+        return torch.mean(total_rewards)
 
     def evolve(self):
         """Run evolutionary training loop"""
@@ -269,7 +268,7 @@ class EvolutionaryTrainer:
             # Create next generation
             new_pop = []
             while len(new_pop) < self.pop_size:
-                parent = np.random.choice(elite)
+                parent = torch.choice(elite)
                 child_config = self._mutate(parent.config)
                 new_pop.append(DQNAgent(self.state_dim, self.action_dim, child_config))
             
@@ -312,7 +311,7 @@ class UnifiedDQNAgent:
                 episode_reward += reward
                 state = next_state
             total_rewards.append(episode_reward)
-        return np.mean(total_rewards)
+        return torch.mean(total_rewards)
 
     def train(self, episodes=1000, validation_freq=50, validation_episodes=5,
               checkpoint_dir='checkpoints', early_stop_patience=20, target_reward=None):
@@ -325,7 +324,7 @@ class UnifiedDQNAgent:
             episode_rewards = []
             episode_losses = []
             episode_lengths = []
-            best_val_reward = -np.inf
+            best_val_reward = -torch.inf
             early_stop_counter = 0
             os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -350,14 +349,14 @@ class UnifiedDQNAgent:
                     steps += 1
 
                 # Episode statistics
-                avg_loss = np.mean(losses) if losses else 0
+                avg_loss = torch.mean(losses) if losses else 0
                 episode_rewards.append(total_reward)
                 episode_losses.append(avg_loss)
                 episode_lengths.append(steps)
 
                 # Calculate moving averages
-                avg_reward_10 = np.mean(episode_rewards[-10:]) if len(episode_rewards) >= 10 else total_reward
-                avg_loss_10 = np.mean(episode_losses[-10:]) if len(episode_losses) >= 10 else avg_loss
+                avg_reward_10 = torch.mean(episode_rewards[-10:]) if len(episode_rewards) >= 10 else total_reward
+                avg_loss_10 = torch.mean(episode_losses[-10:]) if len(episode_losses) >= 10 else avg_loss
 
                 print(f"Episode {ep+1}/{episodes} | "
                       f"Reward: {total_reward:.1f} (Avg10: {avg_reward_10:.1f}) | "
@@ -399,12 +398,12 @@ class UnifiedDQNAgent:
     def save(self, path):
         """Save policy network weights"""
         weights = self.agent.policy_net.get_weights()
-        np.savez(path, *weights)
+        torch.savez(path, *weights)
         print(f"Model saved to {path}")
 
     def load(self, path):
         """Load policy network weights"""
-        with np.load(path) as data:
+        with torch.load(path) as data:
             weights = [data[f'arr_{i}'] for i in range(len(data.files))]
         self.agent.policy_net.set_weights(weights)
         print(f"Model loaded from {path}")
@@ -418,10 +417,10 @@ if __name__ == "__main__":
     # Example environment setup
     class MockEnv:
         def reset(self):
-            return np.random.randn(4)
+            return torch.randn(4)
         
         def step(self, action):
-            return np.random.randn(4), np.random.rand(), random.choice([True, False]), {}
+            return torch.randn(4), torch.rand(), random.choice([True, False]), {}
     
     # Initialize agent
     agent = UnifiedDQNAgent(mode='standard',
