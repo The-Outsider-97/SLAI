@@ -27,7 +27,6 @@ from src.utils.system_optimizer import SystemOptimizer
 from models.music.music_editor import MusicEditor
 from models.training.language_editor import LanguageEditor
 from models.musician import Musician
-from models.auditor import IdleAuditManager
 from frontend.utils.text_editor import TextEditor
 # from frontend.utils.audio_editor import AudioEditor
 # from frontend.utils.visual_editor import VisualEditor
@@ -166,7 +165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.error_count = 0
         self.risk_trigger_count = 0
         self.safe_ai_count = 0
-        shared_resources = {"log_path": "logs/", "memory_limit": 1000, "shared_memory": self.shared_memory, "agent_factory": self.factory}
+        shared_resources = {"log_path": "logs/", "memory_limit": 1000}
         optimizer = SystemOptimizer()
         self.agent = self.collaborative_agent
         self.setWindowTitle("SLAI Launcher")
@@ -787,10 +786,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.collaborative_agent = CollaborativeAgent(
                 shared_memory=self.shared_memory,
                 agent_factory=self.agent_factory,
-                agent_network=self.agent_factory.registry,
+                agent_network={},
                 config_path="config.yaml"
             )
 
+            from models.auditor import IdleAuditManager
             from src.agents.evaluation_agent import EvaluationAgent
 
             self.evaluation_agent = EvaluationAgent(
@@ -897,7 +897,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Connect editor's tempoChanged signal to musician's slot
                 self.music_editor.tempoChanged.connect(self.current_musician_model.handle_tempo_change)
                 # Add connections for other signals here
-                self.music_editor.keyChanged.connect(self.current_musician_model.handle_key_change)
+                # e.g., self.music_editor.keyChanged.connect(self.current_musician_model.handle_key_change)
                 print("Connections established.")
                 self.post_to_output_area("Connections established.", "Musician Model")
             else:
@@ -905,7 +905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.post_to_output_area("Connecting MusicEditor signals to Musician slots...", "Musician Model")
                 logger.warning("MusicEditor or Musician model not available for connection.")
 
-            from models.music.music_setup_dialog import MusicianSetupDialog
+            from models.music.musician_setup_dialog import MusicianSetupDialog
             setup_dialog = MusicianSetupDialog(self)
             if setup_dialog.exec_() == QDialog.Accepted:
                 level, instrument = setup_dialog.get_choices()
