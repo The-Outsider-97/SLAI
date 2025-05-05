@@ -7,12 +7,10 @@ Implements:
 """
 
 import re
-import os, sys
 import logging
 import torch
 import time as timedelta
 import datetime
-import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
@@ -26,8 +24,9 @@ from src.agents.safety_agent import SafeAI_Agent
 from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
 from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
 from models.slai_lm import SLAILMValueModel, get_shared_slailm
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("Alignment Agent")
 logger.setLevel(logging.INFO)
 
 @dataclass
@@ -299,8 +298,8 @@ class AlignmentAgent(BaseAgent):
 
     def align(self, 
              data: pd.DataFrame,
-             predictions: np.ndarray,
-             labels: Optional[np.ndarray] = None) -> Dict:
+             predictions: torch.Tensor,
+             labels: Optional[torch.Tensor] = None) -> Dict:
         """
         Full alignment check pipeline with:
         - Real-time monitoring
@@ -510,7 +509,7 @@ class AlignmentAgent(BaseAgent):
         for dimension, params in adjustments.get('risk_parameters', {}).items():
             current = self.risk_table.get(dimension, self.risk_threshold)
             new_value = current * params['adjustment_factor']
-            self.risk_table[dimension] = np.clip(
+            self.risk_table[dimension] = torch.clip(
                 new_value, 
                 params['min_value'], 
                 params['max_value']
@@ -538,19 +537,19 @@ class AlignmentAgent(BaseAgent):
         self._enable_defensive_mechanisms()
         self._initiate_system_diagnostics()
 
-    def _vectorize_report(self, report: Dict) -> np.ndarray:
+    def _vectorize_report(self, report: Dict) -> torch.Tensor:
         """Convert alignment report to numerical vector"""
-        return np.array([
+        return torch.Tensor([
             report['fairness'].get('statistical_parity', {}).get('value', 0),
             report['fairness'].get('equal_opportunity', {}).get('value', 0),
             len(report.get('ethical_violations', []))
         ])
 
-    def _get_ideal_state_vector(self) -> np.ndarray:
+    def _get_ideal_state_vector(self) -> torch.Tensor:
         """Get target alignment state from constitutional rules"""
-        return np.array([0.0, 0.0, 0.0])  # Perfect fairness, no violations
+        return torch.Tensor([0.0, 0.0, 0.0])  # Perfect fairness, no violations
 
-    def _calculate_temporal_risk(self, current_state: np.ndarray) -> float:
+    def _calculate_temporal_risk(self, current_state: torch.Tensor) -> float:
         """Calculate risk from temporal patterns in alignment metrics"""
         if len(self.memory.fairness_records) > 10:
             window = self.memory.fairness_records.iloc[-10:]['value']
