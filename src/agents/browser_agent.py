@@ -2,7 +2,7 @@ import os
 import time
 import random
 # import pytesseract
-import numpy as np
+import torch
 
 from PIL import Image
 from selenium import webdriver
@@ -11,15 +11,15 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
+from src.agents.browser.functions.do_click import DoClick
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.language_agent import LanguageAgent, DialogueContext
 from src.agents.learning_agent import LearningAgent
-from src.agents.base_agent import BaseAgent
 from src.agents.browser.security import SecurityFeatures, exponential_backoff
 from src.agents.browser.workflow import WorkFlow
 from src.agents.browser.utils import Utility
+from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
-
 logger = get_logger("Browser")
 
 # --------------------------
@@ -46,6 +46,7 @@ class BrowserAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.driver = self._init_browser()
+        self.do_click_helper = DoClick(self.driver)
         self.robots_parser = RobotExclusionRulesParser()
 
         # Initialize integrated agents
@@ -99,9 +100,13 @@ class BrowserAgent(BaseAgent):
     def do_scroll(self, pixels):
         self.driver.execute_script(f"window.scrollBy(0, {pixels});")
     
-    def do_click(self, selector):
-        element = self.driver.find_element(By.CSS_SELECTOR, selector)
-        ActionChains(self.driver).click(element).perform()
+    def do_click(self, selector, wait_before_execution=0.0):
+        result = self.do_click_helper._perform_click(selector, wait_before_execution)
+        if result["status"] != "success":
+            self.logger.error(f"Click failed: {result['message']}")
+        else:
+            self.logger.info(f"Click succeeded: {result['message']}")
+        return result
 
     def _init_browser(self):
         options = webdriver.ChromeOptions()
