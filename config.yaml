@@ -1,6 +1,6 @@
 model:
   name: SLAI-Agent
-  version: v1.6.2
+  version: v1.8
 
 run:
   id_prefix: "run"
@@ -34,19 +34,20 @@ agent-network:
     class: AdaptiveAgent
     path: src.agents.adaptive_agent
     init_args:
-      state_dim: 10
-      num_actions: 2
-      learning_rate: 0.02
-      exploration_rate: 0.2
-      memory_capacity: 500
-      episodic_capacity: 1000
-      replay_capacity: 100000
-      priority_alpha: 0.6
-      experience_staleness_days: 7
-      per_beta: 0.4
-      risk_threshold: 0.7
-      semantic_decay_rate: 0.95    # <-- For decay-based forgetting
-      min_memory_strength: 0.1
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+      config:
+        state_dim: 10
+        num_actions: 2
+        risk_threshold: 0.7
+        replay_capacity: 100000
+        priority_alpha: 0.6
+        experience_staleness_days: 7
+        per_beta: 0.4
+      learning_params:
+        learning_rate: 0.02
+        exploration_rate: 0.2
+        discount_factor: 0.95
     requires: [shared_memory]  
 
   alignment:
@@ -54,30 +55,60 @@ agent-network:
     class: AlignmentAgent
     path: src.agents.alignment_agent
     init_args:
-      value_model: {}
-      ethics: {}
-      memory: {}
-      corrections: {}
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
       sensitive_attrs: ["age", "gender"]
-      monitor:
-        fairness_metrics:
-          - demographic_parity
-          - equal_opportunity
-          - predictive_equality
-        ethical_rules:
-          privacy:
-            - "No sharing of personally identifiable information (PII)"
-          fairness:
-            - "Avoid bias towards protected attributes like gender or race"
-          transparency:
-            - "Explain decisions if confidence is low"
-        drift_threshold: 0.15
-        audit_frequency: 1000
-        adaptive_weights:
-          fairness: 0.4
-          ethics: 0.3
-          safety: 0.3
-    requires: [shared_memory]
+      config:
+        memory:
+          replay_buffer_size: 10000
+          causal_window: 1000
+          drift_threshold: 0.25
+          retention_period: 365
+        ethics:
+          constraints:
+            - "Do not generate discriminatory content"
+            - "Uphold user dignity and agency"
+            - "Avoid promoting misinformation"
+            - "Respect user privacy and autonomy"
+        value_model:
+          embedding_dim: 128
+          similarity_threshold: 0.85
+          use_contextual_embedding: true
+          weights:
+            helpfulness: 0.6
+            harmlessness: 0.2
+            honesty: 0.2
+        corrections:
+          levels:
+            - threshold: 0.1
+              action: log_warning
+            - threshold: 0.2
+              action: adjust_reward
+            - threshold: 0.3
+              action: human_intervention
+            - threshold: 0.5
+              action: agent_suspension
+          learning_rate: 0.01
+          momentum: 0.9
+        monitor:
+          fairness_metrics:
+            - demographic_parity
+            - equal_opportunity
+            - predictive_equality
+          ethical_rules:
+            privacy:
+              - "No sharing of personally identifiable information (PII)"
+            fairness:
+              - "Avoid bias towards protected attributes like gender or race"
+            transparency:
+              - "Explain decisions if confidence is low"
+          drift_threshold: 0.15
+          audit_frequency: 1000
+          adaptive_weights:
+            fairness: 0.4
+            ethics: 0.3
+            safety: 0.3
+      requires: [shared_memory]
 
   browser:
     inherits: base
@@ -91,6 +122,8 @@ agent-network:
       - action: "wait"
         params: {seconds: 2}
     init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
       headless: true
       user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
       captcha_strategy: "auto-retry"
@@ -113,16 +146,28 @@ agent-network:
     class: ExecutionAgent
     path: src.agents.execution_agent
     init_args:
-      browser_integration: "enhanced"  # [basic|enhanced|full]
-      browser_agent: "browser"
-      fallback_to_direct: true
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+      config:
+        timeout: 10
+        user_agent: "EnhancedExecutionAgent/2.0"
+        cache_dir: "cache/execution"
+        max_retries: 3
+        rate_limit: 5
+        cookie_policy: "accept_all"
+        browser_integration: "enhanced"
+        browser_agent: "browser"
+        browser_timeout: 30
+        fallback_to_direct: true
     requires: [browser, safety]
+
 
   language:
     inherits: base  
     class: LanguageAgent
     path: src.agents.language_agent
     init_args:
+      shared_memory: ${shared_memory}
       agent_factory: ${agent_factory}
       grammar: ${grammar}
       context:
@@ -153,11 +198,16 @@ agent-network:
     class: LearningAgent
     path: src.agents.learning_agent
     init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
       algorithm: dqn
       state_dim: 4
       action_dim: 2
       hidden_size: 128
     dqn:
+      typw: dqn
+      class: DQNAgent
+      path: src.agents.learning.dqn
       learning_rate: 0.001
       buffer_size: 10000
       batch_size: 64
@@ -199,21 +249,29 @@ agent-network:
     inherits: base
     class: KnowledgeAgent
     path: src.agents.knowledge_agent
-    init_args: {}
-    cache_size: 1500
-    similarity_threshold: 0.25
-    ontology:
-      max_depth: 3
-      inherit_types: true
-    rules:
-      apply_during_retrieval: true
-    requires: [shared_memory]
+    init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+      config:
+        cache_size: 1500
+        similarity_threshold: 0.25
+        ontology:
+          max_depth: 3
+          inherit_types: true
+        rules:
+          apply_during_retrieval: true
+      language_agent: ${language_agent}
+      knowledge_agent_dir: "data/knowledge_base"
+      persist_file: "data/knowledge_cache.json"
+
 
   safety:
     inherits: base
     class: SafeAI_Agent
     path: src.agents.safety_agent
     init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
       constitutional_rules:
         general: ["Do no harm", "Respect autonomy"]
         data: ["Avoid PII leakage"]
@@ -230,6 +288,8 @@ agent-network:
     class: PerceptionAgent
     path: src.agents.perception_agent
     init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
       modalities:
         - vision
         - text
@@ -245,44 +305,55 @@ agent-network:
     inherits: base
     class: PlanningAgent
     path: src.agents.planning_agent
-    init_args: {}
+    init_args:
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
 
   reasoning:
     inherits: base
     class: ReasoningAgent
     path: src.agents.reasoning_agent
     init_args:
-      tuple_key: "subject|predicate|object"
-      storage_path: "src/agents/knowledge/knowledge_db.json"
-      contradiction_threshold: 0.25       # Threshold for conflict detection
-      rule_validation: 
-        enable: true
-        min_soundness_score: 0.7          # Minimum logical validity score
-        max_circular_depth: 3             # Max allowed dependency depth
-      nlp_integration:
-        spacy_model: "en_core_web_lg"     # Replace regex parsing
-        sentence_transformer: "all-MiniLM-L6-v2" # For semantic similarity
-      serialization:
-        persist_nlp_state: true           # Save word vectors/entity recognition
-        compress_knowledge: true
-      inference:
-        default_chain_length: 5           # For multi-hop reasoning
-        neuro_symbolic_weight: 0.4        # Balance between symbolic/neural
-      limits:
-        max_rules: 200                    # Prevent rule explosion
-        max_hypotheses: 100               # Control graph traversal
-      fallback:
-        enable_llm_fallback: true         # Integrate with LanguageAgent
-        llm_temperature: 0.3
-    requires: [shared_memory]
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+      tuple_key: ["subject", "predicate", "object"]
+      config:
+        storage_path: "src/agents/knowledge/knowledge_db.json"
+        contradiction_threshold: 0.25
+        rule_validation:
+          enable: true
+          min_soundness_score: 0.7
+          max_circular_depth: 3
+        nlp_integration:
+          spacy_model: "en_core_web_lg"
+          sentence_transformer: "all-MiniLM-L6-v2"
+        inference:
+          default_chain_length: 5
+          neuro_symbolic_weight: 0.4
+          max_hypotheses: 100
+          exploration_rate: 0.1
+          llm_fallback:
+            enable: true
+            temperature: 0.3
+            max_tokens: 100
+      llm: ${slai_lm}
+      language_agent: ${language_agent}
+    requires: [shared_memory, slai_lm, language_agent]
 
   base:
     abstract: true
     class: BaseAgent
     path: src.agents.base_agent
     init_args:
-      logging_level: INFO
-      max_retries: 3
+      shared_memory: ${shared_memory}
+      agent_factory: ${agent_factory}
+      config:
+        logging_level: INFO
+        max_retries: 3
+        checkpoint_dir: "models/checkpoints/"
+        enable_metrics: true
+        timeout_seconds: 60
+
 
 training:
   num_samples: 500
