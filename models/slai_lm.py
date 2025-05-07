@@ -9,6 +9,7 @@ import json
 import time
 import torch
 import hashlib
+import threading
 import regex as re
 import pandas as pd
 import torch.nn as nn
@@ -43,11 +44,31 @@ BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
 BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
 
 shared_slailm = None
+slailm_init_lock = threading.Lock()
 
-def get_shared_slailm(shared_memory, agent_factory=None):
+def get_shared_slailm(shared_memory, shared_tokenizer, shared_text_encoder, agent_factory=None):
+    """
+    Gets or initializes the shared SLAILM instance, ensuring it uses
+    pre-initialized tokenizer and encoder.
+    """
     global shared_slailm
     if shared_slailm is None:
-        shared_slailm = SLAILM(shared_memory, agent_factory=agent_factory)
+        with slailm_init_lock: # Acquire lock before the second check and potential creation
+            if shared_slailm is None: # Double-check locking pattern
+                logger.info("Initializing shared SLAILM instance...")
+                if shared_tokenizer is None or shared_text_encoder is None:
+                     raise ValueError("Shared tokenizer and text encoder must be provided.")
+
+                shared_slailm = SLAILM(
+                    shared_memory,
+                    agent_factory=agent_factory,
+                    tokenizer=shared_tokenizer,
+                    text_encoder=shared_text_encoder
+                # Add other necessary args from config or defaults if needed
+                )
+                logger.info("Shared SLAILM instance created.")
+            else:
+                logger.debug("Returning existing shared SLAILM instance.")
     return shared_slailm
 
 class AttentionBlock(torch.nn.Module):
@@ -100,8 +121,8 @@ class SLAILM:
     Self-Contained Language and Interaction Logic Module that aims to minimize external dependencies, relying on
     custom GrammarProcessor, wordlists, and context management.
     """
-    def __init__(self, shared_memory,
-                 agent_factory=None,
+    def __init__(self, shared_memory, tokenizer=None,
+                 agent_factory=None, text_encoder=None,
                  structured_wordlist_path=STRUCTURED_WORDLIST_PATH,
                  simple_wordlist_path=SIMPLE_WORDLIST_PATH,
                  grammar_rules_path: Optional[Union[str, Path]] = None,
@@ -150,30 +171,36 @@ class SLAILM:
         self.checkpoint_manager = CheckpointManager(base_dir="models/checkpoints")
         self.value_model = SLAILMValueModel(self, memory=self.alignment_memory)
 
-        self.tokenizer = Tokenizer(
-            bpe_vocab_path=BPE_VOCAB_PATH,
-            bpe_merges_path=BPE_MODEL_PATH,
-            max_length=512
-        )
+        self.tokenizer = tokenizer
+        if self.tokenizer is None:
+            self.logger.warning("No shared tokenizer provided to SLAILM, initializing a new one. THIS MAY CAUSE MULTIPLE INITIALIZATIONS.")
+            self.tokenizer = Tokenizer()
 
         # INIT TEXT ENCODER WITH REQUIRED ARGUMENTS (MATCHING TextEncoder)
-        self.text_encoder = TextEncoder(
-            vocab_size=self.tokenizer.vocab_size,  # or len(self.tokenizer.word_to_id)
-            embed_dim=200,
-            num_layers=6,
-            num_heads=8,
-            ff_dim=2048,
-            num_styles=14,
-            dropout_rate=0.1,
-            positional_encoding='learned',
-            max_length=512,
-            device=self.device,
-            tokenizer=self.tokenizer
-        )
-        
-        # LOAD EMBEDDINGS
-        # self.text_encoder.load_glove_embeddings(EMBEDDING_PATH, list(self.structured_wordlist.keys()))
-        
+        self.text_encoder = text_encoder
+        if self.text_encoder is None:
+            self.logger.warning("No shared text encoder provided to SLAILM, initializing a new one. THIS MAY CAUSE MULTIPLE INITIALIZATIONS.")
+            encoder_config = custom_config.get('text_encoder', {}) # Or load specific config
+            self.text_encoder = TextEncoder(
+                vocab_size=self.tokenizer.vocab_size,
+                embed_dim=encoder_config.get('embed_dim', 200),
+                num_layers=encoder_config.get('num_layers', 6),
+                num_heads=encoder_config.get('num_heads', 8),
+                ff_dim=encoder_config.get('ff_dim', 2048),
+                num_styles=encoder_config.get('num_styles', 14),
+                dropout_rate=encoder_config.get('dropout_rate', 0.1),
+                positional_encoding=encoder_config.get('positional_encoding', 'sinusoidal'),
+                max_length=encoder_config.get('max_length', 512),
+                device=self.device,
+                tokenizer=self.tokenizer
+            )
+
+        # Log which instances are being used
+        if tokenizer:
+             self.logger.info("SLAILM using provided shared tokenizer.")
+        if text_encoder:
+             self.logger.info("SLAILM using provided shared text encoder.")
+
         self._knowledge_agent = None
         if knowledge_agent_instance:
             self.knowledge = knowledge_agent_instance
@@ -212,6 +239,8 @@ class SLAILM:
         # Dialogue Context
         if dialogue_context_instance:
             self.dialogue_context = dialogue_context_instance
+            if hasattr(self.dialogue_context, 'encoder') and self.dialogue_context.encoder is None:
+                self.dialogue_context.encoder = self.text_encoder
             logger.info("Using provided DialogueContext instance.")
         else:
             # Initialize DialogueContext, passing config
