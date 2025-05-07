@@ -16,7 +16,7 @@ from profiling_utils import memory_profile, time_profile, start_memory_tracing, 
 from src.agents.language.grammar_processor import GrammarProcessor
 #from src.agents.language.resource_loader import ResourceLoader
 #from src.agents.adaptive_agent import AdaptiveAgent
-from src.agents.alignment_agent import AlignmentAgent
+from src.agents.alignment_agent import AlignmentAgent, CorrectionPolicy
 #from src.agents.evaluation_agent import EvaluationAgent
 #from src.agents.execution_agent import ExecutionAgent
 #from src.agents.knowledge_agent import KnowledgeAgent
@@ -26,9 +26,11 @@ from src.agents.language_agent import DialogueContext#, LanguageAgent
 #from src.agents.perception_agent import PerceptionAgent
 #from src.agents.planning_agent import PlanningAgent
 #from src.agents.reasoning_agent import ReasoningAgent
-#from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
+from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
 from src.agents.perception.encoders.audio_encoder import AudioEncoder
 from src.agents.perception.encoders.vision_encoder import VisionEncoder
+from src.agents.perception.encoders.text_encoder import TextEncoder
+from src.agents.perception.modules.tokenizer import Tokenizer
 #from models.slai_lm_registry import SLAILMManager
 from logs.logger import get_logger
 
@@ -44,19 +46,51 @@ class AgentMetaData:
         self.required_params = required_params
 
 class AgentFactory:
-    def __init__(self, config: Dict, shared_resources: Dict):
+    def __init__(self, config, shared_resources):
         self.config = config
         self.shared_resources = {
             **shared_resources,
             "shared_memory": shared_resources.get("shared_memory"),
             "agent_factory": self
-            }
+        }
         self.registry = {}
         self.instance_cache = {}
         self.lock = threading.RLock()
-        
-        # Pre-register core agent types with lazy loading
+        self.tokenizer = self.shared_resources.get('tokenizer') #Add this
+        self.text_encoder = self.shared_resources.get('text_encoder')
+
+        # === Initialize shared tokenizer + text encoder once ===
+        self.shared_tokenizer = Tokenizer()
+        self.shared_text_encoder = TextEncoder(
+            vocab_size=self.shared_tokenizer.vocab_size,
+            embed_dim=200,
+            num_layers=6,
+            num_heads=8,
+            ff_dim=2048,
+            num_styles=14,
+            dropout_rate=0.1,
+            positional_encoding="sinusoidal",
+            max_length=512,
+            device='cpu',
+            tokenizer=self.shared_tokenizer
+        )
+
         self._register_core_agents(config.get('agent-network', {}))
+
+    def _initialize_shared_resources(self):
+        shared_resources_config = self.config.get('shared_resources', {})
+        for name, resource_config in shared_resources_config.items():
+            module_path = resource_config.get('path')
+            class_name = resource_config.get('class')
+            init_args = resource_config.get('init_args', {})
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name)
+            resource = cls(**init_args)
+            self.shared_resources[name] = resource
+            if name == 'tokenizer': #Add this
+                self.shared_resources['tokenizer'] = resource #Add this
+            if name == 'text_encoder': #Add this
+                self.shared_resources['text_encoder'] = resource #Add this
 
     def _register_core_agents(self, agent_network: Dict):
         """Register agents from config with deferred initialization"""
@@ -86,85 +120,188 @@ class AgentFactory:
             return agent
     
     @contextmanager
-    def _get_agent_context(self, agent_name: str):
+    def _get_agent_context(self, agent_name):
         """Thread-safe context manager for agent access"""
         with self.lock:
             if agent_name not in self.instance_cache:
                 self._initialize_agent(agent_name)
             yield self.instance_cache[agent_name]
     
-    def _initialize_agent(self, agent_name: str):
+    def _initialize_agent(self, agent_name):
         from models.slai_lm import get_shared_slailm
-        """Lazy initialization with dependency resolution"""
-        agent_info = self.registry[agent_name]
-        dependencies = {
-            dep: self.instance_cache[dep]
-            for dep in agent_info['dependencies']
-        }
-    
-        # Import the actual class object
-        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
-    
-        # Safely inspect its __init__ parameters
-        init_params = cls.__init__.__code__.co_varnames
+        from src.agents.language.grammar_processor import GrammarProcessor
+        from src.agents.alignment_agent import AlignmentAgent
+        from src.agents.safety_agent import SafetyAgentConfig
 
-        if agent_name == "safety":
-            filtered_config = {
-                k: v for k, v in agent_info['config'].items()
-                if k in init_params
-            }
-            # Convert config dict to SafetyAgentConfig dataclass
-            from src.agents.safety_agent import SafetyAgentConfig
-            safety_config = SafetyAgentConfig(**filtered_config)
-            agent_instance = cls(
-                agent_factory=self,
-                alignment_agent_cls=AlignmentAgent,  # Pass the class
-                config=safety_config,
-                **dependencies,
-                **self.shared_resources
-            )
+        agent_info = self.registry[agent_name]
+        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
+        dependencies = {dep: self.instance_cache[dep] for dep in agent_info['dependencies']}
+        config = agent_info.get('config', {})
+        init_params = inspect.signature(cls.__init__).parameters
+
+        general_args = {}
+        if 'shared_memory' in init_params:
+            general_args['shared_memory'] = self.shared_resources['shared_memory']
+        if 'agent_factory' in init_params:
+            general_args['agent_factory'] = self
+        if 'tokenizer' in init_params:
+             general_args['tokenizer'] = self.shared_tokenizer
+        if 'text_encoder' in init_params:
+             general_args['text_encoder'] = self.shared_text_encoder
     
         if agent_name == "language":
-            from src.agents.perception.encoders.text_encoder import TextEncoder
-
-            text_encoder = TextEncoder(
-                vocab_size=50016,          # e.g., BERT-size vocab or your own
-                embed_dim=200,             # embedding size
-                num_layers=6,             # transformer layers
-                num_heads=8,              # attention heads
-                ff_dim=2048,               # feedforward dim
-                num_styles=14,              # however many styles you use
-                dropout_rate=0.1,
-                positional_encoding="sinusoidal",
-                max_length=512,
-                device='cpu'               # or 'cuda' if available
+            shared_slailm_instance = get_shared_slailm(
+                self.shared_resources['shared_memory'],
+                shared_tokenizer=self.shared_tokenizer,
+                shared_text_encoder=self.shared_text_encoder,
+                agent_factory=self
             )
-
-            filtered_config = {
-                k: v for k, v in agent_info['config'].items()
-                if k in init_params
-            }
+            dialogue_context = DialogueContext(
+                llm=shared_slailm_instance,
+                history=[],
+                summary=None,
+                memory_limit=1000,
+                enable_summarization=True,
+                encoder=self.shared_text_encoder
+            )
             agent_instance = cls(
-                agent_factory=self,
                 grammar=GrammarProcessor(),
-                context=DialogueContext(encoder=text_encoder),
-                slai_lm=get_shared_slailm(self.shared_resources['memory'], self),
-                **filtered_config,
-                **dependencies,
-                **self.shared_resources
+                dialogue_context=dialogue_context,
+                slai_lm=shared_slailm_instance,
+                context=self,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "knowledge":
+            language_agent = self.get('language')
+            agent_instance = cls(
+                language_agent=language_agent,
+                knowledge_agent_dir="data/knowledge_base",
+                persist_file="data/knowledge_cache.json",
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "safety":
+            safety_config = SafetyAgentConfig(**config)
+            agent_instance = cls(
+                alignment_agent_cls=AlignmentAgent,
+                config=safety_config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "reasoning":
+            language_agent = self.get('language')
+            shared_slailm_instance = get_shared_slailm(
+                self.shared_resources['shared_memory'],
+                shared_tokenizer=self.shared_tokenizer,
+                shared_text_encoder=self.shared_text_encoder,
+                agent_factory=self
+            )
+            agent_instance = cls(
+                language_agent=language_agent,
+                llm=shared_slailm_instance,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "perception":
+            audio_encoder = self._init_audio_encoder(config)
+            agent_instance = cls(
+                audio_encoder=audio_encoder,
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                shared_memory=self.shared_resources['shared_memory'],
+                agent_factory=self,
+                **dependencies
+            )
+        elif agent_name == "planning":
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "execution":
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "browser":
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "adaptive":
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "alignment":
+            from src.agents.alignment.alignment_monitor import MonitorConfig
+            safe_agent_instance = self.get('safety')
+            monitor_conf = MonitorConfig(**config.get('monitor', {}))
+            correction_pol = CorrectionPolicy(**config.get('corrections', {}))
+            
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                monitor_config=monitor_conf,
+                correction_policy=correction_pol,
+                safe_agent=safe_agent_instance,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "evaluation":
+            agent_instance = cls(
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **general_args,
+                **dependencies
+            )
+        elif agent_name == "learning":
+            slai_lm = self.get('language').slai_lm if self.get('language') else None
+            safety_agent = self.get('safety')
+            env = self._init_environment(config.get('env_name', 'CartPole-v1'))
+            agent_instance = cls(
+                shared_memory=self.shared_resources['shared_memory'],
+                agent_factory=self,
+                slai_lm=slai_lm,
+                safety_agent=safety_agent,
+                env=env,
+                text_encoder=self.shared_text_encoder,
+                tokenizer=self.shared_tokenizer,
+                config=config,
+                **dependencies
             )
         else:
-            filtered_config = {
-                k: v for k, v in agent_info['config'].items()
-                if k in init_params
-            }
             agent_instance = cls(
-                **filtered_config,
-                **dependencies,
-                **self.shared_resources
+                config=config,
+                **general_args,
+                **dependencies
             )
     
         self.instance_cache[agent_name] = agent_instance
+
+    def _init_environment(self, env_name: str):
+        import gymnasium as gym
+        return gym.make(env_name)
 
     def create(self, agent_name: str, config: Dict = None):
         agent_info = self.registry[agent_name]
@@ -177,7 +314,7 @@ class AgentFactory:
         }
         
         # Merge configurations
-        init_args = agent_info.get('init_args', {})
+        init_args = agent_info.get('init_args', {}).copy()
         if config and 'init_args' in config:
             init_args.update(config['init_args'])
         
@@ -187,7 +324,11 @@ class AgentFactory:
         # Automatically inject required base parameters
         final_args = {}
         for param in init_params:
-            if param in base_params:
+            if param == 'config':
+                final_args['config'] = config or {}
+            elif param == 'audio_encoder' and agent_name == "perception":
+                final_args['audio_encoder'] = self._init_audio_encoder(config or {})
+            elif param in base_params:
                 final_args[param] = base_params[param]
             elif param in init_args:
                 final_args[param] = init_args[param]
