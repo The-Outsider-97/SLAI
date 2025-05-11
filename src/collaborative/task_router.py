@@ -1,5 +1,8 @@
 import torch.nn as nn
 import time
+import uuid
+import numpy as np
+from collections import deque
 
 from logs.logger import get_logger
 
@@ -14,15 +17,22 @@ logger = get_logger("SLAI.TaskRouter")
 class AdaptiveRouter:
     def __init__(self, config):
         from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-        self.scheduler = DeadlineAwareScheduler(
+        from src.agents.alignment.alignment_monitor import AlignmentMonitor
+        self.task_scheduler = DeadlineAwareScheduler(
             config['risk_threshold'],
             config['retry_policy']
+        )
+        # Add sensitive_attributes to config and pass to AlignmentMonitor
+        self.alignment_monitor = AlignmentMonitor(
+            sensitive_attributes=config.get('sensitive_attributes', ['age', 'gender']),
+            config=config.get('alignment_config', {})
         )
         self.policy = nn.Sequential(
             nn.Linear(config['state_dim'], 64),
             nn.ReLU(),
             nn.Linear(64, config['num_handlers'])
         )
+        self.experience_buffer = deque(maxlen=1000)
 
     def route_message(self, message, routing_table: dict):
         """Enhanced routing with task scheduling"""
@@ -55,16 +65,65 @@ class AdaptiveRouter:
         
         return handler_id
 
+    def _calculate_routing_reward(self, message, handler_id):
+        """Calculate reward based on agent performance and task risk."""
+        agents = self.agent_factory.get_available_agents()
+        agent_details = agents.get(handler_id, {})
+        
+        # Get agent metrics
+        successes = agent_details.get("successes", 1)
+        failures = agent_details.get("failures", 0)
+        success_rate = successes / (successes + failures + 1e-6)  # Avoid division by zero
+        current_load = agent_details.get("current_load", 0)
+        load_penalty = current_load * 0.3  # Penalize busy agents
+        
+        # Get task risk
+        task_risk = message.get('risk_score', 0.5)
+        
+        # Combine factors
+        reward = success_rate - load_penalty - (task_risk * 0.2)
+        return reward
+
+    def _store_experience(self, message, handler_id, reward):
+        """Store routing experience for policy training."""
+        state = self._message_to_state(message)
+        self.experience_buffer.append({
+            'state': state,
+            'action': handler_id,
+            'reward': reward
+        })
+        logger.debug(f"Stored experience: {self.experience_buffer[-1]}")
+
+    def _message_to_state(self, message):
+        """Convert message to a state vector for the policy network."""
+        task = self._message_to_task(message)
+        return np.array([
+            task['deadline'] - time.time(),  # Time remaining
+            task['risk_score'],              # Task risk
+            len(task['requirements'])        # Complexity
+        ], dtype=np.float32)
+
     def _message_to_task(self, message):
         """Convert message to scheduler task format"""
         return {
-            'id': message.get('message_id', hash(message)),
+            'id': message.get('message_id', str(uuid.uuid4())),
             'requirements': self._extract_requirements(message),
             'deadline': time.time() + message.get('ttl', 60),
             'risk_score': self.alignment_monitor.assess_risk(message).get('risk_score', 0.5),
             'metadata': message.get('metadata', {})
         }
 
+    def _extract_requirements(self, message):
+        """Extract task requirements from message content"""
+        content = message.get('content', '').lower()
+        requirements = []
+        if 'translate' in content:
+            requirements.append('Translate')
+        if 'summarize' in content:
+            requirements.append('Summarize')
+        if 'analyze' in content:
+            requirements.append('Analyze')
+        return requirements
 
 class TaskRouter:
     FALLBACK_PLANS = {
@@ -160,3 +219,67 @@ class TaskRouter:
         entry = stats.setdefault(agent_name, {"successes": 0, "failures": 0, "priority": 0})
         entry["failures"] += 1
         self.shared_memory.put("agent_stats", stats)
+
+if __name__ == "__main__":
+    # Mock configuration
+    config = {
+        'risk_threshold': 0.7,
+        'retry_policy': {'max_attempts': 3, 'backoff_factor': 1.5},
+        'state_dim': 3,
+        'num_handlers': 2,
+        'sensitive_attributes': ['age', 'gender']
+    }
+
+    # Mock agent factory with test agents
+    class MockAgentFactory:
+        def get_available_agents(self):
+            return {
+                'translator_agent': {
+                    'capabilities': ['Translate'],
+                    'current_load': 0.2,
+                    'successes': 15,
+                    'failures': 1
+                },
+                'analyzer_agent': {
+                    'capabilities': ['Analyze'],
+                    'current_load': 0.5,
+                    'successes': 10,
+                    'failures': 3
+                }
+            }
+    
+    # Initialize router with mocked dependencies
+    router = AdaptiveRouter(config)
+    router.agent_factory = MockAgentFactory()
+    
+    # Test messages
+    messages = [
+        {   # Low-risk translation task
+            'message_id': 'test_1',
+            'content': 'Translate "Hello World" to French',
+            'ttl': 30,
+            'metadata': {'priority': 2},
+            'risk_score': 0.3
+        },
+        {   # High-risk analysis task
+            'message_id': 'test_2',
+            'content': 'Analyze sales data',
+            'ttl': 60,
+            'metadata': {'priority': 1},
+            'risk_score': 0.8
+        }
+    ]
+    
+    # Test routing
+    for idx, msg in enumerate(messages, 1):
+        print(f"\nRouting Message {idx}:")
+        try:
+            handler = router.route_message(msg, routing_table={})
+            print(f"Assigned Handler: {handler}")
+        except Exception as e:
+            print(f"Routing failed: {str(e)}")
+    
+    # Inspect experience buffer
+    print("\nExperience Buffer Contents:")
+    for exp in router.experience_buffer:
+        print(f"State: {exp['state']}, Action: {exp['action']}, Reward: {exp['reward']:.2f}")
