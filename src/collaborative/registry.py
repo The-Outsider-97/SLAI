@@ -1,149 +1,246 @@
 import importlib
 import pkgutil
 import inspect
-import logging
+import time
 from pathlib import Path
+from typing import Dict, Any, List, Optional, Type
+from abc import ABC, abstractmethod
+
 from src.agents.collaborative_agent import CollaborativeAgent
+from logs.logger import get_logger
+
+logger = get_logger(__name__)
+
+class CollaborativeAgent(ABC):
+    """Abstract base class for all collaborative agents"""
+    @abstractmethod
+    def execute(self, task_data: Dict) -> Any:
+        pass
 
 class AgentRegistry:
     """
-    Centralized registry for agents and their capabilities.
-    Also integrates with SharedMemory for distributed coordination.
+    Enhanced registry system with extended capabilities including:
+    - Dynamic agent discovery
+    - Health monitoring
+    - Capability-based routing
+    - Versioned registrations
     """
 
-    def __init__(self, shared_memory):
-        """
-        Args:
-            shared_memory (SharedMemory): Optional shared memory instance.
-        """
-        self._agents = {}
+    def __init__(self, shared_memory: Optional[Any] = None):
+        self._agents: Dict[str, Dict] = {}
         self.shared_memory = shared_memory
+        self._version = 1.0
+        self._health_check_interval = 300  # seconds
 
-    def discover_agents(self, agents_package='src.agents'):
+    def discover_agents(self, agents_package: str = 'src.agents') -> None:
         """
-        Dynamically discover and register all agent classes in the specified package.
+        Dynamically discover and register all concrete agent implementations.
+        
+        Args:
+            agents_package: Python package path to search for agents
+            
+        Raises:
+            ImportError: If package cannot be imported
         """
-        package = importlib.import_module(agents_package)
-        for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+        try:
+            package = importlib.import_module(agents_package)
+            for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+                if "agent" in module_name.lower():
+                    self._load_agent_module(module_name)
+        except ImportError as e:
+            logger.error(f"Failed to import agents package: {e}")
+            raise
+
+    def _load_agent_module(self, module_name: str) -> None:
+        """Internal method to load and validate agent modules"""
+        try:
             module = importlib.import_module(module_name)
-            for attr_name in dir(module):
-                if attr_name.endswith("Agent"):
-                    AgentClass = getattr(module, attr_name)
-                    if callable(AgentClass):
-                        try:
-                            inst = AgentClass()
-                            caps = getattr(inst, "capabilities", [])
-                            self.register(attr_name, inst, caps)
-                        except Exception as e:
-                            logging.error(f"Failed to load agent {attr_name}: {e}")
+            for name, obj in inspect.getmembers(module):
+                if (inspect.isclass(obj) and 
+                    issubclass(obj, CollaborativeAgent) and 
+                    not inspect.isabstract(obj)):
+                    try:
+                        instance = obj()
+                        caps = getattr(instance, "capabilities", [])
+                        meta = {
+                            "class": obj,
+                            "instance": instance,
+                            "capabilities": caps,
+                            "version": self._version
+                        }
+                        self._register_agent(obj.__name__, meta)
+                    except Exception as e:
+                        logger.error(f"Failed to instantiate {name}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to load module {module_name}: {e}")
 
-    def register(self, name, agent_class, agent_instance, capabilities):
-        """
-        Register a new agent and update shared memory.
-
-        Args:
-            name (str): Unique agent identifier.
-            agent_class (object): Agent instance or class with an `execute()` method.
-            capabilities (list[str]): Task types this agent can perform.
-        """
-        agent_name = agent_instance.__class__.__name__
-        if agent_name in self.agents:
-            raise ValueError(f"Agent '{agent_name}' is already registered.")
-        self.agents[agent_name] = agent_instance
-
+    def _register_agent(self, name: str, meta: Dict) -> None:
+        """Validate and register an agent with version control"""
         if name in self._agents:
-            raise ValueError(f"Agent '{name}' is already registered.")
-        if not hasattr(agent_class, "execute") or not callable(agent_class.execute):
-            raise ValueError("Agent class must implement an 'execute' method.")
-        if not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities):
-            raise ValueError("Capabilities must be a list of strings.")
+            if self._agents[name]["version"] >= self._version:
+                logger.warning(f"Skipping older version of {name}")
+                return
+            logger.info(f"Upgrading {name} to version {self._version}")
 
-        self._agents[name] = {
-            "class": agent_class,
-            "capabilities": capabilities
-        }
+        required_attrs = ["execute", "capabilities"]
+        if not all(hasattr(meta["instance"], attr) for attr in required_attrs):
+            raise ValueError(f"Agent {name} missing required attributes")
 
-        # Store in shared memory for system-wide awareness
-        self.shared_memory.set(f"agent:{name}", {
-            "status": "active",
-            "capabilities": capabilities
-        })
+        self._agents[name] = meta
+        logger.info(f"Registered agent: {name} with capabilities: {meta['capabilities']}")
 
-    def unregister(self, name):
+        if self.shared_memory:
+            self.shared_memory.set(
+                f"agent:{name}",
+                {
+                    "status": "active",
+                    "capabilities": meta["capabilities"],
+                    "version": self._version,
+                    "last_seen": time.time()
+                }
+            )
+
+    def get_agents_by_task(self, task_type: str) -> Dict[str, Dict]:
         """
-        Remove an agent from the registry and shared memory.
-
+        Find agents supporting a specific task type with health checks
+        
         Args:
-            name (str): Agent name.
-        """
-        if name not in self._agents:
-            raise KeyError(f"Agent '{name}' is not registered.")
-
-        del self._agents[name]
-        self.shared_memory.delete(f"agent:{name}")
-
-    def update_status(self, name, status: str):
-        """
-        Update the status of an agent in shared memory.
-
-        Args:
-            name (str): Agent identifier.
-            status (str): Status to broadcast (e.g., 'busy', 'idle', 'offline').
-        """
-        if name not in self._agents:
-            raise KeyError(f"Agent '{name}' not registered.")
-
-        agent_key = f"agent:{name}"
-        record = self.shared_memory.get(agent_key) or {}
-        record["status"] = status
-        self.shared_memory.set(agent_key, record)
-
-    def get_status(self, name):
-        """
-        Get the current shared memory status of an agent.
-
-        Args:
-            name (str): Agent name.
-
+            task_type: Task identifier to match against capabilities
+            
         Returns:
-            str: Status string (e.g., 'active', 'busy', etc.)
-        """
-        return self.shared_memory.get(f"agent:{name}").get("status", "unknown")
-
-    def get_agents_by_task(self, task_type):
-        """
-        Return all agents that support a given task_type.
-
-        Args:
-            task_type (str): Task label to match against agent capabilities.
-
-        Returns:
-            dict[str, dict]: Dictionary of agent names and metadata that support the task_type.
+            Dictionary of qualified agents with their metadata
         """
         return {
-            name: agent for name, agent in self._agents.items()
-            if task_type in agent.get("capabilities", [])
+            name: {
+                "instance": agent["instance"],
+                "capabilities": agent["capabilities"],
+                "version": agent["version"]
+            }
+            for name, agent in self._agents.items()
+            if task_type in agent["capabilities"] and 
+            self._check_agent_health(name)
         }
 
-    def list_agents(self):
-        """
-        Return a list of all registered agents with capabilities.
+    def _check_agent_health(self, name: str) -> bool:
+        """Perform health check on registered agent"""
+        agent = self._agents.get(name)
+        if not agent:
+            return False
+            
+        if self.shared_memory:
+            record = self.shared_memory.get(f"agent:{name}") or {}
+            if time.time() - record.get("last_seen", 0) > self._health_check_interval:
+                logger.warning(f"Agent {name} appears unresponsive")
+                return False
+        return True
 
-        Returns:
-            dict[str, list[str]]
-        """
+    def reload_agent(self, name: str) -> bool:
+        """Reload an agent module and update registration"""
+        agent = self._agents.get(name)
+        if not agent:
+            logger.error(f"Agent {name} not found for reload")
+            return False
+
+        try:
+            module = inspect.getmodule(agent["class"])
+            if module:
+                importlib.reload(module)
+                self.discover_agents(module.__name__)
+                return True
+        except Exception as e:
+            logger.error(f"Failed to reload agent {name}: {e}")
+        return False
+
+    def batch_register(self, agents: List[Dict[str, Any]]) -> None:
+        """Bulk register pre-configured agents"""
+        for agent in agents:
+            try:
+                self._register_agent(agent["name"], agent["meta"])
+            except KeyError as e:
+                logger.error(f"Invalid agent configuration: {e}")
+
+    # Existing methods with enhanced type hints and error handling
+    def unregister(self, name: str) -> None:
+        """Safely remove an agent from the registry"""
+        if name not in self._agents:
+            logger.warning(f"Attempted to unregister unknown agent: {name}")
+            return
+
+        del self._agents[name]
+        if self.shared_memory:
+            self.shared_memory.delete(f"agent:{name}")
+        logger.info(f"Unregistered agent: {name}")
+
+    def list_agents(self) -> Dict[str, List[str]]:
+        """Get comprehensive agent list with capabilities"""
         return {name: info["capabilities"] for name, info in self._agents.items()}
 
-    def get_agent_class(self, name):
-        """
-        Get agent class instance by name.
+class MockSharedMemory:
+    """Simulated shared memory for testing"""
+    def __init__(self):
+        self._store = {}
+        
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = value
+        
+    def get(self, key: str) -> Any:
+        return self._store.get(key)
+        
+    def delete(self, key: str) -> None:
+        if key in self._store:
+            del self._store[key]
 
-        Args:
-            name (str): Agent name.
+if __name__ == "__main__":
+    # Test configuration
+    class TranslationAgent(CollaborativeAgent):
+        capabilities = ["translation", "language"]
+        def execute(self, task_data):
+            return f"Translated: {task_data['text']}"
 
-        Returns:
-            object: Registered agent class instance.
-        """
-        if name not in self._agents:
-            raise KeyError(f"Agent '{name}' not found.")
-        return self._agents[name]["class"]
+    class AnalysisAgent(CollaborativeAgent):
+        capabilities = ["analysis", "data"]
+        def execute(self, task_data):
+            return {"status": "analyzed", "result": 42}
+
+    # Initialize components
+    shared_memory = MockSharedMemory()
+    registry = AgentRegistry(shared_memory)
+
+    # Test manual registration
+    registry.batch_register([
+        {"name": "Translator", "meta": {
+            "class": TranslationAgent,
+            "instance": TranslationAgent(),
+            "capabilities": ["translation"],
+            "version": 1.0
+        }},
+        {"name": "Analyzer", "meta": {
+            "class": AnalysisAgent,
+            "instance": AnalysisAgent(),
+            "capabilities": ["analysis"],
+            "version": 1.0
+        }}
+    ])
+
+    # Test dynamic discovery (simulated)
+    print("\nRegistered Agents:")
+    for name, caps in registry.list_agents().items():
+        print(f"{name}: {caps}")
+
+    # Test task-based routing
+    print("\nTranslation Agents:")
+    translators = registry.get_agents_by_task("translation")
+    for name, agent in translators.items():
+        result = agent["instance"].execute({"text": "Hello World"})
+        print(f"{name}: {result}")
+
+    # Test health checks
+    print("\nAgent Health Status:")
+    for name in registry.list_agents():
+        status = registry._check_agent_health(name)
+        print(f"{name}: {'Healthy' if status else 'Unhealthy'}")
+
+    # Test unregistration
+    registry.unregister("Analyzer")
+    print("\nRemaining Agents after Unregistration:")
+    print(registry.list_agents())
