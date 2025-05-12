@@ -146,10 +146,10 @@ class TaskRouter:
         sorted_agents = self._rank_agents(eligible_agents)
 
         # Step 2: Try each agent in order until success
-        for agent_name, agent in sorted_agents:
+        for agent_name, agent, _ in sorted_agents:
             try:
                 # Increment active tasks BEFORE execution
-                agent_stats = self.shared_memory.get("agent_stats", {})
+                agent_stats = self.shared_memory.get("agent_stats") or {}
                 current_tasks = agent_stats.get(agent_name, {}).get("active_tasks", 0)
                 agent_stats[agent_name]["active_tasks"] = current_tasks + 1  # Thread-safe via SharedMemory
 
@@ -158,7 +158,7 @@ class TaskRouter:
                 result = agent.execute(task_data)
 
                 # Decrement on SUCCESS
-                agent_stats = self.shared_memory.get("agent_stats", {})
+                agent_stats = self.shared_memory.get("agent_stats") or {}
                 agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
                 self.shared_memory.set("agent_stats", agent_stats)
 
@@ -169,7 +169,7 @@ class TaskRouter:
             # Error handling
             except Exception as e:
                 # Decrement on FAILURE
-                agent_stats = self.shared_memory.get("agent_stats", {})
+                agent_stats = self.shared_memory.get("agent_stats") or {}
                 agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
                 self.shared_memory.set("agent_stats", agent_stats)
                 logger.exception(f"Agent '{agent_name}' failed...")
@@ -189,7 +189,7 @@ class TaskRouter:
 
     def _rank_agents(self, agents):
         ranked = []
-        agent_stats = self.shared_memory.get("agent_stats", {})
+        agent_stats = self.shared_memory.get("agent_stats") or {}
         
         for name, agent in agents.items():
             meta = agent_stats.get(name, {})
