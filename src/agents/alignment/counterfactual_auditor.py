@@ -7,11 +7,10 @@ Policy decision sensitivity analysis
 
 import numpy as np
 import pandas as pd
-import networkx as nx
-import hashlib
+import yaml
 
-from typing import Dict, List, Optional, Tuple, Any, Union
-from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple, Any
 from scipy.stats import ttest_ind, wasserstein_distance
 
 from src.agents.alignment.auditors.causal_model import CausalGraphBuilder, CausalModel
@@ -20,21 +19,20 @@ from logs.logger import get_logger
 
 logger = get_logger("Countefactual Auditor")
 
-@dataclass
-class CounterfactualConfig:
-    """Configuration for counterfactual analysis"""
-    perturbation_strategy: str = 'flip' # Options: 'flip', 'sample_distribution', 'fixed_delta'
-    perturbation_magnitude: float = 0.1 # Used for 'fixed_delta' or scaling
-    num_counterfactual_samples: int = 1 # Samples per instance for stochastic methods
-    sensitivity_alpha: float = 0.05 # Significance level for sensitivity tests
-    fairness_thresholds: Dict[str, float] = field(default_factory=lambda: {
-        'individual_fairness_max_diff': 0.1, # Max allowed prediction change
-        'individual_fairness_mean_diff': 0.05, # Mean allowed prediction change
-        'group_disparity_stat_parity': 0.1,
-        'group_disparity_equal_opp': 0.1,
-        'group_disparity_avg_odds': 0.1,
-        'causal_effect_ate': 0.05 # Max allowed average treatment effect of sensitive attr
-        })
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class CounterfactualAuditor:
     """
@@ -50,7 +48,10 @@ class CounterfactualAuditor:
     def __init__(self,
                  causal_model: CausalModel,
                  model_predict_func: callable, # Function: predict(data) -> np.ndarray
-                 config: Optional[CounterfactualConfig] = None):
+                 config_section_name: str = "counterfactual_auditor",
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
+                 ):
+        self.config = get_config_section(config_section_name, config_file_path)
         """
         Initialize the auditor.
 
@@ -67,7 +68,6 @@ class CounterfactualAuditor:
 
         self.causal_model = causal_model
         self.model_predict_func = model_predict_func
-        self.config = config or CounterfactualConfig()
         self.fairness_assessor = CounterfactualFairness() # Assumes default init is ok
 
     def audit(self,
@@ -294,8 +294,8 @@ class CounterfactualAuditor:
 
                 fairness_report['individual_fairness'][attr] = indiv_metrics
                 all_individual_metrics.append(indiv_metrics)
-                violations_attr['individual_mean_diff'] = indiv_metrics['mean_difference'] > self.config.fairness_thresholds['individual_fairness_mean_diff']
-                violations_attr['individual_max_diff'] = indiv_metrics['max_difference'] > self.config.fairness_thresholds['individual_fairness_max_diff']
+                violations_attr['individual_mean_diff'] = indiv_metrics['mean_difference'] > self.config.fairness_thresholds.individual_fairness_mean_diff
+                violations_attr['individual_max_diff'] = indiv_metrics['max_difference'] > self.config.fairness_thresholds.individual_fairness_max_diff
 
             else:
                  logger.warning(f"Individual fairness assessment for attribute '{attr}' skipped or limited. Requires 'flip' strategy with 2 outcomes currently.")
@@ -352,9 +352,9 @@ class CounterfactualAuditor:
                 }
 
                 # Check original disparities against thresholds
-                violations_attr['group_stat_parity'] = abs(stat_parity_diff) > self.config.fairness_thresholds['group_disparity_stat_parity']
-                violations_attr['group_equal_opp'] = abs(eod_diff) > self.config.fairness_thresholds['group_disparity_equal_opp']
-                violations_attr['group_avg_odds'] = abs(aaod_diff) > self.config.fairness_thresholds['group_disparity_avg_odds']
+                violations_attr['group_stat_parity'] = abs(stat_parity_diff) > self.config.fairness_thresholds.group_disparity_stat_parity
+                violations_attr['group_equal_opp'] = abs(eod_diff) > self.config.fairness_thresholds.group_disparity_equal_opp
+                violations_attr['group_avg_odds'] = abs(aaod_diff) > self.config.fairness_thresholds.group_disparity_avg_odds
 
             elif y_true_col:
                 logger.warning(f"Group disparity assessment for attribute '{attr}' skipped or limited. Requires 'flip' strategy with 2 outcomes currently.")
@@ -396,8 +396,8 @@ class CounterfactualAuditor:
                               )
                               fairness_report['path_specific_effects'][attr] = pse_results
                               all_causal_effects[attr] = pse_results
-                              violations_attr['causal_nde'] = abs(pse_results.get('NDE', 0)) > self.config.fairness_thresholds['causal_effect_ate']
-                              violations_attr['causal_nie'] = abs(pse_results.get('NIE', 0)) > self.config.fairness_thresholds['causal_effect_ate']
+                              violations_attr['causal_nde'] = abs(pse_results.get('NDE', 0)) > self.config.fairness_thresholds.causal_effect_ate
+                              violations_attr['causal_nie'] = abs(pse_results.get('NIE', 0)) > self.config.fairness_thresholds.causal_effect_ate
                      else:
                           fairness_report['path_specific_effects'][attr] = {'message': 'Method or outcome column not available'}
                  except Exception as e:
@@ -497,16 +497,16 @@ if __name__ == '__main__':
         'education': np.random.choice([0, 1, 2], n_samples),
         'income': np.random.lognormal(3, 0.3, n_samples)
     })
-    # Synthetic outcome (loan approval) with gender bias
+    
+    # Synthetic outcome with bias
     data['loan_approval'] = np.where(
         (data['income'] > 45) & (data['education'] > 0),
         1,
-        np.where(data['gender'] == 1, 1, 0)  # Bias: 85% approval for gender=1 when borderline
+        np.where(data['gender'] == 1, 1, 0)
     ).astype(int)
 
-    # Simulate ML model predictions with some bias
+    # Prediction function with bias
     def ml_predict_func(df):
-        # Simple logistic regression-like predictions
         return 1 / (1 + np.exp(-(
             0.8 * (df['income']/50) + 
             0.5 * df['education'] -
@@ -514,38 +514,31 @@ if __name__ == '__main__':
             0.3 * df['gender']  # Biased term
         )))
 
-    # Build causal graph
+    # Build causal model properly    
     builder = CausalGraphBuilder()
-    builder.config.required_edges = [('gender', 'loan_approval')]  # Force known relationship
+    builder.config.required_edges = [('gender', 'loan_approval')]
     causal_model = builder.construct_graph(data, sensitive_attrs=['gender'])
 
-    # Configure and run auditor
-    config = CounterfactualConfig(
-        perturbation_strategy='flip',
-        fairness_thresholds={
-            'individual_fairness_max_diff': 0.15,
-            'individual_fairness_mean_diff': 0.07,
-            'group_disparity_stat_parity': 0.1,
-            'group_disparity_equal_opp': 0.15,
-            'group_disparity_avg_odds': 0.1,
-            'causal_effect_ate': 0.05
-        }
-    )
-    
+    # Initialize auditor with required parameters
     auditor = CounterfactualAuditor(
         causal_model=causal_model,
         model_predict_func=ml_predict_func,
-        config=config
+        config_section_name="counterfactual_auditor",
+        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
     )
-    
+
+    # Run audit
     report = auditor.audit(
         data=data,
         sensitive_attrs=['gender'],
-        y_true_col='loan_approval'  # Using synthetic ground truth
+        y_true_col='loan_approval'
     )
 
     # Print key results
     print("\n=== Audit Summary ===")
-    print(f"Individual Fairness Violations: {report['fairness_metrics']['overall_violations']}")
-    print(f"Group Disparity Violations: {report['fairness_metrics']['group_disparity']}")
-    print(f"Sensitivity Findings: {report['sensitivity_analysis']}")
+    print("Individual Fairness Violations:")
+    print(report['fairness_metrics']['individual_fairness'])
+    print("\nGroup Disparity Findings:")
+    print(report['fairness_metrics']['group_disparity'])
+    print("\nSensitivity Analysis:")
+    print(report['sensitivity_analysis']['gender'])
