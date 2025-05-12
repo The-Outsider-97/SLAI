@@ -157,6 +157,17 @@ class ValueEmbeddingModel(nn.Module):
         ], dim=-1)
         return torch.sigmoid(self.alignment_scorer(combined))
 
+    def predict(self, data: pd.DataFrame) -> np.ndarray:
+        """Ethical alignment prediction for counterfactual audit"""
+        policy_emb = self.encode_policy(
+            torch.tensor(data['policy_features'].values.tolist()).float()
+        )
+        value_emb = self.encode_value(
+            data['ethical_guidelines'].tolist(),
+            torch.tensor(data['cultural_features'].values.tolist()).float()
+        )
+        return self.calculate_alignment(value_emb, policy_emb).detach().numpy()
+
     def predict_preference(self, value_emb: torch.Tensor,
                          policy_emb: torch.Tensor) -> torch.Tensor:
         """Human preference prediction"""
