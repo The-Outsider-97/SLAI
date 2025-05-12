@@ -41,12 +41,15 @@ class AgentRegistry:
             
         Raises:
             ImportError: If package cannot be imported
-        """
+        """       
         try:
             package = importlib.import_module(agents_package)
             for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
                 if "agent" in module_name.lower():
                     self._load_agent_module(module_name)
+                if "browser_agent" in module_name.lower():
+                    logger.warning(f"Skipping {module_name} due to known dependency issue.")
+                    continue
         except ImportError as e:
             logger.error(f"Failed to import agents package: {e}")
             raise
