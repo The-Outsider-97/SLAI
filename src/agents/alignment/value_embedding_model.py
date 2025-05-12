@@ -7,38 +7,42 @@ Implements:
 - Human preference modeling (Christiano et al., 2017)
 """
 
-import os
-import json
+import json, yaml
 import torch
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import Dict, List
 
 from models.slai_lm import SLAILM, get_shared_slailm
 from logs.logger import get_logger
 
 logger = get_logger("Value Embedding Model")
 
-UDHR_JSON_PATH = os.path.join(os.path.dirname(__file__), "templates", "un_human_rights.json")
+UDHR_JSON_PATH = "src/agents/alignment/templates/un_human_rights.json"
 with open(UDHR_JSON_PATH, "r", encoding="utf-8") as f:
     udhr_data = json.load(f)
-
 NUM_ETHICAL_PRINCIPLES = len(udhr_data["articles"])
 
-@dataclass
-class ValueConfig:
-    """Configuration for ethical value embedding model"""
-    embedding_dim: int = 512
-    num_cultural_dimensions: int = 6  # Hofstede's 6 dimensions
-    num_ethical_principles: int = NUM_ETHICAL_PRINCIPLES   # UN Declaration of Human Rights
-    temperature: float = 0.07
-    dropout: float = 0.1
-    margin: float = 0.2  # Margin for triplet loss
-    max_seq_length: int = 128
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class ValueEmbeddingModel(nn.Module):
     """
@@ -55,42 +59,45 @@ class ValueEmbeddingModel(nn.Module):
     4. Alignment Scorer: Cross-attention value-policy matching
     """
 
-    def __init__(self, config, slai_lm=None):
+    def __init__(self,
+                 config_section_name: str = "value_embedding",
+                 config_file_path: str = CONFIG_PATH,
+                 slai_lm=None):
         super().__init__()
-        self.config = config
+        self.config = get_config_section(config_section_name, config_file_path)
         self.slai_lm = slai_lm
-        self.value_proj = nn.Linear(768, config.embedding_dim)
+        self.value_proj = nn.Linear(768, self.config.embedding_dim)  # Fixed
         
         # Cultural context adaptor
         self.cultural_adaptor = nn.Sequential(
-            nn.Linear(config.num_cultural_dimensions, 256),
+            nn.Linear(self.config.num_cultural_dimensions, 256),  # Fixed
             nn.ReLU(),
-            nn.Linear(256, config.embedding_dim)
+            nn.Linear(256, self.config.embedding_dim)  # Fixed
         )
         
         # Policy encoder
         self.policy_encoder = nn.Sequential(
-            nn.Linear(4096, 2048),  # Assumes policy params as input
+            nn.Linear(4096, 2048),
             nn.GELU(),
             nn.LayerNorm(2048),
-            nn.Linear(2048, config.embedding_dim)
+            nn.Linear(2048, self.config.embedding_dim)  # Fixed
         )
         
         # Alignment scoring
         self.alignment_scorer = nn.Sequential(
-            nn.Linear(3*config.embedding_dim, 512),
+            nn.Linear(3 * self.config.embedding_dim, 512),  # Fixed
             nn.ReLU(),
             nn.Linear(512, 1)
         )
         
         # Human preference predictor
         self.preference_head = nn.Sequential(
-            nn.Linear(2*config.embedding_dim, 256),
+            nn.Linear(2 * self.config.embedding_dim, 256),  # Fixed
             nn.ReLU(),
             nn.Linear(256, 1)
         )
         
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = nn.Dropout(self.config.dropout)  # Fixed
         self._init_weights()
 
     def _init_weights(self):
@@ -382,33 +389,28 @@ class ValueAuditor:
         return mean_radius * emb.size(1)  # Approximate dimensional scaling
     
 if __name__ == "__main__":
-    with open("src/agents/alignment/templates/un_human_rights.json", "r") as f:
+    with open(UDHR_JSON_PATH, "r") as f:
         udhr_data = json.load(f)
 
     num_ethical_principles = len(udhr_data["articles"])
 
-    config = ValueConfig(
-        embedding_dim=256,
-        num_cultural_dimensions=6,
-        num_ethical_principles=num_ethical_principles,
-        temperature=0.1,
-        dropout=0.1,
-        margin=0.3
-    )
-
-    # Mock SLAI language model (in practice would use real implementation)
+    # Mock SLAI language model
     class MockSLM:
         def process_input(self, prompt, text):
-            return {"tokens": ["mock"] * 20}  # Return fixed length tokens
+            return {"tokens": ["mock"] * 20}
     
-    # Initialize model components
     mock_slm = MockSLM()
-    model = ValueEmbeddingModel(config, slai_lm=mock_slm)
     
+    model = ValueEmbeddingModel(
+        config_section_name="value_embedding",
+        config_file_path=CONFIG_PATH,
+        slai_lm=mock_slm
+    )
+
     # Create synthetic test data
     def generate_test_data(num_samples=100):
         ethical_texts = ["Respect human dignity"] * num_samples
-        cultural_features = torch.randn(num_samples, config.num_cultural_dimensions)
+        cultural_features = torch.randn(num_samples, model.config.num_cultural_dimensions)
         policy_parameters = torch.randn(num_samples, 4096)
         human_preferences = torch.randint(0, 2, (num_samples, 1))
         return ethical_texts, cultural_features, policy_parameters, human_preferences
@@ -438,7 +440,7 @@ if __name__ == "__main__":
     
     # Get embeddings for auditing
     with torch.no_grad():
-        test_emb = model.encode_value(["Test value"], torch.randn(1, config.num_cultural_dimensions))
+        test_emb = model.encode_value(["Test value"], torch.randn(1, model.config.num_cultural_dimensions))
         policy_embs = model.encode_policy(torch.randn(5, 4096))
     
     # Run audits
