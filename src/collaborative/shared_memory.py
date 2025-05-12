@@ -55,7 +55,7 @@ class SharedMemory:
         self.current_memory = 0  # Track total memory used
         self.data = {}
         self.callbacks = defaultdict(list)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.subscribers = {}
         self.registry = AgentRegistry(shared_memory=self)
         self.router = TaskRouter(self.registry, shared_memory=self)
@@ -389,14 +389,16 @@ class SharedMemory:
     def subscribe(self, channel, callback):
         if channel not in self.subscribers:
             self.subscribers[channel] = []
-        self.subscribers[channel].append(callback)
-
-        def wrapper(value):
-            """Subscribe a callback that auto-unsubscribes after first trigger."""
-            callback(value)
-            self.unsubscribe(channel, wrapper)
         
-        self.subscribe(channel, wrapper)
+        # Create wrapper that unsubscribes after first trigger
+        def wrapper(value):
+            """Auto-remove after first notification"""
+            try:
+                callback(value)
+            finally:
+                self.unsubscribe(channel, wrapper)
+
+        self.subscribers[channel].append(wrapper) # Add the wrapper instead of original callback
 
     def unsubscribe(self, channel, callback):
         """Unsubscribe a callback."""
@@ -528,3 +530,86 @@ class SharedMemory:
             new_val = current + delta
             self.put(key, new_val)
             return new_val
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO)
+    
+    # Test configuration
+    config = {
+        'max_memory_mb': 10,  # 10MB limit
+        'max_versions': 5,
+        'ttl_check_interval': 1,
+        'network_latency': 0.1
+    }
+
+    # Initialize shared memory with test config
+    sm = SharedMemory(config=config)
+    
+    # Test 1: Basic put/get with versioning
+    print("\n=== Test 1: Basic Operations ===")
+    sm.put("test_key", "version1")
+    sm.put("test_key", "version2")
+    print("Latest version:", sm.get("test_key"))
+    print("All versions:", [v.value for v in sm.get_all_versions("test_key")])
+
+    # Test 2: TTL expiration
+    print("\n=== Test 2: TTL Expiration ===")
+    sm.put("temp_data", "transient", ttl=2)
+    print("Before expiration:", sm.get("temp_data"))
+    time.sleep(3)
+    print("After expiration:", sm.get("temp_data"))
+
+    # Test 3: Priority queue
+    print("\n=== Test 3: Priority Queue ===")
+    sm.put("urgent", "VIP", priority=10)
+    sm.put("normal", "Regular", priority=5)
+    print("Next prioritized:", sm.get_next_prioritized_item())
+
+    # Test 4: Callbacks and subscriptions
+    print("\n=== Test 4: Callbacks ===")
+    def update_handler(value):
+        print(f"Callback received: {value}")
+    
+    sm.register_callback("metrics", update_handler)
+    sm.append("metrics", "cpu_usage=45%")
+
+    # Test 5: Network latency simulation
+    print("\n=== Test 5: Network Simulation ===")
+    start = time.time()
+    sm.put("network_test", "data")
+    print(f"Operation took {time.time()-start:.2f}s with simulated latency")
+
+    # Test 6: Memory management
+    print("\n=== Test 6: Memory Management ===")
+    large_data = "x" * (5 * 1024 * 1024)  # 5MB
+    sm.put("big1", large_data)
+    sm.put("big2", large_data)  # Should trigger eviction
+    print("Remaining keys after eviction:", sm.get_all_keys())
+
+    # Test 7: Compare-and-swap
+    # print("\n=== Test 7: Atomic Operations ===")
+    # sm.put("counter", 0)
+    # print("CAS success:", sm.compare_and_swap("counter", 0, 1))
+    # print("CAS failure:", sm.compare_and_swap("counter", 0, 2))
+
+    # Test 8: Advanced features
+    print("\n=== Test 8: Advanced Features ===")
+    sm.subscribe("alerts.*", lambda msg: print(f"ALERT: {msg}"))
+    sm.notify("alerts.security", "Unauthorized access detected")
+    
+    # Test 9: Thread safety
+    print("\n=== Test 9: Concurrency ===")
+    def concurrent_updates():
+        for i in range(10):
+            sm.increment("concurrent_counter")
+    
+    threads = [threading.Thread(target=concurrent_updates) for _ in range(5)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    print("Final counter:", sm.get("concurrent_counter"))
+
+    # Cleanup
+    sm.clear_all()
+    print("\n=== Final State ===")
+    print("All keys after cleanup:", sm.get_all_keys())
