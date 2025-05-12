@@ -622,8 +622,7 @@ class CausalModel:
                         logger.warning(f"Outcome variable {var} has near-zero variance for OLS. Skipping.")
                         continue
 
-
-                    model = ols(y, X, missing='drop').fit()
+                    model = OLS(y.loc[valid_idx], X.loc[valid_idx]).fit()
                     equations[var] = model # Store the fitted model object
                 except TypeError: # Catch non-numeric parent error
                     continue # Skip this equation
@@ -1237,84 +1236,83 @@ class CausalModel:
                                       Otherwise, returns a DataFrame representing the expected population distribution under intervention.
         """
         if method == 'adjust':
-             # Simplified method: Modify graph (remove incoming to intervened), re-estimate/predict.
-             # Assumes SEMs capture the essential structure.
-             logger.info(f"Computing counterfactual using structural equation adjustment for intervention: {intervention}")
+            # Simplified method: Modify graph (remove incoming to intervened), re-estimate/predict.
+            # Assumes SEMs capture the essential structure.
+            logger.info(f"Computing counterfactual using structural equation adjustment for intervention: {intervention}")
 
-             # Ensure SEMs are estimated
-             sems = self._get_structural_equations()
-             if sems is None:
-                  raise RuntimeError("Structural equations must be estimated before computing counterfactuals with 'adjust' method.")
-
-
-             if observed_data_point is not None:
-                  # Compute for a specific individual (requires abduction step for noise terms in full Pearl method)
-                  # Adjustment method is simpler: just substitute and predict down the chain.
-                  cf_data = observed_data_point.copy().to_frame().T # Make it DataFrame-like
-                  cf_data.index = ['counterfactual']
-             else:
-                  # Compute expected counterfactual for the population
-                  cf_data = self.data.copy()
+            # Ensure SEMs are estimated
+            sems = self._get_structural_equations()
+            if sems is None:
+                raise RuntimeError("Structural equations must be estimated before computing counterfactuals with 'adjust' method.")
 
 
-             # Process variables in topological order for prediction
-             try:
-                 sorted_nodes = list(nx.topological_sort(self.graph))
-             except nx.NetworkXUnfeasible:
-                  raise ValueError("Graph contains cycles, cannot topologically sort for counterfactual prediction.")
+            if observed_data_point is not None:
+                # Compute for a specific individual (requires abduction step for noise terms in full Pearl method)
+                # Adjustment method is simpler: just substitute and predict down the chain.
+                cf_data = observed_data_point.copy().to_frame().T # Make it DataFrame-like
+                cf_data.index = ['counterfactual']
+            else:
+                # Compute expected counterfactual for the population
+                cf_data = self.data.copy()
 
 
-             for var in sorted_nodes:
-                 if var in intervention:
-                     # Action: Set variable to intervened value
-                     cf_data[var] = intervention[var]
-                 else:
-                     # Prediction: Use SEM for non-intervened variables based on their parents' current/counterfactual values
-                     parents = list(self.graph.predecessors(var))
-                     model_info = sems.get(var)
+            # Process variables in topological order for prediction
+            try:
+                sorted_nodes = list(nx.topological_sort(self.graph))
+            except nx.NetworkXUnfeasible:
+                raise ValueError("Graph contains cycles, cannot topologically sort for counterfactual prediction.")
 
-                     if not parents or model_info is None or isinstance(model_info, dict) and model_info.get('type') == 'exogenous':
-                          # Exogenous variable not intervened on keeps its original value(s)
-                          # If computing for population, it retains its distribution (represented by original data col)
-                          # If computing for individual, it retains the observed value
-                          if observed_data_point is not None:
-                               cf_data[var] = observed_data_point[var]
-                          # Else (for population), cf_data[var] already holds the original column, so do nothing.
-                          continue
 
-                     if isinstance(model_info, RegressionResultsWrapper):
-                          # Endogenous variable: Predict using its SEM
-                          try:
-                              # Prepare predictor data (current values of parents in cf_data)
-                              X_pred = cf_data[parents]
-                              X_pred = add_constant(X_pred, has_constant='raise')
-                              # Align columns with model's exog_names (important if factors involved)
-                              X_pred = X_pred.reindex(columns=model_info.model.exog_names, fill_value=0)
+            for var in sorted_nodes:
+                if var in intervention:
+                    # Action: Set variable to intervened value
+                    cf_data[var] = intervention[var]
+                else:
+                    # Prediction: Use SEM for non-intervened variables based on their parents' current/counterfactual values
+                    parents = list(self.graph.predecessors(var))
+                    model_info = sems.get(var)
+                    # Handle exogenous/unmodeled vars first
+                    is_exogenous_or_unmodeled = (
+                        not parents or model_info is None or (isinstance(model_info, dict) and model_info.get('type') == 'exogenous'))
+                    if is_exogenous_or_unmodeled: # Exogenous variable not intervened on keeps its original value(s)
+                        if observed_data_point is not None:
+                            if var in observed_data_point:
+                                cf_data[var] = observed_data_point[var]
+                        continue
 
-                              predictions = model_info.predict(X_pred)
-                              cf_data[var] = predictions
-                          except Exception as e:
-                              logger.error(f"Prediction failed for variable '{var}' during counterfactual computation: {e}")
-                              cf_data[var] = np.nan # Mark as failed
-                     else:
-                          logger.warning(f"No valid SEM found for endogenous variable '{var}'. Cannot predict counterfactual value.")
-                          cf_data[var] = np.nan
+                    if isinstance(model_info, RegressionResultsWrapper):
+                        # Endogenous variable: Predict using its SEM
+                        try:
+                            # Prepare predictor data (current values of parents in cf_data)
+                            X_pred_input = cf_data[parents].copy()
+                            has_intercept = 'const' in model_info.model.exog_names
+                            if has_intercept:
+                                X_pred_input['const'] = 1.0
+                            X_pred_aligned = X_pred_input.reindex(columns=model_info.model.exog_names, fill_value=0)
+                            predictions = model_info.predict(X_pred_aligned)
+                            cf_data[var] = predictions
+                        except Exception as e:
+                            logger.error(f"Prediction failed for variable '{var}' during counterfactual computation: {e}")
+                            cf_data[var] = np.nan # Mark as failed
+                    else:
+                        logger.warning(f"No valid SEM found for endogenous variable '{var}'. Cannot predict counterfactual value.")
+                        cf_data[var] = np.nan
 
-             # Return the result
-             if observed_data_point is not None:
-                  return cf_data.iloc[0] # Return Series for the individual
-             else:
-                  return cf_data # Return DataFrame for the population
+            # Return the result
+            if observed_data_point is not None:
+                return cf_data.iloc[0] # Return Series for the individual
+            else:
+                return cf_data # Return DataFrame for the population
 
 
         elif method == 'pearl3step':
-             # Requires modeling exogenous noise variables U, more complex.
-             # Step 1: Abduction - Estimate U for the observed_data_point.
-             # Step 2: Action - Modify structural equations based on intervention.
-             # Step 3: Prediction - Compute counterfactual outcome using modified model and estimated U.
-             raise NotImplementedError("Pearl's 3-step counterfactual method is not yet implemented.")
+            # Requires modeling exogenous noise variables U, more complex.
+            # Step 1: Abduction - Estimate U for the observed_data_point.
+            # Step 2: Action - Modify structural equations based on intervention.
+            # Step 3: Prediction - Compute counterfactual outcome using modified model and estimated U.
+            raise NotImplementedError("Pearl's 3-step counterfactual method is not yet implemented.")
         else:
-             raise ValueError(f"Unknown counterfactual method: {method}")
+            raise ValueError(f"Unknown counterfactual method: {method}")
 
 
 # Example Usage (Optional - Keep commented out or remove for final script)
