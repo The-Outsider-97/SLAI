@@ -9,6 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.collaborative.registry import AgentRegistry
 from src.collaborative.task_router import TaskRouter
+from logs.logger import get_logger
+
+logger = get_logger("Collaboration Manager")
 
 class CollaborationManager:
     """
