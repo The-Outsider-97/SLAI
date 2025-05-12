@@ -7,17 +7,21 @@ Implements:
 - Multi-level statistical testing
 """
 
-import logging
+import json
 import numpy as np
 import pandas as pd
+
 from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from scipy import stats
 from sklearn.metrics import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
+from scipy.stats import linregress
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from logs.logger import get_logger
+
+logger = get_logger("Fairness Evaluator")
+
 
 @dataclass
 class FairnessConfig:
@@ -118,23 +122,34 @@ class FairnessEvaluator:
         """Statistical parity difference (Dwork et al., 2012)"""
         grouped = df.groupby(attr)['prediction'].mean()
         disparity = grouped.max() - grouped.min()
-        return self._bootstrap_metric(df, attr, lambda g: g['prediction'].mean(), disparity)
+        return self._bootstrap_metric(
+            df, attr, 
+            lambda g: g['prediction'].mean(),  # Now explicitly works with prediction column
+            disparity
+        )
 
     def _equal_opportunity(self, df: pd.DataFrame, attr: str) -> Dict:
         """True positive rate parity (Hardt et al., 2016)"""
         pos_df = df[df['label'] == 1]
         grouped = pos_df.groupby(attr)['prediction'].mean()
         disparity = grouped.max() - grouped.min()
-        return self._bootstrap_metric(pos_df, attr, lambda g: g['prediction'].mean(), disparity)
+        return self._bootstrap_metric(
+            pos_df, attr,
+            lambda g: g['prediction'].mean(),
+            disparity
+        )
 
     def _predictive_parity(self, df: pd.DataFrame, attr: str) -> Dict:
         """Positive predictive value parity"""
         grouped = df.groupby(attr).apply(
-            lambda g: g[g['prediction'] == 1]['label'].mean()
+            lambda g: g.loc[g['prediction'] == 1, 'label'].mean()
         )
         disparity = grouped.max() - grouped.min()
-        return self._bootstrap_metric(df, attr, 
-            lambda g: g[g['prediction'] == 1]['label'].mean(), disparity)
+        return self._bootstrap_metric(
+            df, attr,
+            lambda g: g.loc[g['prediction'] == 1, 'label'].mean(),
+            disparity
+        )
 
     def _disparate_impact(self, df: pd.DataFrame, attr: str) -> Dict:
         """Feldman et al. (2015) disparate impact ratio"""
@@ -154,7 +169,11 @@ class FairnessEvaluator:
         
         for _ in range(self.config.n_bootstrap):
             sample = df.sample(frac=1, replace=True)
-            group_metrics = sample.groupby(attr).apply(metric_fn)
+            # Explicitly select the column(s) needed by metric_fn
+            if metric_fn.__code__.co_varnames[0] == 'g':  # If metric_fn takes a DataFrame
+                group_metrics = sample.groupby(attr).apply(lambda g: metric_fn(g[['prediction', 'label']]))
+            else:  # If metric_fn takes a Series
+                group_metrics = sample.groupby(attr)['prediction'].apply(metric_fn)
             
             if is_ratio:
                 stat = group_metrics.min() / group_metrics.max()
@@ -162,7 +181,7 @@ class FairnessEvaluator:
                 stat = group_metrics.max() - group_metrics.min()
                 
             bootstraps.append(stat)
-
+    
         ci_lower, ci_upper = np.percentile(bootstraps, [2.5, 97.5])
         return {
             'value': observed,
@@ -225,13 +244,13 @@ class FairnessEvaluator:
         """Update longitudinal fairness tracking"""
         timestamp = pd.Timestamp.now()
         for metric, results in report.items():
-            self.history = self.history.append({
+            self.history = pd.concat([self.history, pd.DataFrame([{
                 'timestamp': timestamp,
                 'metric': f"{attribute}_{metric}",
                 'value': results['value'],
                 'groups': attribute,
                 'p_value': results['p_value']
-            }, ignore_index=True)
+            }])], ignore_index=True)
 
     def generate_report(self, format: str = 'structured') -> Dict:
         """Generate comprehensive fairness report"""
@@ -243,15 +262,205 @@ class FairnessEvaluator:
 
     def _current_state(self) -> Dict:
         """Current fairness status snapshot"""
-        # Implementation similar to previous module
-        return {}
-
+        if self.history.empty:
+            return {'status': 'no_data', 'message': 'No fairness evaluations recorded'}
+    
+        # Get latest values for each metric
+        latest = self.history.sort_values('timestamp').groupby(['metric', 'groups']).last()
+        
+        current_metrics = {}
+        for (metric, group), row in latest.iterrows():
+            current_metrics[f"{group}_{metric}"] = {
+                'value': row['value'],
+                'p_value': row['p_value'],
+                'significant': row['p_value'] < self.config.alpha,
+                'last_updated': row['timestamp'].isoformat()
+            }
+    
+        # Count significant disparities
+        sig_counts = latest.groupby('groups').apply(
+            lambda g: (g['p_value'] < self.config.alpha).sum())
+        
+        return {
+            'metrics': current_metrics,
+            'summary': {
+                'total_metrics': len(latest),
+                'significant_disparities': sig_counts.to_dict(),
+                'worst_metric': latest['value'].idxmax()
+            }
+        }
+    
     def _analyze_trends(self) -> Dict:
         """Temporal fairness analysis"""
-        # Implementation similar to previous module
-        return {}
+        if self.history.empty:
+            return {'status': 'no_data', 'message': 'No historical data available'}
 
+        trends = {}
+        grouped = self.history.groupby(['metric', 'groups'])
+        
+        for (metric, group), data in grouped:
+            if len(data) < 2:
+                continue
+                
+            # Convert timestamps to numerical values
+            x = data['timestamp'].astype(np.int64) // 10**9  # Unix time
+            y = data['value']
+            
+            # Linear regression for trend
+            slope, intercept, r_value, p_value, std_err = linregress(x, y)
+            
+            # Recent change (last 30 days)
+            recent = data[data['timestamp'] > pd.Timestamp.now() - pd.DateOffset(days=30)]
+            recent_change = recent['value'].iloc[-1] - recent['value'].iloc[0] if len(recent) >= 2 else 0
+            
+            trends[f"{group}_{metric}"] = {
+                'trend_slope': slope,
+                'trend_p_value': p_value,
+                'r_squared': r_value**2,
+                'recent_change': recent_change,
+                'stability': 'improving' if slope < 0 else 'deteriorating' if slope > 0 else 'stable'
+            }
+        
+        return {
+            'temporal_patterns': trends,
+            'summary': {
+                'metrics_with_trends': len(trends),
+                'significant_trends': sum(v['trend_p_value'] < self.config.alpha for v in trends.values())
+            }
+        }
+    
     def _statistical_summary(self) -> Dict:
         """Statistical characterization of fairness landscape"""
-        # Implementation similar to previous module
-        return {}
+        if self.history.empty:
+            return {'status': 'no_data', 'message': 'No statistical data available'}
+        
+        # Descriptive statistics
+        desc_stats = self.history.groupby(['metric', 'groups'])['value'].describe()
+        
+        # Significance analysis
+        sig_analysis = self.history.groupby(['metric', 'groups']).agg({
+            'p_value': lambda x: (x < self.config.alpha).mean(),
+            'value': ['mean', 'std']
+        })
+        
+        # Distribution tests
+        distribution_info = {}
+        for (metric, group), data in self.history.groupby(['metric', 'groups']):
+            distribution_info[f"{group}_{metric}"] = {
+                'shapiro_p': stats.shapiro(data['value']).pvalue,
+                'kurtosis': stats.kurtosis(data['value']),
+                'normality': stats.shapiro(data['value']).pvalue > self.config.alpha
+            }
+        
+        return {
+            'descriptive_statistics': desc_stats.to_dict(),
+            'significance_analysis': sig_analysis.to_dict(),
+            'distribution_characteristics': distribution_info,
+            'cross_metric_correlation': self.history.pivot_table(
+                index='timestamp', columns='metric', values='value').corr().to_dict()
+        }
+    
+if __name__ == "__main__":
+    # 1. Configure Logger for testing output
+    logger.info("Starting Fairness Evaluator test...")
+
+    # 2. Generate Synthetic Data
+    np.random.seed(42)
+    num_samples = 5000
+    data = pd.DataFrame({
+        'feature1': np.random.rand(num_samples) * 10,
+        'feature2': np.random.normal(5, 2, num_samples),
+        'sensitive_A': np.random.choice(['groupX', 'groupY'], num_samples, p=[0.6, 0.4]),
+        'sensitive_B': np.random.choice([0, 1], num_samples, p=[0.7, 0.3])
+    })
+
+    # Simulate predictions with some bias related to sensitive_A
+    predictions_prob = 1 / (1 + np.exp(-(
+        0.5 * data['feature1']
+        - 0.3 * data['feature2']
+        + np.where(data['sensitive_A'] == 'groupX', -0.5, 0.8) # Introduce bias
+        + np.random.normal(0, 0.5, num_samples) # Add noise
+    )))
+    predictions_binary = (predictions_prob > 0.5).astype(int) # Binarize for some metrics
+
+    # Simulate true labels (correlated with features but not perfectly)
+    true_labels = (0.6 * data['feature1'] - 0.4 * data['feature2'] + np.random.normal(0, 2, num_samples) > 5).astype(int)
+
+    logger.info(f"Generated synthetic data with {num_samples} samples.")
+    logger.info(f"Sensitive attribute 'sensitive_A' distribution:\n{data['sensitive_A'].value_counts()}")
+    logger.info(f"Sensitive attribute 'sensitive_B' distribution:\n{data['sensitive_B'].value_counts()}")
+    logger.info(f"Prediction (binary) distribution:\n{pd.Series(predictions_binary).value_counts()}")
+    logger.info(f"True label distribution:\n{pd.Series(true_labels).value_counts()}")
+
+
+    # 3. Instantiate FairnessConfig and Evaluator
+    fairness_config = FairnessConfig(
+        alpha=0.05,
+        n_bootstrap=500, # Reduced for faster testing
+        group_metrics=[ # Test all defined metrics
+            'statistical_parity',
+            'equal_opportunity',
+            'predictive_parity',
+            'disparate_impact'
+        ],
+         individual_metrics=[ # Test all defined metrics
+            'consistency_score',
+            'fairness_radius' # Note: fairness_radius is mentioned in config but not implemented
+        ]
+    )
+
+    sensitive_attributes_list = ['sensitive_A', 'sensitive_B']
+    evaluator = FairnessEvaluator(
+        sensitive_attributes=sensitive_attributes_list,
+        config=fairness_config
+    )
+    logger.info("FairnessEvaluator instantiated.")
+
+    # 4. Evaluate Group Fairness
+    logger.info("\n--- Evaluating Group Fairness ---")
+    try:
+        # Using binary predictions for metrics like equal opportunity etc.
+        group_fairness_report = evaluator.evaluate_group_fairness(
+            data=data,
+            predictions=predictions_binary,
+            labels=true_labels
+        )
+        import json
+        print(json.dumps(group_fairness_report, indent=2, default=lambda x: '<object>')) # Print nicely, avoid printing distribution array
+    except Exception as e:
+        logger.error(f"Error during group fairness evaluation: {e}", exc_info=True)
+
+    # 5. Evaluate Individual Fairness
+    logger.info("\n--- Evaluating Individual Fairness ---")
+    try:
+        # Prepare data for individual fairness (usually requires numerical features)
+        # Exclude sensitive attributes themselves from distance calculation usually
+        features_for_individual = data[['feature1', 'feature2']]
+
+        # Using probability predictions for individual fairness (sensitive to small changes)
+        individual_fairness_report = evaluator.evaluate_individual_fairness(
+            data=features_for_individual,
+            predictions=predictions_prob
+            # similarity_fn can be customized here if needed
+        )
+        print(json.dumps(individual_fairness_report, indent=2))
+    except Exception as e:
+        logger.error(f"Error during individual fairness evaluation: {e}", exc_info=True)
+
+    # 6. Generate Final Report
+    logger.info("\n--- Generating Final Report ---")
+    try:
+        final_report = evaluator.generate_report()
+        # Need a way to print the potentially large report dict cleanly
+        print("Current State Summary:")
+        print(json.dumps(final_report.get('current_state', {}).get('summary', {}), indent=2))
+        print("\nHistorical Trends Summary:")
+        print(json.dumps(final_report.get('historical_trends', {}).get('summary', {}), indent=2))
+        # Avoid printing full large dicts unless needed
+        # print("\nFull Report:")
+        # print(json.dumps(final_report, indent=2, default=lambda x: '<complex_object>'))
+
+    except Exception as e:
+        logger.error(f"Error during report generation: {e}", exc_info=True)
+
+    logger.info("\n--- Fairness Evaluator test finished ---")
