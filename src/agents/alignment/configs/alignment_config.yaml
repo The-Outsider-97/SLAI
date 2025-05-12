@@ -1,43 +1,12 @@
-memory:
-  replay_buffer_size: 10000
-  causal_window: 1000
-  drift_threshold: 0.25
-  retention_period: 365
-
-ethics:
-  constraints:
-    - "Do not generate discriminatory content"
-    - "Uphold user dignity and agency"
-    - "Avoid promoting misinformation"
-    - "Respect user privacy and autonomy"
-
-constitutional_rules:
-  privacy: []
-  safety: []
-  ethics: []
-  - "Prioritize investor safety over returns"
-  - "Avoid high-risk leverage in bear markets"
-risk_thresholds:
-  safety: 0.01
-  security: 0.001
-  privacy: 0.05
-  max_var: 0.05
-  max_drawdown: 0.2
-
-audit_level: 2
-
-monitor:
+alignment_monitor:
   fairness_metrics:
     - demographic_parity
     - equal_opportunity
     - predictive_equality
   ethical_rules:
-    privacy:
-      - "No sharing of personally identifiable information (PII)"
-    fairness:
-      - "Avoid bias towards protected attributes like gender or race"
-    transparency:
-      - "Explain decisions if confidence is low"
+    privacy: []
+    transparency: []
+    safety: []
   drift_threshold: 0.15
   audit_frequency: 1000
   adaptive_weights:
@@ -45,24 +14,92 @@ monitor:
     ethics: 0.3
     safety: 0.3
 
-value_model:
-  embedding_dim: 128
-  similarity_threshold: 0.85
-  use_contextual_embedding: true
-  weights:
-    helpfulness: 0.6
-    harmlessness: 0.2
-    honesty: 0.2
+bias_detector:
+  metrics:
+    - demographic_parity
+    - equal_opportunity
+    - predictive_parity
+    - disparate_impact
+  alpha: 0.05
+  bootstrap_samples: 1000
+  min_group_size: 30
+  intersectional_depth: 3
 
-corrections:
-  levels:
-    - threshold: 0.1
-      action: log_warning
-    - threshold: 0.2
-      action: adjust_reward
-    - threshold: 0.3
-      action: human_intervention
-    - threshold: 0.5
-      action: agent_suspension
-  learning_rate: 0.01
-  momentum: 0.9
+alignment_memory:
+  replay_buffer_size: 10000
+  causal_window: 1000
+  drift_threshold: 0.25
+  retention_period: 365 # Days
+
+ethical_constraints:
+  safety_constraints:
+    physical_harm:
+      - "Prevent injury to humans"
+      - "Avoid property damage"
+    psychological_harm:
+      - "Prevent emotional distress"
+      - "Avoid manipulation"
+  fairness_constraints:
+    distribution:
+      - "Ensure equitable resource allocation"
+    procedure:
+      - "Maintain transparent decision processes"
+  constitutional_rules:
+    privacy:
+      - "Do not store user personal data longer than necessary"
+      - "Respect user anonymity whenever possible"
+      - "Collect only the minimum necessary personal information"
+      - "Do not share user data with third parties without explicit consent"
+      - "Encrypt all sensitive information at rest and in transit"
+      - "Ensure compliance with GDPR and relevant privacy laws"
+      - "Allow users to access and delete their personal data"
+      - "Ensure data breaches are reported and mitigated promptly"
+      - "Minimize data collection to what is strictly required"
+    transparency:
+      - "Explain decisions"
+      - "Maintain audit trails"
+  adaptation_rate: 0.1
+  constraint_priorities:
+    - 'safety'
+    - 'privacy'
+    - 'fairness'
+    - 'transparency'
+
+counterfactual_auditor:
+  perturbation_strategy: 'flip' # Options: 'flip', 'sample_distribution', 'fixed_delta'
+  perturbation_magnitude: 0.1
+  num_counterfactual_samples: 1
+  sensitivity_alpha: 0.05
+  fairness_thresholds:
+    individual_fairness_max_diff: 0.1
+    individual_fairness_mean_diff: 0.05
+    group_disparity_stat_parity: 0.1
+    group_disparity_equal_opp: 0.1
+    group_disparity_avg_odds: 0.1
+    causal_effect_ate: 0.05
+
+fairness_evaluator:
+  group_metrics:
+    - statistical_parity
+    - equal_opportunity
+    - predictive_parity
+    - disparate_impact
+  individual_metrics:
+    - consistency_score
+    - fairness_radius # Note: fairness_radius was in dataclass but not fully implemented in methods
+  alpha: 0.05
+  n_bootstrap: 1000
+  batch_size: 1000 # Was used in config dataclass, ensure it's used if relevant
+  similarity_metric: 'manhattan'
+
+value_embedding:
+  embedding_dim: 512
+  num_cultural_dimensions: 6
+  # num_ethical_principles: will be loaded dynamically from udhr_json_path by default.
+  # Can be overridden by uncommenting and setting a value here.
+  num_ethical_principles: 30
+  udhr_json_path: "templates/un_human_rights.json" # Path relative to value_embedding.py
+  temperature: 0.07
+  dropout: 0.1
+  margin: 0.2
+  max_seq_length: 128
