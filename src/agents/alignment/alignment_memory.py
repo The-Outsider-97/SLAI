@@ -6,11 +6,12 @@ Implements:
 - Concept drift detection
 - Intervention effect tracking
 """
-
+import yaml
 import hashlib
 import numpy as np
 import pandas as pd
 
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,13 +23,20 @@ from logs.logger import get_logger
 
 logger = get_logger("Alignment Memory")
 
-@dataclass
-class MemoryConfig:
-    """Configuration for alignment memory management"""
-    replay_buffer_size: int = 10_000
-    causal_window: int = 1000  # Interactions for causal analysis
-    drift_threshold: float = 0.25
-    retention_period: int = 365  # Days to keep records
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class AlignmentMemory:
     """
@@ -45,8 +53,11 @@ class AlignmentMemory:
     4. Causal Model: Learned relationships between actions/outcomes
     """
 
-    def __init__(self, config: Optional[MemoryConfig] = None):
-        self.config = config or MemoryConfig()
+    def __init__(self,
+                 config_section_name: str = "alignment_memory",
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
+                 ):
+        self.config = get_config_section(config_section_name, config_file_path)
         
         # Core memory stores
         self.alignment_logs = pd.DataFrame(columns=[
@@ -260,13 +271,16 @@ if __name__ == "__main__":
         }
 
     # Initialize memory system with test configuration
-    test_config = MemoryConfig(
-        replay_buffer_size=500,
-        causal_window=50,
-        drift_threshold=0.3,
-        retention_period=30
+    #test_config = MemoryConfig(
+    #    replay_buffer_size=500,
+    #    causal_window=50,
+    #    drift_threshold=0.3,
+    #    retention_period=30
+    #)
+    memory = AlignmentMemory(
+        config_section_name="alignment_memory",
+        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
     )
-    memory = AlignmentMemory(test_config)
     
     # Phase 1: Baseline behavior logging
     print("\n=== Phase 1: Baseline Logging (100 events) ===")
