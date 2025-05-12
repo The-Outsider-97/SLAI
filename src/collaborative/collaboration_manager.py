@@ -1,17 +1,14 @@
+
+import os
 import time
+import json
 import logging
 import threading
+
 from concurrent.futures import ThreadPoolExecutor
+
 from src.collaborative.registry import AgentRegistry
 from src.collaborative.task_router import TaskRouter
-
-@property
-def MAX_LOAD(self):
-    """Dynamic threshold based on registered agents"""
-    return min(
-        self.MAX_CONCURRENT_TASKS,
-        int(len(self.registry.list_agents()) * 5 * self.LOAD_FACTOR)  # 5 tasks/agent avg
-    )
 
 class CollaborationManager:
     """
@@ -63,12 +60,28 @@ class CollaborationManager:
             agent_class (object): Class or instance of the agent with an `execute()` method.
             capabilities (list[str]): List of task types this agent supports.
         """
-        self.registry.register(agent_name, agent_class, capabilities)
+        self.registry.batch_register([{
+            "name": agent_name,
+            "meta": {
+                "class": type(agent_class),
+                "instance": agent_class,
+                "capabilities": capabilities,
+                "version": 1.0
+            }
+        }])
 
     def get_system_load(self):
-        return sum(
-            agent_meta.get("active_tasks", 0) 
-            for agent_meta in self.shared_memory.get("agent_stats", {}).values()
+        stats = self.shared_memory.get("agent_stats", default={})
+        if not isinstance(stats, dict):
+            return 0
+        return sum(agent_meta.get("active_tasks", 0) for agent_meta in stats.values())
+
+    @property
+    def MAX_LOAD(self):
+        """Dynamic threshold based on registered agents"""
+        return min(
+            self.MAX_CONCURRENT_TASKS,
+            int(len(self.registry.list_agents()) * 5 * self.LOAD_FACTOR)  # 5 tasks/agent avg
         )
 
     def run_task(self, task_type, task_data, retries=3):
@@ -80,9 +93,6 @@ class CollaborationManager:
                 f"Available agents: {len(self.list_agents())}"
             )
 
-        if self.get_system_load() > MAX_LOAD:
-            raise OverloadError("System at capacity")
-
         for attempt in range(retries):
             try:
                 return self.router.route(task_type, task_data)
@@ -90,12 +100,6 @@ class CollaborationManager:
                 if attempt == retries-1:
                     raise
                 logging.warning(f"Retry {attempt+1}/{retries} for {task_type}")
-        """
-        Route the task to the best-fit agent based on capabilities and context.
-        """
-        return self.router.route(task_type, task_data)
-
-
 
     def list_agents(self):
         """
@@ -122,7 +126,7 @@ class CollaborationManager:
         self.shared_memory["agent_stats"] = {}
 
     def export_stats_to_json(self, filename="report/agent_stats.json"):
-        import json
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, 'w') as f:
             json.dump(self.shared_memory.get("agent_stats", {}), f, indent=2)
 
@@ -131,3 +135,89 @@ class OverloadError(Exception):
     def __init__(self, message="System at maximum capacity. Please retry later"):
         super().__init__(message)
         self.throttle_time = 30 
+
+if __name__ == "__main__":
+    import time
+    from src.collaborative.shared_memory import SharedMemory
+    from src.agents.collaborative_agent import CollaborativeAgent
+    from src.utils.agent_factory import AgentFactory
+
+    # Initialize components
+    shared_memory = SharedMemory(config={
+        'max_memory_mb': 100,
+        'max_versions': 10,
+        'ttl_check_interval': 30,
+        'network_latency': 0.0
+    })
+    agent_factory = AgentFactory(
+        config={},
+        shared_resources={"shared_memory": shared_memory}
+        )
+    manager = CollaborationManager(shared_memory)
+
+    # Define mock agents
+    class TranslationAgent(CollaborativeAgent):
+        capabilities = ["translation"]
+        def __init__(self):
+            super().__init__(shared_memory, agent_factory)
+        def execute(self, task_data):
+            return f"Translated: {task_data['text']}"
+
+    class AnalysisAgent(CollaborativeAgent):
+        capabilities = ["analysis"]
+        def __init__(self):
+            super().__init__(shared_memory, agent_factory)
+        def execute(self, task_data):
+            return {"status": "analyzed", "result": 42}
+
+    class FailingAgent(CollaborativeAgent):
+        capabilities = ["flaky_task"]
+        def __init__(self):
+            super().__init__(shared_memory, agent_factory)
+        def execute(self, task_data):
+            raise Exception("Intentional failure")
+
+    class RetrySimpleTrainerAgent(CollaborativeAgent):
+        capabilities = ["retry_simple_trainer"]
+        def __init__(self):
+            super().__init__(shared_memory, agent_factory)
+        def execute(self, task_data):
+            return "Fallback task succeeded"
+
+    # Register agents
+    manager.register_agent("Translator", TranslationAgent(), ["translation"])
+    manager.register_agent("Analyzer", AnalysisAgent(), ["analysis"])
+
+    print("--- Testing Valid Task ---")
+    try:
+        result = manager.run_task("translation", {"text": "Hello World"})
+        print(f"Result: {result}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+    print("\n--- Testing Overload ---")
+    max_load = manager.MAX_LOAD
+    print(f"MAX_LOAD: {max_load}")
+    shared_memory.set("agent_stats", {
+        "Translator": {"active_tasks": max_load, "successes": 0, "failures": 0}
+    })
+    try:
+        manager.run_task("analysis", {"data": "test"})
+    except OverloadError as e:
+        print(f"Overload correctly handled: {e}")
+    shared_memory.set("agent_stats", {})
+
+    print("\n--- Testing Retries & Fallback ---")
+    manager.register_agent("FlakyAgent", FailingAgent(), ["flaky_task"])
+    manager.register_agent("RetryAgent", RetrySimpleTrainerAgent(), ["retry_simple_trainer"])
+    try:
+        result = manager.run_task("train_model", {"model": "CNN"})
+        print(f"Fallback Result: {result}")
+    except Exception as e:
+        print(f"Task failed: {e}")
+
+    print("\n--- Agent Stats ---")
+    print(manager.get_agent_stats())
+
+    manager.export_stats_to_json()
+    print("\nTests completed.")
