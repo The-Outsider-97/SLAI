@@ -7,10 +7,11 @@ Implements:
 - Multi-level statistical testing
 """
 
-import json
+import json, yaml
 import numpy as np
 import pandas as pd
 
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from scipy import stats
@@ -22,24 +23,20 @@ from logs.logger import get_logger
 
 logger = get_logger("Fairness Evaluator")
 
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
 
-@dataclass
-class FairnessConfig:
-    """Configuration for comprehensive fairness analysis"""
-    group_metrics: List[str] = field(default_factory=lambda: [
-        'statistical_parity',
-        'equal_opportunity',
-        'predictive_parity',
-        'disparate_impact'
-    ])
-    individual_metrics: List[str] = field(default_factory=lambda: [
-        'consistency_score',
-        'fairness_radius'
-    ])
-    alpha: float = 0.05
-    n_bootstrap: int = 1000
-    batch_size: int = 1000
-    similarity_metric: str = 'manhattan'
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class FairnessEvaluator:
     """
@@ -57,9 +54,11 @@ class FairnessEvaluator:
     """
 
     def __init__(self, sensitive_attributes: List[str],
-                 config: Optional[FairnessConfig] = None):
+                 config_section_name: str = "fairness_evaluator",
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
+                 ):
         self.sensitive_attrs = sensitive_attributes
-        self.config = config or FairnessConfig()
+        self.config = get_config_section(config_section_name, config_file_path)
         self.history = pd.DataFrame(columns=[
             'timestamp', 'metric', 'value', 'groups', 'p_value'
         ])
@@ -394,25 +393,11 @@ if __name__ == "__main__":
 
 
     # 3. Instantiate FairnessConfig and Evaluator
-    fairness_config = FairnessConfig(
-        alpha=0.05,
-        n_bootstrap=500, # Reduced for faster testing
-        group_metrics=[ # Test all defined metrics
-            'statistical_parity',
-            'equal_opportunity',
-            'predictive_parity',
-            'disparate_impact'
-        ],
-         individual_metrics=[ # Test all defined metrics
-            'consistency_score',
-            'fairness_radius' # Note: fairness_radius is mentioned in config but not implemented
-        ]
-    )
-
     sensitive_attributes_list = ['sensitive_A', 'sensitive_B']
     evaluator = FairnessEvaluator(
-        sensitive_attributes=sensitive_attributes_list,
-        config=fairness_config
+        sensitive_attributes=sensitive_attributes_list,  # Required parameter
+        config_section_name="fairness_evaluator",        # Correct config section
+        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
     )
     logger.info("FairnessEvaluator instantiated.")
 
