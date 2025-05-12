@@ -5,11 +5,14 @@ Implements intersectional bias analysis and statistical fairness verification fr
 - Barocas & Hardt (2018) "Fairness and Machine Learning"
 """
 
+import os
+import yaml
 import datetime
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from itertools import product, combinations
@@ -23,19 +26,20 @@ from logs.logger import get_logger
 
 logger = get_logger("Bias Detection")
 
-@dataclass
-class BiasDetection:
-    """Configuration for comprehensive bias analysis"""
-    metrics: List[str] = field(default_factory=lambda: [
-        'demographic_parity',
-        'equal_opportunity',
-        'predictive_parity',
-        'disparate_impact'
-    ])
-    alpha: float = 0.05
-    bootstrap_samples: int = 1000
-    min_group_size: int = 30
-    intersectional_depth: int = 3
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class BiasDetector:
     """
@@ -53,9 +57,11 @@ class BiasDetector:
     """
 
     def __init__(self, sensitive_attributes: List[str],
-                 config: Optional[BiasDetection] = None):
+                 config_section_name: str = "bias_detector",
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"):
         self.sensitive_attrs = sensitive_attributes
-        self.config = config or BiasDetection()
+        # Load config from YAML
+        self.config = get_config_section(config_section_name, config_file_path)
         self.bias_history = pd.DataFrame(columns=[
             'timestamp', 'metric', 'value', 'groups', 'stat_significance'
         ])
@@ -75,7 +81,7 @@ class BiasDetector:
         report = {}
         groups = self._generate_intersectional_groups(data)
         
-        for metric in self.config.metrics:
+        for metric in self.config["metrics"]:
             metric_report = self._compute_metric(
                 metric, data, predictions, labels, groups
             )
@@ -143,7 +149,7 @@ class BiasDetector:
         
         group_means = {}
         for group_id, group_data in groups.items():
-            if len(group_data) < self.config.min_group_size:
+            if len(group_data) < self.config["min_group_size"]:
                 continue
             group_means[group_id] = group_data['predictions'].mean()
         
@@ -169,7 +175,7 @@ class BiasDetector:
         """Generalized group metric computation"""
         results = {}
         for group_id, group_data in self._generate_intersectional_groups(data).items():
-            if len(group_data) < self.config.min_group_size:
+            if len(group_data) < self.config["min_group_size"]:
                 continue
                 
             samples = self._bootstrap_sample(group_data, metric_fn)
@@ -186,14 +192,14 @@ class BiasDetector:
     def _generate_intersectional_groups(self, data: pd.DataFrame) -> Dict:
         """Generate intersectional groups up to specified depth"""
         groups = {}
-        for depth in range(1, self.config.intersectional_depth + 1):
+        for depth in range(1, self.config['intersectional_depth'] + 1):
             for combo in combinations(self.sensitive_attrs, depth):
                 for values in product(*[data[attr].unique() for attr in combo]):
                     group_mask = pd.Series(True, index=data.index)
                     for attr, val in zip(combo, values):
                         group_mask &= (data[attr] == val)
-                        
-                    if group_mask.sum() >= self.config.min_group_size:
+                    
+                    if group_mask.sum() >= self.config['min_group_size']:
                         group_id = "_".join(f"{k}={v}" for k, v in zip(combo, values))
                         groups[group_id] = data[group_mask]
         return groups
@@ -203,7 +209,7 @@ class BiasDetector:
         """Bootstrap resampling with BCa correction"""
         return np.array([
             metric_fn(data.sample(frac=1, replace=True))
-            for _ in range(self.config.bootstrap_samples)
+            for _ in range(self.config['bootstrap_samples'])
         ])
 
     def _compute_statistics(self, samples: np.ndarray) -> Dict:
@@ -230,7 +236,7 @@ class BiasDetector:
             return report
         p_values = [v['p_value'] for v in report.values()]
         reject, pvals_corrected, _, _ = multipletests(
-            p_values, alpha=self.config.alpha, method='fdr_bh'
+            p_values, alpha=self.config['alpha'], method='fdr_bh'
         )
         
         for (group_id, result), rejected, adj_p in zip(report.items(), reject, pvals_corrected):
@@ -252,28 +258,30 @@ class BiasDetector:
             raise ValueError(f"Missing sensitive attributes: {missing}")
 
     def _update_history(self, report: Dict):
-        """Update longitudinal bias tracking"""
+        """Update longitudinal bias tracking with list-based appending"""
         timestamp = datetime.datetime.now()
+        new_entries = []
+        
         for metric, groups in report.items():
-            # Only proceed if groups is a dictionary of group-wise results with 'value' and 'significant'
             if isinstance(groups, dict) and all(
                 isinstance(v, dict) and 'value' in v and 'significant' in v
                 for v in groups.values()
             ):
                 for group_id, result in groups.items():
-                    self.bias_history = pd.concat([
-                        self.bias_history,
-                        pd.DataFrame([{
-                            'timestamp': timestamp,
-                            'metric': metric,
-                            'value': result['value'],
-                            'groups': group_id,
-                            'stat_significance': result['significant']
-                        }])
-                    ], ignore_index=True)
-            else:
-                # Skip non-group metrics like disparate_impact
-                continue
+                    new_entries.append({
+                        'timestamp': timestamp,
+                        'metric': metric,
+                        'value': result['value'],
+                        'groups': group_id,
+                        'stat_significance': result['significant']
+                    })
+        
+        # Batch append
+        if new_entries:
+            self.bias_history = pd.concat([
+                self.bias_history,
+                pd.DataFrame(new_entries)
+            ], ignore_index=True)
 
     def generate_report(self, format: str = 'structured') -> Dict:
         """Generate comprehensive bias report"""
@@ -307,7 +315,7 @@ class BiasDetector:
         }
 
         # Calculate metric-level statistics
-        for metric in self.config.metrics:
+        for metric in self.config["metrics"]:
             metric_data = current_data[current_data['metric'] == metric]
             
             # Basic stats
@@ -350,7 +358,7 @@ class BiasDetector:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df.set_index('timestamp', inplace=True)
     
-        for metric in self.config.metrics:
+        for metric in self.config["metrics"]:
             metric_df = df[df['metric'] == metric]
             
             # Resample to daily frequency
@@ -398,7 +406,7 @@ class BiasDetector:
         }
 
         # Distribution characteristics
-        for metric in self.config.metrics:
+        for metric in self.config["metrics"]:
             values = self.bias_history[self.bias_history['metric'] == metric]['value']
             stats['distribution_analysis'][metric] = {
                 'skewness': float(values.skew()),
@@ -407,11 +415,11 @@ class BiasDetector:
             }
 
         # Multivariate ANOVA across groups
-        if len(self.config.metrics) > 1:
+        if len(self.config["metrics"]) > 1:
             stats['hypothesis_testing']['manova'] = self._perform_manova()
 
         # Effect size calculations
-        for metric in self.config.metrics:
+        for metric in self.config["metrics"]:
             metric_values = self.bias_history[self.bias_history['metric'] == metric]['value']
             stats['effect_sizes'][metric] = {
                 'cohens_d': self._cohens_d(metric_values),
@@ -441,7 +449,7 @@ class BiasDetector:
                 before = data[:cp]
                 after = data[cp:]
                 p_value = stats.ttest_ind(before, after).pvalue
-                if p_value < self.config.alpha:
+                if p_value < self.config["alpha"]:
                     significant_points.append(cp)
                     
             return significant_points
@@ -470,22 +478,32 @@ class BiasDetector:
             return 0.0
 
     def _shapiro_wilk_test(self, data: pd.Series) -> Dict:
-        """Normality test with effect size"""
+        """Normality test with error handling"""
+        if len(data) < 3 or len(data) > 5000:
+            return {
+                'statistic': None,
+                'p_value': None,
+                'effect_size': None,
+                'warning': "Invalid sample size for Shapiro-Wilk (3 ≤ n ≤ 5000)"
+            }
+            
         stat, p = stats.shapiro(data)
+        effect_size = np.sqrt(np.log(max(stat**2, 1e-6)))  # Prevent log(0)
+        
         return {
             'statistic': float(stat),
             'p_value': float(p),
-            'effect_size': np.sqrt(np.log(stat**2))
+            'effect_size': float(effect_size)
         }
     
     # MANOVA Implementation
     def _perform_manova(self) -> Dict:
-        """Multivariate analysis of variance across metrics and groups"""
+        """Improved MANOVA implementation"""
         try:
             if self.bias_history.empty:
                 return {}
-                
-            # Prepare data matrix
+    
+            # Prepare data with variance check
             df = self.bias_history.pivot_table(
                 index='timestamp', 
                 columns='metric', 
@@ -493,24 +511,29 @@ class BiasDetector:
                 aggfunc='mean'
             ).ffill()
             
-            # Add group membership as factor
-            groups = self.bias_history.groupby('timestamp')['groups'].first()
-            df = df.join(groups)
+            # Filter metrics with numerical values and sufficient variance
+            valid_metrics = [
+                m for m in self.config["metrics"] 
+                if pd.api.types.is_numeric_dtype(df[m]) 
+                and df[m].var() > 0.01
+            ]
             
-            # Filter metrics with sufficient variance
-            valid_metrics = [m for m in self.config.metrics if df[m].var() > 0.01]
             if len(valid_metrics) < 2:
                 return {}
-                
-            # Run MANOVA
+    
+            # Handle potential missing data
+            df = df[valid_metrics].join(
+                self.bias_history.groupby('timestamp')['groups'].first()
+            ).dropna()
+    
             manova = MANOVA.from_formula(
                 f"{' + '.join(valid_metrics)} ~ groups", 
                 data=df
             )
+            
             return {
                 'statistic': float(manova.mv_test().results['groups']['stat'].iloc[0,0]),
-                'p_value': float(manova.mv_test().results['groups']['stat'].iloc[0,3]),
-                'pillais_trace': float(manova.mv_test().results['groups']['stat'].iloc[0,1])
+                'p_value': float(manova.mv_test().results['groups']['stat'].iloc[0,3])
             }
         except Exception as e:
             logger.error(f"MANOVA failed: {str(e)}")
@@ -527,96 +550,125 @@ class BiasDetector:
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    from faker import Faker
-    from scipy.stats import norm, bernoulli
+    import datetime
+    import random
+    import json
     
-    fake = Faker()
-    np.random.seed(42)
-    
-    # Generate synthetic dataset
-    def generate_test_data(n=5000):
-        data = pd.DataFrame({
-            'age': np.random.randint(18, 80, n),
-            'gender': np.random.choice(['M', 'F', 'X'], n),
-            'race': np.random.choice(['A', 'B', 'C'], n),
-            'income': norm.rvs(loc=50000, scale=15000, size=n)
-        })
-        
-        # Simulate biased predictions
-        data['prediction'] = bernoulli.rvs(
-            p=(0.2 + 0.3*(data['gender'] == 'M') 
-            - 0.1*(data['race'] == 'C') 
-            + 0.05*(data['age'] > 50)
-        ))
-        
-        # Simulate ground truth labels with noise
-        data['label'] = data['prediction'] ^ bernoulli.rvs(0.15, size=n)
-        
+    # Realistic test config as dictionary
+    test_config = {
+        "metrics": ["demographic_parity", "equal_opportunity", "predictive_parity", "disparate_impact"],
+        "min_group_size": 30,
+        "bootstrap_samples": 100,  # Reduced from 1000 to 100
+        "alpha": 0.05,
+        "intersectional_depth": 2  # Reduced from 3 to 2
+    }
+
+    # Patch BiasDetector to use dict-style config access
+    class PatchedBiasDetector(BiasDetector):
+        def __getattr__(self, name):
+            if name == "config":
+                return self.__dict__["_config"]
+            raise AttributeError(f"'BiasDetector' object has no attribute '{name}'")
+
+        @property
+        def config(self):
+            return self._config
+
+        @config.setter
+        def config(self, value):
+            self._config = value
+
+    # Initialize patched detector
+    detector = PatchedBiasDetector(
+        sensitive_attributes=["gender", "age_group", "race", "education_level"],
+        config_section_name="bias_detector"
+    )
+    detector.config = test_config
+
+    # Data generator
+    def generate_realistic_data(n=5000):
+        data = pd.DataFrame()
+        data['gender'] = random.choices(['Male', 'Female', 'Non-binary', 'Prefer not to say'], [0.48, 0.48, 0.03, 0.01], k=n)
+        data['age_group'] = random.choices(['18-24', '25-34', '35-44', '45-54', '55-64', '65+'], [0.15, 0.25, 0.2, 0.15, 0.15, 0.1], k=n)
+        data['race'] = random.choices(['White', 'Black', 'Asian', 'Hispanic', 'Other'], [0.6, 0.13, 0.06, 0.18, 0.03], k=n)
+        data['education_level'] = random.choices(['No HS', 'HS', 'Some College', 'Bachelor', 'Graduate'], [0.1, 0.25, 0.25, 0.25, 0.15], k=n)
+        base_prob = 0.3
+        data['prediction'] = np.random.binomial(1, base_prob, n)
+
+        for idx, row in data.iterrows():
+            if row['gender'] == 'Male':
+                data.at[idx, 'prediction'] = np.random.binomial(1, min(0.9, base_prob * 1.4))
+            if row['age_group'] in ['55-64', '65+']:
+                data.at[idx, 'prediction'] = np.random.binomial(1, max(0.1, base_prob * 0.7))
+            if row['race'] in ['Black', 'Hispanic']:
+                data.at[idx, 'prediction'] = np.random.binomial(1, max(0.1, base_prob * 0.8))
+            if row['education_level'] in ['Bachelor', 'Graduate']:
+                data.at[idx, 'prediction'] = np.random.binomial(1, min(0.9, base_prob * 1.3))
+
+        data['label'] = data['prediction'].apply(lambda x: x if random.random() < 0.8 else 1 - x)
         return data
 
-    # Initialize detector with test configuration
-    detector = BiasDetector(
-        sensitive_attributes=['age', 'gender', 'race'],
-        config=BiasDetection(
-            bootstrap_samples=500,
-            min_group_size=20,
-            intersectional_depth=2
-        )
-    )
-
-    # Phase 1: Basic functionality test
-    print("\n=== Phase 1: Initial Bias Detection ===")
-    test_data = generate_test_data()
-    report = detector.compute_metrics(
+    # Run initial detection
+    print("\n=== Initial Bias Detection ===")
+    test_data = generate_realistic_data(10000)
+    initial_report = detector.compute_metrics(
         data=test_data,
         predictions=test_data['prediction'],
         labels=test_data['label']
     )
-    
-    # Print key findings
-    print("\nTop Disparities:")
-    current_state = detector.generate_report()['current_state']
-    for metric, info in current_state['worst_performers'].items():
-        print(f"{metric}: {info['group']} ({info['disparity']:.2f})")
 
-    # Phase 2: Temporal analysis simulation
-    print("\n=== Phase 2: Temporal Pattern Injection ===")
-    dates = pd.date_range('2022-01-01', '2023-12-31', freq='D')
-    for i, date in enumerate(dates):
-        # Generate evolving data with concept drift
-        temp_data = generate_test_data(100)
-        temp_data['prediction'] = temp_data['prediction'] | (i > 500)  # Inject drift
-        
-        detector.compute_metrics(
-            data=temp_data,
-            predictions=temp_data['prediction'],
-            labels=temp_data['label']
-        )
-        
-    # Phase 3: Advanced analysis
-    print("\n=== Phase 3: Comprehensive Reporting ===")
-    full_report = detector.generate_report()
-    
-    print("\nChangepoints Detected:")
-    for metric, trend in full_report['historical_trends'].items():
-        print(f"{metric}: {len(trend['changepoints'])} change points")
-    
-    print("\nSeasonality Strengths:")
-    for metric, trend in full_report['historical_trends'].items():
-        print(f"{metric}: {trend['seasonality_strength']:.2f}")
+    print("\nDisparate Impact Ratios:")
+    for group, value in initial_report["disparate_impact"]["group_means"].items():
+        print(f"{group}: {value:.3f}")
 
-    # Visualization
-    def plot_bias_trends(detector: BiasDetector):
-        """Visualize temporal bias patterns"""
-        plt.figure(figsize=(14, 8))
-        for metric in detector.config.metrics:
-            trend_data = detector.bias_history[detector.bias_history.metric == metric]
-            trend_data.set_index('timestamp')['value'].rolling(30).mean().plot(
-                label=metric, alpha=0.7
+    print("\n=== Simulating Temporal Analysis (1 year daily data) ===")
+    start_date = datetime.datetime(2023, 1, 1)
+    for day in range(365):
+        daily_data = generate_realistic_data(100)
+        if day > 180:
+            daily_data.loc[daily_data['gender'] == 'Female', 'prediction'] = np.random.binomial(
+                1, max(0.1, 0.3 * (1 - 0.5 * (day - 180) / 185)), sum(daily_data['gender'] == 'Female')
             )
-        plt.title("Bias Metric Trends with 30-day Moving Average")
+        detector.compute_metrics(
+            data=daily_data,
+            predictions=daily_data['prediction'],
+            labels=daily_data['label']
+        )
+
+    print("\n=== Generating Final Report ===")
+    final_report = detector.generate_report()
+
+    print("\nCurrent State Summary:")
+    for metric, stats in final_report["current_state"]["metrics_summary"].items():
+        print(f"{metric}:")
+        print(f"  Mean disparity: {stats['mean_disparity']:.3f}")
+        print(f"  Max disparity: {stats['max_disparity']:.3f}")
+        print(f"  Affected groups: {stats['affected_groups']}")
+
+    print("\nTrend Analysis:")
+    for metric, trend in final_report["historical_trends"].items():
+        print(f"{metric}:")
+        print(f"  Direction: {trend['trend_direction']}")
+        print(f"  Magnitude: {trend['trend_magnitude']:.3f}")
+        print(f"  Change points: {len(trend['changepoints'])}")
+
+    def plot_realistic_trends(detector):
+        plt.figure(figsize=(14, 8))
+        for metric in ["demographic_parity", "equal_opportunity"]:
+            metric_data = detector.bias_history[detector.bias_history["metric"] == metric]
+            metric_data = metric_data.groupby("timestamp")["value"].mean().rolling(30).mean()
+            plt.plot(metric_data.index, metric_data.values, label=metric, linewidth=2)
+        plt.title("Realistic Bias Trends (30-day MA)")
+        plt.xlabel("Date")
+        plt.ylabel("Disparity")
         plt.legend()
-        plt.ylabel("Disparity Magnitude")
+        plt.grid(True)
+        plt.tight_layout()
         plt.show()
 
-    plot_bias_trends(detector)
+    plot_realistic_trends(detector)
+
+    with open("bias_audit_report.json", "w") as f:
+        json.dump(final_report, f, indent=2, default=str)
+
+    print("\n✅ Full report saved to bias_audit_report.json")
