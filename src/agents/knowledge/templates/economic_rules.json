@@ -1,0 +1,182 @@
+[
+    {
+      "name": "Law of Supply and Demand",
+      "description": "The price of a good or service is determined by the interaction of supply (quantity offered) and demand (quantity desired). Higher demand or lower supply tends to increase price, and vice versa.",
+      "type": "deductive",
+      "tags": ["economic", "market_dynamics", "price_theory", "microeconomics"],
+      "source": "Classical Economic Theory",
+      "formula": "Price = f(Supply, Demand)",
+      "implementation": "if kb.get('demand_increase', False) and not kb.get('supply_increase', False):\n    inferred['price_pressure_upward'] = 0.85\nif kb.get('supply_increase', False) and not kb.get('demand_increase', False):\n    inferred['price_pressure_downward'] = 0.85"
+    },
+    {
+      "name": "Opportunity Cost",
+      "description": "The value of the next best alternative foregone when making a choice. Every decision has an opportunity cost.",
+      "type": "deductive",
+      "tags": ["economic", "decision_making", "scarcity", "resource_allocation"],
+      "source": "Fundamental Economic Concept",
+      "formula": "N/A",
+      "implementation": "if kb.get('choice_A_selected', False) and kb.get('alternative_B_value', 0) > 0:\n    inferred['opportunity_cost_of_A_is_value_of_B'] = 0.9"
+    },
+    {
+      "name": "Inflation Principle",
+      "description": "A general increase in prices and fall in the purchasing value of money. Often caused by an increase in the money supply or demand exceeding supply.",
+      "type": "heuristic",
+      "tags": ["economic", "macroeconomics", "monetary_policy", "price_level"],
+      "source": "Economic Observation",
+      "formula": "Inflation Rate = ((Current CPI - Past CPI) / Past CPI) * 100",
+      "implementation": "if kb.get('money_supply_growth_high', False) and kb.get('output_growth_low', False):\n    inferred['inflationary_pressure_likely'] = 0.8"
+    },
+    {
+      "name": "Comparative Advantage",
+      "description": "Countries or individuals should specialize in producing goods or services where they have a lower opportunity cost relative to others, leading to gains from trade.",
+      "type": "deductive",
+      "tags": ["economic", "international_trade", "specialization", "efficiency"],
+      "source": "David Ricardo",
+      "formula": "N/A",
+      "implementation": "if kb.get('entity_A_opp_cost_good_X_low', True) and kb.get('entity_B_opp_cost_good_X_high', True):\n    inferred['entity_A_has_comparative_advantage_in_X'] = 0.9"
+    },
+    {
+      "name": "Risk-Return Tradeoff",
+      "description": "Higher potential returns on an investment are typically associated with higher levels of risk.",
+      "type": "heuristic",
+      "tags": ["economic", "finance", "investment", "risk_management"],
+      "source": "Financial Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('investment_potential_return_high', False):\n    inferred['investment_associated_risk_likely_high'] = 0.85"
+    },
+    {
+      "name": "Law of Diminishing Returns",
+      "description": "As more units of a variable input (e.g., labor) are added to fixed inputs (e.g., capital), the marginal product of the variable input will eventually decrease.",
+      "type": "deductive",
+      "tags": ["economic", "production_theory", "microeconomics", "efficiency"],
+      "source": "Economic Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('variable_input_units_very_high', False) and kb.get('fixed_inputs_constant', True):\n    inferred['marginal_product_likely_diminishing'] = 0.8"
+    },
+    {
+      "name": "Incentives Matter",
+      "description": "People respond to incentives. Changes in costs or benefits will predictably alter behavior.",
+      "type": "heuristic",
+      "tags": ["economic", "behavioral_economics", "decision_making", "policy"],
+      "source": "Core Economic Assumption",
+      "formula": "N/A",
+      "implementation": "if kb.get('incentive_A_increased', False):\n    inferred['behavior_related_to_A_may_increase'] = 0.75"
+    },
+    {
+      "name": "Power of Compound Interest",
+      "description": "Interest earned on both the principal amount and any accumulated interest from previous periods, leading to exponential growth over time.",
+      "type": "deductive",
+      "tags": ["economic", "finance", "savings", "investment", "wealth_accumulation"],
+      "source": "Mathematical Finance",
+      "formula": "A = P(1 + r/n)^(nt)",
+      "implementation": "if kb.get('investment_compounds_interest', True) and kb.get('time_horizon_long', True):\n    inferred['significant_growth_from_compounding_expected'] = 0.9"
+    },
+    {
+      "name": "Diversification in Investment",
+      "description": "Spreading investments across various asset classes or types to reduce overall risk. 'Don't put all your eggs in one basket.'",
+      "type": "heuristic",
+      "tags": ["economic", "finance", "risk_management", "portfolio_theory"],
+      "source": "Financial Strategy",
+      "formula": "N/A",
+      "implementation": "if kb.get('portfolio_concentrated_in_one_asset', True):\n    inferred['portfolio_risk_higher_than_diversified'] = 0.8\n    inferred['consider_diversification'] = 0.75"
+    },
+    {
+      "name": "GDP as Economic Indicator",
+      "description": "Gross Domestic Product (GDP) is a measure of the total market value of all final goods and services produced in a country in a given period, indicating economic health.",
+      "type": "heuristic",
+      "tags": ["economic", "macroeconomics", "economic_growth", "national_accounts"],
+      "source": "Economic Measurement Standard",
+      "formula": "GDP = C + I + G + (X-M)",
+      "implementation": "if kb.get('gdp_growth_rate_positive', False):\n    inferred['economic_expansion_indicated'] = 0.8\nelif kb.get('gdp_growth_rate_negative', False):\n    inferred['economic_contraction_indicated'] = 0.8"
+    },
+    {
+      "name": "Monetary Policy Impact",
+      "description": "Actions by a central bank (e.g., changing interest rates or money supply) to manage inflation, employment, and economic growth.",
+      "type": "heuristic",
+      "tags": ["economic", "macroeconomics", "central_banking", "inflation_control"],
+      "source": "Economic Policy Tool",
+      "formula": "N/A",
+      "implementation": "if kb.get('central_bank_interest_rate_increase', False):\n    inferred['inflation_dampening_effect_expected'] = 0.7\n    inferred['economic_activity_may_slow'] = 0.65"
+    },
+    {
+      "name": "Fiscal Policy Impact",
+      "description": "Use of government spending and taxation to influence the economy, often to stimulate growth during recessions or cool down an overheating economy.",
+      "type": "heuristic",
+      "tags": ["economic", "macroeconomics", "government_policy", "aggregate_demand"],
+      "source": "Economic Policy Tool",
+      "formula": "N/A",
+      "implementation": "if kb.get('government_spending_increase', False) and not kb.get('taxes_increase', False):\n    inferred['aggregate_demand_may_increase'] = 0.75"
+    },
+    {
+      "name": "Market Equilibrium",
+      "description": "A state where economic forces such as supply and demand are balanced, and in the absence of external influences, the values of economic variables will not change.",
+      "type": "deductive",
+      "tags": ["economic", "market_dynamics", "price_theory", "microeconomics"],
+      "source": "Economic Theory",
+      "formula": "Quantity Demanded = Quantity Supplied",
+      "implementation": "if kb.get('quantity_demanded', 0) == kb.get('quantity_supplied', 0) and kb.get('quantity_demanded', 0) > 0:\n    inferred['market_is_in_equilibrium'] = 0.9"
+    },
+    {
+      "name": "Externalities (Positive/Negative)",
+      "description": "Costs or benefits of an economic activity experienced by a third party who did not choose to incur that cost or benefit (e.g., pollution - negative, vaccination - positive).",
+      "type": "heuristic",
+      "tags": ["economic", "market_failure", "welfare_economics", "policy_intervention"],
+      "source": "Economic Concept",
+      "formula": "N/A",
+      "implementation": "if kb.get('activity_causes_pollution', True):\n    inferred['negative_externality_present'] = 0.85\n    inferred['market_outcome_may_be_inefficient'] = 0.7"
+    },
+    {
+      "name": "Price Elasticity of Demand",
+      "description": "A measure of how much the quantity demanded of a good responds to a change in its price. Elastic demand is responsive; inelastic is not.",
+      "type": "deductive",
+      "tags": ["economic", "consumer_behavior", "price_theory", "microeconomics"],
+      "source": "Economic Measurement",
+      "formula": "PED = (% Change in Quantity Demanded) / (% Change in Price)",
+      "implementation": "if kb.get('good_has_many_substitutes', True):\n    inferred['demand_for_good_likely_elastic'] = 0.8\nif kb.get('good_is_necessity_few_substitutes', True):\n    inferred['demand_for_good_likely_inelastic'] = 0.8"
+    },
+    {
+      "name": "Liquidity Preference",
+      "description": "The desire of individuals or firms to hold financial assets in the form of money (cash or bank deposits) rather than less liquid assets like bonds or stocks.",
+      "type": "heuristic",
+      "tags": ["economic", "finance", "monetary_theory", "keynesian_economics"],
+      "source": "John Maynard Keynes",
+      "formula": "N/A",
+      "implementation": "if kb.get('economic_uncertainty_high', True):\n    inferred['liquidity_preference_may_increase'] = 0.75"
+    },
+    {
+      "name": "Scarcity Principle",
+      "description": "Resources are limited, while human wants are unlimited. This fundamental problem forces choices and gives rise to economic activity.",
+      "type": "deductive",
+      "tags": ["economic", "fundamental_concept", "resource_allocation", "choice"],
+      "source": "Basic Economic Problem",
+      "formula": "N/A",
+      "implementation": "if kb.get('resource_is_finite', True) and kb.get('demand_for_resource_exists', True):\n    inferred['scarcity_applies_to_resource'] = 0.95"
+    },
+    {
+      "name": "Human Capital Investment",
+      "description": "Spending on education, training, and health that increases the productivity and earning potential of individuals.",
+      "type": "heuristic",
+      "tags": ["economic", "labor_economics", "growth_theory", "productivity"],
+      "source": "Economic Theory",
+      "formula": "N/A",
+      "implementation": "if kb.get('investment_in_education_increased', True):\n    inferred['human_capital_likely_increased'] = 0.8\n    inferred['future_productivity_may_rise'] = 0.7"
+    },
+    {
+      "name": "Business Cycle Phases",
+      "description": "Economies typically go through cycles of expansion (growth), peak, contraction (recession), and trough.",
+      "type": "heuristic",
+      "tags": ["economic", "macroeconomics", "economic_fluctuations", "forecasting"],
+      "source": "Economic Observation",
+      "formula": "N/A",
+      "implementation": "if kb.get('gdp_declining_consecutively', True) and kb.get('unemployment_rising', True):\n    inferred['economy_likely_in_recession_phase'] = 0.8"
+    },
+    {
+      "name": "Role of Financial Intermediaries",
+      "description": "Institutions like banks that channel funds from savers to borrowers, facilitating investment and economic activity.",
+      "type": "deductive",
+      "tags": ["economic", "finance", "banking", "capital_markets"],
+      "source": "Financial System Structure",
+      "formula": "N/A",
+      "implementation": "if kb.get('financial_intermediaries_efficient', True):\n    inferred['capital_allocation_more_efficient'] = 0.75"
+    }
+  ]
