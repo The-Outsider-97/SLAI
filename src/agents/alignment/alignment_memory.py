@@ -55,9 +55,12 @@ class AlignmentMemory:
 
     def __init__(self,
                  config_section_name: str = "alignment_memory",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
-                 ):
-        self.config = get_config_section(config_section_name, config_file_path)
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml",
+                 config: Optional[Dict] = None):
+        if config is not None:
+            self.config = dict_to_namespace(config)
+        else:
+            self.config = get_config_section(config_section_name, config_file_path)
         
         # Core memory stores
         self.alignment_logs = pd.DataFrame(columns=[
@@ -279,7 +282,8 @@ if __name__ == "__main__":
     #)
     memory = AlignmentMemory(
         config_section_name="alignment_memory",
-        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
+        config_file_path="src/agents/alignment/configs/alignment_config.yaml",
+        config = None
     )
     
     # Phase 1: Baseline behavior logging
