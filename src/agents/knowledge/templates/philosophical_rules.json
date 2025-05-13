@@ -1,0 +1,182 @@
+[
+    {
+      "name": "Occam's Razor",
+      "description": "Among competing hypotheses, the one with the fewest assumptions should be selected (entities should not be multiplied without necessity).",
+      "type": "heuristic",
+      "tags": ["philosophical", "epistemology", "logic", "simplicity_principle"],
+      "source": "William of Ockham",
+      "formula": "N/A",
+      "implementation": "if kb.get('hypothesis_A_assumptions', 0) < kb.get('hypothesis_B_assumptions', 0) and kb.get('hypothesis_A_explains_phenomenon', True) and kb.get('hypothesis_B_explains_phenomenon', True):\n    inferred['prefer_hypothesis_A_by_occam_razor'] = 0.7"
+    },
+    {
+      "name": "Categorical Imperative (Kant)",
+      "description": "Act only according to that maxim whereby you can at the same time will that it should become a universal law.",
+      "type": "ethical_deductive",
+      "tags": ["philosophical", "ethics", "deontology", "kantianism", "moral_law"],
+      "source": "Immanuel Kant",
+      "formula": "N/A",
+      "implementation": "if kb.get('action_maxim_universalizable', False):\n    inferred['action_is_morally_permissible_by_kant'] = 0.85\nelse:\n    inferred['action_is_not_morally_permissible_by_kant'] = 0.85"
+    },
+    {
+      "name": "Utilitarianism (Greatest Good)",
+      "description": "The morally right action is the action that produces the greatest good (e.g., happiness or well-being) for the greatest number of people.",
+      "type": "ethical_heuristic",
+      "tags": ["philosophical", "ethics", "consequentialism", "utility_principle"],
+      "source": "Jeremy Bentham, John Stuart Mill",
+      "formula": "Maximize Σ(Utility)",
+      "implementation": "if kb.get('action_A_utility_score', 0) > kb.get('action_B_utility_score', 0):\n    inferred['action_A_preferred_by_utilitarianism'] = 0.8"
+    },
+    {
+      "name": "Socratic Method",
+      "description": "A form of cooperative argumentative dialogue between individuals, based on asking and answering questions to stimulate critical thinking and draw out ideas and underlying presuppositions.",
+      "type": "heuristic",
+      "tags": ["philosophical", "epistemology", "pedagogy", "critical_thinking"],
+      "source": "Socrates (via Plato)",
+      "formula": "N/A",
+      "implementation": "if kb.get('seeking_deeper_understanding', True) and kb.get('complex_issue_at_hand', True):\n    inferred['socratic_method_applicable'] = 0.75"
+    },
+    {
+      "name": "Principle of Non-Contradiction",
+      "description": "Contradictory statements cannot both be true in the same sense at the same time (A cannot be both A and not-A).",
+      "type": "logical_deductive",
+      "tags": ["philosophical", "logic", "metaphysics", "fundamental_law_of_thought"],
+      "source": "Aristotle",
+      "formula": "¬(P ∧ ¬P)",
+      "implementation": "if kb.get('statement_P_is_true', False) and kb.get('statement_not_P_is_true', False):\n    inferred['logical_contradiction_detected'] = 1.0"
+    },
+    {
+      "name": "Argument from Analogy",
+      "description": "If two things are similar in some known respects, they are likely similar in other unknown respects. Strength depends on relevance and number of similarities.",
+      "type": "inductive_heuristic",
+      "tags": ["philosophical", "logic", "reasoning", "analogy"],
+      "source": "Logical Reasoning",
+      "formula": "N/A",
+      "implementation": "if kb.get('A_shares_properties_XYZ_with_B', True) and kb.get('B_has_property_Q', True) and 'relevant_similarity_high' in kb.get('analogy_conditions',[]):\n    inferred['A_may_have_property_Q'] = 0.65"
+    },
+    {
+      "name": "The Golden Rule",
+      "description": "Treat others as you would like others to treat you.",
+      "type": "ethical_heuristic",
+      "tags": ["philosophical", "ethics", "reciprocity", "empathy"],
+      "source": "Various Religions and Philosophies",
+      "formula": "N/A",
+      "implementation": "if kb.get('action_impacts_others', True) and kb.get('contemplating_action_X', True):\n    inferred['consider_if_self_would_want_X_done_to_them'] = 0.8"
+    },
+    {
+      "name": "Problem of Induction",
+      "description": "The philosophical question of whether inductive reasoning leads to knowledge, given that it relies on making generalizations from a finite set of observations.",
+      "type": "epistemological_problem",
+      "tags": ["philosophical", "epistemology", "logic", "scientific_method", "hume"],
+      "source": "David Hume",
+      "formula": "N/A",
+      "implementation": "if kb.get('conclusion_based_on_past_observations_only', True):\n    inferred['conclusion_subject_to_problem_of_induction'] = 0.7"
+    },
+    {
+      "name": "Mind-Body Dualism",
+      "description": "The view that the mind and body are distinct and separable, with the mind being a non-physical substance.",
+      "type": "metaphysical_theory",
+      "tags": ["philosophical", "metaphysics", "philosophy_of_mind", "descartes"],
+      "source": "René Descartes",
+      "formula": "N/A",
+      "implementation": "if kb.get('discussing_consciousness', True) and kb.get('discussing_physical_brain', True):\n    inferred['mind_body_dualism_is_relevant_viewpoint'] = 0.6"
+    },
+    {
+      "name": "Social Contract Theory",
+      "description": "Individuals implicitly consent to surrender some of their freedoms and submit to the authority of a ruler or government in exchange for protection of their remaining rights.",
+      "type": "political_philosophy",
+      "tags": ["philosophical", "political_theory", "ethics", "governance", "locke", "rousseau", "hobbes"],
+      "source": "Enlightenment Philosophers",
+      "formula": "N/A",
+      "implementation": "if kb.get('analyzing_state_legitimacy', True):\n    inferred['social_contract_theory_applicable'] = 0.8"
+    },
+    {
+      "name": "Veil of Ignorance (Rawls)",
+      "description": "A method of determining the morality of issues by imagining oneself in an original position behind a 'veil of ignorance,' unaware of one's own age, sex, race, intelligence, social status etc., to ensure impartiality in creating principles of justice.",
+      "type": "ethical_heuristic",
+      "tags": ["philosophical", "ethics", "political_philosophy", "justice", "fairness", "rawls"],
+      "source": "John Rawls",
+      "formula": "N/A",
+      "implementation": "if kb.get('designing_just_social_principles', True):\n    inferred['apply_veil_of_ignorance_thought_experiment'] = 0.85"
+    },
+    {
+      "name": "Existentialism (Existence precedes essence)",
+      "description": "The philosophical belief that individuals are born without a predetermined purpose (essence) and must create their own meaning in life through their actions and choices.",
+      "type": "philosophical_school",
+      "tags": ["philosophical", "existentialism", "metaphysics", "ethics", "sartre", "camus"],
+      "source": "Existentialist Philosophers",
+      "formula": "N/A",
+      "implementation": "if kb.get('individual_choice_emphasized', True) and kb.get('search_for_meaning_central', True):\n    inferred['existentialist_themes_present'] = 0.75"
+    },
+    {
+      "name": "Stoic Acceptance",
+      "description": "Focus on what you can control and accept what you cannot. Virtue is the only good, and external events are indifferent.",
+      "type": "ethical_heuristic",
+      "tags": ["philosophical", "ethics", "stoicism", "virtue_ethics", "emotional_resilience"],
+      "source": "Stoic Philosophers (e.g., Seneca, Epictetus, Marcus Aurelius)",
+      "formula": "N/A",
+      "implementation": "if kb.get('facing_uncontrollable_adversity', True):\n    inferred['stoic_acceptance_may_be_beneficial'] = 0.7"
+    },
+    {
+      "name": "Virtue Ethics (Aristotle)",
+      "description": "Emphasizes the role of character and virtue in moral philosophy rather than either doing one's duty (deontology) or acting to bring about good consequences (consequentialism).",
+      "type": "ethical_framework",
+      "tags": ["philosophical", "ethics", "aristotle", "character_ethics", "eudaimonia"],
+      "source": "Aristotle",
+      "formula": "N/A",
+      "implementation": "if kb.get('evaluating_moral_action_based_on_character_traits', True):\n    inferred['virtue_ethics_framework_applied'] = 0.8"
+    },
+    {
+      "name": "Empiricism vs. Rationalism",
+      "description": "A central debate in epistemology. Empiricism asserts that knowledge comes primarily from sensory experience, while rationalism asserts that reason is the chief source and test of knowledge.",
+      "type": "epistemological_debate",
+      "tags": ["philosophical", "epistemology", "knowledge_theory", "locke", "hume", "descartes", "spinoza", "leibniz"],
+      "source": "History of Philosophy",
+      "formula": "N/A",
+      "implementation": "if kb.get('source_of_knowledge_questioned', True):\n    inferred['empiricism_rationalism_debate_relevant'] = 0.85"
+    },
+    {
+      "name": "Logical Fallacy Avoidance",
+      "description": "Recognizing and avoiding errors in reasoning (e.g., ad hominem, straw man, false dichotomy) to ensure arguments are valid and sound.",
+      "type": "logical_heuristic",
+      "tags": ["philosophical", "logic", "critical_thinking", "argumentation"],
+      "source": "Logic Studies",
+      "formula": "N/A",
+      "implementation": "if kb.get('argument_presented', True) and kb.get('argument_contains_known_fallacy_X', True):\n    inferred['argument_is_fallacious_due_to_X'] = 0.9"
+    },
+    {
+      "name": "Deductive Reasoning Validity",
+      "description": "In a valid deductive argument, if the premises are true, the conclusion must necessarily be true. Focuses on the structure of the argument.",
+      "type": "logical_deductive",
+      "tags": ["philosophical", "logic", "reasoning", "validity"],
+      "source": "Logic",
+      "formula": "If P → Q and P, then Q (Modus Ponens)",
+      "implementation": "if kb.get('all_premises_true_in_deductive_argument', True) and kb.get('argument_form_is_valid', True):\n    inferred['deductive_conclusion_is_true'] = 1.0"
+    },
+    {
+      "name": "Inductive Reasoning Strength",
+      "description": "Inductive arguments aim to provide strong reasons for their conclusions, making them probable but not guaranteed, even if premises are true.",
+      "type": "inductive_heuristic",
+      "tags": ["philosophical", "logic", "reasoning", "probability"],
+      "source": "Logic",
+      "formula": "N/A",
+      "implementation": "if kb.get('strong_evidence_supports_inductive_premises', True):\n    inferred['inductive_conclusion_is_probable'] = kb.get('evidence_strength_score', 0.75)"
+    },
+    {
+      "name": "Principle of Sufficient Reason",
+      "description": "Everything must have a reason, cause, or ground. Nothing is without a basis for its being.",
+      "type": "metaphysical_principle",
+      "tags": ["philosophical", "metaphysics", "causality", "leibniz"],
+      "source": "Gottfried Wilhelm Leibniz",
+      "formula": "N/A",
+      "implementation": "if kb.get(' unexplained_phenomenon_X_exists', True):\n    inferred['search_for_sufficient_reason_for_X_is_warranted'] = 0.7"
+    },
+    {
+      "name": "Ethical Relativism vs. Absolutism",
+      "description": "Relativism suggests moral principles are not universally valid but depend on cultural or individual viewpoints. Absolutism holds that some moral principles are universally binding.",
+      "type": "meta_ethical_debate",
+      "tags": ["philosophical", "ethics", "meta_ethics", "moral_foundations"],
+      "source": "Ethical Theory",
+      "formula": "N/A",
+      "implementation": "if kb.get('moral_disagreement_across_cultures', True):\n    inferred['ethical_relativism_absolutism_debate_relevant'] = 0.8"
+    }
+  ]
