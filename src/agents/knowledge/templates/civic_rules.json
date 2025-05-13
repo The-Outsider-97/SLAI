@@ -1,0 +1,182 @@
+[
+    {
+      "name": "Presumption of Innocence",
+      "description": "An individual is considered innocent until proven guilty in a court of law. The burden of proof lies with the prosecution.",
+      "type": "deductive",
+      "tags": ["civic", "legal_principle", "human_rights", "justice"],
+      "source": "Fundamental Legal Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('legal_accusation_exists', False) and not kb.get('proven_guilty', False):\n    inferred['status_innocent'] = 0.95"
+    },
+    {
+      "name": "Right to a Fair Trial",
+      "description": "Every individual accused of a crime has the right to a fair and public trial by an impartial tribunal.",
+      "type": "deductive",
+      "tags": ["civic", "legal_right", "due_process", "justice"],
+      "source": "Universal Declaration of Human Rights",
+      "formula": "N/A",
+      "implementation": "if kb.get('criminal_accusation', False):\n    inferred['entitled_to_fair_trial'] = 1.0"
+    },
+    {
+      "name": "Freedom of Speech",
+      "description": "Individuals have the right to express their opinions and ideas without fear of government censorship or retaliation, within certain legal limits.",
+      "type": "heuristic",
+      "tags": ["civic", "fundamental_freedom", "expression", "democracy"],
+      "source": "Constitutional Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('democratic_society', False):\n    inferred['freedom_of_speech_applies'] = 0.9\nif kb.get('speech_incites_violence', False):\n    inferred['freedom_of_speech_limited'] = 0.8"
+    },
+    {
+      "name": "Separation of Powers",
+      "description": "Governmental power is divided among different branches (e.g., legislative, executive, judicial) to prevent any one branch from becoming too powerful.",
+      "type": "deductive",
+      "tags": ["civic", "governance_structure", "checks_and_balances"],
+      "source": "Political Theory (Montesquieu)",
+      "formula": "N/A",
+      "implementation": "if kb.get('government_structure_analysis', False):\n    inferred['separation_of_powers_principle_evaluable'] = 0.85"
+    },
+    {
+      "name": "Rule of Law",
+      "description": "All individuals and institutions, including the state itself, are accountable to laws that are publicly promulgated, equally enforced, and independently adjudicated.",
+      "type": "deductive",
+      "tags": ["civic", "governance_principle", "equality", "justice"],
+      "source": "Core Democratic Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('society_type', '') == 'democratic':\n    inferred['rule_of_law_expected'] = 0.95"
+    },
+    {
+      "name": "Civic Duty to Vote",
+      "description": "In democratic societies, citizens have a civic responsibility to participate in elections by voting.",
+      "type": "heuristic",
+      "tags": ["civic", "citizen_duty", "democracy", "participation"],
+      "source": "Democratic Norm",
+      "formula": "N/A",
+      "implementation": "if kb.get('is_eligible_voter', False) and kb.get('is_democratic_election', False):\n    inferred['should_consider_voting'] = 0.8"
+    },
+    {
+      "name": "Right to Privacy",
+      "description": "Individuals have a right to a domain of personal life free from governmental intrusion and public scrutiny.",
+      "type": "heuristic",
+      "tags": ["civic", "human_rights", "personal_autonomy", "data_protection"],
+      "source": "Legal and Ethical Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('personal_data_involved', False):\n    inferred['privacy_concerns_relevant'] = 0.9"
+    },
+    {
+      "name": "Due Process of Law",
+      "description": "The state must respect all legal rights owed to a person, ensuring fair treatment through the normal judicial system.",
+      "type": "deductive",
+      "tags": ["civic", "legal_procedure", "fairness", "justice"],
+      "source": "Constitutional Law",
+      "formula": "N/A",
+      "implementation": "if kb.get('legal_proceedings_active', False):\n    inferred['due_process_required'] = 1.0"
+    },
+    {
+      "name": "Equality Before the Law",
+      "description": "All individuals are subject to the same laws and treated equally by the legal system, without discrimination.",
+      "type": "deductive",
+      "tags": ["civic", "fundamental_principle", "non_discrimination", "justice"],
+      "source": "Core Legal Tenet",
+      "formula": "N/A",
+      "implementation": "if kb.get('legal_system_assessment', False):\n    inferred['equality_before_law_is_goal'] = 0.95"
+    },
+    {
+      "name": "Public Accountability",
+      "description": "Public officials and institutions are responsible for their actions and decisions to the public.",
+      "type": "heuristic",
+      "tags": ["civic", "governance", "transparency", "ethics"],
+      "source": "Democratic Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('public_official_action', False):\n    inferred['accountability_check_needed'] = 0.8"
+    },
+    {
+      "name": "Freedom of Assembly",
+      "description": "Individuals have the right to gather peacefully with others.",
+      "type": "deductive",
+      "tags": ["civic", "fundamental_freedom", "protest", "association"],
+      "source": "Human Rights Law",
+      "formula": "N/A",
+      "implementation": "if kb.get('group_gathering_planned', False) and kb.get('gathering_is_peaceful', True):\n    inferred['freedom_of_assembly_applies'] = 0.9"
+    },
+    {
+      "name": "Right to Petition Government",
+      "description": "Citizens have the right to make complaints to, or seek assistance from, their government without fear of punishment.",
+      "type": "deductive",
+      "tags": ["civic", "citizen_rights", "governance", "redress"],
+      "source": "Constitutional Right",
+      "formula": "N/A",
+      "implementation": "if kb.get('citizen_grievance_exists', False):\n    inferred['right_to_petition_active'] = 0.9"
+    },
+    {
+      "name": "Habeas Corpus",
+      "description": "A legal recourse requiring a person under arrest to be brought before a judge or into court, especially to secure the person's release unless lawful grounds are shown for their detention.",
+      "type": "deductive",
+      "tags": ["civic", "legal_remedy", "detention", "liberty"],
+      "source": "Common Law Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('person_detained', False) and not kb.get('judicial_review_conducted', False):\n    inferred['habeas_corpus_relevant'] = 0.95"
+    },
+    {
+      "name": "Prohibition of Cruel and Unusual Punishment",
+      "description": "Punishments for crimes must not be excessively brutal, barbaric, or disproportionate to the offense.",
+      "type": "deductive",
+      "tags": ["civic", "human_rights", "criminal_justice", "ethics"],
+      "source": "Constitutional Law (e.g., Eighth Amendment in U.S.)",
+      "formula": "N/A",
+      "implementation": "if kb.get('punishment_proposed', False):\n    inferred['cruelty_assessment_required'] = 0.9"
+    },
+    {
+      "name": "Eminent Domain (Just Compensation)",
+      "description": "The government has the right to take private property for public use, but must provide just compensation to the property owner.",
+      "type": "deductive",
+      "tags": ["civic", "property_rights", "public_use", "law"],
+      "source": "Legal Doctrine",
+      "formula": "N/A",
+      "implementation": "if kb.get('private_property_taken_for_public_use', False):\n    inferred['just_compensation_due'] = 1.0"
+    },
+    {
+      "name": "Checks and Balances",
+      "description": "Each branch of government has powers to limit or check the other branches, preventing the concentration of power.",
+      "type": "deductive",
+      "tags": ["civic", "governance_structure", "separation_of_powers"],
+      "source": "Constitutional Design Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('branch_A_action', False) and kb.get('branch_B_oversight_capability', False):\n    inferred['checks_and_balances_in_play'] = 0.8"
+    },
+    {
+      "name": "Informed Consent in Civic Participation",
+      "description": "Citizens should be adequately informed before participating in civic processes such as referendums or signing petitions.",
+      "type": "heuristic",
+      "tags": ["civic", "democracy", "participation", "ethics"],
+      "source": "Ethical Democratic Norm",
+      "formula": "N/A",
+      "implementation": "if kb.get('civic_participation_event', False) and not kb.get('information_provided_adequately', False):\n    inferred['informed_consent_issue'] = 0.75"
+    },
+    {
+      "name": "Transparency in Government Operations",
+      "description": "Government actions, decisions, and data should be open to public scrutiny to ensure accountability and reduce corruption.",
+      "type": "heuristic",
+      "tags": ["civic", "good_governance", "accountability", "open_data"],
+      "source": "Democratic Ideal",
+      "formula": "N/A",
+      "implementation": "if kb.get('government_decision_made', False) and not kb.get('decision_process_public', False):\n    inferred['transparency_lacking'] = 0.7"
+    },
+    {
+      "name": "Citizen Oversight of Public Institutions",
+      "description": "Mechanisms should exist for citizens or their representatives to monitor and review the performance of public institutions.",
+      "type": "heuristic",
+      "tags": ["civic", "accountability", "democracy", "public_service"],
+      "source": "Good Governance Practice",
+      "formula": "N/A",
+      "implementation": "if kb.get('public_institution_performance_review', False):\n    inferred['citizen_oversight_desirable'] = 0.8"
+    },
+    {
+      "name": "Duty to Obey Law",
+      "description": "Individuals residing within a jurisdiction have a general duty to obey the laws enacted by the legitimate governing authority.",
+      "type": "heuristic",
+      "tags": ["civic", "social_contract", "legal_obligation"],
+      "source": "Legal and Social Norm",
+      "formula": "N/A",
+      "implementation": "if kb.get('is_resident_in_jurisdiction', False) and kb.get('law_enacted_legitimately', True):\n    inferred['duty_to_obey_specific_law'] = 0.85"
+    }
+  ]
