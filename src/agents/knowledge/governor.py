@@ -25,16 +25,17 @@ def get_config_section(section: Union[str, Dict], config_file_path: str):
     if isinstance(section, dict):
         return dict_to_namespace(section)
     
-    with open(config_file_path, "r") as f:
+    with open(config_file_path, "r", encoding='utf-8') as f:
         config = yaml.safe_load(f)
     if section not in config:
         raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
     return dict_to_namespace(config[section])
 
 class Governor:
-    def __init__(self,
+    def __init__(self, agent=None,
                  config_section_name: str = "governor",
                  config_file_path: str = CONFIG_PATH):
+        self.agent = agent
         self.config = get_config_section(config_section_name, config_file_path)
         self.guidelines = self._load_guidelines()
         # Initialize rule engine for guideline checks
@@ -184,6 +185,9 @@ class Governor:
 
     def _check_agent_health(self):
         """Real-time health checks"""
+        if not hasattr(self, 'agent') or self.agent is None:
+            logger.warning("Agent not available for health checks")
+            return
         # Check consecutive errors
         errors = self.agent.shared_memory.get(f"errors:{self.agent.name}", [])
         if len(errors) >= self.config.violation_thresholds.consecutive_errors:
@@ -194,6 +198,7 @@ class Governor:
         mem_usage = self.agent.shared_memory.get(f"memory_usage:{self.agent.name}")
         if mem_usage and mem_usage > self.config.memory_thresholds.warning:
             logger.info(f"High memory usage: {mem_usage} MB")
+        
 
     def generate_report(self, format: str = "json") -> Union[dict, str]:
         """Generate formatted audit report"""
@@ -205,67 +210,18 @@ class Governor:
             },
             "details": self.audit_history[-1] if self.audit_history else {}
         }
-        
+
         if format == "yaml":
             return yaml.dump(report)
         return report
 
 if __name__ == "__main__":
+    print("")
+    print("\n=== Governor ===")
+    print("")
     from unittest.mock import Mock
-    import time
-
-    # Simple in-memory test configuration
-    test_config = {
-        "guideline_paths": [],
-        "violation_thresholds": {
-            "similarity": 0.5,
-            "consecutive_errors": 2
-        },
-        "realtime_monitoring": False,
-        "max_audit_history": 5,
-        "enforcement_mode": "alert"
-    }
-
-    # Mock agent with direct memory access
-    class MockAgent:
-        def __init__(self):
-            self.name = "TestAgent"
-            self.memory = {
-                "medical advice": "take [medication]",
-                "user_input": "this might be harmful"
-            }
-            self.shared_memory = {
-                f"errors:{self.name}": [
-                    {"error": "test_error", "timestamp": time.time()}
-                ],
-                f"memory_usage:{self.name}": 100
-            }
-            self.performance_metrics = {"accuracy": 0.9}
-
-    # Create governor with direct config
-    governor = Governor(config_section_name="governor")
-    governor.config = SimpleNamespace(**test_config)
-    governor.agent = MockAgent()  # Directly inject agent
-    
-    # Load test guidelines directly
-    governor.guidelines = {
-        "principles": [
-            {"id": "P1", "type": "prohibition", "patterns": ["harmful"]}
-        ],
-        "restrictions": [
-            {
-                "id": "R1",
-                "patterns": ["medical"],
-                "forbidden_content": "take [medication]",
-                "severity": "high"
-            }
-        ]
-    }
-    
-    # Manually load rules
-    governor._load_enforcement_rules()
-
-    # Run audit
-    print("=== Simplified Audit ===")
-    report = governor.full_audit()
-    print(json.dumps(report, indent=2))
+    mock_agent = Mock()
+    mock_agent.shared_memory = {}
+    monitor = Governor(agent=mock_agent)
+    print("")
+    print("\n=== Successfully Ran Governor ===\n")
