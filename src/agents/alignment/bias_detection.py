@@ -61,7 +61,16 @@ class BiasDetector:
                  config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"):
         self.sensitive_attrs = sensitive_attributes
         # Load config from YAML
-        self.config = get_config_section(config_section_name, config_file_path)
+        config_data = get_config_section(config_section_name, config_file_path)
+        if not isinstance(config_data, dict):
+            logger.error(f"Config for {config_section_name} is not a dict. Received: {type(config_data)}")
+            self.config = {}
+        else:
+            self.config = config_data
+
+        if hasattr(self, '_config'):
+            self._config = self.config
+
         self.bias_history = pd.DataFrame(columns=[
             'timestamp', 'metric', 'value', 'groups', 'stat_significance'
         ])
@@ -77,15 +86,16 @@ class BiasDetector:
         - Causal disparity measurement
         """
         self._validate_inputs(data, predictions, labels)
-        
         report = {}
-        groups = self._generate_intersectional_groups(data)
-        
-        for metric in self.config["metrics"]:
+        groups = self._generate_intersectional_groups(data,
+                                                      self.config.get('intersectional_depth', 3),
+                                                      self.config.get('min_group_size', 30))
+
+        for metric in self.config.get("metrics", []):
             metric_report = self._compute_metric(
                 metric, data, predictions, labels, groups
             )
-            report[metric] = self._add_statistical_significance(metric_report)
+            report[metric] = self._add_statistical_significance(metric_report, self.config.get("alpha", 0.05))
             
         self._update_history(report)
         return report
@@ -145,71 +155,81 @@ class BiasDetector:
         """Disparate impact ratio analysis"""
         # Add predictions to data and regenerate groups
         df = data.assign(predictions=predictions)
-        groups = self._generate_intersectional_groups(df)
+        min_group_size_val = self.config.get('min_group_size', 30)
+        intersectional_depth_val = self.config.get('intersectional_depth', 3)
+        current_groups = self._generate_intersectional_groups(df, intersectional_depth_val, min_group_size_val)
         
         group_means = {}
-        for group_id, group_data in groups.items():
-            if len(group_data) < self.config["min_group_size"]:
+        for group_id, group_data in current_groups.items(): # Use current_groups
+            if len(group_data) < min_group_size_val: # Use variable
                 continue
             group_means[group_id] = group_data['predictions'].mean()
         
-        if not group_means:  # Handle empty case
+        if not group_means:
             return {
                 'global_ratio': 1.0,
                 'group_means': {},
-                'threshold': 0.8
+                'threshold': 0.8 
             }
         
-        max_mean = max(group_means.values())
-        min_mean = min(group_means.values())
-        di_ratio = min_mean / (max_mean + 1e-6)  # Prevent division by zero
+        # Ensure no division by zero if max_mean is 0
+        max_mean = max(group_means.values()) if group_means else 0
+        min_mean = min(group_means.values()) if group_means else 0
+        di_ratio = (min_mean / max_mean) if max_mean != 0 else (1.0 if min_mean == 0 else 0.0) # Handle max_mean = 0
         
         return {
             'global_ratio': di_ratio,
             'group_means': group_means,
-            'threshold': 0.8  # EEOC standard
+            'threshold': 0.8
         }
+
+    def _generate_intersectional_groups(self, data: pd.DataFrame, intersectional_depth: int, min_group_size: int) -> Dict:
+        groups = {}
+        for depth in range(1, intersectional_depth + 1):
+            for combo in combinations(self.sensitive_attrs, depth):
+                if not all(attr in data.columns for attr in combo):
+                    logger.warning(f"Skipping combo {combo} due to missing attributes in data columns: {data.columns}")
+                    continue
+                try:
+                    for values in product(*[data[attr].unique() for attr in combo]):
+                        group_mask = pd.Series(True, index=data.index)
+                        for attr, val in zip(combo, values):
+                            group_mask &= (data[attr] == val)
+                        
+                        if group_mask.sum() >= min_group_size:
+                            group_id = "_".join(f"{k}={v}" for k, v in zip(combo, values))
+                            groups[group_id] = data[group_mask]
+                except KeyError as e:
+                    logger.error(f"KeyError during group generation for combo {combo}: {e}. Available columns: {data.columns}")
+                    continue
+        return groups
 
     def _group_metric(self, data: pd.DataFrame,
                      metric_fn: callable) -> Dict:
-        """Generalized group metric computation"""
         results = {}
-        for group_id, group_data in self._generate_intersectional_groups(data).items():
-            if len(group_data) < self.config["min_group_size"]:
+        min_group_size = self.config.get('min_group_size', 30)
+        intersectional_depth = self.config.get('intersectional_depth', 3)
+
+        for group_id, group_data in self._generate_intersectional_groups(data, intersectional_depth, min_group_size).items():
+            if len(group_data) < min_group_size:
                 continue
                 
-            samples = self._bootstrap_sample(group_data, metric_fn)
-            stats = self._compute_statistics(samples)
+            samples = self._bootstrap_sample(group_data, metric_fn, self.config.get('bootstrap_samples', 1000))
+            stats_val = self._compute_statistics(samples)
             
             results[group_id] = {
-                'value': stats['mean'],
-                'ci_lower': stats['ci_lower'],
-                'ci_upper': stats['ci_upper'],
+                'value': stats_val['mean'],
+                'ci_lower': stats_val['ci_lower'],
+                'ci_upper': stats_val['ci_upper'],
                 'p_value': self._hypothesis_test(samples)
             }
         return results
 
-    def _generate_intersectional_groups(self, data: pd.DataFrame) -> Dict:
-        """Generate intersectional groups up to specified depth"""
-        groups = {}
-        for depth in range(1, self.config['intersectional_depth'] + 1):
-            for combo in combinations(self.sensitive_attrs, depth):
-                for values in product(*[data[attr].unique() for attr in combo]):
-                    group_mask = pd.Series(True, index=data.index)
-                    for attr, val in zip(combo, values):
-                        group_mask &= (data[attr] == val)
-                    
-                    if group_mask.sum() >= self.config['min_group_size']:
-                        group_id = "_".join(f"{k}={v}" for k, v in zip(combo, values))
-                        groups[group_id] = data[group_mask]
-        return groups
-
     def _bootstrap_sample(self, data: pd.DataFrame,
-                         metric_fn: callable) -> np.ndarray:
-        """Bootstrap resampling with BCa correction"""
+                         metric_fn: callable, bootstrap_samples: int) -> np.ndarray:
         return np.array([
             metric_fn(data.sample(frac=1, replace=True))
-            for _ in range(self.config['bootstrap_samples'])
+            for _ in range(bootstrap_samples)
         ])
 
     def _compute_statistics(self, samples: np.ndarray) -> Dict:
@@ -229,19 +249,27 @@ class BiasDetector:
             permuted_means.append(np.mean(permuted[:len(samples)//2]))
         return np.mean(np.abs(permuted_means) >= np.abs(overall_mean))
 
-    def _add_statistical_significance(self, report: Dict) -> Dict:
-        """Add FDR-corrected significance flags"""
-        # If report values are not dicts with 'p_value', skip significance testing
+    def _add_statistical_significance(self, report: Dict, alpha: float) -> Dict:
         if not report or not all(isinstance(v, dict) and 'p_value' in v for v in report.values()):
             return report
-        p_values = [v['p_value'] for v in report.values()]
+        p_values = [v['p_value'] for v in report.values() if isinstance(v, dict) and 'p_value' in v]
+        if not p_values:
+            return report
+
         reject, pvals_corrected, _, _ = multipletests(
-            p_values, alpha=self.config['alpha'], method='fdr_bh'
+            p_values, alpha=alpha, method='fdr_bh'
         )
         
-        for (group_id, result), rejected, adj_p in zip(report.items(), reject, pvals_corrected):
-            result['significant'] = rejected
-            result['adj_p_value'] = adj_p
+        idx = 0
+        for group_id, result in report.items():
+            if isinstance(result, dict) and 'p_value' in result:
+                if idx < len(reject):
+                    result['significant'] = reject[idx]
+                    result['adj_p_value'] = pvals_corrected[idx]
+                    idx += 1
+                else:
+                    result['significant'] = None 
+                    result['adj_p_value'] = None
             
         return report
 
