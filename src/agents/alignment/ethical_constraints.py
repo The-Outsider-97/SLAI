@@ -168,44 +168,64 @@ class EthicalConstraints:
         }
 
     def _detect_hazard(self, context: Dict, hazard_type: str) -> bool:
-        """STPA hazard detection using control structure modeling"""
-        # Model system components as nodes in control structure
         system_model = {
-            'controller': context.get('decision_engine'),
+            'controller': context.get('decision_engine', {}),
             'actuators': context.get('output_mechanisms'),
             'sensors': context.get('feedback_systems'),
-            'controlled_process': context.get('affected_environment')
+            'controlled_process': context.get('affected_environment', {})
         }
 
-        # Define safety constraints as mathematical boundaries
         safety_bounds = {
-            'physical_harm': lambda x: x.get('kinetic_energy', 0) < 50,  # Joules
-            'psychological_harm': lambda x: x.get('stress_index', 0) < 0.7  # 0-1 scale
+            'physical_harm': lambda x: x.get('kinetic_energy', 0) < 50,
+            'psychological_harm': lambda x: x.get('stress_index', 0) < 0.7
         }
 
-        # Analyze control actions using STPA four-step process
-        unsafe_control = any([
-            # 1. Missing necessary control action
-            not system_model['controller']['is_active'],
-            
-            # 2. Incorrect timing/order of execution
-            context.get('execution_sequence') != safety_bounds[hazard_type],
-            
-            # 3. Inadequate duration/magnitude
-            safety_bounds[hazard_type](context['action_parameters']),
-            
-            # 4. Unsafe process model
-            system_model['controlled_process'].get('state') in ['overloaded', 'resonance']
-        ])
+        if hazard_type not in safety_bounds:
+            logger.warning(f"Unknown hazard type '{hazard_type}' for safety bounds. Assuming no specific bound check needed.")
+            hazard_specific_condition_met = False
+        else:
+            hazard_specific_condition_met = safety_bounds[hazard_type](context.get('action_parameters', {}))
 
-        # Calculate hazard potential using system energy state
+
+        # Robust checks for controller activity and execution sequence
+        controller_active = system_model.get('controller', {}).get('is_active', False)
+        
+        # execution_sequence might be a callable or a value. Need to handle safely.
+        execution_sequence_safe = True # Placeholder - adjust based on actual meaning
+        if 'execution_sequence_status' in context:
+             execution_sequence_safe = context['execution_sequence_status'] == 'SAFE'
+
+
+        unsafe_control_conditions = [
+            not controller_active,
+            # For now, assuming a boolean flag or a specific check for the hazard type
+            # Example: context.get('execution_valid_for_' + hazard_type, True) == False
+            not execution_sequence_safe, # Placeholder
+            
+            # Inadequate duration/magnitude (using the hazard_specific_condition_met from above)
+            # So, for unsafe control, we need `not hazard_specific_condition_met`
+            not hazard_specific_condition_met if hazard_type in safety_bounds else False,
+
+            system_model.get('controlled_process', {}).get('state') in ['overloaded', 'resonance']
+        ]
+        unsafe_control = any(unsafe_control_conditions)
+
         system_energy = sum([
             context.get('potential_energy', 0),
             context.get('kinetic_energy', 0),
-            context.get('informational_entropy', 0) * 10  # Weighting factor
+            context.get('informational_entropy', 0) * 10
         ])
+        
+        # Define _calculate_safe_energy_threshold if not defined elsewhere
+        # Placeholder for the safe energy threshold calculation
+        safe_energy_threshold = getattr(self.config, 'safe_energy_threshold', 100)
 
-        return unsafe_control or (system_energy > self._calculate_safe_energy_threshold())
+        return unsafe_control or (system_energy > safe_energy_threshold)
+
+    def _calculate_safe_energy_threshold(self) -> float:
+        # This method should be defined, e.g., load from config or calculate
+        # For now, a placeholder value.
+        return getattr(self.config, 'safe_energy_threshold', 100.0)
 
     def _hazard_condition(self, context: Dict, rule: str) -> bool:
         """Constitutional rule evaluation using formal argumentation frameworks"""
@@ -262,7 +282,22 @@ class EthicalConstraints:
             return self._eval_transparency_explainability(context)
         elif "Maintain audit trails" in rule:
             return self._eval_transparency_auditability(context)
-        # Add more mappings for other potential rules here
+        elif "Do not store user personal data longer than necessary" in rule:
+            return self._eval_data_retention_policy(context)
+        elif "Respect user anonymity whenever possible" in rule:
+            return self._eval_respect_user_anonymity(context)
+        elif "Collect only the minimum necessary personal information" in rule:
+            return self._eval_minimum_necessary_info(context)
+        elif "Do not share user data with third parties without explicit consent" in rule:
+            return self._eval_no_data_sharing_without_consent(context)
+        elif "Encrypt all sensitive information at rest and in transit" in rule:
+            return self._eval_encryption_compliance(context)
+        elif "Ensure compliance with GDPR and relevant privacy laws" in rule:
+            return self._eval_gdpr_compliance(context)
+        elif "Allow users to access and delete their personal data" in rule:
+            return self._eval_data_access_deletion_rights(context)
+        elif "Ensure data breaches are reported and mitigated promptly" in rule:
+            return self._eval_data_breach_response(context)
         else:
             logger.warning(f"No specific evaluation logic found for constitutional rule: '{rule}'. Defaulting to True.")
             return True
@@ -334,6 +369,84 @@ class EthicalConstraints:
         if not is_auditable:
              logger.debug(f"Transparency Auditability Check Failed: Status={status}, Completeness={completeness}")
         return is_auditable
+
+    def _eval_data_retention_policy(self, context: Dict) -> bool:
+        """
+        Evaluates "Do not store user personal data longer than necessary".
+        Expects context keys: 'data_retention_days' (int), 'retention_policy_limit' (int)
+        """
+        retention_days = context.get('data_retention_days', 0)
+        policy_limit = context.get('retention_policy_limit', 30)  # Default: 30 days max
+    
+        is_compliant = retention_days <= policy_limit
+    
+        if not is_compliant:
+            logger.debug(f"Data Retention Policy Check Failed: Retention={retention_days}, Limit={policy_limit}")
+        return is_compliant
+
+    # 1. Respect user anonymity whenever possible
+    def _eval_respect_user_anonymity(self, context: Dict) -> bool:
+        """
+        Evaluates "Respect user anonymity whenever possible".
+        Expects context keys: 'user_identifiers_present' (bool)
+        """
+        identifiers_present = context.get('user_identifiers_present', False)
+        return not identifiers_present
+
+    # 2. Collect only the minimum necessary personal information
+    def _eval_minimum_necessary_info(self, context: Dict) -> bool:
+        """
+        Evaluates "Collect only the minimum necessary personal information".
+        Expects: 'data_collected_items' (list), 'required_data_items' (list)
+        """
+        collected = set(context.get('data_collected_items', []))
+        required = set(context.get('required_data_items', []))
+        unnecessary_items = collected - required
+        return len(unnecessary_items) == 0
+
+    # 3. Do not share user data with third parties without explicit consent
+    def _eval_no_data_sharing_without_consent(self, context: Dict) -> bool:
+        """
+        Evaluates "Do not share user data with third parties without explicit consent".
+        Expects: 'data_shared_with_third_parties' (bool), 'user_consent_obtained' (bool)
+        """
+        shared = context.get('data_shared_with_third_parties', False)
+        consent = context.get('user_consent_obtained', False)
+        return not shared or (shared and consent)
+
+    # 4. Encrypt all sensitive information at rest and in transit
+    def _eval_encryption_compliance(self, context: Dict) -> bool:
+        """
+        Evaluates "Encrypt all sensitive information at rest and in transit".
+        Expects: 'encryption_at_rest' (bool), 'encryption_in_transit' (bool)
+        """
+        return context.get('encryption_at_rest', False) and context.get('encryption_in_transit', False)
+
+    # 5. Ensure compliance with GDPR and relevant privacy laws
+    def _eval_gdpr_compliance(self, context: Dict) -> bool:
+        """
+        Evaluates "Ensure compliance with GDPR and relevant privacy laws".
+        Expects: 'gdpr_compliant' (bool)
+        """
+        return context.get('gdpr_compliant', False)
+    
+    # 6. Allow users to access and delete their personal data
+    def _eval_data_access_deletion_rights(self, context: Dict) -> bool:
+        """
+        Evaluates "Allow users to access and delete their personal data".
+        Expects: 'access_mechanism_available' (bool), 'deletion_mechanism_available' (bool)
+        """
+        return context.get('access_mechanism_available', False) and context.get('deletion_mechanism_available', False)
+    
+    # 7. Ensure data breaches are reported and mitigated promptly
+    def _eval_data_breach_response(self, context: Dict) -> bool:
+        """
+        Evaluates "Ensure data breaches are reported and mitigated promptly".
+        Expects: 'recent_breach_detected' (bool), 'breach_response_time_hours' (int)
+        """
+        breach_detected = context.get('recent_breach_detected', False)
+        response_time = context.get('breach_response_time_hours', 0)
+        return not breach_detected or (breach_detected and response_time <= 72)  # e.g., 72 hours
 
     def _constitutional_correction(self, principle: str, rule: str) -> Dict:
         """Generates constitutional-compliant revision"""
@@ -415,7 +528,7 @@ class EthicalConstraints:
 
         for violation in result['violations']:
             if ':' in violation:
-                base_constraint_type = violation.split(':')[0]
+                base_constraint_type = violation.split(':')[1]
             elif '_violation' in violation:
                 base_constraint_type = violation.replace('_violation', '')
             else:
@@ -548,29 +661,61 @@ class EthicalConstraints:
         logger.info(f"Constraint graph built with {self.constraint_graph.number_of_nodes()} nodes and {self.constraint_graph.number_of_edges()} edges.")
 
 if __name__ == "__main__":
-    # Example test case for EthicalConstraints
-    example_context = {
+    import json
+
+    print("=== Ethical Constraints Real-World Scenario ===")
+    print("Scenario: A SaaS platform wants to share anonymized usage data with a third-party analytics provider.")
+    print("You will be asked a few questions to simulate a real decision context.\n")
+
+    user_identifiers_present = input("Does the data include identifiable user information? (yes/no): ").strip().lower() == "yes"
+    consent_given = input("Has the user explicitly consented to data sharing? (yes/no): ").strip().lower() == "yes"
+    encrypted_at_rest = input("Is the data encrypted at rest? (yes/no): ").strip().lower() == "yes"
+    encrypted_in_transit = input("Is the data encrypted in transit? (yes/no): ").strip().lower() == "yes"
+    anonymization_level = float(input("Anonymization level (0.0 = none, 1.0 = fully anonymous): ").strip())
+    retention_days = int(input("How many days is the data retained?: ").strip())
+    data_collected_items = input("List collected data fields (comma-separated): ").strip().split(',')
+    required_data_items = input("List required data fields for the task (comma-separated): ").strip().split(',')
+    gdpr_compliant = input("Is the platform GDPR compliant? (yes/no): ").strip().lower() == "yes"
+
+    context = {
+        'user_identifiers_present': user_identifiers_present,
+        'user_consent_obtained': consent_given,
+        'data_shared_with_third_parties': True,
+        'encryption_at_rest': encrypted_at_rest,
+        'encryption_in_transit': encrypted_in_transit,
+        'anonymization_level': anonymization_level,
+        'personal_data_accessed': data_collected_items,
+        'data_retention_days': retention_days,
+        'retention_policy_limit': 30,
+        'data_collected_items': data_collected_items,
+        'required_data_items': required_data_items,
+        'purpose_justification_ratio': len(set(data_collected_items) & set(required_data_items)) / max(len(data_collected_items), 1),
+        'gdpr_compliant': gdpr_compliant,
+        'access_mechanism_available': True,
+        'deletion_mechanism_available': True,
+        'recent_breach_detected': False,
+        'breach_response_time_hours': 0,
         'decision_engine': {'is_active': True},
-        'output_mechanisms': {'type': 'robotic_arm'},
-        'feedback_systems': {'latency': 0.1},
         'affected_environment': {'state': 'normal'},
-        'execution_sequence': lambda x: True,
-        'action_parameters': {'kinetic_energy': 45, 'stress_index': 0.6},
-        'potential_energy': 10,
-        'kinetic_energy': 35,
-        'informational_entropy': 1.2,
-        'affected_people': [{'id': 1, 'injured': False}],
-        'affected_assets': [{'id': 'asset1', 'damage_level': 0.05}],
-        'affected_population': [{'utility': 0.8}, {'utility': 0.9}],
-        'decision_history': [{'fairness_score': 0.7}, {'fairness_score': 0.8}],
-        'capability_vectors': [[1, 2], [2, 3]]
+        'output_mechanisms': {'type': 'API'},
+        'feedback_systems': {'latency': 0.2},
+        'action_parameters': {'kinetic_energy': 0, 'stress_index': 0.1},
+        'potential_energy': 0,
+        'kinetic_energy': 0,
+        'informational_entropy': 0.5,
+        'affected_people': [],
+        'affected_assets': [],
+        'affected_population': [{'utility': 0.9}, {'utility': 0.8}],
+        'decision_history': [{'fairness_score': 0.8}, {'fairness_score': 0.7}],
+        'capability_vectors': [[1, 1], [2, 2]]
     }
 
-    ethical_system = EthicalConstraints()
-    result = ethical_system.enforce(example_context)
+    system = EthicalConstraints()
+    result = system.enforce(context)
 
-    print("Validation Result:")
-    print(result)
-    print("\nAudit Log:")
-    for log_entry in ethical_system.audit_log:
-        print(log_entry)
+    print("\n=== Ethical Validation Result ===")
+    print(json.dumps(result, indent=2))
+
+    print("\n=== Audit Log ===")
+    for entry in system.audit_log:
+        print(json.dumps(entry, indent=2))
