@@ -218,21 +218,60 @@ class FairnessEvaluator:
     def _identify_violations(self, data: pd.DataFrame,
                             predictions: np.ndarray,
                             similarity_fn: Callable) -> Dict:
-        """Identify individual fairness violations"""
-        nn = NearestNeighbors(n_neighbors=50, metric=similarity_fn)
+        if data.empty or len(data) < 2:
+            logger.warning("Not enough samples to identify individual fairness violations.")
+            return {
+                'max_violation': 0.0,
+                'mean_violation': 0.0,
+                'violation_rate': 0.0,
+                'status': 'skipped_insufficient_data'
+            }
+
+        n_neighbors_config = getattr(self.config, 'n_neighbors', 50)
+        if isinstance(self.config, dict):
+            n_neighbors_config = self.config.get('n_neighbors', 50)
+
+        num_samples = len(data)
+        n_neighbors_to_use = min(n_neighbors_config, num_samples)
+        if n_neighbors_to_use == 0 and num_samples > 0:
+            n_neighbors_to_use = 1
+
+        if n_neighbors_to_use == 0 :
+             logger.warning("Not enough samples for NearestNeighbors after adjusting n_neighbors.")
+             return { 'max_violation': 0.0, 'mean_violation': 0.0, 'violation_rate': 0.0, 'status': 'skipped_no_neighbors_possible'}
+
+
+        nn = NearestNeighbors(n_neighbors=n_neighbors_to_use, metric=similarity_fn)
         nn.fit(data)
+        
+        if num_samples < n_neighbors_to_use :
+            logger.warning(f"Number of samples ({num_samples}) is less than n_neighbors ({n_neighbors_to_use}). Skipping Kneighbors.")
+            return { 'max_violation': np.nan, 'mean_violation': np.nan, 'violation_rate': np.nan, 'status': 'skipped_nn_error'}
+
         distances, indices = nn.kneighbors(data)
 
         violations = []
         for i in range(len(data)):
+            if distances[i].size == 0:
+                continue
             neighbor_preds = predictions[indices[i]]
-            deviation = np.abs(predictions[i] - neighbor_preds)
-            violations.extend(deviation / (distances[i] + 1e-6))
+            safe_distances = distances[i] + 1e-9
+            deviation = np.abs(predictions[i] - neighbor_preds) / safe_distances
+            violations.extend(deviation)
+
+        if not violations:
+            return {
+                'max_violation': 0.0,
+                'mean_violation': 0.0,
+                'violation_rate': 0.0,
+                'status': 'no_violations_calculated'
+            }
 
         return {
-            'max_violation': np.max(violations),
-            'mean_violation': np.mean(violations),
-            'violation_rate': np.mean(np.array(violations) > 1.0)
+            'max_violation': np.max(violations) if violations else 0.0,
+            'mean_violation': np.mean(violations) if violations else 0.0,
+            'violation_rate': np.mean(np.array(violations) > 1.0) if violations else 0.0
+            # Example threshold for violation is deviation > 1.0 (Lipschitz constant > 1)
         }
 
     def _default_similarity(self, a: pd.Series, b: pd.Series) -> float:
