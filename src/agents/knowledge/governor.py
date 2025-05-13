@@ -32,10 +32,11 @@ def get_config_section(section: Union[str, Dict], config_file_path: str):
     return dict_to_namespace(config[section])
 
 class Governor:
-    def __init__(self, agent=None,
+    def __init__(self, knowledge_agent, agent=None,
                  config_section_name: str = "governor",
                  config_file_path: str = CONFIG_PATH):
         self.agent = agent
+        self.knowledge_agent = knowledge_agent
         self.config = get_config_section(config_section_name, config_file_path)
         self.guidelines = self._load_guidelines()
         # Initialize rule engine for guideline checks
@@ -50,10 +51,10 @@ class Governor:
         if self.config.realtime_monitoring:
             self._start_monitoring_thread()
 
-    def _init_rule_engine(self):
-        """Initialize standalone rule engine"""
-        from src.agents.knowledge.rule_engine import RuleEngine
-        return RuleEngine(config_file_path=CONFIG_PATH)
+    #def _init_rule_engine(self):
+    #    """Initialize standalone rule engine"""
+    #    from src.agents.knowledge.rule_engine import RuleEngine
+    #    return RuleEngine(config_file_path=CONFIG_PATH)
 
     def _load_guidelines(self) -> Dict[str, list]:
         """Load ethical guidelines from configured paths"""
@@ -222,6 +223,6 @@ if __name__ == "__main__":
     from unittest.mock import Mock
     mock_agent = Mock()
     mock_agent.shared_memory = {}
-    monitor = Governor(agent=mock_agent)
+    monitor = Governor(knowledge_agent=None, agent=mock_agent)
     print("")
     print("\n=== Successfully Ran Governor ===\n")
