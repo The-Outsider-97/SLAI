@@ -12,7 +12,7 @@ import numpy as np
 import networkx as nx
 
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -20,6 +20,8 @@ from functools import partial
 from logs.logger import get_logger
 
 logger = get_logger("Ethical Constraints")
+
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
 
 def dict_to_namespace(d):
     """Recursively convert dicts to SimpleNamespace for dot-access."""
@@ -29,7 +31,10 @@ def dict_to_namespace(d):
         return [dict_to_namespace(i) for i in d]
     return d
 
-def get_config_section(section: str, config_file_path: str):
+def get_config_section(section: Union[str, Dict], config_file_path: str):
+    if isinstance(section, dict):
+        return dict_to_namespace(section)
+    
     with open(config_file_path, "r") as f:
         config = yaml.safe_load(f)
     if section not in config:
@@ -53,7 +58,7 @@ class EthicalConstraints:
 
     def __init__(self,
                  config_section_name: str = "ethical_constraints",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
+                 config_file_path: str = CONFIG_PATH
                  ):
         self.config = get_config_section(config_section_name, config_file_path)
         self.audit_log = []
@@ -101,7 +106,9 @@ class EthicalConstraints:
         corrections = []
         explanations = []
         
-        for constraint_type, rules in vars(self.config.safety_constraints).items():
+        for constraint_type, rules in vars(
+            getattr(self.config, 'safety_constraints', SimpleNamespace())
+        ).items():
             hazard_detected = self._detect_hazard(context, constraint_type)
             if hazard_detected:
                 hazards.append(f"{constraint_type}_violation")
@@ -122,7 +129,9 @@ class EthicalConstraints:
         corrections = []
         explanations = []
         
-        for principle, rules in vars(self.config.constitutional_rules).items():
+        for principle, rules in vars(
+            getattr(self.config, 'constitutional_rules', SimpleNamespace())
+        ).items():
             for rule in rules:
                 if not self._evaluate_constitutional_rule(context, rule):
                     violations.append(f"constitutional_violation:{principle}")
@@ -142,7 +151,9 @@ class EthicalConstraints:
         corrections = []
         explanations = []
         
-        for dimension, rules in vars(self.config.fairness_constraints).items():
+        for dimension, rules in vars(
+            getattr(self.config, 'fairness_constraints', SimpleNamespace())
+        ).items():
             impact_score = self._calculate_societal_impact(context, dimension)
             if impact_score > self.constraint_weights[dimension]:
                 impacts.append(f"societal_impact:{dimension}")
@@ -398,6 +409,10 @@ class EthicalConstraints:
 
     def _adapt_constraints(self, context: Dict, result: Dict):
         """Experience-driven constraint adaptation"""
+        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
+        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
+        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
+
         for violation in result['violations']:
             if ':' in violation:
                 base_constraint_type = violation.split(':')[0]
@@ -414,7 +429,7 @@ class EthicalConstraints:
                 logger.info(f"Adapting weight for '{base_constraint_type}' due to violation '{violation}'. New weight: {self.constraint_weights[base_constraint_type]:.4f} (from {original_weight:.4f})")
             else:
                  found_category = False
-                 for category, types in vars(self.config.safety_constraints).items():
+                 for category, types in vars(safety).items():
                      if base_constraint_type in types or base_constraint_type == category:
                          if category in self.constraint_weights:
                               original_weight = self.constraint_weights[category]
@@ -428,7 +443,7 @@ class EthicalConstraints:
 
                  if not found_category:
                      # Repeat for fairness constraints
-                     for category, types in vars(self.config.fairness_constraints).items():
+                     for category, types in vars(fairness).items():
                           if base_constraint_type in types or base_constraint_type == category:
                                if category in self.constraint_weights:
                                     original_weight = self.constraint_weights[category]
@@ -442,7 +457,7 @@ class EthicalConstraints:
 
                  if not found_category:
                      # Repeat for constitutional rules
-                     for category, types in vars(self.config.constitutional_rules).items():
+                     for category, types in vars(constitutional).items():
                           if base_constraint_type in types or base_constraint_type == category:
                                if category in self.constraint_weights:
                                     original_weight = self.constraint_weights[category]
@@ -458,67 +473,64 @@ class EthicalConstraints:
                      logger.warning(f"Could not find matching weight key or category for violation '{violation}' (extracted type: '{base_constraint_type}'). No weight adapted.")
 
     def _init_weights(self) -> Dict:
-        """Initialize constraint weights based on broader categories."""
-        # Use the priority list or derive categories from the config keys
-        categories = self.config.constraint_priorities
-        # Ensure all config categories are included if not in priorities
-        all_categories = set(categories) | set(vars(self.config.safety_constraints).keys()) | \
-                         set(vars(self.config.fairness_constraints).keys()) | \
-                         set(vars(self.config.constitutional_rules).keys())
+        """Initialize constraint weights with safe config access."""
+        # Safely get all constraint sections with fallbacks
+        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
+        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
+        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
+        categories = getattr(self.config, 'constraint_priorities', [])
+        
+        # Collect all constraint types safely
+        all_categories = (
+            set(categories) |
+            set(vars(safety).keys()) | 
+            set(vars(fairness).keys()) | 
+            set(vars(constitutional).keys())
+        )
     
-        # Assign initial weights, perhaps based on priority order or uniformly
+        # Rest of the weight initialization logic remains the same...
         initial_weight = 1.0
-        step = 0.05 # Decrease weight slightly for lower priority items
+        step = 0.05
         weights = {}
         priority_map = {cat: i for i, cat in enumerate(categories)}
-    
-        for category in sorted(list(all_categories), key=lambda x: priority_map.get(x, 99)):
+        
+        for category in sorted(all_categories, key=lambda x: priority_map.get(x, 99)):
             weights[category] = initial_weight - priority_map.get(category, len(all_categories)) * step
             logger.debug(f"Initialized weight for '{category}': {weights[category]:.4f}")
     
-        # Ensure all keys used in _calculate_societal_impact have weights
-        for dimension in vars(self.config.fairness_constraints).keys():
-             if dimension not in weights:
-                  weights[dimension] = initial_weight - len(weights) * step # Assign a default low priority weight
-                  logger.warning(f"Fairness dimension '{dimension}' added to weights with default priority.")
-    
+        # Handle fairness dimensions
+        for dimension in vars(fairness).keys():
+            if dimension not in weights:
+                weights[dimension] = initial_weight - len(weights) * step
+                logger.warning(f"Fairness dimension added: {dimension}")
+        
         return weights
 
     def _build_constraint_graph(self):
-        """
-        Constructs a directed graph representing dependencies and potential
-        conflicts between ethical constraint categories or specific rules.
-        Edges can represent priority (higher priority node points to lower)
-        or potential conflicts (indicated by edge attributes).
-        """
+        """Build graph with full safe config access."""
         self.constraint_graph = nx.DiGraph()
+        
+        # Get all constraint sections with safe defaults
+        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
+        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
+        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
+        priority_list = getattr(self.config, 'constraint_priorities', [])  # Key fix
     
-        # Add nodes for major categories and specific dimensions/principles
-        categories = list(vars(self.config.safety_constraints).keys()) + \
-                     list(vars(self.config.fairness_constraints).keys()) + \
-                     list(vars(self.config.constitutional_rules).keys())
+        # Node creation remains unchanged
+        categories = (
+            list(vars(safety).keys()) +
+            list(vars(fairness).keys()) +
+            list(vars(constitutional).keys())
+        )
         self.constraint_graph.add_nodes_from(categories)
-
-        # Add nodes for specific rules if finer granularity is needed (optional)
-        # Example:
-        # for principle, rules in self.config.constitutional_rules.items():
-        #     for rule in rules:
-        #         node_id = f"{principle}:{rule[:20]}" # Truncate long rule names
-        #         self.constraint_graph.add_node(node_id, category=principle)
-        #         self.constraint_graph.add_edge(principle, node_id) # Link rule to principle
-
-        # Define potential priority relationships based on config
-        # Example: Higher priority points to lower priority
-        priority_list = self.config.constraint_priorities
+    
+        # Priority relationships with existence checks
         for i in range(len(priority_list)):
             for j in range(i + 1, len(priority_list)):
                 u = priority_list[i]
                 v = priority_list[j]
                 if u in self.constraint_graph and v in self.constraint_graph:
-                     # Add edge indicating u has priority over v
-                     self.constraint_graph.add_edge(u, v, type='priority')
-                     logger.debug(f"Added priority edge: {u} -> {v}")
-
+                    self.constraint_graph.add_edge(u, v, type='priority')
 
         # Define potential conflicts (example: transparency vs privacy)
         if 'transparency' in self.constraint_graph and 'privacy' in self.constraint_graph:
