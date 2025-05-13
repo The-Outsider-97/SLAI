@@ -29,7 +29,7 @@ def get_config_section(section: Union[str, Dict], config_file_path: str):
     if isinstance(section, dict):
         return dict_to_namespace(section)
     
-    with open(config_file_path, "r") as f:
+    with open(config_file_path, "r", encoding='utf-8') as f:
         config = yaml.safe_load(f)
     if section not in config:
         raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
