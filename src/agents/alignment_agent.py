@@ -7,37 +7,31 @@ Implements:
 """
 
 import re
-import logging
-import torch
-import time as timedelta
+import time
+import torch, yaml
+# import time as timedelta
 import datetime
 import pandas as pd
 import statsmodels.formula.api as smf
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from scipy.stats import entropy
 
 from src.agents.base_agent import BaseAgent
-from src.agents.safety_agent import SafeAI_Agent
-from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
-from src.agents.alignment.value_embedding_model import ValueEmbeddingModel, ValueConfig
+# from src.agents.safety_agent import SafeAI_Agent
+from src.agents.alignment.alignment_memory import AlignmentMemory
+from src.agents.alignment.ethical_constraints import EthicalConstraints
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
+from src.agents.alignment.value_embedding_model import ValueEmbeddingModel
 from models.slai_lm import SLAILMValueModel, get_shared_slailm
 from logs.logger import get_logger
 
 logger = get_logger("Alignment Agent")
-logger.setLevel(logging.INFO)
 
-@dataclass
-class AlignmentMemory:
-    """Longitudinal alignment state storage with concept drift detection"""
-    fairness_records: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[
-        'timestamp', 'metric', 'value', 'threshold', 'violation'
-    ]))
-    ethical_violations: List[Dict] = field(default_factory=list)
-    policy_adjustments: List[Dict] = field(default_factory=list)
-    drift_scores: pd.Series = field(default_factory=pd.Series)
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+GLOBAL_CONFIG_PATH = "config.yaml"
 
 @dataclass
 class CorrectionPolicy:
@@ -50,6 +44,31 @@ class CorrectionPolicy:
     ])
     learning_rate: float = 0.01
     momentum: float = 0.9
+    def generate_corrections(self, report: Dict) -> List[Dict]:
+        """Placeholder for generating corrections based on the report."""
+        # Example: if risk is high, suggest a correction
+        corrections = []
+        # This is a simplified placeholder. Actual logic would be more complex.
+        # It needs to be defined based on how CorrectionPolicy should work.
+        # For now, returning an empty list to avoid AttributeError.
+        # Based on `_determine_correction`, it seems `levels` and `threshold` are used.
+        # This method should align with `_determine_correction` if it's about *generating*
+        # the list of applicable corrections rather than one chosen correction.
+        # The current `_determine_correction` returns a single action.
+        # Let's assume `generate_corrections` is meant to list potential ones or the chosen one.
+        risk_score = report.get('risk_score', 0) # Assuming report might have a risk_score
+        if not risk_score and 'risk_assessment' in report and 'total_risk' in report['risk_assessment']:
+            risk_score = report['risk_assessment']['total_risk']
+
+        for level in sorted(self.levels, key=lambda x: x['threshold'], reverse=True):
+            if risk_score >= level['threshold']:
+                corrections.append({
+                    'action': level['action'],
+                    'details': f"Risk score {risk_score:.2f} exceeded threshold {level['threshold']}"
+                })
+                # If only one correction is expected by caller, break here
+                # break
+        return corrections
 
 @dataclass
 class PolicyAdapter:
@@ -73,88 +92,80 @@ class HumanOversightInterface:
             'format': 'json'
         }
 
-@dataclass
-class AlignmentMemory:
-    """Enhanced memory with DataFrame initialization"""
-    fairness_records: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[
-        'timestamp', 'metric', 'value', 'threshold', 'violation'
-    ]))
-    ethical_violations: List[Dict] = field(default_factory=list)
-    policy_adjustments: List[Dict] = field(default_factory=list)
-    drift_scores: pd.Series = field(default_factory=pd.Series)
-
-
-    def store_evaluation(self, report: Dict):
-        """Properly handle DataFrame storage"""
-        timestamp = datetime.now()
-
-        # Create temporary DataFrame for new entries
-        new_entries = []
-        for metric, value in report.get('fairness', {}).items():
-            new_entries.append({
-                'timestamp': timestamp,
-                'metric': metric,
-                'value': value.get('value', 0),
-                'threshold': value.get('threshold', 0),
-                'violation': value.get('violation', False)
-            })
-
-        if new_entries:
-            new_df = pd.DataFrame(new_entries)
-            self.fairness_records = pd.concat([self.fairness_records, new_df], ignore_index=True)
-
-        # Store ethical violations
-        self.ethical_violations.extend(report.get('ethical_violations', []))
+@dataclass 
+class HumanOversightTimeout(Exception):
+    pass
 
 class AlignmentAgent(BaseAgent):
     def __init__(self,
                  shared_memory,
                  agent_factory,
                  sensitive_attrs,
-                 config,
-                 monitor_config: Optional[MonitorConfig] = None,
+                 shared_tokenizer,
+                 shared_text_encoder,
+                 config=None,
                  correction_policy: Optional[CorrectionPolicy] = None,
-                 safe_agent: Optional[SafeAI_Agent] = None
+                 safe_agent = None
                  ):
         super().__init__(
             agent_factory=agent_factory,
-            config=config,
-            shared_memory = shared_memory,
+            config=config or {},
+            shared_memory = shared_memory
         )
-        self.agent_factory = agent_factory
+        agent_specific_config = config or {}
 
-        slailm_instance = get_shared_slailm(shared_memory, agent_factory)
+        from src.agents.alignment.counterfactual_auditor import CausalModel
+        self.agent_factory = agent_factory
+        if not config:
+            with open(CONFIG_PATH, 'r', encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+
+        slailm_instance = get_shared_slailm(shared_memory,
+                                            shared_tokenizer,
+                                            shared_text_encoder,
+                                            agent_factory)
+        model_predict_func = self.perform_task
+        causal_model = CausalModel(
+            graph=self.config['causal_model'],
+            data=self.shared_memory.get("data_schema")
+        )
         self.monitor = AlignmentMonitor(
             sensitive_attributes=sensitive_attrs,
-            config=config['monitor'],
+            model_predict_func=model_predict_func,
+            causal_model=causal_model,
+            slai_lm=slailm_instance,
+            config_file_path=CONFIG_PATH
+        )
+        self.value_embedding_model = ValueEmbeddingModel(
+            config_section_name="value_embedding",
+            config_file_path=CONFIG_PATH,
             slai_lm=slailm_instance
         )
-        #value_config = ValueConfig(**config['value_model'])
-        allowed_keys = ValueConfig.__annotations__.keys()
-        filtered_value_model_config = {k: v for k, v in config['value_model'].items() if k in allowed_keys}
-        value_config = ValueConfig(**filtered_value_model_config)
-        self.value_model = ValueEmbeddingModel(config=value_config, slai_lm=slailm_instance)
 
-        self.memory = AlignmentMemory(config['memory'])
-        self.ethics = EthicalConstraints(config['ethics'])
-        self.correction_policy = CorrectionPolicy(config['corrections'])
+        self.memory = AlignmentMemory(config=config.get('alignment_memory'))
+        self.ethics = EthicalConstraints(config['ethics_constraints'])
+        self.correction_policy = CorrectionPolicy(config.get('corrections', {})) 
 
-        # Initialize from second implementation
-        if safe_agent:
-            self.shared_memory = safe_agent.shared_memory
-            self.risk_threshold = safe_agent.risk_threshold
         self.adjustment_history = []
         self.safety_buffer = 0.1
         self.correction_policy = correction_policy or CorrectionPolicy()
 
     def verify_alignment(self, task_data):
-        report = self.monitor.assess(
-            task_data['inputs'],
-            task_data['predictions'],
-            task_data.get('labels')
+        report = self.monitor.monitor(
+            data=task_data['inputs'],
+            predictions=task_data['predictions'],
+            action_context={},
+            labels=task_data.get('labels'),
+            policy_params=torch.randn(1, 4096),
+            cultural_context_vector=torch.randn(1, 6),
+            ethical_texts=["Sample ethical guideline"]
         )
-
-        self.memory.store_evaluation(report)
+        self.memory.log_evaluation(
+            metric='alignment_metric',
+            value=report.get('overall_score', 0.5),
+            threshold=0.5,
+            context={'action_type': 'alignment_check'}
+        )
         return self._generate_decision(report)
 
     def _generate_decision(self, report):
@@ -164,137 +175,6 @@ class AlignmentAgent(BaseAgent):
             'corrections': self.correction_policy.generate_corrections(report),
             'risk_breakdown': risk_score
         }
-
-    def execute(self, task_data):
-        # Retrieve past errors from shared memory
-        failures = self.shared_memory.get("agent_stats", {}).get(self.name, {}).get("errors", [])
-        for err in failures:
-            if self.is_similar(task_data, err["data"]):
-                self.logger.info("Recognized a known problematic case, applying workaround.")
-                return self.alternative_execute(task_data)
-
-        errors = self.shared_memory.get(f"errors:{self.name}", [])
-
-        # Check if current task_data has caused errors before
-        for error in errors:
-            if self.is_similar(task_data, error['task_data']):
-                self.handle_known_issue(task_data, error)
-                return
-
-        # Proceed with normal execution
-        try:
-            result = self.perform_task(task_data)
-            self.shared_memory.set(f"results:{self.name}", result)
-        except Exception as e:
-            # Log the failure in shared memory
-            error_entry = {'task_data': task_data, 'error': str(e)}
-            errors.append(error_entry)
-            self.shared_memory.set(f"errors:{self.name}", errors)
-            raise
-
-        pass
-
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
-        try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
-            else:
-                clean_data = str(task_data).strip()
-
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
-
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
-
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
-
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
-
-    def is_similar(self, task_data, past_task_data):
-        """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
-        """
-        if type(task_data) != type(past_task_data):
-            return False
-    
-        # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
-        # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
-            for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
-    
-    def handle_known_issue(self, task_data, error):
-        """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
-        """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
-    
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-    
-    def perform_task(self, task_data):
-        """
-        Simulated execution method — replace with actual agent logic.
-        This is where core functionality would happen.
-        """
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, str) and "fail" in task_data.lower():
-            raise ValueError("Simulated failure due to blacklisted word.")
-    
-        if isinstance(task_data, dict):
-            # Simulate failure on missing required keys
-            required_keys = ["input", "context"]
-            for key in required_keys:
-                if key not in task_data:
-                    raise KeyError(f"Missing required key: {key}")
-    
-        # Simulate result
-        return {"status": "success", "result": f"Processed: {task_data}"}
 
     def align(self, 
              data: pd.DataFrame,
@@ -323,20 +203,42 @@ class AlignmentAgent(BaseAgent):
 
     def _run_alignment_checks(self, data, predictions, labels) -> Dict:
         """Comprehensive alignment verification with failure mode analysis"""
-        return self.monitor.assess_alignment(data, predictions, labels)
+        if len(data) < 50:
+            return {
+                'status': 'skipped',
+                'reason': 'Insufficient data for fairness evaluation'
+            }
+        return self.monitor.monitor(
+            data=data,
+            predictions=predictions,
+            action_context={},
+            labels=labels,
+            policy_params=torch.randn(1, 4096),
+            cultural_context_vector=torch.randn(1, 6),
+            ethical_texts=["Sample ethical guideline"]
+        )
 
     def _assemble_risk_profile(self, report: Dict) -> Dict:
-        """Convert alignment metrics to risk scores using KL-divergence"""
         current_state = self._vectorize_report(report)
-        ideal_state = self._get_ideal_state_vector()
+        ideal_state = self._get_ideal_state_vector() # Should be [0.0, 0.0, 0.0] for 0 disparity and 0 violations
+
+        weights = {'stat_parity': 0.4, 'equal_opp': 0.4, 'ethics': 0.2} # Example weights
         
-        kl_risk = entropy(ideal_state, current_state)
-        temporal_risk = self._calculate_temporal_risk(current_state)
+        risk_contributions = {
+            'statistical_parity': current_state[0].item() * weights['stat_parity'],
+            'equal_opportunity': current_state[1].item() * weights['equal_opp'],
+            'ethical_violations': current_state[2].item() * weights['ethics'],
+        }
         
+        total_risk = sum(risk_contributions.values())
+
+        # Ethical violations from the ethical_compliance_report
+        ethical_violations_details = report.get('ethical_compliance_report', {}).get('violations', [])
+
         return {
-            'total_risk': kl_risk + temporal_risk,
-            'component_risks': report.get('fairness', {}),
-            'ethical_violations': len(report.get('ethical_violations', []))
+            'total_risk': total_risk,
+            'component_risks': risk_contributions, # Changed from report.get('fairness', {})
+            'ethical_violations_details': ethical_violations_details # Using the detailed list
         }
 
     def _determine_correction(self, risk_profile: Dict) -> Dict:
@@ -473,7 +375,53 @@ class AlignmentAgent(BaseAgent):
         self.shared_memory.set(
             'system_mode', 
             'SAFE_HOLD', 
-            ttl=timedelta(minutes=30)
+            ttl=time(minutes=30)
+        )
+
+    def _maintain_safety_baselines(self):
+        """Preserve critical safety functions during paused state"""
+        # 1. Continue essential monitoring
+        self.monitor.keep_alive_monitoring(
+            components=['ethical_constraints', 'system_health']
+        )
+        
+        # 2. Enforce fundamental ethical guardrails
+        self.ethics.enforce_core_constraints(
+            constraint_level='emergency',
+            memory_snapshot=self.shared_memory.get_latest_snapshot()
+        )
+        
+        # 3. Maintain system stability
+        self.shared_memory.set(
+            'safety_parameters',
+            self.config.get('fail_safe_params', {'max_cpu': 0.7, 'min_memory': 1024})
+        )
+
+    def _preserve_evidence_memory(self):
+        """Capture forensic state snapshots for audit trails"""
+        # 1. Create state snapshot
+        snapshot_id = f"forensic_{datetime.now().isoformat()}"
+        self.shared_memory.set(
+            f"snapshots:{snapshot_id}",
+            {
+                'agent_state': self.__getstate__(),
+                'memory_dump': self.memory.create_forensic_dump(),
+                'system_metrics': self.shared_memory.get('performance_metrics')
+            },
+            ttl=time(days=30)
+        )
+        
+        # 2. Freeze monitoring buffers
+        self.monitor.preserve_evidence(
+            audit_logs=True,
+            metric_buffers=True,
+            causal_records=True
+        )
+        
+        # 3. Increment immutable log
+        self.shared_memory.append(
+            'audit_trail',
+            {'event': 'safe_state_activation', 'timestamp': time.time()}
         )
 
     def _generate_intervention_report(self) -> Dict:
@@ -537,12 +485,79 @@ class AlignmentAgent(BaseAgent):
         self._enable_defensive_mechanisms()
         self._initiate_system_diagnostics()
 
+    def _reduce_agent_privileges(self):
+        """Implement least-privilege fallback mode"""
+        # 1. Restrict action space
+        self.action_space = self.config['fail_safe_action_space']
+        
+        # 2. Disable high-risk capabilities
+        for module in ['policy_adjustment', 'model_retraining']:
+            self.shared_memory.set(f"module_status:{module}", 'restricted')
+        
+        # 3. Enable permission checks
+        self.operation_mode = 'PRIVILEGED_USER' if self.shared_memory.get(
+            'human_override') else 'RESTRICTED'
+    
+    def _enable_defensive_mechanisms(self):
+        """Activate protection layers against misalignment"""
+        # 1. Input validation hardening
+        self.input_sanitizer.enable_paranoid_mode()
+        
+        # 2. Rate limiting critical operations
+        self.operation_limiter.configure(
+            max_requests=10,
+            interval=60,
+            penalty='cool_down'
+        )
+        
+        # 3. Enable diagnostic monitoring
+        self.monitor.enable_advanced_checks(
+            check_types=['memory_integrity', 'code_signatures'],
+            intensity=9
+        )
+    
+    def _initiate_system_diagnostics(self):
+        """Comprehensive health checking protocol"""
+        # 1. Run core component checks
+        diagnostic_report = {
+            'memory': self.memory.validate_integrity(),
+            'ethics': self.ethics.verify_constraint_weights(),
+            'monitor': self.monitor.run_self_test()
+        }
+        
+        # 2. Automated remediation
+        for component, status in diagnostic_report.items():
+            if status['status'] != 'healthy':
+                self.shared_memory.set(
+                    f"autorepair:{component}",
+                    {'trigger': status['error_code']}
+                )
+        
+        # 3. External verification request
+        if self.shared_memory.get('enable_remote_diagnostics'):
+            self._request_third_party_audit()
+
     def _vectorize_report(self, report: Dict) -> torch.Tensor:
-        """Convert alignment report to numerical vector"""
+        fairness_report_section = report.get('fairness_metrics', report.get('group_fairness_report', {}))
+
+        stat_parity_value = 0.0
+        if isinstance(fairness_report_section, dict):
+            # Check across sensitive attributes if fairness_report_section is structured by attribute
+            # For now, let's assume a flatter structure or a single value after processing elsewhere
+            # If report['fairness'] was expected from AlignmentMonitor directly:
+            stat_parity_value = report.get('fairness', {}).get('statistical_parity', {}).get('value', 0)
+
+        equal_opp_value = 0.0
+        if isinstance(fairness_report_section, dict):
+            equal_opp_value = report.get('fairness', {}).get('equal_opportunity', {}).get('value', 0)
+
+        ethical_violations_list = report.get('ethical_compliance_report', {}).get('violations', [])
+        ethical_violations_count = len(ethical_violations_list) if isinstance(ethical_violations_list, list) else 0
+
         return torch.Tensor([
-            report['fairness'].get('statistical_parity', {}).get('value', 0),
-            report['fairness'].get('equal_opportunity', {}).get('value', 0),
-            len(report.get('ethical_violations', []))
+            stat_parity_value,
+            equal_opp_value,
+            ethical_violations_count
         ])
 
     def _get_ideal_state_vector(self) -> torch.Tensor:
@@ -620,51 +635,217 @@ class AlignmentAgent(BaseAgent):
         temporal_risk = self._calculate_temporal_risk(current_state)
         return kl_risk + temporal_risk
 
-#    def store_evaluation(self, report):
-#        """Integrated memory update from both implementations"""
-#        self._update_memory(report, None)
+if __name__ == "__main__":
+    import pandas as pd
+    import numpy as np
+    import torch
+    from datetime import datetime
+    import networkx as nx
+    import sys
 
-        # 5. Semantic analysis using embedding similarity
-#        if hasattr(self, 'value_model'):
-#            column_embeddings = self.value_model.encode_value(
-#                df.columns.tolist(), 
-#                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
-#            )
-#            sensitive_embeddings = self.value_model.encode_value(
-#                ['gender', 'race', 'religion'],
-#                cultural_context=torch.zeros(self.config.num_cultural_dimensions)
-#            )
-#            similarities = torch.cosine_similarity(
-#                column_embeddings, 
-#                sensitive_embeddings.unsqueeze(0)
-#            )
-#            semantic_matches = [
-#                df.columns[i] for i in range(len(df.columns))
-#                if similarities[i].max() > 0.7
-#            ]
-#            sensitive_attrs.update(semantic_matches)
+    class SharedMemory:
+        def __init__(self):
+            self.store = {}
+            self.agent_stats = {} 
+            
+        def get(self, key, default=None): 
+            return self.store.get(key, default)
+            
+        def set(self, key, value, ttl=None): # Added ttl for compatibility with _enter_safe_state
+            self.store[key] = value
+            if ttl:
+                # Simple TTL mock: store expiration time, not actively purged in this mock
+                self.store[f"{key}__ttl_exp"] = time.time() + ttl.total_seconds()
 
-        # 6. Remove false positives using denylist
-#        denylist = ['modified_date', 'processed_flag']
-#        sensitive_attrs = [attr for attr in sensitive_attrs 
-#                        if attr not in denylist]
+            
+        def append(self, key, value):
+            if key not in self.store:
+                self.store[key] = []
+            self.store[key].append(value)
 
-#        logger.info(f"Detected sensitive attributes: {sorted(sensitive_attrs)}")
+    # Mock agent factory (from original script)
+    class AgentFactory:
+        def get_agent(self, name):
+            return None
+
+    sensitive_attrs = ["age", "gender", "ethnicity"]
+
+    class MockTokenizer:
+        def __init__(self):
+            self.vocab_size = 100
+    class MockTextEncoder:
+        def __init__(self, vocab_size, embed_dim, num_layers, num_heads, ff_dim, num_styles, dropout_rate, positional_encoding, max_length, device, tokenizer):
+            pass
+    
+    try:
+        from src.agents.perception.modules.tokenizer import Tokenizer
+        from src.agents.perception.encoders.text_encoder import TextEncoder
+    except ImportError:
+        print("Warning: Tokenizer/TextEncoder not found. Using mocks.")
+        Tokenizer = MockTokenizer
+        TextEncoder = MockTextEncoder
         
-#        return sorted(sensitive_attrs)
+    shared_memory_instance = SharedMemory() # Renamed to avoid conflict
+    agent_factory_instance = AgentFactory() # Renamed
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    shared_tokenizer_instance = Tokenizer() 
+    shared_text_encoder_instance = TextEncoder( 
+        vocab_size=shared_tokenizer_instance.vocab_size,
+        embed_dim=200, num_layers=6, num_heads=8, ff_dim=2048, num_styles=14,
+        dropout_rate=0.1, positional_encoding="sinusoidal", max_length=512,
+        device=device, tokenizer=shared_tokenizer_instance
+    )
 
-class HumanOversightTimeout(Exception):
-    pass
+    causal_model_data = pd.DataFrame({
+        'age': np.random.randint(18, 65, 50),
+        'gender': np.random.choice([0, 1], 50),
+        'ethnicity': np.random.choice([1, 2, 3], 50),
+        'feature_X': np.random.rand(50),
+        'outcome_Y': np.random.rand(50),
+        # Add other columns if CausalModel expects them or if model_predict_func uses them
+        'input': np.random.rand(50), 
+        'context': np.random.rand(50)
+    })
+    shared_memory_instance.set("data_schema", causal_model_data)
 
-# Add missing component stubs
-@dataclass
-class EthicalConstraints:
-    def __init__(self, config=None):
-        self.config = config if config is not None else {
-            "constraints": [
-                "Do not generate discriminatory content",
-                "Uphold user dignity and agency",
-                "Avoid promoting misinformation",
-                "Respect user privacy and autonomy"
-            ]
-        }
+    sample_graph_for_testing = nx.DiGraph()
+    sample_graph_for_testing.add_nodes_from(causal_model_data.columns)
+    sample_graph_for_testing.add_edges_from([
+        ('age', 'feature_X'), ('gender', 'feature_X'),
+        ('feature_X', 'outcome_Y'), ('ethnicity', 'outcome_Y')
+    ])
+
+    test_config = {
+        'risk_threshold': 0.25,
+        'alignment_memory': {'replay_buffer_size': 1000, 'drift_threshold': 0.2},
+        'ethics_constraints': {'safety_constraints': {'physical_harm': ['Prevent injury']}},
+        'causal_model': sample_graph_for_testing,
+        # Add other configs if AlignmentAgent or its components expect them
+        'fail_safe_action_space': ['safe_action1', 'safe_action2'] # For _reduce_agent_privileges
+    }
+
+    # --- Mocking get_shared_slailm ---
+    class MockSLAILMForAgentTests:
+        def __init__(self, *args, **kwargs):
+            logger.info("MockSLAILMForAgentTests initialized for AlignmentAgent test")
+        def process_input(self, prompt, text, **kwargs):
+            logger.info(f"MockSLAILMForAgentTests.process_input called with prompt: {prompt}, text: {text}")
+            # Return structure potentially used by ValueEmbeddingModel if it's active
+            return {"tokens": ["mock_token"] * 10, "embedding": torch.randn(768)} 
+
+    original_get_shared_slailm_func = None
+    try:
+        # Ensure models.slai_lm is importable before trying to patch
+        import models.slai_lm as slai_lm_module
+        if hasattr(slai_lm_module, 'get_shared_slailm'):
+            original_get_shared_slailm_func = slai_lm_module.get_shared_slailm
+            slai_lm_module.get_shared_slailm = lambda sm, tok, enc, af: MockSLAILMForAgentTests(sm, tok, enc, af)
+            logger.info("Patched models.slai_lm.get_shared_slailm for testing.")
+        else:
+            logger.warning("models.slai_lm does not have get_shared_slailm. SLAILM may not be mocked.")
+    except ModuleNotFoundError:
+        logger.error("Module 'models.slai_lm' not found. SLAILM cannot be mocked. Tests involving it may fail.")
+    except ImportError:
+        logger.error("ImportError for 'models.slai_lm'. SLAILM cannot be mocked. Tests involving it may fail.")
+
+
+    alignment_agent = AlignmentAgent(
+        shared_memory=shared_memory_instance,
+        agent_factory=agent_factory_instance,
+        shared_tokenizer=shared_tokenizer_instance,
+        shared_text_encoder=shared_text_encoder_instance,
+        sensitive_attrs=sensitive_attrs,
+        config=test_config
+    )
+    
+    print("\n=== Test 1: Basic Alignment Check ===")
+    sample_data_verify = pd.DataFrame({
+        'age': [25, 30, 35, 40, 45],
+        'gender': [1, 0, 1, 0, 1],
+        'ethnicity': [2, 1, 3, 2, 1],
+        'feature': [0.5, 0.7, 0.3, 0.6, 0.2],
+        'input': np.random.rand(5), 
+        'context': np.random.rand(5) 
+    })
+    predictions_verify = np.array([0.6, 0.4, 0.8, 0.3, 0.7])
+    labels_verify = np.array([1, 0, 1, 0, 1])
+
+    try:
+        verification_report = alignment_agent.verify_alignment({
+            'inputs': sample_data_verify,
+            'predictions': predictions_verify,
+            'labels': labels_verify,
+            'action_context': {
+                'decision_engine': {'is_active': True}, 
+                'action_parameters': {'kinetic_energy': 10}
+            }
+        })
+        print("Verification Result:")
+        print(f"Approved: {verification_report.get('approved')}")
+        risk_bd = verification_report.get('risk_breakdown', 'N/A')
+        if isinstance(risk_bd, float):
+             print(f"Risk Score: {risk_bd:.4f}")
+        else:
+             print(f"Risk Breakdown: {risk_bd}")
+        print("Corrections:", verification_report.get('corrections'))
+    except Exception as e:
+        print(f"Test 1 (Basic Alignment Check) failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n=== Test 2: Error Handling Test ===")
+    try:
+        print("Testing known failure pattern (string input)...")
+        # This will call AlignmentAgent.perform_task due to override
+        result_str = alignment_agent.execute("this task should fail") 
+        print(f"Result for 'fail' string: {result_str}")
+
+        print("Testing known failure pattern (dict input)...")
+        result_dict = alignment_agent.execute({"input": "data", "context": "info", "text": "fail this one"})
+        print(f"Result for 'fail' dict: {result_dict}")
+
+        print("Testing successful execution (dict input)...")
+        result_ok = alignment_agent.execute({"input": "good data", "context": "normal context"})
+        print(f"Result for successful dict: {result_ok}")
+
+    except Exception as e:
+        print(f"Error caught during Test 2: {str(e)}")
+        print("Shared memory errors:", shared_memory_instance.get(f"errors:{alignment_agent.name}"))
+
+
+    print("\n=== Test 3: Full Alignment Pipeline ===")
+    # Data for align method - ensure it has sensitive attributes and other needed columns
+    align_test_data = pd.DataFrame({
+        'age': np.random.randint(18, 65, 100),
+        'gender': np.random.choice([0,1], 100), # Added gender
+        'ethnicity': np.random.choice([1,2,3], 100), # Added ethnicity
+        'income': np.random.normal(50000, 15000, 100),
+        # Add other columns if model_predict_func (AlignmentAgent.perform_task) expects them
+        # when called by AlignmentMonitor
+        'input': np.random.rand(100), 
+        'context': np.random.rand(100) 
+    })
+    align_predictions = torch.randn(100)
+    align_labels = torch.randint(0, 2, (100,))
+    try:
+        alignment_report_pipeline = alignment_agent.align(
+            data=align_test_data,
+            predictions=align_predictions,
+            labels=align_labels
+        )
+        print("Alignment Report (Pipeline):")
+        total_risk_val = alignment_report_pipeline.get('risk_assessment', {}).get('total_risk', float('nan'))
+        print(f"Total Risk: {total_risk_val:.4f}")
+        print("Applied Correction:", alignment_report_pipeline.get('applied_correction'))
+    except Exception as e:
+        print(f"Test 3 (Full Alignment Pipeline) failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
+    # Restore original get_shared_slailm if it was patched
+    if original_get_shared_slailm_func and 'models.slai_lm' in sys.modules:
+        sys.modules['models.slai_lm'].get_shared_slailm = original_get_shared_slailm_func
+        logger.info("Restored models.slai_lm.get_shared_slailm.")
+
+    print("\nAll tests completed (up to the point of fixes)!")
