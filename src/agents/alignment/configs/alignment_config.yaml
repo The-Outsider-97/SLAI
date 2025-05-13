@@ -78,6 +78,12 @@ counterfactual_auditor:
     group_disparity_avg_odds: 0.1
     causal_effect_ate: 0.05
 
+causal_model:
+  structure_learning_method: "pc"  # Example
+  conditional_independence_test: "fisherz"
+  graph_file: "models/causal_graph.gml"
+  prior_knowledge: ["age->income", "education->income"]
+
 fairness_evaluator:
   group_metrics:
     - statistical_parity
