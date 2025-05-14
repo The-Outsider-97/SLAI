@@ -1,0 +1,68 @@
+task_scheduler:
+  risk_threshold: 0.7
+  retry_policy:
+    max_attempts: 3
+    backoff_factor: 1.5
+  base_duration_per_requirement: 2.0  # Time per capability requirement
+  efficiency_attribute: "efficiency"  # Key in agent's details for efficiency
+
+decision_tree_heuristic:
+  max_depth: 8
+  min_samples_split: 15
+  min_impurity_decrease: 0.01
+  ccp_alpha: 0.02
+  class_weight: "balanced"
+  feature_config:
+    use_temporal_features: true
+    use_priority_weighting: true
+    use_method_complexity: false
+  validation:
+    test_size: 0.25
+    max_training_samples: 10000
+
+gradient_boosting_heuristic:
+  n_estimators: 200
+  learning_rate: 0.05
+  max_depth: 5
+  subsample: 0.8
+  min_samples_split: 10
+  early_stopping_rounds: 20
+  validation_fraction: 0.2
+  class_weight: "balanced"
+  feature_config:
+    use_priority: true
+    use_resource_check: true
+    recent_success_window: 10
+
+planning_memory:
+  max_checkpoints: 20                  # Maximum stored planning states
+  history_window: 1000                 # Execution history items to retain
+  retention_days: 7                    # Auto-delete checkpoints older than this
+  compression: false                   # Enable checkpoint compression
+  auto_save_interval: 300              # Seconds between auto-saves (0=disabled)
+
+planning_metrics:
+  enable_timing: true          # Whether to require timing data
+  default_task_cost: 1.0       # Fallback cost for tasks without cost attribute
+  default_task_duration: 0.5   # Fallback duration (seconds) when timing data missing
+  use_length_fallback: true    # Use plan length * duration when no timing data
+  metrics_weights:
+    success: 0.5               # Weight for success rate in efficiency score
+    cost: 0.3                  # Weight for cost efficiency
+    time: 0.2                  # Weight for time efficiency
+
+planning_monitor:
+  metrics_window: 100          # Number of plans to retain for trend analysis
+  anomaly_thresholds:
+    success_rate: 0.65         # Minimum acceptable success rate
+    cpu_peak: 85.0             # Max CPU% before alert
+    memory_peak: 4096          # Max MB before alert
+  check_intervals:
+    plan_execution: 5          # Check metrics every N plans
+    resource_scan: 300         # Full system scan every N seconds
+  method_analysis_depth: 10    # Track top N most used methods
+
+planning_types:
+  default_constraints: []
+  type_checks: enabled
+  validation_level: strict
