@@ -1,29 +1,36 @@
 import torch
 import math
+import yaml
 
 from src.agents.perception.utils.common import TensorOps, Parameter
 from logs.logger import get_logger
 
 logger = get_logger("Feedforward")
 
+CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
+
 class FeedForward:
     """Enhanced Position-wise Feed-Forward Network with configurable components"""
-    def __init__(
-        self,
-        embed_dim=512,
-        ff_dim=2048,
-        activation='gelu',
-        dropout_rate=0.1,
-        use_bias=True,
-        initializer='he',
-        device='cpu',
-        **kwargs
-    ):
-        self.embed_dim = embed_dim
-        self.ff_dim = ff_dim
-        self.activation = activation
-        self.dropout_rate = dropout_rate
-        self.use_bias = use_bias
+    def __init__(self, config, device='cpu'):
+        cfg = config['feedforward']
+        transformer_cfg = config['transformer']
+        self.embed_dim = transformer_cfg['embed_dim']
+        self.ff_dim = transformer_cfg['ff_dim']
+        self.activation = cfg['activation']  # 🛠️ Fixed config access
+        self.dropout_rate = cfg['dropout_rate']
+        self.use_bias = cfg['use_bias']
+        self.initializer = cfg['initializer']
         self.training = True
         self.device = device
 
@@ -32,17 +39,18 @@ class FeedForward:
             'he': TensorOps.he_init,
             'xavier': TensorOps.xavier_uniform,
             'lecun': TensorOps.lecun_normal
-        }.get(initializer, TensorOps.he_init)
+        }.get(self.initializer, TensorOps.he_init)
 
         # First linear transformation
-        self.w1 = Parameter(init_fn((embed_dim, ff_dim), embed_dim, device=self.device))
-        self.b1 = Parameter(torch.zeros(ff_dim, device=self.device) if use_bias else None)
+        self.w1 = Parameter(init_fn((self.embed_dim, self.ff_dim), self.embed_dim, device=self.device))
+        self.b1 = Parameter(torch.zeros(self.ff_dim, device=self.device) if self.use_bias else None)
 
         # Second linear transformation
-        self.w2 = Parameter(init_fn((ff_dim, embed_dim), ff_dim, device=self.device))
-        self.b2 = Parameter(torch.zeros(embed_dim, device=self.device) if use_bias else None)
+        self.w2 = Parameter(init_fn((self.ff_dim, self.embed_dim), self.ff_dim, device=self.device))
+        self.b2 = Parameter(torch.zeros(self.embed_dim, device=self.device) if self.use_bias else None)
 
         # Intermediate values cache
+        self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
         self._activation_derivatives = {
             'gelu': self._gelu_derivative,
@@ -170,23 +178,17 @@ class FeedForward:
 
 if __name__ == "__main__":
     print("\n=== Running FeedForward ===\n")
+    config = load_config()
 
     # Create a small feedforward model
-    model = FeedForward(
-        embed_dim=8,
-        ff_dim=16,
-        activation='gelu',
-        dropout_rate=0.2,
-        use_bias=True,
-        initializer='he',
-        device='cpu',
-    )
+    model = FeedForward(config)
 
     print("Initialized FeedForward module:")
     print(model)
 
     # Dummy input
-    x = torch.randn(4, 8)  # (batch=4, embed_dim=8)
+    x = torch.randn(4, config['transformer']['embed_dim'])
+    print(f"\nInput shape: {x.shape}")
 
     # Set to training mode
     model.train()
