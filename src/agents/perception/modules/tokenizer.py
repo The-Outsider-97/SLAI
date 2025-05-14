@@ -10,7 +10,7 @@ from typing import List, Dict, Union, Optional, Tuple
 
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Tokenizer")
 
 BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
 BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
@@ -65,6 +65,7 @@ class Tokenizer:
             bpe_merges = [tuple(pair) for pair in merges_data.get("merges", [])]
 
         self.bpe_ranks = {pair: i for i, pair in enumerate(bpe_merges)}
+        self.bpe_processor = BytePairEncoder(bpe_merges, self.word_to_id, self.unk_token)
 
         # Add special tokens if they aren't already in the BPE vocab
         self.special_tokens = [self.pad_token, self.unk_token, self.cls_token, self.sep_token]
@@ -136,7 +137,7 @@ class Tokenizer:
             text = ''.join(c for c in text if not unicodedata.combining(c))
             return text.lower()
         
-        tokens = self._token_pattern.findall(normalize(text))
+        tokens = self.pat.findall(normalize(text))
     
         if hasattr(self, 'bpe_processor'):
             subword_tokens = []
@@ -335,9 +336,11 @@ class Tokenizer:
         self.sep_token_id = self.word_to_id[self.sep_token]
 
 class BytePairEncoder:
-    def __init__(self, merges):
+    def __init__(self, merges, word_to_id=None, unk_token='[UNK]'):
         self.bpe_ranks = {tuple(merge): i for i, merge in enumerate(merges)}
         self.cache = {}
+        self.word_to_id = word_to_id or {}
+        self.unk_token = unk_token
 
     def get_pairs(self, word):
         pairs = set()
@@ -393,3 +396,40 @@ class BytePairEncoder:
             word = word[:-1]
         self.cache[token] = list(word)
         return self.cache[token]
+
+if __name__ == "__main__":
+    print("\n=== Running Tokenizer ===\n")
+
+    try:
+        tokenizer = Tokenizer(
+            bpe_vocab_path=BPE_VOCAB_PATH,
+            bpe_merges_path=BPE_MODEL_PATH,
+            max_length=20,
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+            cls_token="[CLS]",
+            sep_token="[SEP]"
+        )
+
+        # Example input
+        example_text = "I love you SLAI!"
+
+        # Tokenize
+        encoded = tokenizer.encode(example_text)
+        print("Encoded:")
+        print("Input IDs:", encoded['input_ids'])
+        print("Attention Mask:", encoded['attention_mask'])
+
+        # Decode back
+        decoded = tokenizer.decode(encoded['input_ids'])
+        print("Decoded Text:", decoded)
+
+        # Access BPE encoder directly
+        test_token = "Kiss me!"
+        subwords = tokenizer.bpe_processor.bpe(test_token)
+        print(f"BPE for '{test_token}':", subwords)
+
+    except Exception as e:
+        print("Tokenizer initialization or execution failed:", str(e))
+
+    print("\n=== Successfully Ran Tokenizer ===\n")
