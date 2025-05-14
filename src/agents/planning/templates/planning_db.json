@@ -1,0 +1,64 @@
+{
+  "tasks": {
+    "navigation": {
+      "goal_state": {"position": "target", "battery": ">30"},
+      "methods": ["A*", "RRT"],
+      "default_priority": 0.7,
+      "temporal_features": {
+        "max_depth": 3,
+        "time_decay_factor": 0.95
+      }
+    },
+    "object_manipulation": {
+      "goal_state": {"gripper_state": "closed", "force": "<5N"},
+      "methods": ["force_control", "visual_servoing"],
+      "default_priority": 0.9,
+      "temporal_features": {
+        "max_depth": 4,
+        "time_decay_factor": 0.9
+      }
+    },
+    "decision_tree_example": {
+      "goal_state": {"data_quality": ">0.8", "processing_time": "<500ms"},
+      "methods": ["binary_split", "ensemble_voting"],
+      "temporal_features": {
+        "max_depth": 5,
+        "time_decay_factor": 0.9
+      }
+    }
+  },
+  "method_stats": {
+    "navigation:A*": {"success": 45, "total": 50},
+    "navigation:RRT": {"success": 38, "total": 50},
+    "object_manipulation:force_control": {"success": 32, "total": 40},
+    "object_manipulation:visual_servoing": {"success": 28, "total": 35},
+    "decision_tree_example:binary_split": {"success": 22, "total": 25},
+    "decision_tree_example:ensemble_voting": {"success": 19, "total": 20}
+  },
+  "world_states": [
+    {"position": "start", "battery": 100, "cpu_available": 80, "memory_available": 2048},
+    {"gripper_state": "open", "force": "0N", "cpu_available": 65, "memory_available": 1024},
+    {"data_quality": 0.85, "processing_time": 350, "cpu_available": 75, "memory_available": 1536}
+  ],
+  "decision_tree_templates": {
+    "feature_thresholds": {
+      "task_depth": 0.35,
+      "goal_overlap": 0.6,
+      "priority_weight": 0.7
+    },
+    "common_splits": [
+      {
+        "feature": "goal_overlap",
+        "threshold": 0.5,
+        "success_rate_above": 0.82,
+        "success_rate_below": 0.34
+      },
+      {
+        "feature": "method_failure_rate",
+        "threshold": 0.4,
+        "success_rate_above": 0.28,
+        "success_rate_below": 0.75
+      }
+    ]
+  }
+}
