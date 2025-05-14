@@ -2,6 +2,9 @@ import torch
 import math
 
 from src.agents.perception.utils.common import TensorOps, Parameter
+from logs.logger import get_logger
+
+logger = get_logger("Attention")
 
 # causal = True
 # attention_mask = None
@@ -158,13 +161,42 @@ class EfficientAttention:
              # Returning d_context might be needed depending on the model structure
              return d_x # Or return d_x, d_context
 
-    def _split_heads(self, x):
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Splits the last dimension (embedding) into multiple heads.
+        
+        Input shape: (batch_size, seq_len, embed_dim)
+        Output shape: (batch_size, num_heads, seq_len, head_dim)
+    
+        This is necessary for multi-head attention, allowing each head
+        to attend independently over the input.
+        """
         batch_size, seq_len, embed_dim = x.shape
-        return x.view(batch_size, seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        assert embed_dim == self.embed_dim, "Embedding dimension mismatch"
+    
+        # Reshape to split embed_dim into (num_heads, head_dim)
+        x = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
+    
+        # Rearrange dimensions to: (batch, num_heads, seq_len, head_dim)
+        return x.permute(0, 2, 1, 3)
 
-    def _combine_heads(self, x):
+    def _combine_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Combines multi-head tensor into a single embedding dimension.
+    
+        Input shape: (batch_size, num_heads, seq_len, head_dim)
+        Output shape: (batch_size, seq_len, embed_dim)
+    
+        Reverses the operation from _split_heads().
+        """
         batch_size, num_heads, seq_len, head_dim = x.shape
-        return x.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, self.embed_dim)
+        assert num_heads == self.num_heads and head_dim == self.head_dim, "Shape mismatch in combine_heads"
+    
+        # Rearrange back to (batch, seq_len, num_heads, head_dim)
+        x = x.permute(0, 2, 1, 3).contiguous()
+    
+        # Flatten last two dimensions to (embed_dim)
+        return x.view(batch_size, seq_len, self.embed_dim)
 
     @staticmethod
     def build_attention_mask(input_ids, pad_token_id, masked_token_id=None, is_masked_training=False, device='cpu'):
@@ -186,7 +218,6 @@ class EfficientAttention:
         else:
              input_ids = input_ids.to(device)
 
-
         # Base mask: True for real tokens, False for padding
         base_mask = (input_ids != pad_token_id)
 
@@ -197,3 +228,34 @@ class EfficientAttention:
         # Expand to [batch, 1, 1, seq] (compatible with attention scores B,H,S,S)
         attention_mask = base_mask.unsqueeze(1).unsqueeze(2) # Add head and query seq dims
         return attention_mask
+
+if __name__ == "__main__":
+    print("\n=== Running Common ===\n")
+
+    # Test Parameter class with basic initialization
+    data = torch.randn(3, 4)
+    param = Parameter(data, name="test_param")
+
+    print(f"Initial: {param}")
+    print(f"Data:\n{param.data}")
+    print(f"Grad:\n{param.grad}")
+
+    # Simulate a gradient
+    param.grad = torch.ones_like(param.data) * 0.5
+    print(f"\nAfter Gradient Simulation:\nGrad:\n{param.grad}")
+
+    # Apply a gradient descent step
+    lr = 0.1
+    param.step(lr)
+    print(f"\nAfter Step(lr={lr}):\nData:\n{param.data}")
+
+    # Reset the gradients
+    param.zero_grad()
+    print(f"\nAfter zero_grad():\nGrad:\n{param.grad}")
+
+    # Move to another device (if available)
+    if torch.cuda.is_available():
+        param.to("cuda")
+        print(f"\nMoved to CUDA:\n{param}")
+
+    print("\n=== Successfully Ran Common ===\n")
