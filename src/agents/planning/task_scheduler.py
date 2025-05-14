@@ -51,6 +51,7 @@ class DeadlineAwareScheduler(TaskScheduler):
                  config_section_name: str = "task_scheduler",
                  config_file_path: str = CONFIG_PATH,
                  retry_policy: Optional[Dict] = None):
+        super().__init__()
         self.config = get_config_section(config_section_name, config_file_path)
         self.agent = agent
         self.risk_threshold = risk_threshold if risk_threshold is not None else self.config.risk_threshold
