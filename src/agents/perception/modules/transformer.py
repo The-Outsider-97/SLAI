@@ -1,25 +1,48 @@
 import math
 import torch
+import yaml
 
 from abc import ABC, abstractmethod
 
 from src.agents.perception.utils.common import TensorOps, Parameter  
 from src.agents.perception.modules.attention import EfficientAttention  
 from src.agents.perception.modules.feedforward import FeedForward  
+from logs.logger import get_logger
+
+logger = get_logger("Transformer")
+
+CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class Transformer:
-    def __init__(self, num_layers=6, embed_dim=512, num_heads=8, ff_dim=2048, num_styles=14):
+    def __init__(self, config):
+        cfg = config['transformer']
+        self.embed_dim = cfg['embed_dim']
         self.layers = [
             {
-                'attention': EfficientAttention(embed_dim, num_heads),
-                'ff': FeedForward(embed_dim, ff_dim),
-                'norm1': Parameter(torch.ones(embed_dim)),
-                'norm2': Parameter(torch.ones(embed_dim)),
+                'attention': EfficientAttention(config),
+                'ff': FeedForward(config),
+                'norm1': Parameter(torch.ones(cfg['embed_dim'])),
+                'norm2': Parameter(torch.ones(cfg['embed_dim'])),
             }
-            for _ in range(num_layers)
+            for _ in range(cfg['num_layers'])
         ]
-        self.positional_encoding = self._init_positional_encoding(embed_dim)
-        self.style_embeddings = Parameter(torch.randn(num_styles, embed_dim) * 0.02)
+        self.positional_encoding = self._init_positional_encoding(
+            cfg['embed_dim'], 
+            cfg['max_position_embeddings']
+        )
+        self.style_embeddings = Parameter(
+            torch.randn(cfg['num_styles'], cfg['embed_dim']) * 0.02)
 
     def parameters(self):
         params = [self.positional_encoding]
@@ -227,13 +250,73 @@ class Generator:
         return self.tokenizer.decode(best_sequence), best_log_prob
 
 class TaskHead(ABC):
-    """Abstract base class for task-specific heads"""
+    """Enhanced abstract base class for task-specific heads with common utilities"""
+    def __init__(self, 
+                 dropout_rate: float = 0.1, 
+                 layer_norm_eps: float = 1e-5,
+                 device: str = 'cpu'):
+        super().__init__()
+        self.dropout_rate = dropout_rate
+        self.layer_norm_eps = layer_norm_eps
+        self.device = device
+        self.training = True
+        
+        # Common components
+        self.dropout = torch.nn.Dropout(p=dropout_rate)
+        self.layer_norm = lambda x: TensorOps.layer_norm(x, eps=layer_norm_eps)
+
     @abstractmethod
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Forward pass must be implemented by subclasses"""
         pass
+
+    def parameters(self) -> list:
+        """Return all trainable parameters"""
+        params = []
+        for attr in vars(self).values():
+            if isinstance(attr, Parameter):
+                params.append(attr)
+            elif hasattr(attr, 'parameters'):  # For nested modules
+                params.extend(attr.parameters())
+        return params
+
+    def to(self, device: str) -> None:
+        """Move all parameters to specified device"""
+        self.device = device
+        for param in self.parameters():
+            param.data = param.data.to(device)
+            if param.grad is not None:
+                param.grad = param.grad.to(device)
+
+    def train(self) -> None:
+        """Set to training mode"""
+        self.training = True
+
+    def eval(self) -> None:
+        """Set to evaluation mode"""
+        self.training = False
+
+    def freeze_parameters(self) -> None:
+        """Disable gradient calculation for all parameters"""
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def unfreeze_parameters(self) -> None:
+        """Enable gradient calculation for all parameters"""
+        for param in self.parameters():
+            param.requires_grad = True
+
+    def _init_weights(self, module: Parameter, initializer: str = 'he') -> None:
+        """Apply weight initialization to a parameter"""
+        if initializer == 'he':
+            std = math.sqrt(2.0 / module.data.shape[0])
+            module.data.normal_(mean=0, std=std)
+        elif initializer == 'xavier':
+            torch.nn.init.xavier_uniform_(module.data)
 
 class ClassificationHead(TaskHead):
     def __init__(self, hidden_dim, num_classes):
+        super().__init__()
         self.dense = Parameter(torch.randn(hidden_dim, num_classes) * 0.02)
 
     def forward(self, hidden_states):
@@ -242,6 +325,7 @@ class ClassificationHead(TaskHead):
 
 class RegressionHead(TaskHead):
     def __init__(self, hidden_dim):
+        super().__init__()
         self.dense = Parameter(torch.randn(hidden_dim, 1) * 0.02)
 
     def forward(self, hidden_states):
@@ -249,12 +333,58 @@ class RegressionHead(TaskHead):
         return torch.matmul(pooled, self.dense.data)
 
 class Seq2SeqHead(TaskHead):
-    def __init__(self, text_encoder, tokenizer):
-        self.decoder = Transformer(num_layers=4)
-        self.generator = Generator(text_encoder, tokenizer)
+    """Sequence-to-sequence task head with decoder and generator"""
+    def __init__(self, 
+                 text_encoder, 
+                 tokenizer, 
+                 config,
+                 device: str = 'cpu'):
+        seq2seq_cfg = config['task_heads']['seq2seq']
+        decoder_cfg = config['task_heads']['seq2seq']['decoder']
+
+        super().__init__(
+            dropout_rate=seq2seq_cfg['dropout_rate'],
+            device=device)
+        self.vocab_size = tokenizer.vocab_size
+        self.hidden_dim = text_encoder.embed_dim
+        decoder_config = {
+            'transformer': {
+                'num_layers': decoder_cfg['num_layers'],
+                'embed_dim': decoder_cfg['embed_dim'],
+                'num_heads': decoder_cfg['num_heads'],
+                'ff_dim': decoder_cfg['ff_dim'],
+                'num_styles': decoder_cfg['num_styles'],
+                'max_position_embeddings': decoder_cfg['max_position_embeddings']
+            },
+            'attention': config['attention'],
+            'feedforward': config['feedforward']
+        }
+        self.decoder = Transformer(decoder_config)
+        self.generator = Generator(
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            vocab_size=self.vocab_size,
+            hidden_dim=self.hidden_dim)
+        self.proj = Parameter(torch.randn(self.hidden_dim, self.hidden_dim) * 0.02)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Decoder processing
+        decoder_out = self.decoder.forward(
+            hidden_states.to(self.device), 
+            style_id=0, 
+            causal=True
+        )
+        
+        # Projection layer
+        projected = torch.matmul(decoder_out, self.proj.data)
+        
+        # Generator processing
+        logits = self.generator.output_head.data @ projected.transpose(-1, -2)
+        return self.dropout(logits) if self.training else logits
 
 class MultiModalClassificationHead(TaskHead):
     def __init__(self, hidden_dims, num_classes, fusion_method='concat'):
+        super().__init__()
         """
         Args:
             hidden_dims: List of hidden dimensions for each modality.
@@ -289,3 +419,47 @@ class MultiModalClassificationHead(TaskHead):
         # Use the first element in the sequence
         cls_output = fused_states[:, 0, :]
         return torch.matmul(cls_output, self.dense.data)
+
+if __name__ == "__main__":
+    print("\n=== Running Transformer ===\n")
+    config = load_config()
+
+    embed_dim = 200
+    vocab_size = 50016
+    transformer = Transformer(config)
+
+    from src.agents.perception.modules.tokenizer import Tokenizer
+    tokenizer = Tokenizer(config)
+
+    generator = Generator(
+        text_encoder=transformer,
+        tokenizer=tokenizer,
+        vocab_size=vocab_size,
+        hidden_dim=embed_dim
+    )
+    task_heads = [
+        ClassificationHead(hidden_dim=embed_dim, num_classes=10),
+        RegressionHead(hidden_dim=embed_dim),
+        Seq2SeqHead(
+            text_encoder=transformer,
+            tokenizer=tokenizer,
+            config=config,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        ),
+        MultiModalClassificationHead(
+            hidden_dims=[embed_dim, 64],  # Example multimodal setup
+            num_classes=10,
+            fusion_method='concat'
+        )
+    ]
+
+    for head in task_heads:
+        head.to('cuda' if torch.cuda.is_available() else 'cpu')
+
+    print("Enhanced TaskHeads initialized successfully with:")
+    print(f"- Device awareness\n- Parameter freezing\n- Dropout/LayerNorm\n- Weight initialization\n")
+    print("Transformer and Generator initialized successfully.")
+    print(transformer)
+    print(generator)
+    print(task_heads)
+    print("\n=== Successfully Ran Transformer ===\n")
