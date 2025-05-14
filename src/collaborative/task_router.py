@@ -2,6 +2,9 @@ import torch.nn as nn
 import time
 import uuid
 import numpy as np
+import pandas as pd
+
+from typing import Callable
 from collections import deque
 
 from logs.logger import get_logger
@@ -12,20 +15,35 @@ FALLBACK_PLANS = {
     "ExplainConcept": ["RetrieveFact", "Summarize"]
 }
 
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+
 logger = get_logger("SLAI.TaskRouter")
+
+def model_predict_func(df: pd.DataFrame) -> np.ndarray:
+    # Replace with actual model logic
+    return np.zeros(len(df))  # Stub: returns zero predictions
 
 class AdaptiveRouter:
     def __init__(self, config):
         from src.agents.planning.task_scheduler import DeadlineAwareScheduler
         from src.agents.alignment.alignment_monitor import AlignmentMonitor
+        from src.agents.alignment.auditors.causal_model import CausalModel, CausalGraphBuilder
         self.task_scheduler = DeadlineAwareScheduler(
             config['risk_threshold'],
             config['retry_policy']
         )
         # Add sensitive_attributes to config and pass to AlignmentMonitor
+        raw_data = pd.read_csv("data/users.csv", sep=';')
+        
+        sensitive_attrs = config.get('sensitive_attributes', ['age', 'gender'])
+        graph_builder = CausalGraphBuilder()
+        data = raw_data.select_dtypes(include=[np.number])
+        causal_model_instance = graph_builder.construct_graph(data, sensitive_attrs)
         self.alignment_monitor = AlignmentMonitor(
             sensitive_attributes=config.get('sensitive_attributes', ['age', 'gender']),
-            config=config.get('alignment_config', {})
+            model_predict_func= model_predict_func,
+            causal_model=causal_model_instance,
+            config_file_path=config.get('config_file_path', CONFIG_PATH)
         )
         self.policy = nn.Sequential(
             nn.Linear(config['state_dim'], 64),
@@ -131,9 +149,10 @@ class TaskRouter:
         "data_audit": ["emergency_data_cleaner"]
     }
 
-    def __init__(self, registry, shared_memory):
+    def __init__(self, registry, shared_memory, agent=None):
         self.registry = registry
         self.shared_memory = shared_memory
+        self.agent=agent
 
     def route(self, task_type, task_data):
         eligible_agents = self.registry.get_agents_by_task(task_type)
@@ -220,6 +239,18 @@ class TaskRouter:
         entry["failures"] += 1
         self.shared_memory.put("agent_stats", stats)
 
+
+if __name__ == "__main__":
+    print("")
+    print("\n=== Running Task Router ===")
+    print("")
+    from unittest.mock import Mock
+    mock_agent = Mock()
+    mock_agent.shared_memory = {}
+    router = TaskRouter(shared_memory=None, registry=None, agent=mock_agent)
+    print("")
+    print("\n=== Successfully ran the Task Router ===\n")
+
 if __name__ == "__main__":
     # Mock configuration
     config = {
@@ -227,9 +258,9 @@ if __name__ == "__main__":
         'retry_policy': {'max_attempts': 3, 'backoff_factor': 1.5},
         'state_dim': 3,
         'num_handlers': 2,
-        'sensitive_attributes': ['age', 'gender']
+        'sensitive_attributes': ['age', 'gender'],
+        'config_file_path': CONFIG_PATH
     }
-
     # Mock agent factory with test agents
     class MockAgentFactory:
         def get_available_agents(self):
