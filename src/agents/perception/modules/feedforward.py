@@ -2,6 +2,9 @@ import torch
 import math
 
 from src.agents.perception.utils.common import TensorOps, Parameter
+from logs.logger import get_logger
+
+logger = get_logger("Feedforward")
 
 class FeedForward:
     """Enhanced Position-wise Feed-Forward Network with configurable components"""
@@ -164,3 +167,50 @@ class FeedForward:
         self.w2.data = weights.get(f'{prefix}output.dense.weight', self.w2.data).to(self.device)
         if self.use_bias:
           self.b2.data = weights.get(f'{prefix}output.dense.bias', self.b2.data).to(self.device)
+
+if __name__ == "__main__":
+    print("\n=== Running FeedForward ===\n")
+
+    # Create a small feedforward model
+    model = FeedForward(
+        embed_dim=8,
+        ff_dim=16,
+        activation='gelu',
+        dropout_rate=0.2,
+        use_bias=True,
+        initializer='he',
+        device='cpu',
+    )
+
+    print("Initialized FeedForward module:")
+    print(model)
+
+    # Dummy input
+    x = torch.randn(4, 8)  # (batch=4, embed_dim=8)
+
+    # Set to training mode
+    model.train()
+    print("\nMode: Training")
+    y_train = model.forward(x)
+    print("Forward output (train):\n", y_train)
+
+    # Simulate dummy loss gradient
+    dout = torch.ones_like(y_train)
+
+    # Backward pass
+    dx = model.backward(dout)
+    print("Backward output (gradient w.r.t input):\n", dx)
+
+    # Perform simple SGD step
+    lr = 0.01
+    for param in model.parameters():
+        param.step(lr)
+        param.zero_grad()
+
+    # Switch to evaluation mode
+    model.eval()
+    print("\nMode: Evaluation")
+    y_eval = model.forward(x)
+    print("Forward output (eval):\n", y_eval)
+
+    print("\n=== Successfully Ran FeedForward ===\n")
