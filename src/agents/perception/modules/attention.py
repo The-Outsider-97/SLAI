@@ -1,27 +1,45 @@
 import torch
 import math
+import yaml
+
+from pathlib import Path
 
 from src.agents.perception.utils.common import TensorOps, Parameter
 from logs.logger import get_logger
 
 logger = get_logger("Attention")
 
-# causal = True
-# attention_mask = None
+CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class EfficientAttention:
-    def __init__(self, embed_dim=512, num_heads=8, device='cpu'):
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+    def __init__(self, config, device='cpu'):
+        cfg = config['attention']
+        transformer_cfg = config['transformer']
+        self.embed_dim = transformer_cfg['embed_dim']
+        self.num_heads = transformer_cfg['num_heads']
+        self.head_dim = self.embed_dim // self.num_heads
         self.device = device
+        self.dropout_rate = cfg['dropout_rate']
+        self.initializer = cfg['initializer']
         
         # Initialize parameters with proper scaling
-        self.q_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.k_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.v_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.out_proj = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        
+        init_fn = getattr(TensorOps, f"{self.initializer}_init")
+        self.q_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.k_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.v_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.out_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
 
     def forward(self, x, context=None, mask=None, causal=False):
@@ -51,7 +69,7 @@ class EfficientAttention:
             mask = mask.to(self.device)
             attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
 
-        attn_probs = torch.softmax(attn_scores, dim=-1) # Specify dimension
+        attn_probs = self.dropout(torch.softmax(attn_scores, dim=-1))
 
         context_vec = torch.einsum('bhij,bhjd->bhid', attn_probs, v)
         context_vec = self._combine_heads(context_vec)
