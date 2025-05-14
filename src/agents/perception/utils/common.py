@@ -1,22 +1,42 @@
 import torch 
 import math
+
 from typing import Optional, Tuple
 
+from logs.logger import get_logger
+
+logger = get_logger("Common")
+
 class Parameter:
-    def __init__(self, data: torch.Tensor):
-        self.data = data
-        self.grad = torch.zeros_like(data)
-        
+    def __init__(self, data: torch.Tensor, requires_grad: bool = True, name: Optional[str] = None):
+        if not isinstance(data, torch.Tensor):
+            raise TypeError("data must be a torch.Tensor")
+        self.data = data.clone().detach()
+        self.requires_grad = requires_grad
+        self.grad = torch.zeros_like(data) if requires_grad else None
+        self.name = name or "UnnamedParameter"
+
     def zero_grad(self) -> None:
-        """Reset gradients to zero"""
-        self.grad.fill(0)
-        
+        """Reset the gradient to zero, if gradient tracking is enabled."""
+        if self.requires_grad and self.grad is not None:
+            self.grad.zero_()
+
+    def step(self, lr: float):
+        """
+        Apply a simple gradient descent step. Note: for demonstration/testing only.
+        Args:
+            lr (float): Learning rate.
+        """
+        if self.requires_grad and self.grad is not None:
+            self.data -= lr * self.grad
+
     @property
-    def shape(self) -> Tuple[int]:
+    def shape(self) -> Tuple[int, ...]:
         return self.data.shape
-    
+
     def __repr__(self) -> str:
-        return f"Parameter(shape={self.shape}, dtype={self.data.dtype})"
+        return (f"Parameter(name={self.name}, shape={self.shape}, "
+                f"dtype={self.data.dtype}, requires_grad={self.requires_grad})")
 
 class TensorOps:
     # --------------------------
@@ -148,3 +168,26 @@ class TensorOps:
         return torch.where(x >= 0,
                       1 / (1 + torch.exp(-x)),
                       torch.exp(x) / (1 + torch.exp(x)))
+
+if __name__ == "__main__":
+    print("\n=== Running Common ===\n")
+
+    # Create a real tensor for testing
+    data = torch.randn(3, 4)  # Example tensor of shape (3, 4)
+    common01 = Parameter(data)
+    common02 = TensorOps()
+
+    w = Parameter(torch.randn(2, 2), name="weights")
+    print(w)
+    
+    # Simulate gradient
+    w.grad = torch.ones_like(w.data)
+    
+    # Update step
+    w.step(lr=0.1)
+    
+    # Reset gradient
+    w.zero_grad()
+
+    print(common01)
+    print("\n=== Successfully Ran Common ===\n")
