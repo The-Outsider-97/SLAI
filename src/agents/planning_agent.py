@@ -32,6 +32,8 @@ from collections import defaultdict, deque
 from src.agents.base_agent import BaseAgent
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
 from src.agents.planning.planning_metrics import PlanningMetrics
+from src.agents.planning.planning_memory import PlanningMemory
+from src.agents.planning.planning_monitor import PlanningMonitor
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
@@ -39,8 +41,9 @@ from src.agents.perception.modules.transformer import ClassificationHead, Regres
 from src.tuning.tuner import HyperparamTuner
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Planning Agent")
 
+CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
 
 CostProfile = Tuple[float, float]
 StateTuple = Tuple[Tuple[str, Any], ...]
@@ -56,17 +59,11 @@ class PlanningAgent(BaseAgent):
             agent_factory=agent_factory,
             config=base_config
         )
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
+        self.memory = PlanningMemory(agent=self, config_file_path=CONFIG_PATH)
         self.decision_tree_heuristic = DecisionTreeHeuristic()
         self.gb_heuristic = GradientBoostingHeuristic()
+        self.monitor = PlanningMonitor(agent=self)
         self.plan_history = deque(maxlen=1000)
-        self.task_library: Dict[str, Task] = {}
-        self.current_plan: List[Task] = []
-        self.world_state: Dict[str, any] = {}
-        self.execution_history = []
-        self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0})
-
         self.shared_memory = self.shared_memory[0] if isinstance(self.shared_memory, tuple) else self.shared_memory
         self.agent_factory = self.agent_factory[0] if isinstance(self.agent_factory, tuple) else self.agent_factory
 
@@ -81,6 +78,7 @@ class PlanningAgent(BaseAgent):
         self._planning_end_time: Optional[float] = None
 
         config=config or {}
+        self.memo_table = {}
         self.scheduler = DeadlineAwareScheduler(risk_threshold=config.get('risk_threshold', 0.7))
         self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
@@ -167,11 +165,6 @@ class PlanningAgent(BaseAgent):
         """Recursive decomposition with method selection tracking"""
         logger.debug(f"Decomposing task: {task_to_decompose.name}")
 
-        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
-        if memo_key in self.memo_table:
-            logger.debug(f"Memo hit for {memo_key}")
-            return self.memo_table[memo_key]
-
         # Base case: If the task is primitive, it's already decomposed.
         if task_to_decompose.type == TaskType.PRIMITIVE:
             if task_to_decompose.check_preconditions(self.world_state):
@@ -196,9 +189,19 @@ class PlanningAgent(BaseAgent):
             score = self._heuristic(task_to_decompose)
             scores.append((i, score))
         
+        if not scores:
+            logger.error(f"No methods available for task '{task_to_decompose.name}'.")
+            task_to_decompose.status = TaskStatus.FAILED
+            return None
+        
         # Select method with highest predicted success
         method_index_to_try = max(scores, key=lambda x: x[1])[0]
         task_to_decompose.selected_method = method_index_to_try
+
+        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
+        if memo_key in self.memo_table:
+            logger.debug(f"Memo hit for {memo_key}")
+            return self.memo_table[memo_key]
 
         if not (0 <= method_index_to_try < len(library_task.methods)):
              logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
@@ -498,31 +501,36 @@ class PlanningAgent(BaseAgent):
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
         """Decomposes the goal task into a plan of primitive tasks."""
-        raw_plan = super().generate_plan(goal_task)
-        if not raw_plan:
-            return None
         self._planning_start_time = time.time()
         plan = self.decompose_task(goal_task)
         self._planning_end_time = time.time()
-        scheduled_tasks = self._convert_to_schedule_format(raw_plan)
-        risk_assessor = self.shared_memory.get('risk_assessor')
-
+    
+        if plan is None:
+            goal_task.status = TaskStatus.FAILED
+            logger.error("Failed to generate plan.")
+            return None
+    
         # Execute scheduling
+        scheduled_tasks = self._convert_to_schedule_format(plan)
+        risk_assessor = self.shared_memory.get('risk_assessor')
+    
         schedule = self.scheduler.schedule(
             tasks=scheduled_tasks,
             agents=self._get_available_agents(),
             risk_assessor=risk_assessor,
             state=self.world_state
         )
-
-        if plan is None:
-            goal_task.status = TaskStatus.FAILED
-            logger.error("Failed to generate plan.")
-            return None
-
+    
         logger.info(f"Plan generated with {len(plan)} steps.")
         self.current_plan = plan
-        return plan(schedule)
+        return self._convert_to_plan(schedule)
+
+    def copy(self):
+        new_task = Task(name=self.name, type=self.type)
+        # Copy other attributes like preconditions, effects, etc.
+        new_task.preconditions = self.preconditions.copy()
+        new_task.effects = self.effects.copy()
+        return new_task
 
     def _convert_to_schedule_format(self, plan):
         """Map plan tasks to scheduler format"""
@@ -547,38 +555,47 @@ class PlanningAgent(BaseAgent):
         self.current_plan = plan
         executed_successfully = True
         plan_idx = 0
-    
+
+        # Track plan start
+        plan_meta = self.monitor.track_plan_start(plan)
+
         task_hierarchy = []
         current_parent = None
-    
+
         while plan_idx < len(plan):
             task = plan[plan_idx]
-    
+
             if task.parent != current_parent:
                 if current_parent is not None:
                     self._update_task_success(current_parent, task_hierarchy)
                 current_parent = task.parent
                 task_hierarchy = []
-    
+
             task.status = TaskStatus.EXECUTING
             self._execute_action(task)
             task_hierarchy.append(task)
             self.execution_history.append(task)
-    
+
             if task.status == TaskStatus.FAILED:
                 executed_successfully = False
                 if goal_task:
                     goal_task.status = TaskStatus.FAILED
+                # Trigger health check immediately
+                self.monitor._perform_interval_checks()
                 break
-    
+
             plan_idx += 1
-    
+
         if current_parent is not None:
             self._update_task_success(current_parent, task_hierarchy)
-    
+
         if executed_successfully and goal_task:
             goal_task.status = TaskStatus.SUCCESS
-    
+
+        # Track plan completion
+        final_status = goal_task.status if goal_task else (TaskStatus.SUCCESS if executed_successfully else TaskStatus.FAILED)
+        self.monitor.track_plan_completion(plan_meta, final_status)
+
         return {
             "status": goal_task.status.name if goal_task else ("SUCCESS" if executed_successfully else "FAILED"),
             "world_state": self.world_state
@@ -1111,3 +1128,156 @@ class ExplanatoryPlanner(PlanningAgent):
         result = super().decompose_task(task)
         self.decomposition_cache[cache_key] = result
         return result
+
+if __name__ == "__main__":
+    print("\n=== Running Planning Agent Demo ===")
+    
+    # Mock environment setup
+    from unittest.mock import Mock
+    
+    # Define sample tasks
+    class BreakfastTask(Task):
+        def __init__(self):
+            super().__init__("prepare_breakfast", TaskType.ABSTRACT)
+            self.methods = [
+                [make_coffee_task(), toast_bread_task()],  # Method 0
+                [brew_tea_task(), cook_eggs_task()]        # Method 1
+            ]
+
+    class toast_bread_task(Task):
+        def __init__(self):
+            super().__init__("toast_bread", TaskType.ABSTRACT)
+            self.methods = [
+                [use_toaster_task()],
+                [use_oven_task()]  # Now it is defined!
+            ]
+
+    class make_coffee_task(Task):
+        def __init__(self):
+            super().__init__("make_coffee", TaskType.PRIMITIVE, preconditions=[lambda s: s.get('has_water', False)],
+                             effects=[lambda s: s.update({'coffee_made': True})])
+            self.preconditions = [lambda s: s.get('has_water', False)]
+            self.effects = [lambda s: s.update({'coffee_made': True})]
+ 
+    class brew_tea_task(Task):
+        def __init__(self):
+            super().__init__("brew_tea", TaskType.PRIMITIVE)
+            self.preconditions = [lambda s: s.get('has_water', False)]
+            self.effects = [lambda s: s.update({'tea_made': True})]
+    
+    class cook_eggs_task(Task):
+        def __init__(self):
+            super().__init__("cook_eggs", TaskType.PRIMITIVE)
+            self.preconditions = [lambda s: s.get('oven_available', False)]
+            self.effects = [lambda s: s.update({'eggs_cooked': True})]
+    
+    class use_oven_task(Task):
+        def __init__(self):
+            super().__init__("use_oven", TaskType.PRIMITIVE)
+            self.preconditions = [lambda s: s.get('oven_available', False)]
+            self.effects = [lambda s: s.update({'toast_done': True})]
+           
+    class use_toaster_task(Task):
+        def __init__(self):
+            super().__init__("use_toaster", TaskType.PRIMITIVE)
+            self.preconditions = [lambda s: s.get('toaster_available', False)]
+            self.effects = [lambda s: s.update({'toast_done': True})]
+
+    # Initialize agent with sample world state
+    mock_agent = Mock()
+    mock_agent.shared_memory = {
+        'text_encoder': Mock(),
+        'risk_assessor': lambda x: 0.3,
+        'agent_registry': {'chef_agent': {'capabilities': ['food_prep']}}
+    }
+    
+    planner = PlanningAgent(
+        shared_memory=mock_agent.shared_memory,
+        agent_factory=None,
+        config={'risk_threshold': 0.4}
+    )
+
+    # Register tasks
+    planner.register_task(BreakfastTask())
+    planner.register_task(toast_bread_task())
+    planner.register_task(use_toaster_task())
+    planner.register_task(make_coffee_task())
+    planner.register_task(brew_tea_task())
+    planner.register_task(cook_eggs_task())
+    planner.register_task(use_oven_task())
+
+    # Set initial world state
+    planner.world_state = {
+        'has_water': True,
+        'toaster_available': False,  # Simulate broken toaster
+        'oven_available': True
+    }
+
+    # Generate plan
+    print("\n=== Generating Initial Plan ===")
+    goal_task = BreakfastTask()
+    plan = planner.generate_plan(goal_task)
+    
+    if plan:
+        print(f"\nGenerated Plan Steps:")
+        for i, task in enumerate(plan, 1):
+            print(f"{i}. {task.name} (Method {task.selected_method})")
+
+    # Execute plan
+    print("\n=== Executing Plan ===")
+    if plan is not None:
+        result = planner.execute_plan(plan, goal_task)
+        print(f"\nExecution Result: {result['status']}")
+        print(f"Final World State: {result['world_state']}")
+    else:
+        print("\nPlan generation failed. No execution performed.")
+
+    # Demonstrate replanning
+    print("\n=== Simulating Replanning Scenario ===")
+    if plan:
+        failed_task_for_replan = next((t for t in plan if t.name == "toast_bread"), None)
+        
+        if failed_task_for_replan:
+            print(f"Attempting to replan based on hypothetical failure in: {failed_task_for_replan.name}")
+            original_toast_bread_task = None
+            toast_bread_template_for_replan = planner.task_library.get("toast_bread")
+            if toast_bread_template_for_replan:
+
+                toast_bread_template_for_replan.status = TaskStatus.FAILED 
+
+                print(f"Simulating failure of a method for: {toast_bread_template_for_replan.name}")
+                new_plan = planner.replan(toast_bread_template_for_replan) # Pass the task that needs replanning
+
+                if new_plan:
+                    print("\nReplanned Steps:")
+                    for i, task in enumerate(new_plan, 1):
+                        method_info = f" (Method {task.selected_method})" if task.type == TaskType.ABSTRACT else ""
+                        print(f"{i}. {task.name}{method_info}")
+                    
+                    print("\n=== Executing Replanned Version ===")
+                    planner.world_state['toaster_available'] = False
+                    planner.world_state['oven_available'] = True
+
+                    if goal_task:
+                         goal_task.status = TaskStatus.PENDING
+
+                    replan_result = planner.execute_plan(new_plan, goal_task)
+                    print(f"\nReplan Result: {replan_result['status']}")
+                    print(f"Updated World State: {replan_result['world_state']}")
+                else:
+                    print(f"Replanning failed for {toast_bread_template_for_replan.name}!")
+            else:
+                print("Could not find 'toast_bread' task in library for replanning demo.")
+        else:
+            print("Could not find 'toast_bread' task in the plan for replanning demo, or plan is empty.")
+    else:
+        print("Initial plan generation failed, skipping replanning demo.")
+
+    # Show method statistics
+    print("\n=== Method Performance Statistics ===")
+    for (task, method), stats in planner.method_stats.items():
+        if stats['total'] > 0:
+            success_rate = stats['success']/stats['total']
+            print(f"{task} Method {method}: {success_rate:.1%} success rate")
+
+    print("\n=== Demo Completed ===\n")
