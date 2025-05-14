@@ -1,6 +1,6 @@
 
 import os
-import json
+import json, yaml
 import re
 import torch
 import unicodedata
@@ -14,19 +14,25 @@ logger = get_logger("Tokenizer")
 
 BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
 BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
+CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class Tokenizer:
     """
     Handles text preprocessing: tokenization, ID conversion, padding, truncation,
     and attention mask generation based on a predefined vocabulary
     """
-    def __init__(self,
-        bpe_vocab_path: Union[str, Path] = BPE_VOCAB_PATH,
-        bpe_merges_path: Union[str, Path] = BPE_MODEL_PATH,
-        max_length: int = 512,
-        pad_token: str = "[PAD]", unk_token: str = "[UNK]",
-        cls_token: str = "[CLS]", sep_token: str = "[SEP]",
-    ):
+    def __init__(self, config):
         """
         Initializes the Tokenizer.
 
@@ -38,16 +44,17 @@ class Tokenizer:
             cls_token (str): Classification token added at the beginning.
             sep_token (str): Separator token added at the end.
         """
-        self.max_length = max_length
+        cfg = config['tokenizer']
+        self.max_length = cfg['max_length']
+        self.bpe_merges_path = Path(cfg['bpe_model_path'])
+        self.bpe_vocab_path = Path(cfg['bpe_vocab_path'])
+        self.vocab_size = cfg['vocab_size']
 
         # --- Special Tokens ---
-        self.pad_token = pad_token
-        self.unk_token = unk_token
-        self.cls_token = cls_token
-        self.sep_token = sep_token
-
-        self.bpe_merges_path = Path(bpe_merges_path)
-        self.bpe_vocab_path = Path(bpe_vocab_path)
+        self.pad_token = cfg['pad_token']
+        self.unk_token = cfg['unk_token']
+        self.cls_token = cfg['cls_token']
+        self.sep_token = cfg['sep_token']
 
         if not self.bpe_vocab_path.exists():
             raise FileNotFoundError(f"BPE vocab file not found: {self.bpe_vocab_path}")
@@ -399,17 +406,10 @@ class BytePairEncoder:
 
 if __name__ == "__main__":
     print("\n=== Running Tokenizer ===\n")
+    config = load_config()
 
     try:
-        tokenizer = Tokenizer(
-            bpe_vocab_path=BPE_VOCAB_PATH,
-            bpe_merges_path=BPE_MODEL_PATH,
-            max_length=20,
-            pad_token="[PAD]",
-            unk_token="[UNK]",
-            cls_token="[CLS]",
-            sep_token="[SEP]"
-        )
+        tokenizer = Tokenizer(config)
 
         # Example input
         example_text = "I love you SLAI!"
