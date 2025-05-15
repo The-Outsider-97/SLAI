@@ -90,7 +90,7 @@ class FeedForward:
         dout = dout.to(self.device)
 
         # Output projection gradients
-        d_w2 = torch.matmul(self._cache['act'].T, dout)
+        d_w2 = torch.einsum('bnd,bne->de', self._cache['act'], dout)
         d_act = torch.matmul(dout, self.w2.data.T)
         if self.w2.grad is None: self.w2.grad = torch.zeros_like(self.w2.data)
         self.w2.grad += d_w2
