@@ -33,7 +33,7 @@ import statsmodels.formula.api as smf
 
 from collections import defaultdict, deque
 
-from src.agents.alignment.alignment_monitor import AlignmentMonitor, MonitorConfig
+from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
 from src.agents.adaptive.policy_manager import PolicyManager
 from src.agents.adaptive.parameter_tuner import LearningParameterTuner
@@ -41,7 +41,9 @@ from src.agents.adaptive.memory_system import MultiModalMemory
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Adaptive Agent")
+
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
 
 class AdaptiveAgent(BaseAgent):
     """
@@ -126,7 +128,7 @@ class AdaptiveAgent(BaseAgent):
         # Alignment implementation
         self.alignment_monitor = AlignmentMonitor(
             sensitive_attributes=['gender', 'age_group'],
-            config=MonitorConfig(
+            config=CONFIG_PATH(
                 fairness_metrics=['demographic_parity', 'equal_opportunity'],
                 drift_threshold=0.1
             )
@@ -569,3 +571,30 @@ class AdaptiveAgent(BaseAgent):
         
         logger.info("[Recovery] Full reset complete.")
         return True
+
+if __name__ == "__main__":
+    print("\n=== Running Adaptive Agent ===\n")
+
+    shared_memory = {}
+    agent_factory = lambda: None
+
+    config = {
+        'state_dim': 10,
+        'num_actions': 2,
+        'num_handlers': 3,
+        'episodic_capacity': 1000,
+        'experience_staleness_days': 1,
+        'semantic_decay_rate': 0.95,
+        'min_memory_strength': 0.05,
+        'replay_capacity': 100000,
+        'priority_alpha': 0.6,
+        'per_beta': 0.4,
+        'per_epsilon': 1e-6,
+        'risk_threshold': 0.7,
+        'retry_policy': {'max_attempts': 3, 'backoff_factor': 1.5}
+    }
+
+    adaptive = AdaptiveAgent(shared_memory, agent_factory, config=config, learning_params=None)
+
+    print(adaptive)
+    print("\n=== Successfully Ran Adaptive Agent ===\n")
