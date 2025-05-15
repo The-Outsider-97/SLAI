@@ -1,102 +1,128 @@
 import math
+import yaml
 import torch
-import torch.nn as nn
+import torch.nn
+import torch.nn.functional as F
+
 from typing import Dict, Any
 
 from src.agents.perception.utils.common import TensorOps, Parameter
-from src.agents.perception.modules.transformer import Transformer  
+from src.agents.perception.modules.transformer import Transformer
+from logs.logger import get_logger
+
+logger = get_logger("Audio Encoder")
+
+CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class AudioEncoder(torch.nn.Module):
-    def __init__(self,
-                 audio_length=16000,
-                 patch_size=400,
-                 embed_dim=100,
-                 in_channels=1,
-                 num_layers=6,
-                 dropout_rate=0.1,
-                 positional_encoding="learned",
-                 encoder_type: str = "transformer",
-                 mfcc_config: Dict[str, Any] = None):
+    def __init__(self, config, device: str = 'cpu'):
         super().__init__()
-        self.encoder_type = encoder_type
+        audio_cfg = config['audio_encoder']
+        transformer_cfg = config['transformer']
+
+        # Audio-specific parameters
+        self.encoder_type = audio_cfg['encoder_type']
+        self.audio_length = audio_cfg['audio_length']
+        self.patch_size = audio_cfg['patch_size']
+        self.in_channels = audio_cfg['in_channels']
+        self.dynamic_patching = audio_cfg['dynamic_patching']
+        self.positional_encoding = audio_cfg['positional_encoding']
+        self.dropout_rate = audio_cfg['dropout_rate']
+
+        # Shared transformer parameters
+        self.embed_dim = transformer_cfg['embed_dim']
+        self.num_layers = transformer_cfg['num_layers']
+        self.max_position_embeddings = transformer_cfg['max_position_embeddings']
+        self.device = device
+
+        self._cache = {}
         if self.encoder_type == "transformer":
-            self.patch_size = patch_size
-            self.num_patches = audio_length // patch_size
-            #self.in_channels = 1  # Mono audio input
-            self.in_channels = in_channels
-            self.embed_dim = embed_dim
-            self.dropout_rate = dropout_rate
-            self.training = True
-            
-            # Convolutional projection initialization (1D equivalent)
+            # Projection layer
             self.projection = Parameter(
-                TensorOps.he_init((patch_size * in_channels, embed_dim), patch_size * in_channels))
+                TensorOps.he_init(
+                    (self.patch_size * self.in_channels, self.embed_dim),
+                    self.patch_size * self.in_channels,
+                    device=device
+                )
+            )
 
-            # Positional embeddings
-            self.positional_encoding = positional_encoding
-            if self.positional_encoding == "learned":
-                self.position_embed = Parameter(torch.randn(1, 1, embed_dim) * 0.02)
-            elif self.positional_encoding == "sinusoidal":
-                self.position_embed = self._init_sinusoidal_encoding(max_len=5000)
+            # Positional encoding
+            if self.positional_encoding == "sinusoidal":
+                self.position_embed = self._init_sinusoidal_encoding()
+            else:  # learned
+                self.position_embed = Parameter(
+                    torch.randn(1, self.max_position_embeddings, self.embed_dim, device=device) * 0.02
+                )
 
-            self.cls_token = Parameter(torch.randn(1, 1, embed_dim) * 0.02)
-            self.transformer = Transformer(num_layers=num_layers, embed_dim=embed_dim)        
-            self._cache = {}
+            self.cls_token = Parameter(torch.randn(1, 1, self.embed_dim, device=device) * 0.02)
+            self.transformer = Transformer(config)
 
         elif self.encoder_type == "mfcc":
-            # MFCC-specific initialization
-            mfcc_config = mfcc_config or {}
-            self.sample_rate = mfcc_config.get('sample_rate', 16000)
-            self.n_mfcc = mfcc_config.get('n_mfcc', 13)
-            self.frame_length = int(mfcc_config.get('frame_length_ms', 25) * self.sample_rate // 1000)
-            self.frame_step = int(mfcc_config.get('frame_step_ms', 10) * self.sample_rate // 1000)
-            self.mel_filters = self._create_mel_filterbank(mfcc_config)
+            mfcc_cfg = audio_cfg['mfcc']
+            self.sample_rate = mfcc_cfg['sample_rate']
+            self.n_mfcc = mfcc_cfg['n_mfcc']
+            self.frame_length = int(mfcc_cfg['frame_length_ms'] * self.sample_rate // 1000)
+            self.frame_step = int(mfcc_cfg['frame_step_ms'] * self.sample_rate // 1000)
+            self.mel_filters = self._create_mel_filterbank(mfcc_cfg)
 
         else:
             raise ValueError(f"Unknown encoder type: {self.encoder_type}")
-    def _init_sinusoidal_encoding(self, max_len, embed_dim, device):
-        if self.positional_encoding == "sinusoidal":
-             pe = torch.zeros(1, max_len, embed_dim, device=device)
-             position = torch.arange(0, max_len, dtype=torch.float, device=device).unsqueeze(1)
-             div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim))
-             pe[0, :, 0::2] = torch.sin(position * div_term)
-             pe[0, :, 1::2] = torch.cos(position * div_term)
-             # Make it a non-learnable buffer or Parameter(..., requires_grad=False)
-             return Parameter(pe, requires_grad=False)
-        elif self.positional_encoding == "learned":
-             return Parameter(torch.randn(1, max_len, embed_dim) * 0.02) # Add batch dim
-        else:
-             raise ValueError("Positional encoding must be 'sinusoidal' or 'learned'")
+
+    def _init_sinusoidal_encoding(self):
+        pe = torch.zeros(1, self.max_position_embeddings, self.embed_dim, device=self.device)
+        position = torch.arange(0, self.max_position_embeddings, dtype=torch.float, device=self.device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.embed_dim, 2).float() * (-math.log(10000.0) / self.embed_dim))
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        return Parameter(pe, requires_grad=False)
+
+    def extract_patches(self, x):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
+        b, c, l = x.shape
+        
+        if self.dynamic_patching:
+            pad = (self.patch_size - (l % self.patch_size)) % self.patch_size
+            x = F.pad(x, (0, pad))
+        
+        x = x.unfold(2, self.patch_size, self.patch_size)  # (B, C, num_patches, patch_size)
+        x = x.permute(0, 2, 1, 3).reshape(b, -1, self.patch_size * c)
+        return x
 
     def forward(self, x, style_id=0):
         if self.encoder_type == "transformer":
-            # Original transformer processing
             x = self.extract_patches(x)
             self._cache['input_shape'] = x.shape
             
             x = torch.matmul(x, self.projection.data)
             
             if self.training and self.dropout_rate > 0:
-                mask = (torch.rand(*x.shape) > self.dropout_rate).astype(torch.float32)
+                mask = (torch.rand(x.shape, device=self.device) > self.dropout_rate).float()
                 x *= mask
             
-            cls_tokens = torch.tile(self.cls_token.data, (x.shape[0], 1, 1))
-            x = torch.concatenate((cls_tokens, x), axis=1)
+            cls_tokens = self.cls_token.data.expand(x.size(0), -1, -1)
+            x = torch.cat([cls_tokens, x], dim=1)
             
-            if self.positional_encoding == "sinusoidal":
-                seq_len = x.shape[1]
-                x += self.position_embed.data[:, :seq_len, :]
-            else:
-                x += self.position_embed.data[:, :x.shape[1]]
+            seq_len = x.size(1)
+            x += self.position_embed.data[:, :seq_len, :]
             
             x = self.transformer.forward(x, style_id)
-            self._cache['pre_projection'] = x
             return x
-            
+        
         elif self.encoder_type == "mfcc":
-            # Process with MFCC pipeline
             return self._mfcc_forward(x)
-            
+        
         else:
             raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
 
@@ -141,23 +167,6 @@ class AudioEncoder(torch.nn.Module):
                 filters[i-1, j] = (right - j) / (right - center)
         
         return filters
-
-    def extract_patches(self, x):
-        """Convert waveform to patched representation with padding"""
-        if x.ndim == 2:
-            x = x[:, torch.newaxis, :]  # Add channel dim: (B, C, L)
-        batch, channels, length = x.shape
- 
-        # Pad if necessary
-        remainder = length % self.patch_size
-        if remainder != 0:
-            pad_size = self.patch_size - remainder
-            x = torch.pad(x, ((0, 0), (0, 0), (0, pad_size)))
-
-        # Reshape into non-overlapping patches
-        num_patches = x.shape[2] // self.patch_size
-        x = x.reshape(batch, channels, num_patches, self.patch_size)
-        return x.transpose(0, 2, 1, 3).reshape(batch, num_patches, -1)
 
     def load_pretrained(self, weights):
         """Handle 1D conv, transformer, and positional weights"""
@@ -231,3 +240,30 @@ class AudioEncoder(torch.nn.Module):
     def eval(self):
         self.training = False
         self.transformer.training = False
+
+if __name__ == "__main__":
+    print("\n=== Running Audio Encoder ===\n")
+    import torch
+
+    # Load configuration
+    config = get_merged_config()
+
+    # Create dummy audio input: (batch_size, in_channels, audio_length)
+    batch_size = 2
+    audio_cfg = config['audio_encoder']
+    in_channels = audio_cfg['in_channels']
+    audio_length = audio_cfg['audio_length']
+    dummy_audio = torch.randn(batch_size, in_channels, audio_length)
+
+    # Instantiate encoder
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    encoder = AudioEncoder(config, device=device).to(device)
+    dummy_audio = dummy_audio.to(device)
+
+    # Forward pass
+    output = encoder(dummy_audio)
+
+    # Print output shape
+    if isinstance(output, tuple):
+        output = output[0]
+    print("AudioEncoder output shape:", output.shape)
