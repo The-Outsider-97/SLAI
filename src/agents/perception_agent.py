@@ -10,77 +10,73 @@ Perception Agent:
 import torch
 import torch.nn as nn
 import math
+import yaml
+
+from pathlib import Path
 from collections import OrderedDict
 
 from src.agents.base_agent import BaseAgent
 from src.agents.perception.utils.common import Parameter, TensorOps
+from logs.logger import get_logger
+
+logger = get_logger("Perception Agent")
+
+LOCAL_CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
 
 class PerceptionAgent(BaseAgent):
-    def __init__(self, config, shared_memory, agent_factory,
-                 audio_encoder=None,
-                 args=(),
-                 kwargs={}):
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory)
-        from src.agents.perception.encoders.vision_encoder import VisionEncoder
-        from src.agents.perception.encoders.text_encoder import TextEncoder
-        from src.agents.perception.encoders.audio_encoder import AudioEncoder
-        from src.agents.perception.modules.transformer import Generator
+    def __init__(self,
+                 shared_memory, agent_factory,
+                 config=None,
+                 args=(), kwargs={}):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config)
+        from src.agents.perception.modules.tokenizer import Tokenizer, load_config
+        from src.agents.perception.modules.transformer import Transformer, load_config
+        from src.agents.perception.encoders.vision_encoder import VisionEncoder, load_config
+        from src.agents.perception.encoders.audio_encoder import AudioEncoder, load_config
+        from src.agents.perception.encoders.text_encoder import TextEncoder, load_config
 
-        self.modalities = config.get('modalities', ['text'])
+        self.perceptive_agent = []
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.config = config
-        self.pretrainer = self.PretrainingTasks(self)
-        self.encoders = OrderedDict()
-        embed_dim = config.get('embed_dim', 512)
-        projection_dim = config.get('projection_dim', 256)
-        if 'text' in self.encoders:
-            self.generator = Generator(
-                text_encoder=self.encoders['text'],
-                tokenizer=self.encoders['text'].tokenizer,
-                vocab_size=self.encoders['text'].tokenizer.vocab_size,
-                hidden_dim=self.encoders['text'].embed_dim
-            )
-        else:
-            self.generator = None
+        self.tokenizer = Tokenizer(config=load_config(LOCAL_CONFIG_PATH))
+        self.transformer = Transformer(config=load_config(LOCAL_CONFIG_PATH))
+        self.vision_encoder = VisionEncoder(config=load_config(LOCAL_CONFIG_PATH))
+        self.audio_encoder = AudioEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
+        self.text_encoder = TextEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
 
+        #tokenizer = Tokenizer(self.config) if 'text' in self.modalities else None
+
+        self.modalities = config.get('perception', {}).get('modalities', ['text', 'vision', 'audio'])
+        self.encoders = OrderedDict()
         
         if 'vision' in self.modalities:
-            self.encoders['vision'] = VisionEncoder()
+            self.encoders['vision'] = self.vision_encoder
         if 'text' in self.modalities:
-            self.encoders['text'] = agent_factory.shared_text_encoder # or TextEncoder()
+            self.encoders['text'] = self.text_encoder
         if 'audio' in self.modalities:
-            self.encoders['audio'] = AudioEncoder()
+            self.encoders['audio'] = self.audio_encoder
 
-        audio_weights = {}
-        for layer in range(6):
-            audio_weights.update({
-                f'transformer_encoder_{layer}_attn_q_proj': torch.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_k_proj': torch.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_v_proj': torch.randn(512, 512),
-                f'transformer_encoder_{layer}_attn_out_proj': torch.randn(512, 512),
-                f'transformer_encoder_{layer}_ffn_w1': torch.randn(512, 2048),
-                f'transformer_encoder_{layer}_ffn_w2': torch.randn(2048, 512),
-                f'transformer_encoder_{layer}_norm1': torch.ones(512),
-                f'transformer_encoder_{layer}_norm2': torch.ones(512),
-            })
-        audio_weights.update({
-            'conv_proj': torch.randn(512, 1, 400),
-            'cls_token': torch.randn(1, 1, 512),
-            'pos_embed': torch.randn(1, 41, 512),
-        })
-        converted = self.convert_audio_weights(audio_weights)
-        prefixed = {f'transformer_{k}': v for k, v in converted.items()}
-        self.load_pretrained('audio', prefixed)
+        #transformer_cfg = self.config['transformer']
+        #self.embed_dim = transformer_cfg['embed_dim']
+        #self.projection_dim = self.config['perception']['projection_dim']
 
-        self.fusion = MultimodalFusion(embed_dim=embed_dim, modalities=self.modalities)
-        self.projection = Parameter(
-            TensorOps.he_init((embed_dim, projection_dim), embed_dim)
-        )
+        #self.fusion = MultimodalFusion(
+        #    embed_dim=self.embed_dim,
+        #    modalities=self.modalities,
+        #    dropout_rate=self.config['perception'].get('fusion_dropout', 0.1),
+        #)
 
-        # Initialize gradients
-        self.params = self._collect_parameters()
-        
+        #self.projection = Parameter(
+        #    TensorOps.he_init((self.embed_dim, self.projection_dim), self.embed_dim)
+        #)
+
+        #self.params = self._collect_parameters()
+
+        #if self.config['perception'].get('pretrained_weights'):
+        #    self.load_pretrained(self.config['perception']['pretrained_weights'])        
 
     def convert_audio_weights(self, weights):
         """Convert custom audio weights to HF-style for all layers"""
@@ -490,7 +486,7 @@ class MultimodalFusion:
             grads[modality] = grad
 
             if not self._mask_flags.get(modality, False):
-                pooled_input = input_tensor.mean(axis=1)  # shape (B, D)
+                pooled_input = input_tensor.mean(axis=1)
                 d_alpha = torch.sum(pooled_input * d_fused) / len(self._cached_inputs)
                 self.modal_weights[modality].grad += d_alpha
 
@@ -503,7 +499,7 @@ class SLAILMAdapter:
     def __init__(self, perception_dim, llm_dim):
         self.projection = Parameter(TensorOps.he_init((perception_dim, llm_dim), perception_dim))
         self.layer_norm = Parameter(torch.ones(llm_dim))
-        self._cache = {}  # initially empty
+        self._cache = {}
 
     def parameters(self):
         return [self.projection, self.layer_norm]
@@ -514,5 +510,68 @@ class SLAILMAdapter:
 
     def forward(self, multimodal_emb):
         projected = torch.matmul(multimodal_emb, self.projection.data)
-        self.set_cache(multimodal_emb, projected)  # ensure cache is populated
+        self.set_cache(multimodal_emb, projected)
         return TensorOps.layer_norm(projected) * self.layer_norm.data
+
+if __name__ == "__main__":
+    print("\n=== Running Perception Agent ===\n")
+
+    config =  {}
+    shared_memory = {}
+    agent_factory = lambda: None
+    perception_dim = 512
+    llm_dim = 768
+
+    perceptive = PerceptionAgent(shared_memory, agent_factory, config)
+    attention = CrossModalAttention(embed_dim=512)
+    metrics = MultimodalMetrics()
+    fusion = MultimodalFusion(embed_dim=512, modalities=['text'], dropout_rate=0.1, masking_prob=0.15)
+    adapter = SLAILMAdapter(perception_dim, llm_dim)
+
+    print(perceptive)
+    print(attention)
+    print(metrics)
+    print(fusion)
+    print(adapter)
+    print("\n=== Successfully Ran Perception Agent ===\n")
+
+if __name__ == "__main__":
+    print("\n=== Running Perception Agent ===\n")
+
+    from src.agents.perception.modules.tokenizer import load_config
+
+    # Load configuration
+    config = load_config(LOCAL_CONFIG_PATH)
+
+    perception_dim = config.get('perception', {}).get('projection_dim', 512)
+    llm_dim = config.get('transformer', {}).get('embed_dim', 768)
+
+    # Dummy shared memory and agent factory
+    shared_memory = {}
+    agent_factory = lambda: None
+
+    # Create the PerceptionAgent
+    perceptive = PerceptionAgent(shared_memory, agent_factory, config=config)
+
+    # Create and test SLAILMAdapter
+    adapter = SLAILMAdapter(perception_dim, llm_dim)
+
+    # Print out initialized components
+    print("Perception Agent initialized successfully.")
+    print("SLAILMAdapter projection shape:", adapter.projection.shape)
+
+    # Run dummy forward if needed
+    # Example dummy input: a dict with fake tensors for each encoder
+    dummy_input = {
+        'text': torch.randint(0, config['tokenizer']['vocab_size'], (1, config['tokenizer']['max_length'])),
+        'vision': torch.randn(1, 3, 224, 224),  # B, C, H, W
+        'audio': torch.randn(1, 16000)  # 1 second of audio at 16kHz
+    }
+
+    try:
+        perceptive.forward(dummy_input)
+        print("Forward pass completed.")
+    except Exception as e:
+        print(f"Forward pass failed: {e}")
+
+    print("\n=== Successfully Ran Perception Agent ===\n")
