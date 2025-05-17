@@ -4,7 +4,7 @@ import yaml, json
 import traceback
 
 from collections import defaultdict
-from typing import Dict, Union, Callable, Optional, List
+from typing import Dict, Union, Callable, Optional, List, Tuple
 from types import SimpleNamespace
 
 from logs.logger import get_logger
@@ -74,44 +74,59 @@ class RuleEngine:
             "meta": metadata or {}
         }
         self.rules.append(rule)
+        logger.debug(f"Added rule: {name} with weight {weight} and tags {tags}")
 
         for tag in rule["tags"]:
             if (sector := tag.lower()) in self.SECTORS:
                 self.sector_rules[sector].append(rule)
 
     def smart_apply(self, knowledge_base: dict, verbose=False) -> dict:
-        """
-        Applies rules from the most relevant sector based on the context in the KB.
-        Falls back to all rules if sector is unknown or has no specific matches.
-        """
+        """Applies rules from the most relevant sector or all if no specific match."""
         sector = self.infer_sector(knowledge_base)
-        if sector in self.sector_rules and self.sector_rules[sector]:
-            logger.info(f"[RuleEngine] Applying sector-specific rules for: {sector}")
-            return self.apply_by_sector(knowledge_base, sector, verbose=verbose)
+        rules_to_use = []
+        
+        if sector != "general" and sector in self.sector_rules and self.sector_rules[sector]:
+            logger.info(f"[RuleEngine] Smart Apply: Using sector-specific rules for: {sector}")
+            rules_to_use = self.sector_rules[sector]
         else:
-            logger.info(f"[RuleEngine] No specific sector match. Applying all rules.")
-            return self.apply(knowledge_base, verbose=verbose)
+            logger.info(f"[RuleEngine] Smart Apply: No specific sector match or no rules for sector '{sector}'. Applying all general rules.")
+            rules_to_use = self.rules # Fallback to all rules
+
+        # The iterative application logic is now centralized in apply()
+        # We need to temporarily set self.rules to the selected set for apply() to use them.
+        original_rules = self.rules
+        self.rules = rules_to_use
+        result = self.apply(knowledge_base, verbose)
+        self.rules = original_rules # Restore original rules
+        return result
 
     def infer_sector(self, knowledge_base: dict) -> str:
-        """
-        Attempt to infer which sector is most relevant based on keys or tags in the knowledge base.
-        Returns sector name or 'general' if unknown.
-        """
+        # (Keep infer_sector as is)
         keywords = {
             "civic": {"law", "governance", "citizen", "vote", "policy", "courtroom", "privacy"},
             "medical": {"diagnosis", "symptom", "treatment", "patient", "disease", "medicine"},
-            "economic": {"market", "inflation", "currency", "gdp", "employment", "moneny", "dollar", "recession"},
-            "scientific": {"experiment", "hypothesis", "equation", "physics", "biology"},
-            "philosophical": {"ethics", "metaphysics", "ontology", "logic", "thought"},
-            "technological": {"ai", "robot", "algorithm", "neural", "software", "agents"}
+            "economic": {"market", "inflation", "currency", "gdp", "employment", "money", "dollar", "recession"},
+            "scientific": {"experiment", "hypothesis", "equation", "physics", "biology", "research"},
+            "philosophical": {"ethics", "metaphysics", "ontology", "logic", "thought", "consciousness"},
+            "technological": {"ai", "robot", "algorithm", "neural", "software", "agents", "data", "code"}
         }
+        # Consider predicates and objects as well for better sector inference
+        all_terms_in_kb = set()
+        for s, p, o in knowledge_base.keys():
+            all_terms_in_kb.add(str(s).lower())
+            all_terms_in_kb.add(str(p).lower())
+            all_terms_in_kb.add(str(o).lower())
 
-        kb_keys = set(map(str.lower, knowledge_base.keys()))
+        sector_scores = defaultdict(int)
         for sector, terms in keywords.items():
-            if kb_keys & terms:
-                return sector
-
-        return "general"
+            for term in terms:
+                if term in all_terms_in_kb:
+                    sector_scores[sector] +=1
+        
+        if not sector_scores:
+            return "general"
+            
+        return max(sector_scores, key=sector_scores.get)
 
     def apply_by_sector(self, knowledge_base: dict, sector: str, verbose=False) -> dict:
         inferred = {}
@@ -234,6 +249,17 @@ class RuleEngine:
                 tags=tags,
                 metadata=metadata
             )
+
+    def _human_mortality_rule_impl(self, kb: dict, rule_weight: float) -> Dict[Tuple[str,str,str], float]:
+        """If (X is_a Human), then infer (X is_mortal True)."""
+        inferred_facts = {}
+        for (s, p, o), conf in kb.items():
+            if p == "is_a" and o == "Human":
+                new_fact = (s, "is_mortal", "True") # Represent boolean as string for consistency
+                new_confidence = conf * rule_weight
+                if new_confidence > inferred_facts.get(new_fact, -1.0) and new_confidence > self.config.min_confidence_to_propagate:
+                   inferred_facts[new_fact] = new_confidence
+        return inferred_facts
 
 
 
