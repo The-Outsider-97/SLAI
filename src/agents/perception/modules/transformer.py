@@ -26,7 +26,8 @@ def get_merged_config(user_config=None):
 
 class Transformer:
     def __init__(self, config):
-        cfg = config['transformer']
+        cfg = config.get('transformer', {})
+        self.dropout_rate = cfg.get('dropout_rate', 0.1)
         self.embed_dim = cfg['embed_dim']
         self.layers = [
             {
