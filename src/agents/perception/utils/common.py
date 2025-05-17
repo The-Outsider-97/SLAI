@@ -8,7 +8,9 @@ from logs.logger import get_logger
 
 logger = get_logger("Common")
 
-def load_config(config_path: str) -> Dict[str, Any]:
+DEFAULT_CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+
+def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     """Load configuration from a YAML file."""
     try:
         with open(config_path, "r", encoding="utf-8") as f:
