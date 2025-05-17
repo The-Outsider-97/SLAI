@@ -1,11 +1,24 @@
 import torch 
 import math
+import yaml
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 from logs.logger import get_logger
 
 logger = get_logger("Common")
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load configuration from a YAML file."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logger.error(f"Config file not found: {config_path}")
+        return {}
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing YAML in {config_path}: {e}")
+        return {}
 
 class Parameter:
     def __init__(self, data: torch.Tensor, requires_grad: bool = True, name: Optional[str] = None):
