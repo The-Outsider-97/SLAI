@@ -67,6 +67,15 @@ audio_encoder:
     n_filters: 40
     low_freq: 0
     high_freq: 8000
+
+text_encoder:
+  transformer:
+    num_layers: 6
+    embed_dim: 768
+    num_heads: 12
+    ff_dim: 3072
+    max_position_embeddings: 512
+  embedding_dim: 768
   
 vision_encoder:
   img_size: 224
