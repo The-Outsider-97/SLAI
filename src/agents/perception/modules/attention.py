@@ -24,7 +24,8 @@ def get_merged_config(user_config=None):
 
 class EfficientAttention:
     def __init__(self, config, device='cpu'):
-        cfg = config['attention']
+        cfg = config.get('attention', {})
+        self.dropout_rate = cfg.get('dropout_rate', 0.1)
         transformer_cfg = config['transformer']
         self.embed_dim = transformer_cfg['embed_dim']
         self.num_heads = transformer_cfg['num_heads']
