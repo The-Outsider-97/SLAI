@@ -1,13 +1,158 @@
 {
-    "knowledge": {},
+    "knowledge": [],
     "rules": [
-        ["IdentityRule", "identity_rule", 1.0],
-        ["TransitiveIsRule", "transitive_rule", 0.8],
-        ["MLDiscoveredRule:Material→Conductivity", "material_conductivity_rule", 0.65]],
+        [
+            "IdentityRule", "identity_rule", 1.0],
+        [
+            "TransitiveIsARule", "transitive_is_a_rule", 0.95],
+        [
+            "SymmetricMarriageRule", "symmetric_marriage_rule", 0.98],
+        [
+            "SymmetricSiblingRule", "symmetric_sibling_rule", 0.98],
+        [
+            "InverseParentChildRule", "inverse_parent_child_rule", 1.0],
+        [
+            "InverseEmployerEmployeeRule", "inverse_employer_employee_rule", 0.9],
+        [
+            "TransitivePartOfRule", "transitive_part_of_rule", 0.9],
+        [
+            "TransitiveLocatedInRule", "transitive_located_in_rule", 0.9],
+        [
+            "DisjointAliveDeadRule", "disjoint_alive_dead_rule", 1.0],
+        [
+            "DisjointLiquidSolidRule", "disjoint_liquid_solid_rule", 0.95],
+        [
+            "IrreflexiveParentRule", "irreflexive_parent_rule", 1.0],
+        [
+            "PropertyInheritanceIsARule", "property_inheritance_is_a_rule", 0.85],
+        [
+            "DisjointClassesMammalReptileRule", "disjoint_classes_mammal_reptile_rule", 0.9],
+        [
+            "DomainConstraintParentIsPersonRule", "domain_constraint_parent_is_person_rule", 0.98],
+        [
+            "RangeConstraintAgeIsNumberRule", "range_constraint_age_is_number_rule", 1.0],
+        [
+            "HumanMortalityRule", "human_mortality_rule", 0.9],
+        [
+            "BirdFlightDefaultRule", "bird_flight_default_rule", 0.7],
+        [
+            "PenguinCannotFlyRule", "penguin_cannot_fly_rule", 0.99],
+        [
+            "WaterStateAtRoomTempRule", "water_state_at_room_temp_rule", 0.95],
+        [
+            "TemporalOrderBirthDeathRule", "temporal_order_birth_death_rule", 1.0],
+        [
+            "SpatialContainmentAntiSymmetryRule", "spatial_containment_anti_symmetry_rule", 0.98],
+        [
+            "RainCausesWetGroundRule", "rain_causes_wet_ground_rule", 0.8],
+        [
+            "ObjectSingleLocationRule", "object_single_location_rule", 0.85],
+        [
+            "AgeMustBePositiveRule", "age_must_be_positive_rule", 0.99],
+        [
+            "CannotBeOwnAncestorRule", "cannot_be_own_ancestor_rule", 1.0],
+        [
+            "MarriageImpliesDifferentPeopleRule", "marriage_implies_different_people_rule", 0.99],
+        [
+            "SymmetricConnectedToRule", "symmetric_connected_to_rule", 0.9],
+        [
+            "CompanyHasEmployeesRule", "company_has_employees_rule", 0.75],
+        [
+            "MaterialCompositionRule", "material_composition_rule", 0.8],
+        [
+            "EventHasLocationAndTimeRule", "event_has_location_and_time_rule", 0.7],
+        [
+            "SubstanceHasPropertiesRule", "substance_has_properties_rule", 0.8],
+        [
+            "CausePrecedesEffectRule", "cause_precedes_effect_rule", 0.9],
+        [
+            "AbilityImpliesPotentialRule", "ability_implies_potential_rule", 0.8],
+        [
+            "ToolHasPurposeRule", "tool_has_purpose_rule", 0.75],
+        [
+            "LocationContainsObjectsRule", "location_contains_objects_rule", 0.8],
+        [
+            "PossessionImpliesExistenceRule", "possession_implies_existence_rule", 0.95],
+        [
+            "MutuallyExclusivePropertiesRule", "mutually_exclusive_properties_rule_transparent_opaque", 0.98],
+        [
+            "RequirementForActionRule", "requirement_for_action_rule_fuel_for_car_to_run", 0.9],
+        [
+            "SpeciesDietRule", "species_diet_rule_lion_eats_meat", 0.85],
+        [
+            "ProfessionalRoleImpliesSkillsRule", "professional_role_implies_skills_doctor_medical_knowledge", 0.8],
+        [
+            "SiblingShareParentsRule", "sibling_share_parents_rule", 0.9],
+        [
+            "ReflexiveSelfIdentityRule", "reflexive_self_identity_rule", 1.0],
+        [
+            "TransitiveOwnershipRule", "transitive_ownership_rule", 0.85],
+        [
+            "DisjointDayNightRule", "disjoint_day_night_rule", 0.95],
+        [
+            "VehicleRequiresDriverRule", "vehicle_requires_driver_rule", 0.9],
+        [
+            "FoodMustBeEdibleRule", "food_must_be_edible_rule", 0.88],
+        [
+            "ToolRequiresUserRule", "tool_requires_user_rule", 0.85],
+        [
+            "PetIsDomesticatedRule", "pet_is_domesticated_rule", 0.9],
+        [
+            "EmotionImpliesConsciousnessRule", "emotion_implies_consciousness_rule", 0.8],
+        [
+            "PartRequiresWholeRule", "part_requires_whole_rule", 0.92]
+    ],
     "rule_weights": {
         "IdentityRule": 1.0,
-        "TransitiveIsRule": 0.8,
-        "MLDiscoveredRule:Material→Conductivity": 0.65
+        "TransitiveIsARule": 0.95,
+        "SymmetricMarriageRule": 0.98,
+        "SymmetricSiblingRule": 0.98,
+        "InverseParentChildRule": 1.0,
+        "InverseEmployerEmployeeRule": 0.9,
+        "TransitivePartOfRule": 0.9,
+        "TransitiveLocatedInRule": 0.9,
+        "DisjointAliveDeadRule": 1.0,
+        "DisjointLiquidSolidRule": 0.95,
+        "IrreflexiveParentRule": 1.0,
+        "PropertyInheritanceIsARule": 0.85,
+        "DisjointClassesMammalReptileRule": 0.9,
+        "DomainConstraintParentIsPersonRule": 0.98,
+        "RangeConstraintAgeIsNumberRule": 1.0,
+        "HumanMortalityRule": 0.9,
+        "BirdFlightDefaultRule": 0.7,
+        "PenguinCannotFlyRule": 0.99,
+        "WaterStateAtRoomTempRule": 0.95,
+        "TemporalOrderBirthDeathRule": 1.0,
+        "SpatialContainmentAntiSymmetryRule": 0.98,
+        "RainCausesWetGroundRule": 0.8,
+        "ObjectSingleLocationRule": 0.85,
+        "AgeMustBePositiveRule": 0.99,
+        "CannotBeOwnAncestorRule": 1.0,
+        "MarriageImpliesDifferentPeopleRule": 0.99,
+        "SymmetricConnectedToRule": 0.9,
+        "CompanyHasEmployeesRule": 0.75,
+        "MaterialCompositionRule": 0.8,
+        "EventHasLocationAndTimeRule": 0.7,
+        "SubstanceHasPropertiesRule": 0.8,
+        "CausePrecedesEffectRule": 0.9,
+        "AbilityImpliesPotentialRule": 0.8,
+        "ToolHasPurposeRule": 0.75,
+        "LocationContainsObjectsRule": 0.8,
+        "PossessionImpliesExistenceRule": 0.95,
+        "MutuallyExclusivePropertiesRule_transparent_opaque": 0.98,
+        "RequirementForActionRule_fuel_for_car_to_run": 0.9,
+        "SpeciesDietRule_lion_eats_meat": 0.85,
+        "ProfessionalRoleImpliesSkillsRule_doctor_medical_knowledge": 0.8,
+        "SiblingShareParentsRule": 0.9,
+        "ReflexiveSelfIdentityRule": 1.0,
+        "TransitiveOwnershipRule": 0.85,
+        "DisjointDayNightRule": 0.95,
+        "VehicleRequiresDriverRule": 0.9,
+        "FoodMustBeEdibleRule": 0.88,
+        "ToolRequiresUserRule": 0.85,
+        "PetIsDomesticatedRule": 0.9,
+        "EmotionImpliesConsciousnessRule": 0.8,
+        "PartRequiresWholeRule": 0.92
     },
-        "bayesian_network": {}
+    "bayesian_network": {}
 }
