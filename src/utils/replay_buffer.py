@@ -4,13 +4,32 @@ import json
 import heapq
 import numpy as np
 import random
+
 from collections import deque, defaultdict
 from threading import Lock
 from datetime import datetime, timedelta
+
 from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
 from logs.logger import get_logger
 
-logger = get_logger("DistributedReplayBuffer")
+logger = get_logger("Replay Buffer")
+
+class ReplayBuffer:
+    """Experience replay buffer with uniform sampling"""
+    
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+    
+    def push(self, transition):
+        """Store transition (state, action, reward, next_state, done)"""
+        self.buffer.append(transition)
+    
+    def sample(self, batch_size):
+        """Random batch of transitions"""
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    
+    def __len__(self):
+        return len(self.buffer)
 
 class ExperienceReplayManager:
     def __init__(self, buffer, policy_net, batch_size=32):
