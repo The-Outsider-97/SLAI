@@ -147,7 +147,12 @@ class PerceptionAgent(BaseAgent):
     def forward(self, inputs):
         embeddings = {}
         for modality, encoder in self.encoders.items():
-            embeddings[modality] = encoder.forward(inputs[modality])
+            if modality == 'vision':
+                vision_output = encoder.forward(inputs[modality])
+                embeddings[modality] = vision_output  # Use as-is
+                print(f"Vision output shape: {vision_output.shape}")
+            else:
+                embeddings[modality] = encoder.forward(inputs[modality])
         fused = self.fusion.forward(embeddings)
         self._cache = {'fused': fused}
         if self.generator:
@@ -466,7 +471,8 @@ class MultimodalFusion:
     
             # Apply dropout
             if self.training and self.dropout_rate > 0:
-                dropout_mask = (torch.rand(*pooled_mod.shape) > self.dropout_rate).astype(torch.float32)
+                # dropout_mask = (torch.rand(*pooled_mod.shape) > self.dropout_rate).astype(torch.float32)
+                dropout_mask = (torch.rand(*pooled_mod.shape, device=pooled_mod.device) > self.dropout_rate).float()
                 pooled_mod *= dropout_mask
     
             weight = self.modal_weights[modality].data
