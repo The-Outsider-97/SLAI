@@ -1,9 +1,11 @@
 import time
+import math
 import yaml, json
 import numpy as np
 
+from difflib import SequenceMatcher
 from types import SimpleNamespace
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import Any, Optional, List, Dict, Union
 
 from logs.logger import get_logger
@@ -134,18 +136,110 @@ class KnowledgeMemory:
         return all(metadata.get(k) == v for k, v in filters.items())
 
     def _calculate_relevance(self, value: Any, context: dict) -> float:
-        """
-        Heuristic for relevance scoring. Override in subclass for custom logic.
-        """
-        # Simple heuristic: shared word count ratio
+        """Comprehensive relevance scoring with multiple dimensions"""
         try:
-            val_tokens = set(str(value).lower().split())
-            ctx_text = str(context) if isinstance(context, str) else str(context.get("text", ""))
-            ctx_tokens = set(ctx_text.lower().split())
-            overlap = len(val_tokens & ctx_tokens)
-            return overlap / (len(val_tokens) + 1e-5)
-        except Exception:
-            return 0.5
+            # Normalize inputs
+            val_str = str(value)
+            ctx_str = self._context_to_text(context)
+            
+            # Initialize score components
+            scores = {
+                'semantic': 0.0,
+                'contextual': 0.0,
+                'temporal': 0.0,
+                'structural': 0.0
+            }
+            weights = self.config.relevance_weights  # From config.yaml
+    
+            # 1. Semantic Similarity (Embedding-based)
+            try:
+                from sentence_transformers import SentenceTransformer
+                model = SentenceTransformer('all-MiniLM-L6-v2')
+                emb_val = model.encode(val_str)
+                emb_ctx = model.encode(ctx_str)
+                scores['semantic'] = self._cosine_sim(emb_val, emb_ctx)
+            except ImportError:
+                scores['semantic'] = self._fallback_semantic(val_str, ctx_str)
+    
+            # 2. Contextual Term Importance (TF-IDF enhanced)
+            scores['contextual'] = self._contextual_term_score(val_str, ctx_str)
+    
+            # 3. Temporal Relevance
+            scores['temporal'] = self._temporal_relevance(
+                value_meta=self._store.get('_timestamp', {}),
+                context_meta=context
+            )
+    
+            # 4. Structural Similarity
+            if isinstance(value, dict) and isinstance(context, dict):
+                scores['structural'] = self._structural_similarity(value, context)
+    
+            # Weighted combination
+            total_score = sum(scores[dim] * weights[dim] for dim in scores)
+            return min(max(total_score, 0.0), 1.0)
+    
+        except Exception as e:
+            logger.error(f"Relevance calculation failed: {str(e)}")
+            return 0.5  # Fallback neutral score
+    
+    # Helper methods ---------------------------------------------------
+    def _context_to_text(self, context: dict) -> str:
+        """Extract meaningful text from context"""
+        if isinstance(context, dict):
+            return ' '.join(f"{k}={v}" for k, v in context.items())
+        return str(context)
+    
+    def _cosine_sim(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Compute cosine similarity between two vectors"""
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    
+    def _fallback_semantic(self, text1: str, text2: str) -> float:
+        """TF-IDF/BM25 fallback when embeddings unavailable"""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        vectorizer = TfidfVectorizer()
+        try:
+            tfidf = vectorizer.fit_transform([text1, text2])
+            return (tfidf * tfidf.T).A[0,1]
+        except ValueError:
+            return SequenceMatcher(None, text1, text2).ratio()
+    
+    def _contextual_term_score(self, value: str, context: str) -> float:
+        """Weighted term importance using TF-IDF"""
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        try:
+            # Extract key terms from context
+            vectorizer = TfidfVectorizer(max_features=10)
+            tfidf = vectorizer.fit_transform([context])
+            important_terms = vectorizer.get_feature_names_out()
+            
+            # Score value based on term presence
+            value_counts = Counter(value.lower().split())
+            total = sum(value_counts.get(term, 0) for term in important_terms)
+            return total / (len(important_terms) + 1e-5)
+        except:
+            return 0.0
+    
+    def _temporal_relevance(self, value_meta: dict, context_meta: dict) -> float:
+        """Time-based decay using context timestamp"""
+        ctx_time = context_meta.get('timestamp', time.time())
+        val_time = value_meta.get('timestamp', ctx_time)
+        time_diff = abs(ctx_time - val_time)
+        
+        # Exponential decay with half-life of 30 days
+        half_life = 30 * 86400  # configurable
+        return math.exp(-time_diff * math.log(2)/half_life)
+    
+    def _structural_similarity(self, dict1: dict, dict2: dict) -> float:
+        """Recursive structural similarity for nested dicts"""
+        def compare(a, b):
+            if isinstance(a, dict) and isinstance(b, dict):
+                keys = set(a.keys()) | set(b.keys())
+                return sum(compare(a.get(k), b.get(k)) for k in keys)/len(keys)
+            elif isinstance(a, list) and isinstance(b, list):
+                return sum(compare(x, y) for x,y in zip(a,b))/max(len(a),len(b),1)
+            else:
+                return 1.0 if a == b else 0.0
+        return compare(dict1, dict2)
         
 if __name__ == "__main__":
     import readline  # Enables command history and editing
