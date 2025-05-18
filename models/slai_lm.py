@@ -23,7 +23,6 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Optional, Dict, Any, Union, Set, Tuple
 
 from src.agents.language.grammar_processor import GrammarProcessor
-from src.agents.language.resource_loader import ResourceLoader
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.language_agent import DialogueContext
 from src.agents.alignment.alignment_memory import AlignmentMemory
@@ -156,11 +155,11 @@ class SLAILM:
         
         self._setup_logging(log_level, log_file)
         
-        self.structured_wordlist = ResourceLoader.get_structured_wordlist(STRUCTURED_WORDLIST_PATH)
-        self.wordlist = ResourceLoader.get_simple_wordlist(SIMPLE_WORDLIST_PATH)
-        self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
-        self._load_enriched_wordlist()
-        self.responses = ResourceLoader.get_nlg_templates()
+        # self.structured_wordlist = ResourceLoader.get_structured_wordlist(STRUCTURED_WORDLIST_PATH)
+        # self.wordlist = ResourceLoader.get_simple_wordlist(SIMPLE_WORDLIST_PATH)
+        # self.sentiment_lexicon = ResourceLoader.get_sentiment_lexicon()
+        # self._load_enriched_wordlist()
+        # self.responses = ResourceLoader.get_nlg_templates()
         
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -413,7 +412,6 @@ class SLAILM:
     
     def _tokenize(self, text: str) -> list[str]:
         """Tokenization using GrammarProcessor's POS patterns and linguistic rules."""
-        from src.agent.perception.modules.transformers import AutoTokenizer
         for i, pattern_item in enumerate(pos_patterns):
             try:
                 pattern, name = pattern_item
