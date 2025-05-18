@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import yaml, json
+import torch.optim as optim
 
 from src.agents.learning.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
 from logs.logger import get_logger
@@ -133,10 +134,31 @@ class Adam(Optimizer):
     
             params_Ws[i].data.copy_(updated_W)
             params_bs[i].data.copy_(updated_b)    
-        
-        # Replace old parameters with new ones
-        # params_Ws[:] = new_params_Ws
-        # params_bs[:] = new_params_bs
+
+class NoveltyDetector(nn.Module):
+    """
+    Simple neural network for estimating state novelty
+    """
+    def __init__(self, input_dim):
+        super().__init__()
+        self.predictor = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32)
+        )
+        self.target = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32)
+        )
+        self.optimizer = optim.Adam(self.predictor.parameters(), lr=1e-3)
+
+    def forward(self, x):
+        with torch.no_grad():
+            target_features = self.target(x)
+        pred_features = self.predictor(x)
+        return torch.norm(pred_features - target_features, dim=1)
+
 class PolicyNetwork(nn.Module):
     """
     Manually implemented Policy Network for Reinforcement Learning.
