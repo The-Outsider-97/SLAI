@@ -1,3 +1,5 @@
+semantic_frames_path: "src/agents/reasoning/templates/semantic_rules.json"
+
 inference:
   default_chain_length: 5         # Max steps in chain-of-thought reasoning
   neuro_symbolic_weight: 0.4      # Weight for neural vs symbolic reasoning (0.0-1.0)
@@ -26,7 +28,7 @@ validation:
   min_soundness_score: 0.7
   contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
   redundancy_margin: 0.05
-  max_validation_attempts: 3
+  max_validation_attempts: 5
   validation_timeout: 1
   enable_semantic_redundancy: false  # or true, depending on your needs
   mln_rule_confidence_threshold: 0.7
