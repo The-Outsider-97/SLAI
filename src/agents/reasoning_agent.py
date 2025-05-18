@@ -20,7 +20,7 @@ import json
 import re
 import yaml
 import math
-import logging as logger
+import time
 import itertools
 import random
 import hashlib
@@ -28,17 +28,18 @@ import numpy as np
 
 from collections import defaultdict, OrderedDict
 from typing import Any, Callable, Dict, List, Set, Tuple, Union, Optional
+from dataclasses import dataclass
 from pathlib import Path
-from src.agents.base_agent import BaseAgent
-from src.agents.language.resource_loader import ResourceLoader
-from src.agents.reasoning.rule_engine import RuleEngine
-from src.agents.reasoning.probabilistic_models import ProbabilisticModels
-from src.agents.reasoning.validation import (
-        detect_circular_rules,
-        detect_fact_conflicts,
-        redundant_fact_check
-    )
 
+from src.agents.base_agent import BaseAgent
+from src.agents.reasoning.rule_engine import RuleEngine, load_config
+from src.agents.reasoning.probabilistic_models import ProbabilisticModels
+from src.agents.reasoning.validation import ValidationEngine
+from logs.logger import get_logger
+
+logger = get_logger("Reasoning Agent")
+
+LOCAL_CONFIG_PATH = "src/agents/reasoning/configs/reasoning_config.yaml"
 
 def identity_rule(kb):
     return {(s, p, o): 1.0 for (s, p, o) in kb if p == 'is'}
@@ -51,12 +52,26 @@ def transitive_rule(kb):
                 new_facts[(a, 'is', c)] = min(conf1, conf2)
     return new_facts
 
+@dataclass
+class Token:
+    text: str
+    lemma: str
+    pos: str
+    index: int # Original index in the sentence
+    # Add other attributes as needed, e.g., is_stop, is_punct, shape, etc.
+    is_stop: bool = False
+    is_punct: bool = False
+    # For more advanced features, you might add:
+    # ner_tag: Optional[str] = None
+    # embedding: Optional[List[float]] = None
+
 class ReasoningAgent(BaseAgent):
     """
     Initialize the Reasoning Agent with learning capabilities.
     """
-    def __init__(self, shared_memory, agent_factory, tuple_key: Tuple = ("subject", "predicate", "object"), config=None,
-                 storage_path: str = "src/agents/knowledge/knowledge_db.json",
+    def __init__(self, shared_memory, agent_factory,
+                 config=None,
+                 tuple_key: Tuple = ("subject", "predicate", "object"),
                  contradiction_threshold=0.25,
                  rule_validation: Dict = None,
                  nlp_integration: Dict = None,
@@ -66,72 +81,48 @@ class ReasoningAgent(BaseAgent):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config
-        )
+            config=config)
+        
         self.tuple_key = tuple_key
         self.hypothesis_graph = defaultdict(
             lambda: {
                 'nodes': set(),
                 'edges': defaultdict(float),
                 'confidence': 0.0
-            }
-        )
-
-        # Core components
+            })
+        self.reasoning_agent = []
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.llm = llm
-        self.language_agent = language_agent
-        self.knowledge_base = {}
-        self.bayesian_network = {}
-        self.rule_engine = RuleEngine()
-        self.rules = []
-        self.rule_weights = {}
-
-        # Ensure storage_path is set before it's used
+        self.inference_settings = config.get("inference", {"exploration_rate": 0.1})
+        storage_path = config.get("storage", {}).get("knowledge_db")
         self.storage_path = storage_path
 
-        # Add default rules
-        self.add_rule(identity_rule, rule_name="IdentityRule", weight=1.0)
-        self.add_rule(transitive_rule, rule_name="TransitiveIsRule", weight=0.8)
-
-        # Load YAML config if available
-        config_path = "src/agents/reasoning/templates/reasoning_config.yaml"
-        if Path(config_path).exists():
-            with open(config_path, 'r') as f:
-                external_config = yaml.safe_load(f)
-                self.inference_settings = external_config.get('inference', {})
-                self.rule_validation = external_config.get('rules', {})
-                self.nlp_config = external_config.get('nlp', {})
-                self.storage_path = external_config.get('storage', {}).get('knowledge_db', self.storage_path)
-
-        # Fallback configurations if not set
-        self.contradiction_threshold = contradiction_threshold
-        self.rule_validation = self.rule_validation or {
-            'enable': True,
-            'min_soundness_score': 0.7,
-            'max_circular_depth': 3
-        }
-        self.nlp_config = nlp_integration or self.nlp_config or {
-            'sentence_transformer': 'your-internal-model',
-            'tokenizer': self.language_agent.tokenizer if language_agent else None
-        }
-        self.inference_settings = inference or self.inference_settings or {
-            'default_chain_length': 5,
-            'neuro_symbolic_weight': 0.4,
-            'max_hypotheses': 100,
-            'exploration_rate': 0.1,
-            'llm_fallback': {
-                'enable': True,
-                'temperature': 0.3,
-                'max_tokens': 100
-            }
-        }
+        self.rule_engine = RuleEngine(config=load_config(LOCAL_CONFIG_PATH))
+        self.validation_engine = ValidationEngine(config=load_config(LOCAL_CONFIG_PATH))
+        self.probabilistic_models = ProbabilisticModels(config=load_config(LOCAL_CONFIG_PATH))
 
         # Initialize components
+
         self._load_knowledge()
-        self._initialize_nlp()
-        self._initialize_probabilistic_models()
+
+        # Initialize Language components
+        language_config_path = "src/agents/language/configs/language_config.yaml"
+        self.language_config = self._load_language_config(language_config_path)
+        glove_path = self.language_config.get("nlu", {}).get("glove_path")
+        self._initialize_nlp(glove_path, tokens=[])
+
+        logger.info(f"\nReasoning Agent Initialized...")
+
+    def _save_knowledge(self):
+        """Save knowledge and learned models to storage."""
+        data = {
+            'knowledge': {list(k): v for k, v in self.knowledge_base.items()},
+            'rules': [(r[0], r[1].__name__, r[2]) for r in self.rules],
+            'rule_weights': self.rule_weights,
+            'bayesian_network': self.bayesian_network
+        }
+        with open(self.storage_path, 'w') as f:
+            json.dump(data, f)
 
     def _load_knowledge(self, storage_path: str = None):
         """Load knowledge and learned models from storage."""
@@ -162,179 +153,57 @@ class ReasoningAgent(BaseAgent):
                 self.rule_weights = data.get('rule_weights', {})
                 self.bayesian_network = data.get('bayesian_network', {})
 
-    def _save_knowledge(self):
-        """Save knowledge and learned models to storage."""
-        data = {
-            'knowledge': {list(k): v for k, v in self.knowledge_base.items()},
-            'rules': [(r[0], r[1].__name__, r[2]) for r in self.rules],
-            'rule_weights': self.rule_weights,
-            'bayesian_network': self.bayesian_network
-        }
-        with open(self.storage_path, 'w') as f:
-            json.dump(data, f)
+    def _load_language_config(self, path: str) -> Dict:
+        """Load language configuration file."""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Failed to load language config: {e}")
+            return {}
 
-    def _initialize_nlp(self):
+    def _initialize_nlp(self, path: str, tokens: List['Token']):
         """
         Advanced NLP initialization with multi-layered linguistic features.
-        Incorporates concepts from:
-        - Mikolov et al. (2013) Word2Vec embeddings
-        - Manning et al. (2014) Stanford CoreNLP architecture
-        - Bird et al. (2009) NLTK design patterns
         """
+        from src.agents.language.nlp_engine import NLPEngine
+        from src.agents.language.nlu_engine import Wordlist
+    
+        # Initialize NLPEngine instance
+        nlp_engine = NLPEngine(config=self.language_config)
+    
         # Core linguistic resources
-        self.vocab = self._build_core_lexicon()
-        self.stop_words = self._load_stop_words()
-        self.morphology = self._initialize_morphology()
-        self.semantic_frames = self._create_semantic_frames()
-        
+        self.stop_words = nlp_engine.STOPWORDS
+    
         # Embedding spaces
-        self.word_vectors = self._init_embeddings()
-        self.dependency_grammar = self.rule_engine._create_dependency_rules()
-        self.pos_tagger = self._build_rule_based_tagger()
+        wordlist_instance = Wordlist(config=self.language_config)
+        self.word_vectors = wordlist_instance._load_glove(path)
         
+        # Initialize POS tagger with valid tokens
+        if not tokens:
+            # Create minimal default tokens if empty
+            tokens = [Token(text="", lemma="", pos="", index=0)]
+        self.pos_tagger = nlp_engine.apply_dependency_rules(tokens)
+    
+        # Rest of the initialization code remains unchanged
+        self.dependency_grammar = self.rule_engine._create_dependency_rules()
+        self.morphology = self._initialize_morphology
+        semantic_frames = self.config.get("semantic_frames_path")
+        self.semantic_frames = semantic_frames
+        self.vocab = self._build_core_lexicon
+    
         # Discourse features
         self.cohesion_metrics = {'entity_grid': {}, 'coref_chains': {}}
         self.pragmatic_rules = self.rule_engine._load_pragmatic_heuristics()
 
-    def _build_core_lexicon(self) -> Set[str]:
-        """Construct foundational lexicon with psycholinguistic priors"""
-        base_words = {
-            # Closed-class words
-            'is', 'are', 'the', 'a', 'an', 'and', 'or', 'not', 'all', 'some', 'none',
-            'true', 'false', 'in', 'on', 'at', 'of', 'to', 'for', 'with', 'by',
-            
-            # Semantic primes (Wierzbicka, 1996)
-            'I', 'you', 'someone', 'something', 'do', 'happen', 'know', 'think',
-            'want', 'feel', 'see', 'hear', 'say', 'word', 'true', 'good', 'bad',
-            
-            # Basic ontological categories
-            'time', 'space', 'object', 'event', 'action', 'property', 'quantity'
-        }
-        return base_words
+    def _build_core_lexicon(self):
+        # This accesses the NLP Engine
+        pass
 
-    def _load_stop_words(self) -> Set[str]:
-        """Curated stop words list with domain adaptation"""
-        return {
-            'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'of',
-            'at', 'by', 'for', 'with', 'to', 'from', 'in', 'on', 'that', 'this',
-            'these', 'those', 'is', 'are', 'was', 'were', 'have', 'has', 'had'
-        }
+    def _initialize_morphology(self):
+        # this access the morphologies in morphology_rules.json
+        pass
 
-    def _initialize_morphology(self) -> Dict[str, dict]:
-        """Morphological analyzer with stemming and lemmaization"""
-        return {
-            'stemmer': self._porter_style_stemmer(),
-            'lemmatizer': self._lemmatization_rules(),
-            'inflection_rules': self._inflection_patterns()
-        }
-
-    def _init_embeddings(self) -> Dict[str, np.ndarray]:
-        """Distributional semantics with simplified word embeddings"""
-        embed_dim = 50  # Reduced dimension for efficiency
-        return {word: np.random.normal(scale=0.1, size=embed_dim)
-                for word in self.vocab}
-
-    def _build_rule_based_tagger(self) -> Dict[str, str]:
-        """Regex-based POS tagger with context rules"""
-        patterns = [
-            (r'.*ing$', 'VBG'),               # gerunds
-            (r'.*ed$', 'VBD'),                 # past tense
-            (r'.*es$', 'VBZ'),                 # 3rd singular
-            (r'.*ould$', 'MD'),                # modals
-            (r'^-?[0-9]+(\.[0-9]+)?$', 'CD'),  # numbers
-            (r'.*', 'NN')                      # default noun
-        ]
-        return {'patterns': patterns, 'context_rules': self._context_sensitive_rules()}
-
-    def _create_semantic_frames(self) -> Dict[str, dict]:
-        """Frame semantics inventory based on FrameNet concepts"""
-        return {
-            'Motion': {'roles': ['Agent', 'Theme', 'Path'], 'verbs': ['move', 'go', 'travel']},
-            'Transfer': {'roles': ['Donor', 'Recipient', 'Theme'], 'verbs': ['give', 'send', 'receive']},
-            'Cognitive': {'roles': ['Cognizer', 'Content'], 'verbs': ['think', 'believe', 'consider']}
-        }
-
-    def _porter_style_stemmer(self) -> Callable:
-        """Implementation of Porter algorithm key steps"""
-        step1_suffixes = {
-            'sses': 'ss',
-            'ies': 'i',
-            'ss': 'ss',
-            's': ''
-        }
-        return lambda word: next(
-            (word[:-len(suf)] + repl for suf, repl in step1_suffixes.items()
-             if word.endswith(suf)), word)
-
-    def _lemmatization_rules(self) -> Dict[str, str]:
-        """Exception lists and transformation rules"""
-        return {
-            'is': 'be',
-            'are': 'be',
-            'were': 'be',
-            'went': 'go',
-            'better': 'good',
-            'best': 'good'
-        }
-
-    def _inflection_patterns(self) -> Dict[str, Union[List[Tuple], Dict[str, str]]]:
-        """Return regex patterns and irregular mappings for inflection handling."""
-        return {
-            # Ordered regex patterns (most specific first)
-            'regular': [
-                # --- Noun Plurals ---
-                (r'(?i)([aeiou]y)s$', r'\1y'),         # toys -> toy
-                (r'(?i)([^aeiou]y)s$', r'\1y'),        # babies -> baby (but catches "boys" -> "boy")
-                (r'(?i)(ss|sh|ch|x|z)es$', r'\1'),     # buses -> bus, dishes -> dish
-                (r'(?i)(m|l)ice$', r'\1ouse'),         # mice -> mouse, lice -> louse
-                (r'(?i)([ft]eeth)$', r'\1ooth'),       # teeth -> tooth, feet -> foot
-                (r'(?i)([a-z]+[^aeiou])ies$', r'\1y'), # cities -> city
-                (r'(?i)([a-z]+[aeiou])s$', r'\1'),     # radios -> radio
-                
-                # --- Verb Conjugations ---
-                (r'(?i)(\w+)(ed)$', r'\1'),            # walked -> walk
-                (r'(?i)(\w+)(ing)$', r'\1'),           # running -> run
-                (r'(?i)(\w+)(s)$', r'\1'),             # walks -> walk
-                
-                # --- Adjectives/Adverbs ---
-                (r'(?i)(\w+)(er)$', r'\1'),            # bigger -> big
-                (r'(?i)(\w+)(est)$', r'\1'),           # biggest -> big
-                (r'(?i)(\w+)(ly)$', r'\1'),            # quickly -> quick
-            ],
-            
-            # Irregular forms (inflected -> base)
-            'irregular': {
-                # Nouns
-                'children': 'child',
-                'men': 'man',
-                'women': 'woman',
-                'people': 'person',
-                'geese': 'goose',
-                'mice': 'mouse',
-                
-                # Verbs
-                'went': 'go',
-                'were': 'be',
-                'ate': 'eat',
-                'ran': 'run',
-                'spoke': 'speak',
-                
-                # Adjectives
-                'better': 'good',
-                'best': 'good',
-                'worse': 'bad',
-                'worst': 'bad'
-            }
-        }
-
-    def _context_sensitive_rules(self) -> List[tuple]:
-        """Brill-style contextual tagging rules"""
-        return [
-            (('NN', 'VB'), ('PREVTAG', 'DT'), 'NN'),
-            (('VB', 'NN'), ('NEXTTAG', 'NN'), 'VB'),
-            (('JJ', 'NN'), ('PREVTAG', 'RB'), 'JJ')
-        ]
-        
     def _initialize_probabilistic_models(self):
         """Initialize probabilistic reasoning structures."""
         self.bayesian_network = {
@@ -526,10 +395,10 @@ class ReasoningAgent(BaseAgent):
         elif "verify" in last_thought:
             return "run_consistency_check"
         return "forward_chaining"
-    
+
     def execute_action(self, action: List[str]) -> str:
         pass
-    
+
     def _is_goal_reached(self, context: Dict[str, Any]) -> bool:
         """
         Determines whether the reasoning process has reached its goal.
@@ -586,9 +455,10 @@ class ReasoningAgent(BaseAgent):
             self.knowledge_base.update(current_new)
 
         # --- Validation Phase ---
-        circular = detect_circular_rules(self.rules)
-        conflicts = detect_fact_conflicts(self.knowledge_base)
-        redundant = redundant_fact_check(new_facts, self.knowledge_base)
+        rule_engine = RuleEngine(config=load_config(LOCAL_CONFIG_PATH), knowledge_base=self.knowledge_base)
+        circular = rule_engine.detect_circular_rules()
+        conflicts = rule_engine.detect_fact_conflicts()
+        redundant = rule_engine.redundant_fact_check(confidence_margin=0.05)
 
         if circular:
             self.logger.warning(f"Circular rules detected: {circular}")
@@ -599,7 +469,35 @@ class ReasoningAgent(BaseAgent):
 
         return {k: v for k, v in new_facts.items() if k not in redundant}
 
+    def _incremental_forward_chain(self, seed_facts: Dict[Tuple, float], max_iterations: int = 10):
+        """
+        Run a light inference pass starting from seed_facts.
+        """
+        new_facts = {}
+        for _ in range(max_iterations):
+            current_new = {}
+            for name, rule_func, weight in self.rules:
+                try:
+                    inferred = rule_func(self.knowledge_base)
+                    for fact, conf in inferred.items():
+                        weighted_conf = conf * weight
+                        if fact not in self.knowledge_base or weighted_conf > self.knowledge_base[fact]:
+                            current_new[fact] = weighted_conf
+                            self._update_rule_weights(name, True)
+                        else:
+                            self._update_rule_weights(name, False)
+                except Exception as e:
+                    self.logger.warning(f"Rule {name} failed during incremental chaining: {e}")
+
+            if not current_new:
+                break
+            new_facts.update(current_new)
+            self.knowledge_base.update(current_new)
+
+        self.logger.info(f"[IncrementalInference] Added {len(new_facts)} new facts.")
+
     def _parse_statement(self, statement: str) -> Tuple:
+        from src.agents.language.nlu_engine import NLUEngine
         """
         Advanced statement parsing with entity recognition.
         
@@ -610,7 +508,7 @@ class ReasoningAgent(BaseAgent):
             Structured fact tuple
         """
         # Enhanced parsing with simple entity recognition
-        parsed = self._recognize_entities(statement)
+        parsed = NLUEngine.get_entities
 
         # Try multiple parsing patterns
         patterns = [
@@ -630,165 +528,9 @@ class ReasoningAgent(BaseAgent):
 
         raise ValueError(f"Could not parse statement: {statement}")
 
-    def _recognize_entities(self, text: str) -> str:
-        """
-        Hybrid rule-based/statistical NER with semantic normalization.
-        Implements features from:
-        - Lample et al. (2016) Neural Architectures for Named Entity Recognition
-        - Regular expression patterns from Cunningham et al. (2002) GATE system
-        """
-        if text in self.entity_recognition:
-            return self.entity_recognition[text]
-
-        # Semantic normalization pipeline
-        normalized = text.lower()
-        entities = []
-
-        # Rule-based patterns with priority
-        patterns = OrderedDict([
-            ('DATE', r'\b(\d{4}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b'),
-            ('TIME', r'\b\d{1,2}:\d{2}(?::\d{2})?\b(?: [APap][Mm])?'),
-            ('PERSON', r'\b([A-Z][a-z]+ [A-Z][a-z]+-?[A-Za-z]*)\b'),
-            ('GPE', r'\b([A-Z][a-z]+(?: [A-Z][a-z]+)*)\b(?=\s+(?:County|State|Republic|Province|City))'),
-            ('ORG', r'\b([A-Z][a-z]+(?: [A-Za-z0-9&]+){1,3} (?:Inc|Ltd|LLC|Corp|University))\b')
-        ])
-
-        # Multi-pass recognition with confidence scoring
-        entity_conf = defaultdict(float)
-        for ent_type, pattern in patterns.items():
-            for match in re.finditer(pattern, text):
-                span = match.span()
-                raw_entity = text[span[0]:span[1]]
-
-                # Conflict resolution: prefer longer matches and higher priority types
-                existing = next((e for e in entities if e['start'] <= span[0] and e['end'] >= span[1]), None)
-                if not existing:
-                    entities.append({
-                        'text': raw_entity,
-                        'type': ent_type,
-                        'start': span[0],
-                        'end': span[1],
-                        'confidence': 0.9  # Base confidence for rule-based matches
-                    })
-                    entity_conf[raw_entity] = max(entity_conf[raw_entity], 0.9)
-                elif existing['confidence'] < 0.9:
-                    entities.remove(existing)
-                    entities.append({
-                        'text': raw_entity,
-                        'type': ent_type,
-                        'start': span[0],
-                        'end': span[1],
-                        'confidence': 0.9
-                    })
-
-        # Statistical disambiguation using knowledge base
-        for ent in entities:
-            # Check against known entities in KB
-            kb_matches = [k for k in self.knowledge_base 
-                          if k[1] == 'is' and str(k[0]).lower() == ent['text'].lower()]
-            
-            if kb_matches:
-                ent['confidence'] = min(ent['confidence'] + 0.1 * len(kb_matches), 1.0)
-                ent_type = kb_matches[0][2]
-                if ent_type in patterns:
-                    ent['type'] = ent_type
-
-        # Build normalized text with entity markers
-        sorted_entities = sorted(entities, key=lambda x: x['start'])
-        result = []
-        last_pos = 0
-        
-        for ent in sorted_entities:
-            result.append(normalized[last_pos:ent['start']])
-            result.append(f"[{ent['text']}:{ent['type']}({ent['confidence']:.2f})]")
-            last_pos = ent['end']
-            
-        result.append(normalized[last_pos:])
-        marked_text = ''.join(result)
-        
-        self.entity_recognition[text] = marked_text
-        return marked_text
-
-    def _tokenize(self, text: str) -> List[str]:
-        """Enhanced tokenization with linguistic features"""
-        # Basic tokenization with regex
-        tokens = re.findall(r'''
-            \b\w+(?:['’]\w+)?        # Words with contractions
-            | \d+\.?\d*              # Numbers
-            | \S\W+                  # Special characters
-            ''', text, re.X)
-        
-        # Normalization pipeline
-        processed = []
-        for token in tokens:
-            # Case normalization
-            if self.config.get('lowercase', True):
-                token = token.lower()
-                
-            # Stemming
-            if self.config.get('stemming', False):
-                token = self.morphology['stemmer'](token)
-                
-            # Remove residual punctuation
-            token = re.sub(r'^[^\w\s]+|[^\w\s]+$', '', token)
-            
-            if token:
-                processed.append(token)
-                
-        return processed
-
-    def _update_vocabulary(self, text: str):
-        if not hasattr(self, "vocab_vectors"):
-            self.vocab_vectors = {}
-        
-        tokens = self._tokenize(text)
-        for token in tokens:
-            self.vocab_vectors[token.lower()] = self._enhanced_binary_encode(token)
-
-    def _enhanced_binary_encode(self, word: str, dim: int = 64) -> np.ndarray:
-        """
-        Enhanced binary encoding for discrete semantic hashing.
-        """
-        hash_val = int(hashlib.sha256(word.encode()).hexdigest(), 16)
-        bin_hash = bin(hash_val)[2:].zfill(dim)
-        return np.array([int(b) for b in bin_hash[-dim:]], dtype=np.uint8)
-
-    def semantic_similarity(self, text1: str, text2: str) -> float:
-        """
-        Compute semantic similarity using mean-pooled word vectors and cosine similarity.
-        Falls back to token overlap if embeddings are missing.
-        """
-        def embed(text: str) -> Optional[np.ndarray]:
-            tokens = self._tokenize(text)
-            vectors = [self.word_vectors[t] for t in tokens if t in self.word_vectors]
-            if not vectors:
-                return None
-            return np.mean(vectors, axis=0)
-
-        vec1 = embed(text1)
-        vec2 = embed(text2)
-
-        if vec1 is None or vec2 is None:
-            # Fallback: Jaccard token overlap
-            t1, t2 = set(self._tokenize(text1)), set(self._tokenize(text2))
-            return len(t1 & t2) / max(len(t1 | t2), 1)
-
-        numerator = np.dot(vec1, vec2)
-        denominator = np.linalg.norm(vec1) * np.linalg.norm(vec2)
-        return float(numerator / denominator) if denominator != 0 else 0.0
-
-    def _text_to_vector(self, text: str) -> Dict[str, float]:
-        """Convert text to simple word vector."""
-        words = re.findall(r'\w+', text.lower())
-        vec = defaultdict(float)
-        for word in words:
-            if word in self.word_vectors:
-                for w, val in self.word_vectors[word].items():
-                    vec[w] += val
-        return dict(vec)
-    
     def _build_hypothesis_graph(self, root_node: Tuple):
         """Constructs multi-layered hypothesis graph with confidence scoring"""
+        from src.agents.language.nlu_engine import NLUEngine
         root_key = hash(root_node)
         
         # Initialize root node
@@ -807,7 +549,7 @@ class ReasoningAgent(BaseAgent):
             visited.add(node)
             
             for fact in self.knowledge_base:
-                similarity = self.semantic_similarity(str(node), str(fact))
+                similarity = NLUEngine.semantic_similarity(str(node), str(fact))
                 if similarity > 0.65:
                     edge_conf = current_confidence * decay * similarity
                     
@@ -828,3 +570,141 @@ class ReasoningAgent(BaseAgent):
         if max_conf > 0:
             for edge in self.hypothesis_graph[root_key]['edges']:
                 self.hypothesis_graph[root_key]['edges'][edge] /= max_conf
+
+    def stream_update(self, new_facts: List[Tuple[str, str, str]], confidence: float = 1.0):
+        """
+        Incrementally update the knowledge base with new facts and run inference only on those.
+        """
+        updated = False
+        affected_facts = {}
+
+        for fact in new_facts:
+            if fact not in self.knowledge_base or self.knowledge_base[fact] < confidence:
+                self.knowledge_base[fact] = confidence
+                affected_facts[fact] = confidence
+                updated = True
+
+        if updated:
+            self._incremental_forward_chain(affected_facts)
+            self._save_knowledge()
+
+        return updated
+
+    def forget_fact(self, fact: Union[str, Tuple[str, str, str]]) -> bool:
+        """
+        Remove a fact from the knowledge base and delete it from storage.
+        Also clears derived facts and rules influenced by it if applicable.
+        """
+        try:
+            if isinstance(fact, str):
+                fact = self._parse_statement(fact)
+    
+            # Directly delete the fact
+            if fact in self.knowledge_base:
+                del self.knowledge_base[fact]
+    
+            # Optionally: remove any facts inferred from this
+            derived_facts = [k for k in self.knowledge_base if fact[0] in k or fact[2] in k]
+            for df in derived_facts:
+                del self.knowledge_base[df]
+    
+            # Clean any rule references if applicable
+            if hasattr(self, 'rules'):
+                self.rules = [(name, fn, wt) for (name, fn, wt) in self.rules if fact not in fn(self.knowledge_base)]
+    
+            self._save_knowledge()
+            self.logger.info(f"[GDPR] Forgotten fact: {fact}")
+            return True
+    
+        except Exception as e:
+            self.logger.error(f"[GDPR] Failed to forget fact {fact}: {e}")
+            return False
+        
+    def forget_by_subject(self, subject: str) -> int:
+        """
+        Remove all facts related to a given subject/entity (e.g., 'user123').
+        Returns the number of facts removed.
+        """
+        to_remove = [fact for fact in self.knowledge_base if subject in fact]
+        for fact in to_remove:
+            del self.knowledge_base[fact]
+        self._save_knowledge()
+        self.logger.info(f"[GDPR] Removed {len(to_remove)} facts related to subject: {subject}")
+        return len(to_remove)
+    
+    def forget_memory_keys(self, key_prefix: str):
+        """
+        Remove all shared memory keys starting with a specific prefix.
+        """
+        keys_to_clear = [key for key in self.shared_memory.keys() if key.startswith(key_prefix)]
+        for key in keys_to_clear:
+            self.shared_memory.set(key, None)
+        self.logger.info(f"[GDPR] Cleared {len(keys_to_clear)} shared memory keys with prefix '{key_prefix}'.")
+
+    def log_gdpr_request(self, request_type: str, target: str):
+        with open("logs/gdpr_audit_log.jsonl", "a") as log:
+            log.write(json.dumps({
+                "timestamp": time.time(),
+                "agent": self.name,
+                "action": request_type,
+                "target": target
+            }) + "\n")
+
+if __name__ == "__main__":
+    print("\n=== Running Reasoning Agent ===\n")
+
+    config = {
+        "storage": {
+            "knowledge_db": "knowledge_db.json"
+        },
+        "semantic_frames_path": "semantic_frames.json"
+    }
+    shared_memory = {}
+    agent_factory = lambda: None
+
+    agent = ReasoningAgent(shared_memory, agent_factory, config=config)
+    print(agent)
+
+    # Prepopulate some basic knowledge
+    agent.knowledge_base = {
+        ("cat", "is", "animal"): 1.0,
+        ("animal", "is", "living"): 1.0,
+        ("penguin", "is", "bird"): 1.0,
+        ("bird", "can", "fly"): 0.9,
+        ("penguin", "cannot", "fly"): 0.99
+    }
+
+    # Register sample rule manually
+    def identity_rule(kb):
+        return {(s, p, o): 1.0 for (s, p, o) in kb if p == 'is'}
+
+    agent.rules = [
+        ("IdentityRule", identity_rule, 1.0)
+    ]
+
+    # Test generate_chain_of_thought
+    print("\n--- Chain of Thought ---")
+    thoughts = agent.generate_chain_of_thought(("penguin", "is", "bird"))
+    for t in thoughts:
+        print(t)
+
+    # Test _select_action
+    action = agent._select_action(thoughts)
+    print(f"\nSelected Action: {action}")
+
+    # Stub execute_action
+    result = agent.execute_action(action)
+    print(f"\nExecuted Action Result (stub): {result}")
+
+    # Mock context and test _is_goal_reached
+    test_context = {"target_fact": ("penguin", "is", "bird")}
+    goal_reached = agent._is_goal_reached(test_context)
+    print(f"\nGoal Reached? {goal_reached}")
+
+    # Test forward chaining
+    print("\n--- Forward Chaining ---")
+    inferred_facts = agent.forward_chaining()
+    for fact, conf in inferred_facts.items():
+        print(f"Inferred: {fact} => {conf:.2f}")
+
+    print("\n=== Successfully Ran Reasoning Agent ===\n")
