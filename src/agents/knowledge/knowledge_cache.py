@@ -42,7 +42,16 @@ class KnowledgeCache:
         self.cache = OrderedDict()
         self.cipher = Fernet(os.getenv('CACHE_ENCRYPTION_KEY', Fernet.generate_key())) \
             if self.config.enable_encryption else None
-        
+
+    def __contains__(self, key):
+        return key in self.cache
+    
+    def __getitem__(self, key):
+        return self.get(key)
+    
+    def __len__(self):
+        return len(self.cache)
+
     def get(self, key: str) -> Optional[Any]:
         if key not in self.cache:
             return None
