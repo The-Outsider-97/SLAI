@@ -4,7 +4,7 @@ import re
 
 from typing import Dict, Union
 from difflib import SequenceMatcher
-from collections import deque
+from collections import deque, defaultdict
 from types import SimpleNamespace
 
 from logs.logger import get_logger
@@ -32,10 +32,9 @@ def get_config_section(section: Union[str, Dict], config_file_path: str):
     return dict_to_namespace(config[section])
 
 class Governor:
-    def __init__(self, knowledge_agent, agent=None,
+    def __init__(self, knowledge_agent,
                  config_section_name: str = "governor",
                  config_file_path: str = CONFIG_PATH):
-        self.agent = agent
         self.knowledge_agent = knowledge_agent
         self.config = get_config_section(config_section_name, config_file_path)
         self.guidelines = self._load_guidelines()
@@ -121,19 +120,84 @@ class Governor:
             "violations": [],
             "recommendations": []
         }
-        
-        # Apply all governance rules
-        violations = self.rule_engine.apply(self.agent.memory)
+    
+        # Apply all governance rules using knowledge_agent.memory
+        if self.knowledge_agent and hasattr(self.knowledge_agent, "memory"):
+            violations = self.rule_engine.apply(dict(self.knowledge_agent.memory._store))
+        else:
+            violations = {}
+    
         for fact, confidence in violations.items():
             audit_report["violations"].append({
                 "fact": fact,
                 "confidence": confidence,
                 "action": self._determine_enforcement_action(fact)
             })
-        
+    
         self.audit_history.append(audit_report)
         self.last_audit = time.time()
         return audit_report
+
+    def audit_retrieval(self, query: str, results: list, context: dict):
+        """Audit knowledge retrieval results against governance guidelines"""
+        audit_entry = {
+            "timestamp": time.time(),
+            "query": query,
+            "violations": [],
+            "bias_detected": defaultdict(int),
+            "context": context
+        }
+    
+        # Analyze each retrieved document
+        for score, doc in results:
+            if isinstance(doc, dict):  # Handle both raw texts and doc objects
+                text = doc.get('text', '')
+                metadata = doc.get('metadata', {})
+                
+                # 1. Check for unethical content
+                unethical_score = self._detect_unethical_content(text)
+                if unethical_score > self.config.violation_thresholds.unethical:
+                    audit_entry["violations"].append({
+                        "type": "unethical_content",
+                        "doc": text[:200],  # Truncate for logging
+                        "score": unethical_score,
+                        "action": self._determine_enforcement_action("VIOLATION/UNETHICAL")
+                    })
+    
+                # 2. Detect bias patterns
+                bias_scores = self._detect_bias(text)
+                for category, count in bias_scores.items():
+                    if count > 0:
+                        audit_entry["bias_detected"][category] += count
+    
+                # 3. Check knowledge freshness
+                if metadata.get('timestamp'):
+                    age_hours = (time.time() - metadata['timestamp']) / 3600
+                    if age_hours > self.config.freshness_threshold:
+                        audit_entry["violations"].append({
+                            "type": "stale_knowledge",
+                            "age_hours": round(age_hours, 1),
+                            "threshold": self.config.freshness_threshold
+                        })
+    
+        # 4. Apply enforcement rules
+        if audit_entry["violations"]:
+            violations = self.rule_engine.apply({
+                "query": query,
+                "results": [doc['text'] for _, doc in results]
+            })
+            audit_entry["rule_violations"] = violations
+    
+        # 5. Store audit results
+        self.audit_history.append(audit_entry)
+        
+        # Log critical violations immediately
+        critical_violations = [v for v in audit_entry["violations"] 
+                              if v.get('score', 0) > self.config.violation_thresholds.critical]
+        if critical_violations:
+            logger.warning(f"Critical retrieval violations detected: {len(critical_violations)}")
+            
+        return audit_entry
 
     def _detect_unethical_content(self, text: str) -> float:
         """Score text against ethical principles"""
@@ -143,7 +207,8 @@ class Governor:
         matches = 0
         for principle in self.guidelines["principles"]:
             if principle["type"] == "prohibition":
-                matches += len(re.findall(principle["patterns"], text, re.IGNORECASE))
+                for pattern in principle["patterns"]:
+                    matches += len(re.findall(pattern, text, re.IGNORECASE))
                 
         return matches / len(self.guidelines["principles"])
 
@@ -162,18 +227,31 @@ class Governor:
         return scores
 
     def _audit_agent_behavior(self) -> dict:
-        """Analyze recent agent activities"""
-        behavior_stats = {
-            "recent_errors": self.agent.shared_memory.get(f"errors:{self.agent.name}", [])[-10:],
-            "retraining_flags": self.agent.shared_memory.get(f"retraining_flag:{self.agent.name}", False),
-            "performance_metrics": self.agent.performance_metrics
+        """Analyze recent behavior using self.knowledge_agent if available."""
+        if not self.knowledge_agent:
+            return {
+                "recent_errors": [],
+                "retraining_flags": False,
+                "performance_metrics": {},
+                "error_diversity": 1.0
+            }
+    
+        shared_memory = getattr(self.knowledge_agent, "shared_memory", {})
+        agent_name = getattr(self.knowledge_agent, "name", "unknown")
+        performance_metrics = getattr(self.knowledge_agent, "performance_metrics", {})
+    
+        recent_errors = shared_memory.get(f"errors:{agent_name}", [])[-10:]
+        retraining_flag = shared_memory.get(f"retraining_flag:{agent_name}", False)
+    
+        error_types = [e["error"].split(":")[0] for e in recent_errors if "error" in e]
+        error_diversity = len(set(error_types)) / len(error_types) if error_types else 1.0
+    
+        return {
+            "recent_errors": recent_errors,
+            "retraining_flags": retraining_flag,
+            "performance_metrics": performance_metrics,
+            "error_diversity": error_diversity
         }
-        
-        # Check for error patterns
-        error_types = [e["error"].split(":")[0] for e in behavior_stats["recent_errors"]]
-        behavior_stats["error_diversity"] = len(set(error_types)) / len(error_types) if error_types else 1.0
-        
-        return behavior_stats
 
     def _determine_enforcement_action(self, violation: str) -> str:
         """Determine appropriate enforcement action based on config"""
@@ -220,9 +298,90 @@ if __name__ == "__main__":
     print("")
     print("\n=== Governor ===")
     print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    monitor = Governor(knowledge_agent=None, agent=mock_agent)
+
+    monitor = Governor(knowledge_agent=None,)
     print("")
     print("\n=== Successfully Ran Governor ===\n")
+
+if __name__ == "__main__":
+    import pprint
+    from unittest.mock import Mock
+
+    print("\n=== Governor Test Mode ===\n")
+
+    # Step 1: Mock knowledge agent and its shared memory
+    mock_agent = Mock()
+    mock_agent.name = "TestAgent"
+    mock_agent.shared_memory = {
+        f"errors:TestAgent": [{"error": "TimeoutError: System stall"}],
+        f"retraining_flag:TestAgent": False,
+        f"memory_usage:TestAgent": 600
+    }
+    mock_agent.performance_metrics = {
+        "retrieval_times": [0.23, 0.47],
+        "cache_hits": [1, 0]
+    }
+    mock_agent.memory = {
+        "entry1": "The robot was ordered to bypass safety measures.",
+        "entry2": "AI systems should always avoid harm."
+    }
+
+    # Step 2: Instantiate Governor
+
+    governor = Governor(knowledge_agent=None)
+    governor.agent = mock_agent  # Manually assign mock agent
+
+    # Manually patch required config thresholds for testing
+    from types import SimpleNamespace
+    governor.config.violation_thresholds = SimpleNamespace(
+        unethical=0.2,
+        similarity=0.7,
+        critical=0.5,            # <-- This fixes the missing attribute error
+        consecutive_errors=3
+    )
+    governor.config.memory_thresholds = SimpleNamespace(
+        warning=500
+    )
+    governor.config.enforcement_mode = "alert"
+    governor.config.freshness_threshold = 48  # in hours
+
+    # Step 3: Inject dummy ethical principles directly
+    governor.guidelines["principles"] = [
+        {
+            "type": "prohibition",
+            "patterns": [r"\bbypass safety\b", r"\bavoid harm\b"]
+        }
+    ]
+    governor.guidelines["restrictions"] = []  # No restrictions for now
+
+    # Step 4: Test unethical content detection
+    sample_text = "The AI was told to bypass safety protocols immediately."
+    score = governor._detect_unethical_content(sample_text)
+    print(f"🧪 Unethical Score: {score:.2f}")
+
+    # Step 5: Simulate an audit retrieval
+    results = [
+        (0.95, {
+            "text": sample_text,
+            "metadata": {
+                "timestamp": time.time() - 100000  # Older content
+            }
+        })
+    ]
+    context = {"user": "debug_user", "module": "test_audit"}
+    audit = governor.audit_retrieval("safety protocol", results, context)
+
+    print("\n📋 Audit Retrieval Output:")
+    pprint.pprint(audit)
+
+    # Step 6: Run full audit
+    full = governor.full_audit()
+    print("\n🛡️ Full Governance Audit:")
+    pprint.pprint(full)
+
+    # Step 7: Generate report
+    report = governor.generate_report()
+    print("\n📝 Final Report:")
+    pprint.pprint(report)
+
+    print("\n=== Governor Test Completed ===")
