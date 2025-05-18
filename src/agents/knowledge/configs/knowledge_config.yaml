@@ -1,3 +1,12 @@
+relevance_weights:
+  semantic: 0.4
+  contextual: 0.3
+  temporal: 0.2
+  structural: 0.1
+
+temporal_decay:
+  half_life_days: 30  # How fast relevance decays over time
+
 knowledge_memory:
   # Storage & Capacity
   max_entries: 10000            # Maximum number of memory entries
@@ -20,8 +29,8 @@ knowledge_memory:
   embedding_model: "all-MiniLM-L6-v2"
 
   # Persistence
-  persist_file: "data/knowledge_memory.json"
-  knowledge_dir: "data/knowledge_docs/"
+  persist_file: "src/agents/knowledge/data/knowledge_memory.json"
+  knowledge_dir: "src/agents/knowledge/data/knowledge_docs/"
   autoload_on_startup: true
 
   # Logging & Monitoring
@@ -46,11 +55,13 @@ governor:
   audit_interval: 300             # Seconds between full system audits
   realtime_monitoring: true       # Monitor shared memory continuously
   guideline_paths:
-    - "data/guidelines/ai_ethics.yaml"
-    - "data/guidelines/safety_protocols.json"
+    - "src/agents/safety/guidelines/ai_ethics.yaml"
+    - "src/agents/safety/guidelines/safety_protocols.json"
   violation_thresholds:
+    unethical: 0.65
     similarity: 0.85              # Min match similarity for guideline detection
     consecutive_errors: 5         # Max allowed consecutive errors before intervention
+  freshness_threshold: 720        # 30 days in hours
   enforcement_mode: "log"         # Options: log, alert, restrict
   max_audit_history: 100          # Max stored audit records
   memory_thresholds:
