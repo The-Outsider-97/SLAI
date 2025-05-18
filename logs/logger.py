@@ -8,6 +8,7 @@ import psutil
 import hashlib
 import zlib
 import statistics
+import atexit
 
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -21,6 +22,33 @@ log_queue = queue.Queue()
 
 # Global flag to track initialization
 _logger_initialized = False
+
+class ColorFormatter(logging.Formatter):
+    COLOR_CODES = {
+        'RESET': "\033[0m",
+        'BLUE': "\033[94m",
+        'GREEN': "\033[92m",
+        'YELLOW': "\033[93m",
+        'RED': "\033[91m",
+    }
+
+    def format(self, record):
+        level = record.levelname
+        message = record.getMessage()
+
+        if "initializ" in message.lower():
+            color = self.COLOR_CODES['BLUE']
+        elif "load" in message.lower() and record.levelno < logging.WARNING:
+            color = self.COLOR_CODES['GREEN']
+        elif record.levelno >= logging.CRITICAL:
+            color = self.COLOR_CODES['RED']
+        elif record.levelno >= logging.WARNING:
+            color = self.COLOR_CODES['YELLOW']
+        else:
+            color = self.COLOR_CODES['RESET']
+
+        formatted = f"{record.levelname}:{record.name}:{message}"
+        return f"{color}{formatted}{self.COLOR_CODES['RESET']}"
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, q: queue.Queue, batch_size: int = 10, flush_interval: int = 5) -> None:
@@ -53,64 +81,41 @@ class QueueLogHandler(logging.Handler):
         self.last_flush = time.time()
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Retrieves or creates a logger with the given name, ensuring only one instance exists.
-    """
     global _logger_initialized, log_queue
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)  # Set default level
-
-    if not _logger_initialized:
-        # Only initialize once
-        _logger_initialized = True
-        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
-        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-
-    #if not logger.handlers:
-    #    os.makedirs(os.path.join(log_dir, "sessions"), exist_ok=True)
-    #    session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    #    logger.anomaly_detector = AnomalyDetector(window_size=200, sigma=2.5)
-
-        # Rotating app-wide log
-    #    rotating_handler = RotatingHandler(os.path.join(log_dir, "app.log"), maxBytes=5_000_000, backupCount=2)
-    #    rotating_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    rotating_handler.setLevel(file_level)
-    #    logger.addHandler(rotating_handler)
-
-        # Per-session log
-    #    session_handler = logging.FileHandler(os.path.join(log_dir, "sessions", f"session_{session_id}.log"))
-    #    session_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    session_handler.setLevel(file_level)
-    #    logger.addHandler(session_handler)
-
-        # Console stream
-    #    console_handler = logging.StreamHandler(sys.stdout)
-    #    console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    console_handler.setLevel(console_level)
-    #    logger.addHandler(console_handler)
-
-        # Real-time Queue handler (optional for GUI)
-    #    if enable_queue:
-    #        queue_handler = QueueLogHandler(log_queue)
-    #        queue_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #        queue_handler.setLevel(console_level)
-    #        logger.addHandler(queue_handler)
-
-    #    original_handle = logger.handle
-
-    #    def wrapped_handle(record):
-    #        if logger.anomaly_detector.analyze(record):
-    #            logger.warning("Anomalous error pattern detected!", extra={'origin': 'security'})
-    #        return original_handle(record)
-        
-    #    logger.handle = wrapped_handle
-
-        file_handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
     
+    if not _logger_initialized:
+        _logger_initialized = True
+        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+
+        # Initialize root logger first
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+
+        # Remove any existing handlers
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+        # File handler
+        file_handler = RotatingFileHandler(
+            'logs/app.log', 
+            maxBytes=1000000, 
+            backupCount=5, 
+            delay=True  # Defer file opening until first log
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+        # Console handler with colors
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(ColorFormatter())
+        root_logger.addHandler(console_handler)
+
+        # Queue handler
+        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
     return logger
 
 def get_log_queue():
@@ -128,6 +133,11 @@ def cleanup_logger(name):
         handler.close()
         logger.removeHandler(handler)
 
+def exit_handler():
+    cleanup_logger(None)  # Cleanup root logger
+
+atexit.register(exit_handler)
+
 class RotatingHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -140,14 +150,17 @@ class RotatingHandler(RotatingFileHandler):
         self._manage_compression()
 
     def _manage_compression(self):
-        # Apply Huffman coding principles via zlib
         while len(self._compress_queue) > self.compress_threshold:
             old_log = self._compress_queue.popleft()
-            with open(old_log, 'rb') as f:
-                data = zlib.compress(f.read(), level=9)
-            with open(old_log + '.z', 'wb') as f:
-                f.write(data)
-            os.remove(old_log)
+            try:
+                # Read and compress with context managers
+                with open(old_log, 'rb') as f:
+                    data = zlib.compress(f.read(), level=9)
+                with open(old_log + '.z', 'wb') as f:
+                    f.write(data)
+                os.remove(old_log)
+            except PermissionError as e:
+                logging.error(f"Failed to compress {old_log}: {e}")
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):
