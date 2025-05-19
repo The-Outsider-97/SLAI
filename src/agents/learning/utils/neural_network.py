@@ -3,6 +3,8 @@ import torch
 import yaml
 import math
 
+from src.agents.learning.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
+
 CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
 
 def load_config(config_path=CONFIG_PATH):
@@ -20,49 +22,6 @@ def get_merged_config(user_config=None):
             else:
                 base_config[key] = user_config[key]
     return base_config
-
-# --- Activation Functions ---
-# Based on common activation functions in deep learning literature.
-class Activation:
-    """Base class for activation functions."""
-    def forward(self, z):
-        """Computes the activation."""
-        raise NotImplementedError
-    def backward(self, z_or_a_depending_on_context):
-        """Computes the derivative of the activation function w.r.t. its input z."""
-        raise NotImplementedError
-
-class ReLU(Activation):
-    """Rectified Linear Unit activation.
-    Reference: Nair, V., & Hinton, G. E. (2010). Rectified linear units improve restricted boltzmann machines.
-    """
-    def forward(self, z):
-        return torch.maximum(torch.tensor(0.0, device=z.device, dtype=z.dtype), z)
-    def backward(self, z):
-        return (z > 0).type_as(z)
-
-class Sigmoid(Activation):
-    """Sigmoid activation function."""
-    def forward(self, z):
-        return 1 / (1 + torch.exp(-z))
-    def backward(self, z):
-        s = self.forward(z)
-        return s * (1 - s)
-
-class Tanh(Activation):
-    """Hyperbolic Tangent (Tanh) activation function."""
-    def forward(self, z):
-        return torch.tanh(z)
-    def backward(self, z):
-        t = self.forward(z) # or torch.tanh(z)
-        return 1 - t**2
-
-class Linear(Activation):
-    """Linear activation function (identity)."""
-    def forward(self, z):
-        return z
-    def backward(self, z):
-        return torch.ones_like(z)
 
 class Softmax(Activation):
     """Softmax activation, typically for multi-class classification output.
