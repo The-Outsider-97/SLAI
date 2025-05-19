@@ -25,15 +25,15 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class VisionEncoder(torch.nn.Module):
+class VisionEncoder:
     def __init__(self, config):
-        super().__init__()
         self.config = config
         vision_cfg = config['vision_encoder']
         transformer_shared_cfg = config['transformer']
         
         # Extract vision-specific parameters
         self.img_size = vision_cfg['img_size']
+        self.patch_size = vision_cfg['patch_size']
         self.patch_size = vision_cfg['patch_size'] if vision_cfg['encoder_type'] == 'transformer' else None
         self.in_channels = vision_cfg['in_channels']
         self.encoder_type = vision_cfg['encoder_type']
@@ -279,8 +279,11 @@ class VisionEncoder(torch.nn.Module):
         x = self._cache['x']
         d_patch_tokens = d_x[:, 1:, :]
         d_proj = torch.einsum('bni,bno->io', x, d_patch_tokens)
+        
+        if self.projection.grad is None:
+            self.projection.grad = torch.zeros_like(self.projection.data)
+        
         self.projection.grad += d_proj.sum(axis=0)
-
         return torch.matmul(d_patch_tokens, self.projection.data.T)
 
     def parameters(self):
@@ -366,4 +369,4 @@ if __name__ == "__main__":
         print(f"Error during CNN forward pass: {str(e)}")
         print("Note: The CNN implementation might require adjustments for batch processing")
 
-    print("\n=== Vision Encoder Tests Completed ===\n")
+    print("\n=== Vision Encoder Tests Completed ===")
