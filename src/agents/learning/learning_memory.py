@@ -2,8 +2,11 @@
 import yaml
 import torch
 import os
+import random
 
+from threading import Lock
 from datetime import datetime
+from collections import namedtuple, defaultdict
 
 from logs.logger import get_logger
 
@@ -22,11 +25,21 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
+Transition = namedtuple('Transition', ['state', 'action', 'reward', 'next_state', 'done'])
+
 class LearningMemory:
     def __init__(self, config):
+        """Manages experiences with LRU/FIFO eviction, checkpoints, and tagging."""
         base_config = config or load_config()
         memory_config = base_config.get('learning_memory', {})
         base_config.update(memory_config)
+        self.tag_index = defaultdict(list)
+
+        #  Priority Queue
+        self.priorities = {}
+        self.max_priority = 1.0
+
+        self.lock = Lock()
 
         self.config = base_config
         self.memory = {}
@@ -34,17 +47,35 @@ class LearningMemory:
         
         logger.info(f"Learning Memory has succesfully initialized")
 
-    def add(self, experience, tag=None):
+    def add(self, experience, priority=None, tag=None):
         """Add experience with cache management"""
-        key = f"{tag}_{datetime.now().timestamp()}" if tag else str(self.access_counter)
-        self.memory[key] = experience
-        self.access_counter += 1
-        
-        if len(self.memory) >= self.config['max_size']:
-            self._evict()
-        
-        if self.config['auto_save'] and (self.access_counter % self.config['checkpoint_freq'] == 0):
-            self.save_checkpoint()
+        with self.lock:
+            key = f"{tag}_{datetime.now().timestamp()}" if tag else str(self.access_counter)
+            self.tag_index[tag].append(key)
+            self.memory[key] = experience
+            self.access_counter += 1
+
+            if priority is None:
+                priority = self.max_priority
+            self.priorities[key] = priority
+            
+            if len(self.memory) >= self.config['max_size']:
+                self._evict()
+            
+            if self.config['auto_save'] and (self.access_counter % self.config['checkpoint_freq'] == 0):
+                self.save_checkpoint()
+
+    def add_batch(self, experiences, tag=None):
+        for experience in experiences:
+            self.add(experience, tag)
+
+    def sample(self, batch_size):
+        keys = random.sample(list(self.memory.keys()), batch_size)
+        return [self.memory[key] for key in keys]
+
+    def sample_proportional(self, batch_size):
+        # Use sum-tree or weighted sampling
+        pass
 
     def _evict(self):
         """Remove items based on eviction policy"""
@@ -53,14 +84,15 @@ class LearningMemory:
         else:  # FIFO
             self.memory.popitem(last=True)
 
+    def get_by_tag(self, tag):
+        return [self.memory[key] for key in self.tag_index.get(tag, [])]
+
     def get(self, key=None):
-        """Retrieve experience with access tracking"""
         if key:
             experience = self.memory.get(key)
             if experience:
-                # Move to end for LRU
-                self.memory.pop(key)
-                self.memory[key] = experience
+                if self.config['eviction_policy'] == 'LRU':
+                    self.memory.move_to_end(key)  # Reorder for LRU
             return experience
         return list(self.memory.values())
 
@@ -91,6 +123,13 @@ class LearningMemory:
             logger.info(f"Loaded memory checkpoint from {path}")
         else:
             logger.warning(f"Checkpoint file {path} not found")
+
+    def metrics(self):
+        return {
+            'size': len(self.memory),
+            'access_counter': self.access_counter,
+            'tags': list(self.tag_index.keys())
+        }
 
     def clear(self):
         """Reset memory while preserving configuration"""
