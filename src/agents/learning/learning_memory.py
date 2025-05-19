@@ -34,18 +34,14 @@ class LearningMemory:
         
         logger.info(f"Learning Memory has succesfully initialized")
 
-    def add(self, experience):
-        self.memory.append(experience)
-
-
     def add(self, experience, tag=None):
         """Add experience with cache management"""
-        if len(self.memory) >= self.config['max_size']:
-            self._evict()
-            
         key = f"{tag}_{datetime.now().timestamp()}" if tag else str(self.access_counter)
         self.memory[key] = experience
         self.access_counter += 1
+        
+        if len(self.memory) >= self.config['max_size']:
+            self._evict()
         
         if self.config['auto_save'] and (self.access_counter % self.config['checkpoint_freq'] == 0):
             self.save_checkpoint()
@@ -60,10 +56,17 @@ class LearningMemory:
     def get(self, key=None):
         """Retrieve experience with access tracking"""
         if key:
-            experience = self.memory.pop(key)
-            self.memory[key] = experience  # Move to end for LRU
+            experience = self.memory.get(key)
+            if experience:
+                # Move to end for LRU
+                self.memory.pop(key)
+                self.memory[key] = experience
             return experience
         return list(self.memory.values())
+
+    def set(self, key, value):
+        """Explicitly set a key-value pair in memory"""
+        self.memory[key] = value
 
     def save_checkpoint(self, path=None):
         """Save memory state to disk"""
