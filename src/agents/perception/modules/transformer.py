@@ -98,12 +98,14 @@ class Transformer:
         for layer in reversed(self.layers):
             # Backward through FFN
             d_ff = layer['ff'].backward(dout)
-            d_norm2 = d_ff * (1 + layer['norm2'].grad)
+            norm2_grad = layer['norm2'].grad if layer['norm2'].grad is not None else 0
+            d_norm2 = d_ff * (1 + norm2_grad)
             dout += d_norm2
             
             # Backward through attention
             d_attn = layer['attention'].backward(dout)
-            d_norm1 = d_attn * (1 + layer['norm1'].grad)
+            norm1_grad = layer['norm1'].grad if layer['norm1'].grad is not None else 0
+            d_norm1 = d_attn * (1 + norm1_grad)
             dout += d_norm1
             
         # Positional encoding gradients (non-trainable in original paper)
