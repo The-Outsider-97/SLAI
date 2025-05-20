@@ -85,6 +85,7 @@ class CrossEntropyLoss(Loss):
         
         # Select the probabilities of the true classes
         # Add epsilon for numerical stability to prevent log(0)
+        y_true_indices = y_true_indices.long()
         log_probs = torch.log(probs[torch.arange(batch_size), y_true_indices] + 1e-9)
         
         # Compute mean negative log likelihood
@@ -210,21 +211,26 @@ class NeuralNetwork:
     
     def __init__(self, config, input_dim, output_dim, hidden_dim=128):
         # He initialization with ReLU
-        self.W1 = torch.randn(input_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / input_dim))
-        self.b1 = torch.zeros(hidden_dim)
-        self.W2 = torch.randn(hidden_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
-        self.b2 = torch.zeros(hidden_dim)
-        self.W3 = torch.randn(hidden_dim, output_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
-        self.b3 = torch.zeros(output_dim)
+        # self.W1 = torch.randn(input_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / input_dim))
+        # self.b1 = torch.zeros(hidden_dim)
+        # self.W2 = torch.randn(hidden_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
+        # self.b2 = torch.zeros(hidden_dim)
+        # self.W3 = torch.randn(hidden_dim, output_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
+        # self.b3 = torch.zeros(output_dim)
+
 
         nn_config = config.get('neural_network', {})
         self.layer_dims = nn_config.get('layer_dims', [input_dim, 128, 64, output_dim])
+
+        # Override input/output dims explicitly to ensure compatibility
+        self.layer_dims[0] = input_dim
+        self.layer_dims[-1] = output_dim
+
         self.hidden_activation = nn_config.get('hidden_activation', 'relu')
         self.output_activation = nn_config.get('output_activation', 'linear')
         self.loss_function = nn_config.get('loss_function', 'mse')
         self.optimizer = nn_config.get('optimizer', 'adam')
         self.learning_rate = nn_config.get('learning_rate', 0.001)
-        self.layer_dims = nn_config['layer_dims']
         self.num_layers = len(self.layer_dims) - 1 # Number of layers with weights/biases
         self.l1_lambda = nn_config.get('l1_lambda', 0.0)
         self.l2_lambda = nn_config.get('l2_lambda', 0.0)
