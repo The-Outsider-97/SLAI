@@ -1,13 +1,15 @@
 import numpy as np
 from typing import Dict, Any, Tuple, List
 
+from scipy.stats import bartlett
+
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Metrics Utils")
 
 class MetricBridge:
     from src.utils.system_optimizer import SystemOptimizer
-    from src.utils.agent_factory import AgentFactory
+    from src.agents.agent_factory import AgentFactory
     """New class to handle feedback routing"""
     def __init__(self, agent_factory: AgentFactory, optimizer: SystemOptimizer):
         self.factory = agent_factory
@@ -132,23 +134,31 @@ class PerformanceMetrics:
 
     @staticmethod
     def calibration_error(y_true: np.ndarray,
-                        probs: np.ndarray,
-                        bins: int = 10) -> float:
+                          probs: np.ndarray,
+                          bins: int = 10) -> float:
         """
-        Calculate expected calibration error (Guo et al., 2017)
+        Safe expected calibration error (ECE) computation.
+        Avoids freezes due to zero bins or uniform probabilities.
         """
+        if len(y_true) == 0 or len(probs) == 0:
+            return 0.0
+    
         bin_boundaries = np.linspace(0, 1, bins + 1)
-        bin_lowers = bin_boundaries[:-1]
-        bin_uppers = bin_boundaries[1:]
-        
         errors = []
-        for bl, bu in zip(bin_lowers, bin_uppers):
+        total = 0
+    
+        for i in range(bins):
+            bl, bu = bin_boundaries[i], bin_boundaries[i + 1]
             in_bin = (probs >= bl) & (probs < bu)
-            prop = np.mean(y_true[in_bin]) if np.any(in_bin) else 0
-            avg_prob = np.mean(probs[in_bin]) if np.any(in_bin) else 0
-            errors.append(np.abs(avg_prob - prop) * np.sum(in_bin))
-            
-        return np.sum(errors) / len(y_true)
+            count = np.sum(in_bin)
+            if count == 0:
+                continue
+            avg_prob = np.mean(probs[in_bin])
+            avg_true = np.mean(y_true[in_bin])
+            errors.append(np.abs(avg_prob - avg_true) * count)
+            total += count
+    
+        return np.sum(errors) / total if total > 0 else 0.0
 
 class BiasDetection:
     """
@@ -163,7 +173,6 @@ class BiasDetection:
         Bartlett's test for variance homogeneity across groups
         Reference: Bartlett, "Properties of Sufficiency and Statistical Tests", 1937
         """
-        from scipy.stats import bartlett
         group_vars = [np.var(g_scores) for g_scores in scores.values()]
         stat, pval = bartlett(*scores.values())
         
@@ -215,3 +224,62 @@ class MetricSummarizer:
             'provenance': references,
             'timestamp': np.datetime64('now')
         }
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Metrics Utils ===\n")
+    # --- Dummy classes to preserve original structure ---
+    class AgentFactory: 
+        def apply_optimizations(self, x): pass
+    
+    class SystemOptimizer:
+        def optimize_throughput(self, x): return {}
+    
+    # --- Initialize mock data matching your original variables ---
+    positive_rates = {'groupA': 0.4, 'groupB': 0.45}
+    threshold = 0.05
+    y_true = np.array([0, 1, 0, 1])
+    y_pred = np.array([0, 1, 0, 1])
+    classes = [0, 1]
+    scores = {'group1': np.random.rand(100), 'group2': np.random.rand(100)}
+    
+    # --- Preserve original instantiation pattern ---
+    bridge = MetricBridge(agent_factory=AgentFactory(), optimizer=SystemOptimizer())
+    
+    # --- Initialize metric classes with mock data ---
+    fairness_violation, fairness_msg = FairnessMetrics.demographic_parity(
+        sensitive_groups=['groupA', 'groupB'],
+        positive_rates=positive_rates,
+        threshold=threshold
+    )
+    
+    performance_value = PerformanceMetrics.class_balanced_accuracy(
+        y_true=y_true,
+        y_pred=y_pred,
+        classes=classes
+    )
+    
+    bias_violation, bias_msg = BiasDetection.subgroup_variance(
+        scores=scores,
+        alpha=0.05
+    )
+    
+    # --- Maintain original print structure ---
+    print(f"\n{bridge}")
+    print(f"\nFairness Check: {fairness_msg}")
+    print(f"\nPerformance Value: {performance_value:.2f}")
+    print(f"\nBias Detection: {bias_msg}")
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+#    agent_id1='dqn'
+#    agent_id2='maml'
+#    cross = factory._crossover(agent_id1, agent_id2)
+#    print(f"\n{cross}")
+
+    print("\n* * * * * Phase 4 * * * * *\n")
+#    monitor = factory.monitor_architecture()
+#    print(f"\n{monitor}")
+
+    print("\n=== Successfully Ran Metrics Utils ===\n")
