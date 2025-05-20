@@ -37,7 +37,7 @@ from collections import deque
 
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
-from src.utils.replay_buffer import ReplayBuffer
+from src.utils.buffer.replay_buffer import ReplayBuffer
 from logs.logger import get_logger
 
 logger = get_logger("Deep-Q Network Agent")
