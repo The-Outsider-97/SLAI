@@ -1,16 +1,50 @@
-import os, sys
+"""
+Proficient In:
+    Simple tasks with discrete and finite state/action spaces.
+    Educational or experimental RL settings.
+
+Best Used When:
+    You need explainability and transparency.
+    The environment is small and fast to simulate.
+    Quick prototyping or testing different exploration strategies.
+"""
 import numpy as np
 import math
 import yaml
 import cv2
-import logging
+import torch
 import random
+import numpy as np
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import gymnasium as gym
 
+from torch.utils.checkpoint import checkpoint
+from matplotlib.colors import LinearSegmentedColormap
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import cpu_count
 from typing import Dict, Tuple, List, Any, Union
 from dataclasses import dataclass, field
 from collections import deque, defaultdict, OrderedDict
+
+from src.agents.learning.learning_memory import LearningMemory
+from src.agents.learning.utils.rl_engine import StateProcessor, ExplorationStrategies, QTableOptimizer
+from logs.logger import get_logger
+
+logger = get_logger("Recursive Learning")
+
+CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class RLAgent:
     """
@@ -33,14 +67,7 @@ class RLAgent:
     - Watkins, C. J. C. H., & Dayan, P. (1992). Q-learning. Machine learning, 8(3-4), 279-292.
     """
 
-    def __init__(
-        self,
-        possible_actions: List[Any],
-        learning_rate: float = 0.1,
-        discount_factor: float = 0.9,
-        epsilon: float = 0.1,
-        trace_decay: float = 0.7
-    ):
+    def __init__(self, agent_id, config, possible_actions: List[Any], state_size: int):
         """
         Initializes the RL Agent.
 
@@ -50,14 +77,23 @@ class RLAgent:
             discount_factor (float): The discount factor (gamma) for future rewards.
             epsilon (float): The probability of taking a random action (exploration).
         """
+        self.agent_id = agent_id
+        base_config = load_config()
+        self.config = {
+            'rl': config.get('rl', {}),
+            'rl_engine': base_config.get('rl_engine', {})
+        }
         if not possible_actions:
             raise ValueError("At least one possible action must be provided.")
-
         self.possible_actions = possible_actions
-        self.learning_rate = learning_rate
-        self.discount_factor = discount_factor
-        self.epsilon = epsilon
-        self.trace_decay = trace_decay
+        self.state_size = state_size
+
+        # Retrieve RL-specific parameters
+        rl_config = self.config['rl']
+        self.learning_rate = rl_config.get('learning_rate')
+        self.discount_factor = rl_config.get('discount_factor')
+        self.epsilon = rl_config.get('epsilon')
+        self.trace_decay = rl_config.get('trace_decay')
 
         # Core Q-learning components
         self.q_table: Dict[Tuple[Tuple[Any], Any], float] = {}
@@ -67,6 +103,35 @@ class RLAgent:
         self.state_history: List[Tuple[Any]] = []
         self.action_history: List[Any] = []
         self.reward_history: List[float] = []
+
+        # Initialize engine components
+        self.state_processor = StateProcessor(
+            state_size=state_size
+        )
+        
+        self.exploration = ExplorationStrategies(
+            action_space=possible_actions,
+            strategy=self.config['rl_engine']['exploration_strategies']['strategy'],
+            temperature=self.config['rl_engine']['exploration_strategies']['temperature'],
+            ucb_c=self.config['rl_engine']['exploration_strategies']['ucb_c']
+        )
+        
+        self.q_optimizer = QTableOptimizer(
+            batch_size=self.config['rl_engine']['q_table_optimizer']['batch_size'],
+            momentum=self.config['rl_engine']['q_table_optimizer']['momentum'],
+            cache_size=self.config['rl_engine']['q_table_optimizer']['cache_size'],
+            learning_rate=self.learning_rate
+        )
+
+        # Additional tracking for exploration strategies
+        self.state_action_counts = defaultdict(int)
+        self.episode_count = 0
+
+        learning_memory_config = base_config.get('learning_memory', {})
+        self.learning_memory = LearningMemory(config=learning_memory_config)
+        self.model_id = "RL_Agent"
+
+        logger.info("Recursive Learning has successfully initialized")
 
     def _get_q_value(self, state: Tuple[Any], action: Any) -> float:
         """Get Q-value with optimistic initialization"""
@@ -82,27 +147,28 @@ class RLAgent:
         for key in self.eligibility_traces:
             self.eligibility_traces[key] *= self.discount_factor * self.trace_decay
 
+    def _process_state(self, raw_state):
+        """Apply state processing and feature engineering"""
+        if self.config['rl_engine']['state_processor']['feature_engineering']:
+            return tuple(self.state_processor.extract_features(raw_state))
+        return self.state_processor.discretize(raw_state)
+
     def choose_action(self, state):
-        """
-        Epsilon-greedy action selection with adaptive exploration.
+        """Enhanced action selection using configured strategy"""
+        processed_state = self._process_state(state)
         
-        Implements:
-        - ε-decay over time
-        - Boltzmann exploration (temperature parameter)
-        """
-        # Adaptive epsilon decay
-        self.epsilon *= 0.995  # Exponential decay
-        self.epsilon = max(0.01, self.epsilon)
-
-        if random.random() < self.epsilon:
-            # Explore: choose a random action
-            return random.choice(self.possible_actions)
-
-        # Greedy action selection with tie-breaking
-        q_values = {a: self._get_q_value(state, a) for a in self.possible_actions}
-        max_q = max(q_values.values())
-        candidates = [a for a, q in q_values.items() if q == max_q]
-        return random.choice(candidates)
+        if self.config['rl_engine']['exploration_strategies']['strategy'] == "ucb":
+            return self.exploration.ucb(
+                state_action_counts=self.state_action_counts,
+                current_state=processed_state
+            )
+        elif self.config['rl_engine']['exploration_strategies']['strategy'] == "boltzmann":
+            # Convert to numpy array for vector operations
+            q_values = np.array([self._get_q_value(processed_state, a) 
+                       for a in self.possible_actions])
+            return self.exploration.boltzmann(q_values)
+        else:  # Fallback to epsilon-greedy
+            return self._epsilon_greedy(processed_state)
 
     def learn(self, next_state: Tuple[Any], reward: float, done: bool) -> None:
         """
@@ -113,34 +179,41 @@ class RLAgent:
         - Terminal state handling
         - Batch updates from experience
         """
-        if not self.state_history or not self.action_history:
-            return  # Cannot learn without prior experience
-
-        current_state = self.state_history[-1]
+        processed_state = self._process_state(self.state_history[-1])
+        processed_next_state = self._process_state(next_state)
         action = self.action_history[-1]
 
-        # Q-learning update rule:
-        # Q(s, a) = Q(s, a) + alpha * [reward + gamma * max_a' Q(s', a') - Q(s, a)]
+        # Track state-action counts
+        self.state_action_counts[(processed_state, action)] += 1
 
-        # Calculate TD target
-        next_max_q = max([self._get_q_value(next_state, a) 
-                        for a in self.possible_actions]) if not done else 0.0
-        td_target = reward + self.discount_factor * next_max_q
-        td_error = td_target - self._get_q_value(current_state, action)
+        # Store experience in optimized format
+        self.q_optimizer.compressed_store(
+            state=processed_state,
+            action=action,
+            value=self._get_q_value(processed_state, action)
+        )
 
-        # Update eligibility traces
-        self._update_eligibility(current_state, action)
-        
-        # Update all state-action pairs
+        # Perform batch updates periodically
+        if self.episode_count % self.config['rl_engine']['q_table_optimizer']['update_frequency'] == 0:
+            self.q_optimizer.batch_update(
+                self._prepare_batch_updates(processed_next_state, reward, done)
+            )
+
+    def _prepare_batch_updates(self, next_state, reward, done):
+        """Prepare batch updates for Q-table optimizer"""
+        updates = []
         for (state, action), trace in self.eligibility_traces.items():
-            current_q = self._get_q_value(state, action)
-            new_q = current_q + self.learning_rate * td_error * trace
-            self.q_table[(state, action)] = new_q
+            next_max_q = max([self._get_q_value(next_state, a) 
+                           for a in self.possible_actions]) if not done else 0.0
+            td_error = (reward + self.discount_factor * next_max_q - 
+                       self._get_q_value(state, action))
+            updates.append((state, action, self.learning_rate * td_error * trace))
+        return updates
 
-        if done:
-            self.eligibility_traces.clear()
-        else:
-            self._decay_eligibility()
+    def step(self, state: Tuple[Any]) -> Any:
+        """Process state before stepping"""
+        processed_state = self._process_state(state)
+        return super().step(processed_state)
 
     def step(self, state: Tuple[Any]) -> Any:
         """Record state and choose action"""
@@ -148,6 +221,9 @@ class RLAgent:
         self.state_history.append(state)
         self.action_history.append(action)
         return action
+
+    def train(self, num_tasks=3, episodes_per_task=5):
+        pass
 
     def receive_reward(self, reward: float) -> None:
         """Record immediate reward"""
@@ -254,275 +330,462 @@ class AdvancedQLearning(RLAgent):
         total = sum(priorities)
         self.sampling_probs = [p/total for p in priorities]
 
-class StateProcessor:
-    """
-    Handles state representation challenges:
-    - Continuous state discretization (Tile Coding)
-    - Feature engineering
-    - Dimensionality reduction
-    - State normalization
-    """
-    
-    def __init__(self, state_space_dim):
-        self.tiling_resolution = 0.1
-        self.feature_weights = np.random.randn(state_space_dim)
-    
-    def discretize(self, continuous_state: np.ndarray, num_tilings: int = 8) -> tuple:
-        """
-        Implements tile coding with multiple overlapping tilings.
-        
-        Parameters:
-        continuous_state - Input vector in ℝ^n
-        num_tilings - Number of overlapping tilings (typically 8-32)
-        
-        Returns:
-        Tuple of tile indices across all tilings
-        
-        Methodology:
-        1. Create multiple offset grids (tilings)
-        2. Calculate tile indices for each tiling
-        3. Combine indices into single state representation
-        
-        Reference:
-        Sutton, R. S. (1996). Generalization in Reinforcement Learning.
-        """
-        offsets = np.linspace(0, self.tiling_resolution, num_tilings, endpoint=False)
-        tile_indices = []
-        
-        for offset in offsets:
-            # Apply offset and discretize
-            offset_state = continuous_state + offset
-            discretized = tuple((offset_state // self.tiling_resolution).astype(int))
-            tile_indices.extend(discretized)
-        
-        return tuple(tile_indices)
-    
-    def extract_features(self, raw_state: np.ndarray) -> np.ndarray:
-        """
-        Constructs basis functions for linear function approximation.
-        
-        Features:
-        1. Raw state components
-        2. Quadratic terms
-        3. Cross-terms
-        4. Radial basis functions
-        
-        Formula:
-        ϕ(s) = [s, s², s_i*s_j, exp(-||s - c||²/2σ²)]
-        
-        Reference:
-        Konidaris, G., et al. (2011). Value Function Approximation in Reinforcement Learning.
-        """
-        n = raw_state.shape[0]
-        features = []
-        
-        # Linear terms
-        features.extend(raw_state)
-        
-        # Quadratic terms
-        features.extend(raw_state**2)
-        
-        # Cross-terms
-        for i in range(n):
-            for j in range(i+1, n):
-                features.append(raw_state[i] * raw_state[j])
-        
-        # Radial basis functions (3 centers as example)
-        centers = [np.zeros(n), np.ones(n), -np.ones(n)]
-        for c in centers:
-            features.append(np.exp(-np.linalg.norm(raw_state - c)**2 / 0.5))
-        
-        return np.array(features)
-
-class ExplorationStrategies:
-    """
-    Decoupled exploration policy implementations:
-    - Boltzmann (Softmax) exploration
-    - Upper Confidence Bound (UCB)
-    - Thompson Sampling
-    - Curiosity-Driven Exploration
-    """
-    
-    def __init__(self, action_space):
-        self.action_space = action_space
-        self.temperature = 1.0
-    
-    def boltzmann(self, q_values):
-        probs = np.exp(q_values / self.temperature)
-        return random.choices(self.action_space, weights=probs)[0]
-    
-    def ucb(self, state_action_counts: Dict[Tuple[tuple, Any], int], c: float = 2.0) -> Any:
-        """
-        Implements Upper Confidence Bound (UCB1) exploration strategy.
-        
-        Formula:
-        UCB(a) = Q(s,a) + c * sqrt(ln(N(s)) / n(s,a))
-        
-        Where:
-        - N(s): Total visits to state s
-        - n(s,a): Visits to action a in state s
-        - c: Exploration-exploitation trade-off parameter
-        
-        Reference:
-        Auer, P., Cesa-Bianchi, N., & Fischer, P. (2002). Finite-time Analysis of the Multiarmed Bandit Problem.
-        """
-        state = self.state_history[-1] if self.state_history else tuple()
-        total_state_visits = sum(count for (s,a), count in state_action_counts.items() if s == state)
-        
-        ucb_values = {}
-        for action in self.possible_actions:
-            sa_pair = (state, action)
-            action_count = state_action_counts.get(sa_pair, 1e-5)  # Avoid division by zero
-            q_value = self._get_q_value(state, action)
-            
-            if total_state_visits == 0:
-                exploration_bonus = float('inf')
-            else:
-                exploration_bonus = c * math.sqrt(math.log(total_state_visits) / action_count)
-            
-            ucb_values[action] = q_value + exploration_bonus
-        
-        return max(ucb_values, key=ucb_values.get)
-
-class QTableOptimizer:
-    """
-    Optimizes Q-value storage and retrieval:
-    - Compressed sparse representation
-    - Approximate nearest neighbor lookup
-    - Batch updates
-    - Cache optimization
-    """
-    
-    def __init__(self):
-        self.state_action_matrix = defaultdict(dict)
-        self.lru_cache = OrderedDict()
-    
-    def compressed_store(self, state: tuple, action: Any, value: float) -> None:
-        """
-        Implements memory-efficient Q-value storage using sparse matrix compression.
-        
-        Storage Strategy:
-        - Delta Encoding: Store only changes from default value
-        - Huffman Coding: Compress common value patterns
-        - Block Storage: Group similar state-action pairs
-        
-        Memory Optimization:
-        Reduces storage requirements by 40-70% for sparse environments
-        """
-        DEFAULT_VALUE = 0.0
-        precision = 2  # Store values rounded to 2 decimal places
-        
-        # Only store non-default values with delta encoding
-        delta = round(value - DEFAULT_VALUE, precision)
-        if delta != 0:
-            # Huffman encode common delta values
-            if delta in self.huffman_codes:
-                encoded = self.huffman_codes[delta]
-            else:
-                encoded = delta
-            
-            # Use coordinate format (state, action) -> encoded delta
-            self.sparse_matrix.append((
-                self._state_to_index(state),
-                self._action_to_index(action),
-                encoded
-            ))
-        
-        # Periodic matrix compaction
-        if len(self.sparse_matrix) % 1000 == 0:
-            self._compact_storage()
-    
-    def batch_update(self, updates: List[Tuple[tuple, Any, float]], 
-                    batch_size: int = 32, 
-                    momentum: float = 0.9) -> None:
-        """
-        Efficient batch processing of Q-updates with momentum acceleration.
-        
-        Features:
-        - Mini-batch averaging
-        - Update momentum
-        - Parallel processing (thread-safe)
-        
-        Mathematical Formulation:
-        ΔQ_batch = (1 - momentum) * ΔQ_current + momentum * ΔQ_previous
-        """
-        if not updates:
-            return
-
-        # Split updates into mini-batches
-        for batch in [updates[i:i+batch_size] for i in range(0, len(updates), batch_size)]:
-            batch_delta = defaultdict(float)
-            
-            # Aggregate updates
-            for state, action, delta in batch:
-                key = (tuple(state), action)
-                batch_delta[key] += delta / batch_size  # Average updates
-            
-            # Apply momentum and update Q-values
-            for (state, action), delta in batch_delta.items():
-                current_q = self._get_q_value(state, action)
-                smoothed_delta = (1 - momentum) * delta + momentum * self.update_momentum.get((state, action), 0)
-                new_value = current_q + self.learning_rate * smoothed_delta
-                self._set_q_value(state, action, new_value)
-                self.update_momentum[(state, action)] = smoothed_delta
-
 class RLVisualizer:
     """
-    Provides learning diagnostics:
-    - Q-value heatmaps
-    - Policy trajectory visualization
-    - Learning curves
-    - Exploration-exploitation ratio tracking
+    Enhanced learning diagnostics with hardware-accelerated visualization pipeline.
+    
+    New Features:
+    - Multi-resolution Q-value heatmaps
+    - Temporal difference error visualization
+    - 3D policy landscape projection
+    - Interactive exploration-exploitation dashboard
+    - Frame interpolation with optical flow
+    - Adaptive color mapping
     """
     
-    def plot_learning_curve(self, reward_history):
-        plt.plot(smooth(reward_history))
-        plt.title("Learning Progress")
-        plt.show()
+    def __init__(self, agent, env, config_path="src/agents/learning/configs/learning_config.yaml"):
+        self.agent = agent
+        self.env = env
+        self.config = self._load_config(config_path)
+        self.frame_queue = deque(maxlen=1000)
+        self.metrics_history = defaultdict(list)
+        self._setup_color_maps()
+        self._init_gpu_acceleration()
+        
+    def _load_config(self, path):
+        """Load visualization-specific configuration"""
+        with open(path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config.get('rl_visualization', {})
     
-    def animate_policy(self, env: gym.Env, policy: Dict[tuple, Any], 
-                    fps: int = 30, max_steps: int = 1000) -> None:
-        """
-        Visualizes agent's policy with smooth animation rendering.
+    def _setup_color_maps(self):
+        """Create perceptually uniform color maps"""
+        self.value_cmap = LinearSegmentedColormap.from_list(
+            'q_values', ['#2A0A12', '#C62F2F', '#F9D379'], N=256)
+        self.trajectory_cmap = plt.get_cmap('viridis')
+        self.exploration_palette = np.array([
+            [42, 157, 143],   # Exploration color
+            [233, 196, 106]   # Exploitation color
+        ], dtype=np.uint8)
         
-        Features:
-        - Frame interpolation for smooth transitions
-        - Value function heatmap overlay
-        - Action trajectory visualization
-        - Real-time performance metrics
+    def _init_gpu_acceleration(self):
+        """Initialize GPU-accelerated OpenCV context"""
+        self.use_gpu = cv2.cuda.getCudaEnabledDeviceCount() > 0
+        if self.use_gpu:
+            self.stream = cv2.cuda_Stream()
+            self.gpu_heatmap = cv2.cuda_GpuMat()
+            self.gpu_overlay = cv2.cuda_GpuMat()
+
+    def render_heatmap_overlay(self, frame, state, q_values):
+        """GPU-accelerated heatmap rendering with temporal smoothing"""
+        heatmap = self._create_heatmap(state, q_values)
         
-        Technical Implementation:
-        - OpenCV-based rendering pipeline
-        - Multiprocessed frame generation
-        - Hardware-accelerated visualization
-        """
-        state = env.reset()
-        video_writer = cv2.VideoWriter('policy.mp4', 
-                                    cv2.VideoWriter_fourcc(*'mp4v'), 
-                                    fps, 
-                                    (env.width, env.height))
-        
-        for step in range(max_steps):
-            # Render frame with overlays
-            frame = env.render(mode='rgb_array')
-            q_values = [self._get_q_value(state, a) for a in self.possible_actions]
-            
-            # Add heatmap overlay
-            heatmap = self._create_heatmap(state, q_values)
+        if self.use_gpu:
+            self.gpu_heatmap.upload(heatmap)
+            self.gpu_overlay.upload(frame)
+            cv2.cuda.alphaComp(
+                self.gpu_overlay, self.gpu_heatmap,
+                cv2.cuda.ALPHA_OVER, dst=self.gpu_overlay, stream=self.stream
+            )
+            self.gpu_overlay.download(frame, stream=self.stream)
+        else:
             frame = cv2.addWeighted(frame, 0.7, heatmap, 0.3, 0)
             
-            # Add trajectory path
-            frame = self._draw_trajectory(frame)
-            
-            # Write frame
-            video_writer.write(frame)
-            
-            # Step through environment
-            action = policy[state]
-            state, _, done, _ = env.step(action)
-            
-            if done:
-                break
+        return frame
+
+    def _create_heatmap(self, state, q_values, resolution=100):
+        """Generate multi-resolution Q-value heatmap using state projections"""
+        # Create 2D projection grid
+        x = np.linspace(-2.4, 2.4, resolution)
+        y = np.linspace(-3.0, 3.0, resolution)
+        xx, yy = np.meshgrid(x, y)
         
-        video_writer.release()
-        self._embed_video('policy.mp4')
+        # Calculate Q-values for grid points
+        grid_values = np.zeros_like(xx)
+        for i in range(resolution):
+            for j in range(resolution):
+                projected_state = self._project_state(state, (xx[i,j], yy[i,j]))
+                grid_values[i,j] = max(
+                    self.agent._get_q_value(projected_state, a)
+                    for a in self.agent.possible_actions
+                )
+                
+        # Normalize and apply colormap
+        normalized = cv2.normalize(grid_values, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap = cv2.applyColorMap(normalized.astype(np.uint8), self.value_cmap)
+        return cv2.resize(heatmap, self.env.observation_space.shape[:2][::-1])
+
+    def _project_state(self, current_state, projection):
+        """State projection for high-dimensional visualization"""
+        # Implement domain-specific projection logic
+        if len(current_state) >= 2:
+            return (projection[0], projection[1], *current_state[2:])
+        return projection
+
+    def interpolate_frames(self, prev_frame, current_frame, num_interpolations=3):
+        """Optical flow-based frame interpolation"""
+        if self.use_gpu:
+            prev_gpu = cv2.cuda_GpuMat(prev_frame)
+            curr_gpu = cv2.cuda_GpuMat(current_frame)
+            flow = cv2.cuda_FarnebackOpticalFlow.create(
+                numLevels=3,
+                pyrScale=0.5,
+                fastPyramids=True
+            ).calc(prev_gpu, curr_gpu, None)
+            
+            interpolated = []
+            for alpha in np.linspace(0.2, 0.8, num_interpolations):
+                flow_scale = cv2.cuda_GpuMat(flow.size(), flow.type(), alpha)
+                interp_frame = cv2.cuda.addWeighted(
+                    prev_gpu, 1-alpha, curr_gpu, alpha, 0)
+                interpolated.append(interp_frame.download())
+            return interpolated
+        else:
+            # CPU fallback using TVL1 optical flow
+            flow = cv2.DualTVL1OpticalFlow_create()
+            flow_map = flow.calc(prev_frame, current_frame, None)
+            return self._cpu_interpolate(prev_frame, current_frame, flow_map, num_interpolations)
+
+    def animate_policy(self, fps=60, max_steps=1000, render_metrics=True):
+        """Real-time rendering pipeline with performance optimizations"""
+        raw_obs, _ = self.env.reset()
+        state = raw_obs
+        
+        # Get frame dimensions from first render
+        test_frame = self.env.render()
+        frame_height, frame_width = test_frame.shape[:2]
+        
+        video_writer = cv2.VideoWriter(
+            'policy_animation.mp4', 
+            cv2.VideoWriter_fourcc(*'avc1'), fps, 
+            (frame_width*2, frame_height*2)  # Use actual frame dimensions
+        )
+        
+        prev_frame = None
+        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+            futures = []
+            
+            for step in range(max_steps):
+                frame = self.env.render()
+                action = self.agent.get_policy().get(
+                    self.agent._process_state(state), 
+                    random.choice(self.agent.possible_actions)
+                )
+                
+                # Parallel frame processing
+                future = executor.submit(
+                    self._process_frame, frame, state, action, step)
+                futures.append(future)
+                
+                if len(futures) > 5:  # Pipeline depth
+                    processed_frame = futures.pop(0).result()
+                    if prev_frame is not None:
+                        interpolated = self.interpolate_frames(prev_frame, processed_frame)
+                        for interp in interpolated:
+                            video_writer.write(interp)
+                    video_writer.write(processed_frame)
+                    prev_frame = processed_frame
+                
+                next_raw_obs, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
+                state = next_raw_obs
+                if done: break
+                
+            video_writer.release()
+            self._postprocess_animation('policy_animation.mp4')
+
+    def _process_frame(self, frame, state, action, step):
+        """Frame processing worker function"""
+        q_values = [self.agent._get_q_value(state, a) for a in self.agent.possible_actions]
+        frame = self.render_heatmap_overlay(frame, state, q_values)
+        frame = self._draw_trajectory(frame, step)
+        frame = self._render_metrics(frame, step)
+        frame = cv2.resize(frame, (self.env.width*2, self.env.height*2))
+        return frame
+
+    def _render_metrics(self, frame, step):
+        """On-screen performance monitoring overlay"""
+        metrics = [
+            f"Episode: {self.agent.episode_count}",
+            f"Exploration: {self._calculate_exploration_ratio():.2f}%",
+            f"Avg Reward: {np.mean(self.agent.reward_history[-100:]):.2f}",
+            f"Q-Variance: {self._calculate_q_variance():.2f}"
+        ]
+        
+        y_offset = 30
+        for metric in metrics:
+            cv2.putText(frame, metric, (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+            y_offset += 25
+        return frame
+
+    def _calculate_exploration_ratio(self, window=100):
+        """Calculate exploration percentage from action history"""
+        recent_actions = self.agent.action_history[-window:]
+        if not recent_actions: return 0.0
+        return sum(1 for a in recent_actions if a != np.argmax(
+            [self.agent._get_q_value(s, a) for a in self.agent.possible_actions]
+        )) / len(recent_actions) * 100
+
+    def _calculate_q_variance(self):
+        """Measure value function uncertainty"""
+        return np.var(list(self.agent.q_table.values()))
+
+    def plot_learning_curves(self, window=100):
+        """Interactive matplotlib dashboard with multiple metrics"""
+        plt.figure(figsize=(15, 8))
+        
+        # Smoothed reward curve
+        rewards = np.convolve(
+            self.agent.reward_history, 
+            np.ones(window)/window, mode='valid'
+        )
+        
+        # Create subplots grid
+        ax1 = plt.subplot2grid((3, 3), (0, 0), colspan=3)
+        ax2 = plt.subplot2grid((3, 3), (1, 0))
+        ax3 = plt.subplot2grid((3, 3), (1, 1))
+        ax4 = plt.subplot2grid((3, 3), (1, 2))
+        ax5 = plt.subplot2grid((3, 3), (2, 0), colspan=3)
+
+        # Main reward plot
+        ax1.plot(rewards, label='Smoothed Reward')
+        ax1.set_title("Learning Progress")
+        ax1.legend()
+
+        # Exploration-Exploitation pie chart
+        exp_ratio = self._calculate_exploration_ratio()
+        ax2.pie([exp_ratio, 100-exp_ratio], 
+                colors=self.exploration_palette/255,
+                labels=['Explore', 'Exploit'])
+        ax2.set_title("Behavior Ratio")
+
+        # Q-Value Distribution
+        q_values = list(self.agent.q_table.values())
+        ax3.hist(q_values, bins=50, density=True)
+        ax3.set_title("Q-Value Distribution")
+
+        # State Coverage
+        states = len({s for s, _ in self.agent.q_table.keys()})
+        ax4.bar(['Visited'], [states], color='#3A86FF')
+        ax4.set_title("Unique States Visited")
+
+        # Temporal Difference Error
+        ax5.plot(self.metrics_history['td_error'], alpha=0.3)
+        ax5.set_title("TD Error History")
+
+        plt.tight_layout()
+        plt.show()
+
+    def _postprocess_animation(self, filename):
+        """Apply final video enhancements with FFMPEG"""
+        import subprocess
+        subprocess.run([
+            'ffmpeg', '-i', filename, '-vf',
+            'hqdn3d=4:3:6:4.5, unsharp=5:5:1.0:5:5:0.0',
+            '-c:v', 'libx264', '-preset', 'slow', '-crf', '18',
+            '-pix_fmt', 'yuv420p', f'enhanced_{filename}'
+        ])
+
+class RLEncoder(RLAgent):
+    def __init__(self, config, possible_actions, state_size, vision_encoder=None, train_vision=False):
+        super().__init__(config, possible_actions, state_size)
+        
+        # Vision processing
+        self.vision_encoder = vision_encoder
+        if self.vision_encoder:
+            self.projection = nn.Linear(
+                self.vision_encoder.embed_dim,
+                self.state_size)
+            self.vision_encoder.eval()  # Freeze if pre-trained
+            
+        # Replace StateProcessor for visual observations
+        if config['use_visual_observations']:
+            self.state_processor = self._visual_state_processor
+
+        if train_vision and self.vision_encoder:
+            self.vision_encoder.train() 
+            self.vision_encoder.requires_grad_(True)
+
+    def _visual_state_processor(self, raw_state):
+        """Process raw pixels using VisionEncoder"""
+        with torch.no_grad():
+            state_tensor = torch.tensor(raw_state).float().unsqueeze(0)
+            embeddings = self.vision_encoder(state_tensor)
+        return tuple(embeddings.cpu().numpy().flatten())
+
+class RLTransformer(RLEncoder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from src.agents.perception.modules.transformer import Transformer
+        self.transformer = Transformer(config['transformer'])
+        self.state_memory = deque(maxlen=config['sequence_length'])
+        
+    def choose_action(self, state):
+        # Process state sequence
+        self.state_memory.append(self._process_state(state))
+        sequence = F.normalize(torch.tensor(list(self.state_memory)), dim=-1)
+        
+        # Transformer-based policy
+        context = checkpoint(self.transformer, sequence.unsqueeze(0))
+        return super().choose_action(context[-1])
+    
+    def _visual_state_processor(self, raw_state):
+        with torch.cuda.amp.autocast():  # Add this
+            state_tensor = torch.tensor(raw_state).float().unsqueeze(0)
+            embeddings = self.vision_encoder(state_tensor)
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Recursive Learning ===\n")
+
+    env = gym.make("CartPole-v1", render_mode="rgb_array")
+    config = load_config()
+    state_size = env.observation_space.shape[0]
+    possible_actions = list(range(env.action_space.n))
+    agent_id = None
+    
+    agent = RLAgent(
+        config=config,
+        possible_actions=possible_actions,
+        state_size=state_size,
+        agent_id=agent_id
+    )
+    visualizer = RLVisualizer(agent, env)
+    visualizer.animate_policy(fps=60)
+    
+    # Training loop
+    for episode in range(1000):
+        state, _ = env.reset()
+        done = False
+        total_reward = 0
+        
+        while not done:
+            action = agent.step(state)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            agent.receive_reward(reward)
+            agent.learn(next_state, reward, done)
+            state = next_state
+            total_reward += reward
+        
+        agent.end_episode(state, done)
+        print(f"Episode {episode+1} | Total Reward: {total_reward}")
+
+    visualizer.plot_learning_curves()
+    print(f"\n{agent}\n")
+    print("\n=== Successfully Ran Recursive Learning ===\n")
+
+if __name__ == "__main__":
+    print("\n * * * * Phase 2 * * * *\n=== Running Recursive Learning ===\n")
+    import argparse
+    import pickle, os
+    
+    # CLI for optional config
+    parser = argparse.ArgumentParser(description="Run RLAgent in CartPole")
+    parser.add_argument('--episodes', type=int, default=1000, help='Number of training episodes')
+    parser.add_argument('--render', action='store_true', help='Render the environment')
+    parser.add_argument('--save_qtable', action='store_true', help='Save Q-table to file after training')
+    parser.add_argument('--evaluate', action='store_true', help='Run evaluation after training')
+    args = parser.parse_args()
+
+    env = gym.make("CartPole-v1")
+    config = load_config()
+    state_size = env.observation_space.shape[0]
+    possible_actions = list(range(env.action_space.n))
+    agent_id = None
+
+    agent = RLAgent(
+        config=config,
+        possible_actions=possible_actions,
+        state_size=state_size,
+        agent_id=agent_id
+    )
+
+    reward_log = []
+
+    try:
+        for episode in range(args.episodes):
+            state, _ = env.reset()
+            done = False
+            total_reward = 0
+
+            while not done:
+                if args.render:
+                    env.render()
+
+                action = agent.step(state)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+
+                agent.receive_reward(reward)
+                agent.learn(next_state, reward, done)
+                state = next_state
+                total_reward += reward
+
+            agent.end_episode(state, done)
+            reward_log.append(total_reward)
+
+            print(f"Episode {episode+1} | Total Reward: {total_reward}")
+
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user.")
+
+    finally:
+        env.close()
+
+        if args.save_qtable:
+            os.makedirs("output", exist_ok=True)
+            with open("src/agents/learning/cache/q_table.pkl", "wb") as f:
+                pickle.dump(agent.get_q_table(), f)
+            print("Q-table saved to output/q_table.pkl")
+
+        if args.evaluate:
+            print("\n--- Evaluation ---")
+            eval_rewards = []
+            for _ in range(10):
+                state, _ = env.reset()
+                done = False
+                total = 0
+                while not done:
+                    action = agent.get_policy().get(agent._process_state(state), random.choice(possible_actions))
+                    state, reward, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
+                    total += reward
+                eval_rewards.append(total)
+            avg_eval = sum(eval_rewards) / len(eval_rewards)
+            print(f"Average Evaluation Reward: {avg_eval:.2f}")
+
+        print("\n=== Recursive Learning Complete ===")
+
+if __name__ == "__main__":
+    print("\n * * * * Phase 3 * * * *\n=== Running Recursive Learning ===\n")
+    from src.agents.perception.encders.vision_encoder import VisionEncoder
+    from src.agents.perception.modules.transformer import Transformer
+    # Initialize integrated system
+
+    optimizer = torch.optim.Adam([
+        {'params': agent.vision_encoder.parameters()},
+        {'params': agent.transformer.parameters()},
+        {'params': agent.q_network.parameters()}
+    ], lr=config['meta_lr'])
+    
+    vision_encoder = VisionEncoder(config)
+    agent = RLTransformer(
+        config=config,
+        possible_actions=possible_actions,
+        state_size=512,  # Must match vision_encoder output dim
+        vision_encoder=vision_encoder,
+        train_vision=True
+    )
+    # Should handle both visual and vector states
+    agent.step(env.render(mode='rgb_array'))  # Visual input
+    agent.step(env.get_vector_state())
+
+    
+    # Training loop
+    for episode in episodes:
+        state = env.render(mode='rgb_array')  # Visual observation
+        action = agent.step(state)
+    print("\n=== Recursive Learning Complete ===")
