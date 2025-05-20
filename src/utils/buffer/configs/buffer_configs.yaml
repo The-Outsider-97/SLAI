@@ -1,0 +1,13 @@
+manager:
+  batch_size: 32
+  per_beta: 0.4
+  per_epsilon: 0.01
+
+replay_buffer:
+  capacity: 100000
+
+distributed:
+  capacity: 100000
+  seed: null
+  staleness_threshold_days: 1
+  prioritization_alpha: 0.6
