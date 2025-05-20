@@ -6,7 +6,7 @@ import random
 
 from threading import Lock
 from datetime import datetime
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, OrderedDict
 
 from logs.logger import get_logger
 
@@ -42,7 +42,7 @@ class LearningMemory:
         self.lock = Lock()
 
         self.config = base_config
-        self.memory = {}
+        self.memory = OrderedDict()
         self.access_counter = 0
         
         logger.info(f"Learning Memory has succesfully initialized")
