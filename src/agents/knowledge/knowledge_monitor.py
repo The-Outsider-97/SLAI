@@ -51,7 +51,7 @@ class KnowledgeMonitor:
         self.integrity_hashes = {}
         self.monitoring_active = False
 
-        self.governor = Governor()
+        self.governor = Governor(knowledge_agent=agent)
         self.governor.agent = self.agent
 
         self.knowledge_cache = KnowledgeCache()
