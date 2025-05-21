@@ -22,8 +22,9 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class EfficientAttention:
+class EfficientAttention(torch.nn.Module):
     def __init__(self, config, device='cpu'):
+        super().__init__()
         cfg = config.get('attention', {})
         self.dropout_rate = cfg.get('dropout_rate', 0.1)
         transformer_cfg = config['transformer']
@@ -43,6 +44,8 @@ class EfficientAttention:
         self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
 
+        logger.info(f"Attention is successfully initialized with:\n- {torch.nn.Module}")
+    
     def forward(self, x, context=None, mask=None, causal=False):
         x = x.to(self.device)
         if context is None:
