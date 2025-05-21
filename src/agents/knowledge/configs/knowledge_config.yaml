@@ -116,3 +116,25 @@ knowledge_monitor:
   crossref_checking: true        # Enable DOI validation via CrossRef API
   plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
   auto_archive_outdated: false  # Automatically archive outdated sources
+
+knowledge_sync:
+  auto_sync:
+    enabled: true
+    interval: 3600  # Seconds between syncs
+  conflict_resolution:
+    strategy: "semantic"  # Options: timestamp, confidence, semantic, governance
+    similarity_threshold: 0.85
+    auto_quarantine: true
+  versioning:
+    enabled: true
+    max_versions: 10
+  external_sources:
+    - data/external_knowledge_1.yaml
+    - data/external_knowledge_2.json
+    - type: "api"
+      endpoint: "https://api.knowledgebase/v1/updates"
+      auth_type: "bearer_token"
+      update_interval: 86400
+    - type: "database"
+      connection_string: "postgresql://user:pass@knowledge-db:5432/main"
+      tables: ["public.research_papers", "public.datasets"]
