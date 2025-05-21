@@ -94,3 +94,8 @@ openai
 # Misc Utilities
 deepmerge
 sentencepiece
+
+Flask-Talisman==5.1.0
+Flask-Limiter==3.5.0
+bleach==6.0.0
+Werkzeug==2.3.7
