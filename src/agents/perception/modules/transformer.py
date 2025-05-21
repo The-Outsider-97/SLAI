@@ -24,8 +24,9 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class Transformer:
+class Transformer(torch.nn.Module):
     def __init__(self, config):
+        super().__init__()
         cfg = config.get('transformer', {})
         self.dropout_rate = cfg.get('dropout_rate', 0.1)
         self.embed_dim = cfg['embed_dim']
@@ -44,6 +45,8 @@ class Transformer:
         )
         self.style_embeddings = Parameter(
             torch.randn(cfg['num_styles'], cfg['embed_dim']) * 0.02)
+        
+        logger.info(f"Transformer is successfully initialized with:\n- {self.embed_dim} embed dimensions\n- {self.dropout_rate} dropout rate")
 
     def parameters(self):
         params = [self.positional_encoding]
@@ -80,15 +83,14 @@ class Transformer:
 
         for layer in self.layers:
             residual = x
-            x = TensorOps.layer_norm(x + layer['norm1'].data)
-            x = layer['attention'].forward(x, mask=attention_mask, causal=causal)
-            x = residual + x
-
+            normed_x = TensorOps.layer_norm(x, gamma=layer['norm1_gamma'].data, beta=layer['norm1_beta'].data)
+            attn_out = layer['attention'].forward(normed_x, ...) # Add dropout here if needed
+            x = residual + attn_out # Or residual + self.dropout(attn_out)
+            
             residual = x
-            x = TensorOps.layer_norm(x + layer['norm2'].data)
-            x = x + style_emb.unsqueeze(1)
-            x = layer['ff'].forward(x)
-            x = residual + x
+            normed_x = TensorOps.layer_norm(x, gamma=layer['norm2_gamma'].data, beta=layer['norm2_beta'].data)
+            ff_out = layer['ff'].forward(normed_x) # Add dropout here if needed
+            x = residual + ff_out # Or residual + self.dropout(ff_out)
 
         return TensorOps.layer_norm(x)
 
