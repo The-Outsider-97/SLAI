@@ -253,30 +253,47 @@ class Tokenizer:
 
     def decode(self, token_ids: Union[List[int], torch.Tensor], skip_special_tokens: bool = True) -> str:
         """
-        Decodes a sequence of token IDs back into a string.
-
-        Args:
-            token_ids (Union[List[int], torch.Tensor]): The sequence of token IDs.
-            skip_special_tokens (bool): Whether to remove special tokens ([PAD], [CLS], [SEP])
-                                         from the output string. [UNK] is usually kept.
-
-        Returns:
-            str: The decoded text string.
+        Decodes a sequence of token IDs back into a string with improved spacing and punctuation handling.
         """
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
-
+    
         tokens = []
         for token_id in token_ids:
             token = self.id_to_word.get(token_id, self.unk_token)
-
             if skip_special_tokens and token in [self.pad_token, self.cls_token, self.sep_token]:
                 continue
             tokens.append(token)
-
-        # Basic detokenization (joining with space) - more sophisticated needed for perfect reconstruction
-        # This doesn't perfectly handle punctuation spacing yet.
-        return " ".join(tokens).strip()
+    
+        # Reconstruct the text from BPE tokens
+        current_part = []
+        parts = []
+        for token in tokens:
+            if token.endswith('</w>'):
+                # Remove the </w> and add to current_part
+                stripped_token = token[:-4]
+                current_part.append(stripped_token)
+                # Join and add to parts, then reset current_part
+                parts.append(''.join(current_part))
+                current_part = []
+            else:
+                current_part.append(token)
+        # Add any remaining parts
+        if current_part:
+            parts.append(''.join(current_part))
+        
+        # Join parts with spaces between original tokens
+        decoded_text = ' '.join(parts)
+        
+        # Post-process to handle punctuation spacing
+        # Remove spaces before punctuation
+        decoded_text = re.sub(r'\s+([,.!?])', r'\1', decoded_text)
+        # Replace multiple spaces with a single space
+        decoded_text = re.sub(r'\s+', ' ', decoded_text)
+        # Trim leading and trailing spaces
+        decoded_text = decoded_text.strip()
+    
+        return decoded_text
 
     # Make the tokenizer callable like Hugging Face tokenizers
     def __call__(self, text: Union[str, List[str]]) -> Dict[str, torch.Tensor]:
@@ -342,6 +359,9 @@ class Tokenizer:
         self.cls_token_id = self.word_to_id[self.cls_token]
         self.sep_token_id = self.word_to_id[self.sep_token]
 
+    def _special_tokens_list():
+        pass
+
 class BytePairEncoder:
     def __init__(self, merges, word_to_id=None, unk_token='[UNK]'):
         self.bpe_ranks = {tuple(merge): i for i, merge in enumerate(merges)}
@@ -361,6 +381,10 @@ class BytePairEncoder:
         if token in self.cache:
             return self.cache[token]
 
+        # Handle empty token or single-character tokens
+        if len(token) == 0:
+            return [self.unk_token]
+
         word = tuple(token) + ('</w>',)
         pairs = self.get_pairs(word)
 
@@ -372,6 +396,9 @@ class BytePairEncoder:
                 return [self.unk_token]
 
         while True:
+            # Safeguard against empty pairs during merging
+            if not pairs:
+                break 
             bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float('inf')))
             if bigram not in self.bpe_ranks:
                 break
@@ -425,7 +452,7 @@ if __name__ == "__main__":
         print("Decoded Text:", decoded)
 
         # Access BPE encoder directly
-        test_token = "Kiss me!"
+        test_token = "Will you...kiss me?"
         subwords = tokenizer.bpe_processor.bpe(test_token)
         print(f"BPE for '{test_token}':", subwords)
 
