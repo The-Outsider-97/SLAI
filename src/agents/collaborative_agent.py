@@ -23,7 +23,7 @@ from collections import defaultdict
 from enum import Enum, auto
 from datetime import datetime
 
-from src.utils.agent_factory import AgentFactory
+from src.agents.agent_factory import AgentFactory
 from src.agents.language.grammar_processor import GrammarProcessor
 from src.agents.base_agent import BaseAgent
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
