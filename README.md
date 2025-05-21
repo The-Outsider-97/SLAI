@@ -127,6 +127,8 @@ Note: If you see an error about execution policy:
    pip install ruptures
    pip install fuzzywuzzy python-Levenshtein metaphone
    pip install pympler
+   pip install flask_limiter
+   pip install flask_talisman
 
    python -m nltk.downloader punkt
    ```
