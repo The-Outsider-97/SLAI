@@ -70,6 +70,10 @@ class Governor:
                 
         return guidelines
 
+    def get_approved_rules(self):
+        # TODO: Implement rule approval logic
+        return []
+
     def _load_enforcement_rules(self):
         """Load dynamic enforcement rules based on guidelines"""
         # Convert restrictions to executable rules
