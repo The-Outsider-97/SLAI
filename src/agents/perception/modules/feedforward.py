@@ -20,9 +20,10 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class FeedForward:
+class FeedForward(torch.nn.Module):
     """Enhanced Position-wise Feed-Forward Network with configurable components"""
     def __init__(self, config, device='cpu'):
+        super().__init__()
         cfg = config['feedforward']
         transformer_cfg = config['transformer']
         self.embed_dim = transformer_cfg['embed_dim']
@@ -50,13 +51,14 @@ class FeedForward:
         self.b2 = Parameter(torch.zeros(self.embed_dim, device=self.device) if self.use_bias else None)
 
         # Intermediate values cache
-        # self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
         self._activation_derivatives = {
             'gelu': self._gelu_derivative,
             'relu': self._relu_derivative,
             'swish': self._swish_derivative
         }
+
+        logger.info(f"Feedforward is successfully initialized with:\n- {torch.nn.Module}")
 
     def forward(self, x):
         x = x.to(self.device)
