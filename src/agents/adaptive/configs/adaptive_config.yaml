@@ -1,0 +1,27 @@
+adaptive_memory:
+  episodic_capacity: 1000
+  experience_staleness_days: 7
+  semantic_decay_rate: 0.9
+  min_memory_strength: 0.1
+  replay_capacity: 50000
+  drift_threshold: 0.4
+  priority_alpha: 0.6
+  retrieval_limit: 5
+
+policy_manager:
+  hidden_layers: [64, 32]
+  activation: 'tanh'
+  output_activation: 'softmax'
+
+parameter_tuner:
+  base_learning_rate: 0.01
+  base_exploration_rate: 0.3
+  base_discount_factor: 0.95
+  base_temperature: 1.0
+  min_learning_rate: 1e-4
+  max_learning_rate: 0.1
+  min_exploration: 0.01
+  exploration_decay: 0.9995
+
+rl:
+
