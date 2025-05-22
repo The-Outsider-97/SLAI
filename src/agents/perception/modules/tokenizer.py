@@ -12,8 +12,8 @@ from logs.logger import get_logger
 
 logger = get_logger("Tokenizer")
 
-BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
-BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
+# BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
+# BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
 CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
 
 def load_config(config_path=CONFIG_PATH):
@@ -68,20 +68,28 @@ class Tokenizer:
         # Load BPE Merges
         with open(self.bpe_merges_path, "r", encoding="utf-8") as f:
             merges_data = json.load(f)
-            # Assuming merges are stored under a key like "merges", adjust if needed
-            bpe_merges = [tuple(pair) for pair in merges_data.get("merges", [])]
+            bpe_merges = [tuple(pair) for pair in merges_data["merges"]]
+            logger.info(f"Loaded {len(bpe_merges)} BPE merges")
 
         self.bpe_ranks = {pair: i for i, pair in enumerate(bpe_merges)}
         self.bpe_processor = BytePairEncoder(bpe_merges, self.word_to_id, self.unk_token)
 
+        # ASCII characters as fallback
+        for char in map(chr, range(32, 127)):
+            if char not in self.word_to_id:
+                self.word_to_id[char] = len(self.word_to_id)
+        logger.info(f"Added ASCII fallback tokens. New vocab size: {len(self.word_to_id)}")
+
         # Add special tokens if they aren't already in the BPE vocab
+        self._additional_special_tokens = cfg.get('additional_special_tokens', [])
         self.special_tokens = [self.pad_token, self.unk_token, self.cls_token, self.sep_token]
+        current_id = 0
         for token in self.special_tokens:
             if token not in self.word_to_id:
-                 # Add special tokens with high IDs
-                 next_id = max(self.word_to_id.values()) + 1
-                 self.word_to_id[token] = next_id
-                 logger.info(f"Added special token '{token}' with ID {next_id}")
+                self.word_to_id[token] = current_id
+                current_id += 1
+        # Rebuild id_to_word after special token assignment
+        self.id_to_word = {v: k for k, v in self.word_to_id.items()}
 
         self.id_to_word = {idx: token for token, idx in self.word_to_id.items()}
         self.vocab_size = len(self.word_to_id)
@@ -120,14 +128,6 @@ class Tokenizer:
                     self.word_to_id[token] = current_id
                     self.id_to_word[current_id] = token
                     current_id += 1
-
-        #    # 2. Add GloVe vocabulary words, skipping any duplicates of special tokens
-        #    for word in glove_data.keys():
-        #        # Ensure GloVe words don't overwrite special tokens if they happen to exist
-        #        if word not in self.word_to_id:
-        #            self.word_to_id[word] = current_id
-        #            self.id_to_word[current_id] = word
-        #            current_id += 1
 
             self.vocab_size = len(self.word_to_id)
 
@@ -281,19 +281,19 @@ class Tokenizer:
         # Add any remaining parts
         if current_part:
             parts.append(''.join(current_part))
-        
-        # Join parts with spaces between original tokens
-        decoded_text = ' '.join(parts)
-        
-        # Post-process to handle punctuation spacing
-        # Remove spaces before punctuation
-        decoded_text = re.sub(r'\s+([,.!?])', r'\1', decoded_text)
-        # Replace multiple spaces with a single space
-        decoded_text = re.sub(r'\s+', ' ', decoded_text)
-        # Trim leading and trailing spaces
-        decoded_text = decoded_text.strip()
-    
-        return decoded_text
+
+        # Handling of BPE markers
+        decoded_text = ""
+        for token in tokens:
+            if token == self.unk_token:
+                decoded_text += " " + "[UNK]"
+            elif token.endswith('</w>'):
+                decoded_text += token[:-4] + " "
+            else:
+                decoded_text += token
+        # Remove extra spaces around punctuation
+        decoded_text = re.sub(r'\s+([.,!?])', r'\1', decoded_text)
+        return decoded_text.strip()
 
     # Make the tokenizer callable like Hugging Face tokenizers
     def __call__(self, text: Union[str, List[str]]) -> Dict[str, torch.Tensor]:
@@ -359,8 +359,10 @@ class Tokenizer:
         self.cls_token_id = self.word_to_id[self.cls_token]
         self.sep_token_id = self.word_to_id[self.sep_token]
 
-    def _special_tokens_list():
-        pass
+    @property
+    def _special_tokens_list(self) -> List[str]:
+        """Returns all special tokens (core + additional)"""
+        return self._special_tokens_list + self._additional_special_tokens
 
 class BytePairEncoder:
     def __init__(self, merges, word_to_id=None, unk_token='[UNK]'):
@@ -438,11 +440,11 @@ if __name__ == "__main__":
     try:
         tokenizer = Tokenizer(config)
 
-        # Example input
-        example_text = "I love you SLAI!"
+        # Example input (SINGLE STRING)
+        example_text = "I love you SLAI!"  # <- Remove list brackets
 
         # Tokenize
-        encoded = tokenizer.encode(example_text)
+        encoded = tokenizer.encode(example_text)  # Now receives a string
         print("Encoded:")
         print("Input IDs:", encoded['input_ids'])
         print("Attention Mask:", encoded['attention_mask'])
@@ -451,12 +453,16 @@ if __name__ == "__main__":
         decoded = tokenizer.decode(encoded['input_ids'])
         print("Decoded Text:", decoded)
 
-        # Access BPE encoder directly
-        test_token = "Will you...kiss me?"
-        subwords = tokenizer.bpe_processor.bpe(test_token)
-        print(f"BPE for '{test_token}':", subwords)
+        # Test cases (keep as list for batch testing)
+        test_cases = [
+            "Hello world!", 
+            "I'm testing contractions",
+            "SLAI-2023"
+        ]
+        batch_encoded = tokenizer.batch_encode(test_cases)  # Use batch_encode for lists
+        print("\nBatch Encoded IDs:", batch_encoded['input_ids'][0][:10])
 
     except Exception as e:
-        print("Tokenizer initialization or execution failed:", str(e))
+        print("Tokenizer failed:", str(e))
 
     print("\n=== Successfully Ran Tokenizer ===\n")
