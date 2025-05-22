@@ -25,8 +25,9 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class VisionEncoder:
+class VisionEncoder(torch.nn.Module):
     def __init__(self, config):
+        super().__init__()
         self.config = config
         vision_cfg = config['vision_encoder']
         transformer_shared_cfg = config['transformer']
@@ -49,7 +50,7 @@ class VisionEncoder:
         self._cache = {}
         if self.encoder_type == "transformer":
             # Initialize transformer components using shared config
-            self.projection = Parameter(
+            self.projection = nn.Parameter(
                 TensorOps.he_init(
                     (self.in_channels * self.patch_size**2, self.embed_dim),
                     self.in_channels * self.patch_size**2
@@ -67,18 +68,41 @@ class VisionEncoder:
             self.transformer = Transformer(config)
 
         elif self.encoder_type == "cnn":
-            self.cnn_config = vision_cfg['cnn']
             self._init_cnn_components()
+            self.cnn_config = vision_cfg['cnn']
             
         else:
             raise ValueError(f"Unknown encoder type: {self.encoder_type}")
 
     def _init_cnn_components(self):
-        """Initialize CNN-specific parameters from config"""
-        cnn_cfg = self.cnn_config
-        self.input_size = cnn_cfg['input_size']
-        self.channels = cnn_cfg['channels']
-        self.filters = [tuple(f) for f in cnn_cfg['filters']]
+        """Initialize CNN layers using PyTorch modules."""
+        cnn_cfg = self.config['vision_encoder']['cnn']
+        filters = cnn_cfg['filters']
+        
+        self.conv_layers = nn.ModuleList()
+        in_channels = self.in_channels
+        
+        # Create Conv2d, ReLU, and MaxPool layers
+        for i, f in enumerate(filters):
+            kernel_h, kernel_w, out_channels = f
+            conv = nn.Conv2d(
+                in_channels, 
+                out_channels,
+                kernel_size=(kernel_h, kernel_w),
+                stride=4 if i == 0 else 1,  # First layer has stride 4
+                padding=2 if i == 0 else 2   # Adjust padding as needed
+            )
+            self.conv_layers.append(conv)
+            self.conv_layers.append(nn.ReLU())
+            
+            # Add MaxPool after first two conv layers
+            if i < 2:
+                self.conv_layers.append(nn.MaxPool2d(kernel_size=3, stride=2))
+            
+            in_channels = out_channels
+        
+        # Spatial Pyramid Pooling levels
+        self.spp_levels = [1, 2, 4]
 
     def _init_sinusoidal_encoding(self, max_len, embed_dim, device):
         if self.positional_encoding == "sinusoidal":
@@ -166,28 +190,43 @@ class VisionEncoder:
         )
 
     def _cnn_forward(self, image: torch.Tensor) -> torch.Tensor:
-        """CNN-based feature extraction pipeline"""
-        features = image
-        channel_axis = -1
+        """
+        CNN-based feature extraction with Spatial Pyramid Pooling (SPP).
+        """
+        x = image
+        # Process through all CNN layers (Conv2d, ReLU, MaxPool2d)
+        for layer in self.conv_layers:
+            x = layer(x)
         
-        # Conv1 Layer
-        features = self._conv2d(features, self.filters[0], stride=4, padding=2)
-        features = self._relu(features)
-        features = self._max_pool(features, 3, stride=2)
+        # Apply Spatial Pyramid Pooling
+        spp_output = self._spatial_pyramid_pooling(x)
+        return spp_output
+    
+    def _spatial_pyramid_pooling(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute multi-level spatial pyramid pooling.
+        """
+        batch_size = x.size(0)
+        spp_outputs = []
+        
+        for level in self.spp_levels:
+            # Adaptive max pooling for current pyramid level
+            pool = torch.nn.AdaptiveMaxPool2d(output_size=(level, level))
+            pooled = pool(x)
+            # Flatten features: (B, C, level, level) -> (B, C*level^2)
+            spp_outputs.append(pooled.view(batch_size, -1))
+        
+        # Concatenate across pyramid levels
+        return torch.cat(spp_outputs, dim=1)
 
-        # Conv2 Layer
-        features = self._conv2d(features, self.filters[1], padding=2)
-        features = self._relu(features)
-        features = self._max_pool(features, 3, stride=2)
-
-        # Conv3 Layer
-        features = self._conv2d(features, self.filters[2])
-        features = self._relu(features)
-
-        # Spatial Pyramid Pooling
-        features = self._spatial_pyramid_pooling(features)
-
-        return features
+    def parameters(self):
+        """Collect parameters based on encoder type."""
+        if self.encoder_type == "transformer":
+            return [self.projection, self.cls_token, self.position_embed] + list(self.transformer.parameters())
+        elif self.encoder_type == "cnn":
+            return list(self.conv_layers.parameters())
+        else:
+            return []
 
     def _conv2d(self, x, filters, stride=1, padding=0):
         """2D Convolution implementation"""
@@ -205,21 +244,6 @@ class VisionEncoder:
                 receptive_field = x[h_start:h_start+Fh, w_start:w_start+Fw, :]
                 output[i,j] = torch.sum(receptive_field * filters, axis=(0,1,2))
         return output
-
-    def _spatial_pyramid_pooling(self, features):
-        """Spatial pyramid pooling implementation"""
-        levels = [1, 2, 4]
-        pooled = []
-        for level in levels:
-            H, W = features.shape[:2]
-            bin_h = H // level
-            bin_w = W // level
-            for i in range(level):
-                for j in range(level):
-                    pool_region = features[i*bin_h:(i+1)*bin_h, 
-                                        j*bin_w:(j+1)*bin_w]
-                    pooled.append(torch.max(pool_region, axis=(0,1)))
-        return torch.concatenate(pooled)
 
     def _relu(self, x):
         """ReLU activation implementation"""
@@ -243,32 +267,31 @@ class VisionEncoder:
 
     def forward(self, x, style_id=0):
         if self.encoder_type == "transformer":
-            # Original transformer processing
             x = self.extract_patches(x)
             self._cache['input_shape'] = x.shape
             self._cache['x'] = x.clone()
 
-            x = torch.matmul(x, self.projection.data)
-
+            x = torch.matmul(x, self.projection)
+    
             if self.training and self.dropout_rate > 0:
                 mask = (torch.rand(*x.shape) > self.dropout_rate).to(torch.float32)
                 x *= mask
 
-            cls_tokens = torch.tile(self.cls_token.data, (x.shape[0], 1, 1))
+            cls_tokens = torch.tile(self.cls_token, (x.shape[0], 1, 1))
             x = torch.concatenate((cls_tokens, x), axis=1)
 
             if self.positional_encoding == "sinusoidal":
-                x += self.position_embed.data[:, :x.shape[1]]
+                x += self.position_embed[:, :x.shape[1]]
             else:
-                x += self.position_embed.data[:, :x.shape[1]]
-
+                x += self.position_embed[:, :x.shape[1]]
+    
             x = self.transformer.forward(x, style_id)
             return x
-
+    
         elif self.encoder_type == "cnn":
             # Process with CNN pipeline
             return self._cnn_forward(x)
-
+    
         else:
             raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
 
@@ -285,10 +308,6 @@ class VisionEncoder:
         
         self.projection.grad += d_proj.sum(axis=0)
         return torch.matmul(d_patch_tokens, self.projection.data.T)
-
-    def parameters(self):
-        return [self.projection, self.cls_token, self.position_embed] + \
-               self.transformer.parameters()
 
     def train(self):
         self.training = True
@@ -308,28 +327,35 @@ if __name__ == "__main__":
     print("Initialized Vision Transformer:", vision_transformer)
 
     # Create dummy input (batch_size, channels, height, width)
-    dummy_input = torch.randn(2, config['vision_encoder']['in_channels'], 
+    input = torch.randn(2, config['vision_encoder']['in_channels'], 
                             config['vision_encoder']['img_size'], 
                             config['vision_encoder']['img_size'])
-    print(f"\nInput shape: {dummy_input.shape}")
+    print(f"\nInput shape: {input.shape}")
 
     # Test forward pass
     vision_transformer.train()
     print("\n[Transformer] Training mode:")
-    output = vision_transformer.forward(dummy_input)
+    output = vision_transformer.forward(input)
+    loss = output.mean()
+    loss.backward()
+    if vision_transformer.projection.grad is not None:
+        print(f"Gradient norm: {vision_transformer.projection.grad.norm():.4f}")
+    else:
+        print("Warning: No gradients detected for projection")
+    print(f"Gradient for projection: {vision_transformer.projection.grad.norm():.4f}")
     print(f"Output shape: {output.shape}")
     print(f"Output mean: {output.mean().item():.4f}")
 
     # Test backward pass
-    dummy_grad = torch.randn_like(output)
-    dx = vision_transformer.backward(dummy_grad)
+    grad = torch.randn_like(output)
+    dx = vision_transformer.backward(grad)
     print(f"\nBackward pass gradient shape: {dx.shape}")
 
     # Test evaluation mode
     vision_transformer.eval()
     with torch.no_grad():
         print("\n[Transformer] Evaluation mode:")
-        eval_output = vision_transformer.forward(dummy_input)
+        eval_output = vision_transformer.forward(input)
         print(f"Eval output mean: {eval_output.mean().item():.4f}")
 
     # Print parameter counts
@@ -352,7 +378,7 @@ if __name__ == "__main__":
         print("Initialized CNN Encoder:", vision_cnn)
         
         # Create CNN-style input (batch, height, width, channels)
-        cnn_input = torch.randn(1,  # Works with batch_size=1 due to CNN implementation
+        cnn_input = torch.randn(2, 3, 224, 224,  # Works with batch_size=1 due to CNN implementation
                               cnn_config['vision_encoder']['img_size'],
                               cnn_config['vision_encoder']['img_size'],
                               cnn_config['vision_encoder']['in_channels'])
