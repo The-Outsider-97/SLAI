@@ -25,7 +25,7 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class AudioEncoder(nn.Module):
+class AudioEncoder(torch.nn.Module):
     def __init__(self, config, device: str = 'cpu'):
         super().__init__()
         self._cache = {}
@@ -37,6 +37,9 @@ class AudioEncoder(nn.Module):
         self.audio_length = audio_cfg['audio_length']
         self.in_channels = audio_cfg['in_channels']
         self.device = device
+
+        if self.encoder_type == "mfcc":
+            self.dct_matrix = self._dct_matrix()  # (n_mfcc, n_filters)
 
         # Shared transformer parameters
         self.embed_dim = transformer_cfg['embed_dim']
@@ -152,48 +155,46 @@ class AudioEncoder(nn.Module):
         
         return torch.stack(frames)  # (batch, seq_len, n_mfcc)
 
-    def _mfcc_forward(self, waveform):
-        """MFCC feature extraction for single sample"""
-        T = waveform.shape[-1]
-        N = 1 + (T - self.frame_length) // self.frame_step
-        mfccs = []
+    def _mfcc_forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Vectorized MFCC feature extraction for batched input."""
+        B, T = waveform.shape  # Assuming waveform shape is (batch, time)
         
-        for i in range(N):
-            frame = waveform[..., i*self.frame_step : i*self.frame_step+self.frame_length]
-            
-            # Windowing
-            window = 0.54 - 0.46 * torch.cos(2 * math.pi * torch.arange(self.frame_length, 
-                                    device=self.device) / (self.frame_length - 1))
-            windowed = frame * window
-            
-            # Power spectrum
-            spectrum = torch.abs(torch.fft.rfft(windowed)) ** 2
-            
-            # Mel filterbank
-            filter_energies = torch.matmul(spectrum, self.mel_filters.T)
-            
-            # Log compression and DCT
-            log_energies = torch.log(filter_energies + 1e-6)
-            mfcc = torch.matmul(log_energies, self._dct_matrix())
-            
-            mfccs.append(mfcc)
+        # Frame extraction using unfold
+        frames = waveform.unfold(
+            dimension=1, 
+            size=self.frame_length, 
+            step=self.frame_step
+        )  # Shape: (B, num_frames, frame_length)
         
-        return torch.stack(mfccs)  # (seq_len, n_mfcc)
-
-    def _dct_matrix(self):
-        """Create DCT-II matrix for MFCC computation"""
-        n_filters = self.mel_filters.shape[0]
-        dct = torch.zeros((self.n_mfcc, n_filters), device=self.device)
+        # Windowing
+        window = torch.hamming_window(self.frame_length, device=waveform.device)
+        windowed = frames * window  # Applies window to each frame
         
-        for i in range(self.n_mfcc):
-            for j in range(n_filters):
-                dct[i,j] = math.cos(math.pi * i * (j + 0.5) / n_filters)
-                
-        return dct
+        # Power spectrum (FFT and magnitude squared)
+        fft = torch.fft.rfft(windowed, dim=-1)
+        power_spectrum = torch.abs(fft) ** 2  # (B, num_frames, n_fft_bins)
+        
+        # Mel filterbank energies (batch matmul)
+        mel_energies = torch.matmul(power_spectrum, self.mel_filters.T)  # (B, num_frames, n_filters)
+        
+        # Log compression
+        log_energies = torch.log(mel_energies + 1e-6)
+        
+        # DCT (precompute self.dct_matrix during init)
+        mfcc = torch.matmul(log_energies, self.dct_matrix)  # (B, num_frames, n_mfcc)
+        
+        return mfcc
+    
+    def _dct_matrix(self) -> torch.Tensor:
+        """Vectorized DCT matrix creation."""
+        n = self.mel_filters.shape[0]
+        k = torch.arange(self.n_mfcc, device=self.device)[:, None]
+        j = torch.arange(n, device=self.device)[None, :]
+        return torch.cos(math.pi * k * (2 * j + 1) / (2 * n)) * math.sqrt(2 / n)
 
     def parameters(self):
         if self.encoder_type == "transformer":
-            return [self.projection, self.cls_token, self.position_embed] + self.transformer.parameters()
+            return [self.projection, self.cls_token, self.position_embed] + list(self.transformer.parameters())
         else:
             return list(self.mfcc_proj.parameters())
 
@@ -287,9 +288,6 @@ class AudioEncoder(nn.Module):
             for j in range(n_coefficients):
                 dct_matrix[i, j] = torch.cos(torch.pi * i * (j + 0.5) / n_coefficients)
         return dct_matrix
-
-    def parameters(self):
-        return [self.projection, self.cls_token, self.position_embed] + self.transformer.parameters()
 
     def train(self):
         self.training = True
