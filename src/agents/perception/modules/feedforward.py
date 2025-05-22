@@ -63,30 +63,30 @@ class FeedForward(torch.nn.Module):
     def forward(self, x):
         x = x.to(self.device)
         self._cache['x'] = x
-
+    
         # First projection
         h = torch.matmul(x, self.w1.data)
         if self.use_bias and self.b1 is not None:
             h += self.b1.data
         self._cache['pre_act'] = h.clone()
-
+    
         # Activation function
         h_act = self._apply_activation(h)
         self._cache['act'] = h_act.clone()
-
-        # Apply dropout
+    
+        # Apply dropout using inverted scaling
         if self.training and self.dropout_rate > 0:
-            self._cache['dropout_mask'] = (torch.rand(*h_act.shape, device=self.device) > self.dropout_rate).to(torch.float32)
-            h_drop = h_act * self._cache['dropout_mask']
+            h_drop, dropout_mask = TensorOps.dropout(h_act, p=self.dropout_rate, training=self.training)
+            self._cache['dropout_mask'] = dropout_mask
         else:
             h_drop = h_act
         self._cache['dropped_act'] = h_drop.clone()
-
+    
         # Second projection
         output = torch.matmul(h_drop, self.w2.data)
         if self.use_bias and self.b2 is not None:
             output += self.b2.data
-
+    
         return output
 
     def backward(self, dout):
