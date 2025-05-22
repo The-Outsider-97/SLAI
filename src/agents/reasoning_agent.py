@@ -101,8 +101,9 @@ class ReasoningAgent(BaseAgent):
         self.validation_engine = ValidationEngine(config=load_config(LOCAL_CONFIG_PATH))
         self.probabilistic_models = ProbabilisticModels(config=load_config(LOCAL_CONFIG_PATH))
 
-        # Initialize components
 
+
+        # Initialize components
         self._load_knowledge()
 
         # Initialize Language components
@@ -212,7 +213,7 @@ class ReasoningAgent(BaseAgent):
             'cpt': {}  # Conditional Probability Tables
         }
 
-    def add_fact(self, fact: Union[Tuple, str], confidence: float = 1.0) -> bool:
+    def add_fact(self, fact_tuple, fact: Union[Tuple, str], confidence: float = 1.0) -> bool:
         """
         Add a fact with confidence score.
         
@@ -223,6 +224,12 @@ class ReasoningAgent(BaseAgent):
         Returns:
             True if fact was added/modified
         """
+        contradiction_score = self.agent_factory.validate_with_azr(fact_tuple)
+        if contradiction_score > 0.3:
+            logger.warning(f"Fact rejected due to contradiction: {fact_tuple} (score={contradiction_score})")
+        else:
+            self.knowledge_base[fact_tuple] = confidence
+
         try:
             if isinstance(fact, str):
                 fact = self._parse_statement(fact)
@@ -263,13 +270,19 @@ class ReasoningAgent(BaseAgent):
         self.rule_weights[name] = weight
         self._save_knowledge()
 
-    def learn_from_interaction(self, feedback: Dict[Tuple, bool]):
+    def learn_from_interaction(self, fact_tuple, feedback: Dict[Tuple, bool], confidence: float = 1.0):
         """
         Learn from user feedback about facts.
         
         Args:
             feedback: Dictionary of facts and whether they were correct
         """
+        contradiction_score = self.agent_factory.validate_with_azr(fact_tuple)
+        if contradiction_score > 0.3:
+            logger.warning(f"Fact rejected due to contradiction: {fact_tuple} (score={contradiction_score})")
+        else:
+            self.knowledge_base[fact_tuple] = confidence
+
         for fact, is_correct in feedback.items():
             current_conf = self.knowledge_base.get(fact, 0.0)
             if is_correct:
