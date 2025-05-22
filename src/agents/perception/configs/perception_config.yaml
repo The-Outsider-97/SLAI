@@ -1,3 +1,8 @@
+inference:
+  vision_batch: 8
+  audio_batch: 16
+  text_batch: 32
+
 transformer:
   num_layers: 6
   embed_dim: 512
@@ -25,8 +30,9 @@ tokenizer:
   unk_token: "[UNK]"
   cls_token: "[CLS]"
   sep_token: "[SEP]"
-  bpe_model_path: "data/embeddings/bpe_200d_50k_model.json"
-  bpe_vocab_path: "data/embeddings/bpe_200d_50k_vocab.json"
+  additional_special_tokens: ["[MED]", "[LAB]"]
+  bpe_model_path: "data/bpe_200d_50k_model.json"
+  bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
 
 generator:
   temperature: 1.0
@@ -71,11 +77,11 @@ audio_encoder:
 text_encoder:
   transformer:
     num_layers: 6
-    embed_dim: 768
-    num_heads: 12
-    ff_dim: 3072
+    embed_dim: 512
+    num_heads: 8
+    ff_dim: 2048
     max_position_embeddings: 512
-  embedding_dim: 768
+  embedding_dim: 512
   
 vision_encoder:
   img_size: 224
