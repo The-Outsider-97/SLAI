@@ -11,6 +11,7 @@ import numpy as np
 from typing import Any
 from collections import OrderedDict, defaultdict, deque
 
+from src.agents.collaborative.shared_memory import SharedMemory
 from logs.logger import get_logger
 
 logger = get_logger("Base Agent")
@@ -19,7 +20,10 @@ class BaseAgent(abc.ABC):
     def __init__(self, shared_memory, agent_factory, config=None):
             self.logger = logging.getLogger(self.__class__.__name__)
             self.name = self.__class__.__name__
-            self.shared_memory=shared_memory
+            
+            if shared_memory is None:
+                shared_memory = SharedMemory(config={})
+            self.shared_memory = shared_memory
             self.agent_factory=agent_factory
             self.config=config or {
                 'defer_initialization': True,
