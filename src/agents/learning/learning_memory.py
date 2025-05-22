@@ -47,6 +47,9 @@ class LearningMemory:
         
         logger.info(f"Learning Memory has succesfully initialized")
 
+    def size(self):
+        return len(self.memory)
+
     def add(self, experience, priority=None, tag=None):
         """Add experience with cache management"""
         with self.lock:
