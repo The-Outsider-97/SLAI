@@ -169,7 +169,7 @@ class TextEncoder(torch.nn.Module):
         return d_embed
 
     def parameters(self):
-        return [self.embedding, self.position_embed] + self.transformer.parameters()
+        return [self.embedding, self.position_embed] + list(self.transformer.parameters())
 
     def train(self):
         self.training = True
