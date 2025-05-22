@@ -37,10 +37,10 @@ class EfficientAttention(torch.nn.Module):
         
         # Initialize parameters with proper scaling
         init_fn = getattr(TensorOps, f"{self.initializer}_init")
-        self.q_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
-        self.k_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
-        self.v_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
-        self.out_proj = Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.q_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.k_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.v_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
+        self.out_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
         self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
 
