@@ -1,6 +1,7 @@
 import math
 import torch
 import yaml
+import torch.nn as nn
 
 from abc import ABC, abstractmethod
 
@@ -28,25 +29,30 @@ class Transformer(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         cfg = config.get('transformer', {})
-        self.dropout_rate = cfg.get('dropout_rate', 0.1)
         self.embed_dim = cfg['embed_dim']
-        self.layers = [
-            {
+        self.num_layers = cfg['num_layers']
+        self.dropout_rate = cfg.get('dropout_rate', 0.1)
+        self.dropout = torch.nn.Dropout(p=self.dropout_rate)
+        
+        self.layers = torch.nn.ModuleList([
+            torch.nn.ModuleDict({
                 'attention': EfficientAttention(config),
                 'ff': FeedForward(config),
-                'norm1': Parameter(torch.ones(cfg['embed_dim'])),
-                'norm2': Parameter(torch.ones(cfg['embed_dim'])),
-            }
-            for _ in range(cfg['num_layers'])
-        ]
-        self.positional_encoding = self._init_positional_encoding(
-            cfg['embed_dim'], 
-            cfg['max_position_embeddings']
+                'norm1': torch.nn.LayerNorm(cfg['embed_dim']),
+                'norm2': torch.nn.LayerNorm(cfg['embed_dim']),
+            }) for _ in range(cfg['num_layers'])
+        ])
+        self.positional_encoding = nn.Parameter(
+            self._init_positional_encoding(
+                cfg['embed_dim'], 
+                cfg['max_position_embeddings']
+            ), 
+            requires_grad=True  # Ensure gradients are enabled
         )
-        self.style_embeddings = Parameter(
+        self.style_embeddings = torch.nn.Parameter(
             torch.randn(cfg['num_styles'], cfg['embed_dim']) * 0.02)
         
-        logger.info(f"Transformer is successfully initialized with:\n- {self.embed_dim} embed dimensions\n- {self.dropout_rate} dropout rate")
+        logger.info(f"Transformer is successfully initialized with:\n- {torch.nn.Module}")
 
     def parameters(self):
         params = [self.positional_encoding]
@@ -63,7 +69,7 @@ class Transformer(torch.nn.Module):
                 layer['norm1'],
                 layer['norm2']
             ])
-        return params
+        return super().parameters() # OR param
 
     def _init_positional_encoding(self, d_model, max_len=5000):
         """Sinusoidal positional encoding (Vaswani et al. 2017)"""
@@ -72,27 +78,27 @@ class Transformer(torch.nn.Module):
         pe = torch.zeros(max_len, d_model)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        return Parameter(pe)  # (max_len, d_model)
+        return pe # OR nn.Parameter(pe, requires_grad=False)  # (max_len, d_model)
 
     def forward(self, x, style_id, attention_mask=None, causal=False):
-        """Implements transformer encoder forward pass"""
         seq_len = x.shape[1]
-        x = x + self.positional_encoding.data.unsqueeze(0)[:, :seq_len, :]
-
-        style_emb = self.style_embeddings.data[style_id].unsqueeze(0)
+        x = x + self.positional_encoding[:seq_len, :].unsqueeze(0)
+        style_emb = self.style_embeddings[style_id].unsqueeze(0).unsqueeze(1)
+        x = x + style_emb 
+        # x = x + self.style_embeddings[style_id].unsqueeze(1)
 
         for layer in self.layers:
+            # Attention block
             residual = x
-            normed_x = TensorOps.layer_norm(x, gamma=layer['norm1_gamma'].data, beta=layer['norm1_beta'].data)
-            attn_out = layer['attention'].forward(normed_x, ...) # Add dropout here if needed
-            x = residual + attn_out # Or residual + self.dropout(attn_out)
+            x = layer['norm1'](x)
+            x = residual + self.dropout(layer['attention'](x, mask=attention_mask, causal=causal))
             
+            # FFN block
             residual = x
-            normed_x = TensorOps.layer_norm(x, gamma=layer['norm2_gamma'].data, beta=layer['norm2_beta'].data)
-            ff_out = layer['ff'].forward(normed_x) # Add dropout here if needed
-            x = residual + ff_out # Or residual + self.dropout(ff_out)
+            x = layer['norm2'](x)
+            x = residual + self.dropout(layer['ff'](x))
 
-        return TensorOps.layer_norm(x)
+        return x
 
     def backward(self, dout):
         """Backpropagation through transformer layers"""
@@ -100,18 +106,19 @@ class Transformer(torch.nn.Module):
         for layer in reversed(self.layers):
             # Backward through FFN
             d_ff = layer['ff'].backward(dout)
-            norm2_grad = layer['norm2'].grad if layer['norm2'].grad is not None else 0
-            d_norm2 = d_ff * (1 + norm2_grad)
+            d_norm2 = d_ff
             dout += d_norm2
             
             # Backward through attention
             d_attn = layer['attention'].backward(dout)
-            norm1_grad = layer['norm1'].grad if layer['norm1'].grad is not None else 0
-            d_norm1 = d_attn * (1 + norm1_grad)
+            d_norm1 = d_attn
             dout += d_norm1
-            
+
         # Positional encoding gradients (non-trainable in original paper)
         return dout
+
+    #def positional_encoding():
+    #    return []
 
     def load_pretrained(self, weights):
         """Load weights in Hugging Face-style format"""
@@ -254,7 +261,7 @@ class Generator:
         best_sequence, best_log_prob = beams[0]
         return self.tokenizer.decode(best_sequence), best_log_prob
 
-class TaskHead(ABC):
+class TaskHead(torch.nn.Module):
     """Enhanced abstract base class for task-specific heads with common utilities"""
     def __init__(self, 
                  dropout_rate: float = 0.1, 
@@ -262,36 +269,37 @@ class TaskHead(ABC):
                  device: str = 'cpu'):
         super().__init__()
         self.dropout_rate = dropout_rate
-        self.layer_norm_eps = layer_norm_eps
         self.device = device
         self.training = True
         
         # Common components
         self.dropout = torch.nn.Dropout(p=dropout_rate)
-        self.layer_norm = lambda x: TensorOps.layer_norm(x, eps=layer_norm_eps)
 
-    @abstractmethod
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Forward pass must be implemented by subclasses"""
-        pass
+        self.layer_norm = None
+        self.layer_norm_eps = layer_norm_eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.layer_norm:
+            x = self.layer_norm(x)
+        x = self.dropout(x)
+        raise x
 
     def parameters(self) -> list:
-        """Return all trainable parameters"""
+        """Return all trainable parameters using PyTorch's native parameter tracking"""
         params = []
-        for attr in vars(self).values():
-            if isinstance(attr, Parameter):
-                params.append(attr)
-            elif hasattr(attr, 'parameters'):  # For nested modules
-                params.extend(attr.parameters())
+        for name, module in self.named_modules():
+            if name == '':  # Skip self
+                continue
+            params += list(module.parameters())
         return params
 
+    def named_modules():
+        return None
+
     def to(self, device: str) -> None:
-        """Move all parameters to specified device"""
+        """Move all parameters to specified device using PyTorch's native to()"""
+        super().to(device)  # This handles module movement
         self.device = device
-        for param in self.parameters():
-            param.data = param.data.to(device)
-            if param.grad is not None:
-                param.grad = param.grad.to(device)
 
     def train(self) -> None:
         """Set to training mode"""
@@ -320,72 +328,57 @@ class TaskHead(ABC):
             torch.nn.init.xavier_uniform_(module.data)
 
 class ClassificationHead(TaskHead):
-    def __init__(self, hidden_dim, num_classes):
-        super().__init__()
-        self.dense = Parameter(torch.randn(hidden_dim, num_classes) * 0.02)
+    def __init__(self, hidden_dim, num_classes, dropout_rate=0.1):
+        super().__init__(dropout_rate=dropout_rate)
+        self.layer_norm = torch.nn.LayerNorm(hidden_dim, eps=self.layer_norm_eps)
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, hidden_dim//2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim//2, num_classes)
+        )
 
     def forward(self, hidden_states):
-        cls_output = hidden_states[:, 0, :]
-        return torch.matmul(cls_output, self.dense.data)
+        # Get CLS token or average pooling
+        if hidden_states.dim() == 3:  # [batch, seq_len, features]
+            x = hidden_states[:, 0, :]  # CLS token
+        else:
+            x = torch.mean(hidden_states, dim=1)  # Average pooling
+        x = super().forward(x) # Apply base processing
+        return self.classifier(x) # Final classification
 
 class RegressionHead(TaskHead):
-    def __init__(self, hidden_dim):
-        super().__init__()
-        self.dense = Parameter(torch.randn(hidden_dim, 1) * 0.02)
+    def __init__(self, hidden_dim, dropout_rate=0.1):
+        super().__init__(dropout_rate=dropout_rate)
+        self.layer_norm = torch.nn.LayerNorm(hidden_dim, eps=self.layer_norm_eps)
+        self.regressor = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, 1),
+            torch.nn.Sigmoid()  # For [0,1] outputs
+        )
 
     def forward(self, hidden_states):
-        pooled = torch.mean(hidden_states, dim=1)
-        return torch.matmul(pooled, self.dense.data)
+        x = torch.mean(hidden_states, dim=1) # Pooling
+        x = super().forward(x) # Base processing
+        
+        return self.regressor(x)
 
 class Seq2SeqHead(TaskHead):
     """Sequence-to-sequence task head with decoder and generator"""
-    def __init__(self, 
-                 text_encoder, 
-                 tokenizer, 
-                 config,
-                 device: str = 'cpu'):
-        seq2seq_cfg = config['task_heads']['seq2seq']
-        decoder_cfg = config['task_heads']['seq2seq']['decoder']
+    def __init__(self, decoder, generator, hidden_dim):
+        super().__init__()
+        self.decoder = decoder
+        self.generator = generator
+        self.proj = torch.nn.Linear(hidden_dim, hidden_dim)
 
-        super().__init__(
-            dropout_rate=seq2seq_cfg['dropout_rate'],
-            device=device)
-        self.vocab_size = tokenizer.vocab_size
-        self.hidden_dim = text_encoder.embed_dim
-        decoder_config = {
-            'transformer': {
-                'num_layers': decoder_cfg['num_layers'],
-                'embed_dim': decoder_cfg['embed_dim'],
-                'num_heads': decoder_cfg['num_heads'],
-                'ff_dim': decoder_cfg['ff_dim'],
-                'num_styles': decoder_cfg['num_styles'],
-                'max_position_embeddings': decoder_cfg['max_position_embeddings']
-            },
-            'attention': config['attention'],
-            'feedforward': config['feedforward']
-        }
-        self.decoder = Transformer(decoder_config)
-        self.generator = Generator(
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            vocab_size=self.vocab_size,
-            hidden_dim=self.hidden_dim)
-        self.proj = Parameter(torch.randn(self.hidden_dim, self.hidden_dim) * 0.02)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states):
         # Decoder processing
-        decoder_out = self.decoder.forward(
-            hidden_states.to(self.device), 
-            style_id=0, 
-            causal=True
-        )
+        decoder_out = self.decoder(hidden_states)
         
-        # Projection layer
-        projected = torch.matmul(decoder_out, self.proj.data)
+        # Projection
+        projected = self.proj(decoder_out)
         
-        # Generator processing
-        logits = self.generator.output_head.data @ projected.transpose(-1, -2)
-        return self.dropout(logits) if self.training else logits
+        # Generate logits
+        logits = self.generator(projected)
+        return logits
 
 class MultiModalClassificationHead(TaskHead):
     def __init__(self, hidden_dims, num_classes, fusion_method='concat'):
@@ -432,6 +425,8 @@ if __name__ == "__main__":
     embed_dim = 200
     vocab_size = 50016
     transformer = Transformer(config)
+    decoder=None
+    hidden_dim=8
 
     from src.agents.perception.modules.tokenizer import Tokenizer
     tokenizer = Tokenizer(config)
@@ -443,14 +438,9 @@ if __name__ == "__main__":
         hidden_dim=embed_dim
     )
     task_heads = [
-        ClassificationHead(hidden_dim=embed_dim, num_classes=10),
-        RegressionHead(hidden_dim=embed_dim),
-        Seq2SeqHead(
-            text_encoder=transformer,
-            tokenizer=tokenizer,
-            config=config,
-            device='cuda' if torch.cuda.is_available() else 'cpu'
-        ),
+        ClassificationHead(hidden_dim=embed_dim, num_classes=10, dropout_rate=0.1),
+        RegressionHead(hidden_dim=embed_dim, dropout_rate=0.1),
+        Seq2SeqHead(decoder, generator, hidden_dim),
         MultiModalClassificationHead(
             hidden_dims=[embed_dim, 64],  # Example multimodal setup
             num_classes=10,
