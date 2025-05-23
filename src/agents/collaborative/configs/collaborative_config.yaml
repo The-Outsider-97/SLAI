@@ -1,0 +1,48 @@
+# configs/collaboration_config.yaml
+collaboration:
+  max_concurrent_tasks: 100
+  load_factor: 0.75
+  health_check_interval: 60  # seconds
+  thread_pool_workers: 10
+
+task_routing:
+  risk_threshold: 0.7
+  retry_policy:
+    max_attempts: 3
+    backoff_factor: 1.5
+  state_dim: 3
+  num_handlers: 2
+  sensitive_attributes: ["age", "gender"]
+  fallback_plans:
+    train_model: ["retry_simple_trainer", "notify_human"]
+    data_audit: ["emergency_data_cleaner"]
+    TranslateAndSummarize: ["Translate", "Summarize"]
+    AnalyzeData: ["PreprocessData", "Analyze"]
+    ExplainConcept: ["RetrieveFact", "Summarize"]
+
+registry:
+  health_check_interval: 300  # seconds-
+  agent_discovery:
+    default_package: "src.agents"
+    excluded_modules: ["browser_agent"]
+
+shared_memory:
+  max_memory_mb: 100
+  max_versions: 10
+  ttl_check_interval: 30  # seconds
+  network_latency: 0.0
+  default_ttl: 3600  # 1 hour default expiration
+
+paths:
+  alignment_config: "src/agents/alignment/configs/alignment_config.yaml"
+  user_data: "data/users.csv"
+  stats_output: "report/agent_stats.json"
+
+agents:
+  default_priority: 0
+  max_tasks_per_agent: 5
+  new_agent_success_bias: 1.0  # Initial success rate assumption for new agents
+
+replay_config:
+  batch_size: 64
+  per_beta: 0.6
