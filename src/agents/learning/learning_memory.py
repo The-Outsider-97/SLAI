@@ -30,22 +30,27 @@ Transition = namedtuple('Transition', ['state', 'action', 'reward', 'next_state'
 class LearningMemory:
     def __init__(self, config):
         """Manages experiences with LRU/FIFO eviction, checkpoints, and tagging."""
-        base_config = config or load_config()
-        memory_config = base_config.get('learning_memory', {})
-        base_config.update(memory_config)
-        self.tag_index = defaultdict(list)
+        if 'learning_memory' in config:
+            self.config = config['learning_memory']
+        else:
+            # fallback for flat config
+            self.config = config
 
-        #  Priority Queue
+        # Set fallback defaults
+        self.config.setdefault('max_size', 10000)
+        self.config.setdefault('eviction_policy', 'LRU')
+        self.config.setdefault('checkpoint_dir', 'checkpoints')
+        self.config.setdefault('checkpoint_freq', 1000)
+        self.config.setdefault('auto_save', True)
+
+        self.tag_index = defaultdict(list)
         self.priorities = {}
         self.max_priority = 1.0
-
         self.lock = Lock()
-
-        self.config = base_config
         self.memory = OrderedDict()
         self.access_counter = 0
-        
-        logger.info(f"Learning Memory has succesfully initialized")
+
+        logger.info("Learning Memory successfully initialized")
 
     def size(self):
         return len(self.memory)
@@ -57,15 +62,15 @@ class LearningMemory:
             self.tag_index[tag].append(key)
             self.memory[key] = experience
             self.access_counter += 1
-
+    
             if priority is None:
                 priority = self.max_priority
             self.priorities[key] = priority
-            
+    
             if len(self.memory) >= self.config['max_size']:
                 self._evict()
-            
-            if self.config['auto_save'] and (self.access_counter % self.config['checkpoint_freq'] == 0):
+    
+            if self.config.get('auto_save') and (self.access_counter % self.config['checkpoint_freq'] == 0):
                 self.save_checkpoint()
 
     def add_batch(self, experiences, tag=None):
