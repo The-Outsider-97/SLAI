@@ -129,6 +129,7 @@ Note: If you see an error about execution policy:
    pip install pympler
    pip install flask_limiter
    pip install flask_talisman
+   pip install flask_sqlalchemy
 
    python -m nltk.downloader punkt
    ```
