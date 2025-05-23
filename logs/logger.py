@@ -9,6 +9,7 @@ import hashlib
 import zlib
 import statistics
 import atexit
+import shutil
 
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -120,13 +121,14 @@ def get_logger(name: str) -> logging.Logger:
             root_logger.removeHandler(handler)
 
         # File handler
-        file_handler = RotatingFileHandler(
+        file_handler = RotatingHandler(
             'logs/app.log', 
             maxBytes=1000000, 
             backupCount=5, 
             delay=True  # Defer file opening until first log
         )
         file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(file_handler)
 
         # Console handler with colors
@@ -168,8 +170,38 @@ class RotatingHandler(RotatingFileHandler):
         self.compress_threshold = 2  # Number of backups before compression
 
     def doRollover(self):
-        super().doRollover()
-        self._compress_queue.append(self.baseFilename + ".1")
+        if self.stream:
+            try:
+                self.stream.flush()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+    
+        dfn = self.rotation_filename(self.baseFilename + ".1")
+    
+        try:
+            if os.path.exists(dfn):
+                os.remove(dfn)
+            os.rename(self.baseFilename, dfn)
+        except PermissionError:
+            # Graceful fallback: copy+remove, tolerate failure silently            
+            try:
+                shutil.copyfile(self.baseFilename, dfn)
+                os.remove(self.baseFilename)
+            except Exception:
+                # Last resort: log but suppress crash
+                if self._compress_queue and self._compress_queue[-1] != self.baseFilename:
+                    print(f"[LOGGER] Log rotation skipped (still locked): {self.baseFilename}", file=sys.stderr)
+                return  # Prevent further attempts this cycle
+    
+        if not self.delay:
+            try:
+                self.stream = self._open()
+            except Exception:
+                self.stream = None
+    
+        self._compress_queue.append(dfn)
         self._manage_compression()
 
     def _manage_compression(self):
