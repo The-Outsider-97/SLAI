@@ -145,12 +145,22 @@ class PerceptionAgent(BaseAgent):
     def forward(self, inputs):
         embeddings = {}
         for modality, encoder in self.encoders.items():
-            if modality == 'vision':
-                vision_output = encoder.forward(inputs[modality])
-                embeddings[modality] = vision_output  # Use as-is
-                print(f"Vision output shape: {vision_output.shape}")
-            else:
-                embeddings[modality] = encoder.forward(inputs[modality])
+            if modality in inputs:
+                # Tokenize text input before processing
+                if modality == 'text':
+                    # Tokenize the text
+                    tokenized = self.tokenizer(inputs[modality])
+                    # Extract input_ids tensor
+                    input_ids = tokenized['input_ids']
+                    embeddings[modality] = encoder.forward(input_ids)
+                elif modality == 'vision':
+                    vision_output = encoder.forward(inputs[modality])
+                    embeddings[modality] = vision_output
+                elif modality == 'audio':
+                    audio_output = encoder.forward(inputs[modality])
+                    embeddings[modality] = audio_output
+                else:
+                    embeddings[modality] = encoder.forward(inputs[modality])
         fused = self.fusion.forward(embeddings)
         self._cache = {'fused': fused}
         if self.generator:
