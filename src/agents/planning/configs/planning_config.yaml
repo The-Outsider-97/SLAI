@@ -1,3 +1,52 @@
+safety_margins:
+  resource_buffers:
+    gpu: 0.15           # 15% of available GPUs must remain unallocated
+    ram: 0.2            # 20% of total RAM must remain free
+    specialized_hardware: ["emergency_gpu"]  # Reserved hardware units
+  temporal:
+    min_task_duration: 30  # Minimum allowed task duration in seconds
+    max_concurrent: 5      # Max simultaneous tasks per agent
+    time_buffer: 120       # Minimum gap between dependent tasks (seconds)
+
+service_discovery:
+  mode: "static"  # Options: static|consul|k8s
+  static_nodes: [] # OR add "node1", "node2", "gpu-node1"
+  consul_url: "http://localhost:8500"
+  k8s_api: "https://kubernetes.default.svc"
+  k8s_token: ""
+  node_port: 9100  # Port for node metrics API
+
+decomposition:
+  min_chunk_size: 100      # Minimum data elements per horizontal split
+  max_parallel_chunks: 8   # Maximum concurrent data chunks
+  min_ram_per_chunk: 4     # GB RAM guaranteed per data chunk
+  vertical_stages:
+    ABSTRACT:  # Match TaskType.ABSTRACT
+      - name: "default_stage"
+        gpu: 0
+        ram: 8
+    processing_pipeline:
+      - name: "preprocessing"
+        gpu: 0
+        ram: 8
+      - name: "core_processing"
+        gpu: 1
+        ram: 16
+        specialized_hw: ["tensor_core"]
+      - name: "postprocessing"
+        gpu: 0
+        ram: 4
+  stage_time_buffer: 60    # Buffer between stage deadlines (seconds)
+
+cluster_monitoring:
+  node_query_timeout: 2    # Seconds to wait for node response
+  update_interval: 5       # Seconds between resource updates
+  discovery_poll_interval: 300  # Seconds between node discovery scans
+  load_thresholds:
+    cpu: 0.85              # CPU usage alert threshold
+    memory: 0.9            # Memory usage alert threshold
+    temperature: 70        # GPU temperature threshold (°C)
+
 task_scheduler:
   risk_threshold: 0.7
   retry_policy:
