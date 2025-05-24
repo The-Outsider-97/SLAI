@@ -130,6 +130,7 @@ Note: If you see an error about execution policy:
    pip install flask_limiter
    pip install flask_talisman
    pip install flask_sqlalchemy
+   pip install apscheduler
 
    python -m nltk.downloader punkt
    ```
