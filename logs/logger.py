@@ -57,6 +57,8 @@ class ColorFormatter(logging.Formatter):
         'bg_white': '\033[47m',
     }
     def format(self, record):
+        if not sys.stdout.isatty():
+            return super().format(record)
         level = record.levelname
         message = record.getMessage()
 
@@ -133,7 +135,7 @@ def get_logger(name: str) -> logging.Logger:
 
         # Console handler with colors
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(ColorFormatter())
+        console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s'))
         root_logger.addHandler(console_handler)
 
         # Queue handler
