@@ -75,7 +75,7 @@ class GridSearch:
         self.best_score: float = -np.inf
         self.best_params: Optional[Dict] = None
         self.best_score_std: float = 0.0
-        self.output_dir = Path("reports/grid_search")
+        self.output_dir = Path("src/tuning/reports/grid_search")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.X_data: Optional[np.ndarray] = None
         self.y_data: Optional[np.ndarray] = None
