@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Planning Agent with Alternative Method Search Strategies
 Implements grid search and Bayesian-inspired decomposition selection
@@ -34,6 +36,7 @@ from src.agents.planning.planning_types import Task, TaskType, TaskStatus, World
 from src.agents.planning.planning_metrics import PlanningMetrics
 from src.agents.planning.planning_memory import PlanningMemory
 from src.agents.planning.planning_monitor import PlanningMonitor
+from src.agents.planning.safety_planning import SafetyPlanning, SafetyMarginError, TemporalViolation, ResourceViolation
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
@@ -63,6 +66,8 @@ class PlanningAgent(BaseAgent):
         self.decision_tree_heuristic = DecisionTreeHeuristic()
         self.gb_heuristic = GradientBoostingHeuristic()
         self.monitor = PlanningMonitor(agent=self)
+        self.safety_planner = SafetyPlanning(config=config.get('safety_margins', CONFIG_PATH))
+        self.safety_planner.resource_monitor._service_discovery_config = (config.get('service_discovery', CONFIG_PATH))
         self.plan_history = deque(maxlen=1000)
         self.shared_memory = self.shared_memory[0] if isinstance(self.shared_memory, tuple) else self.shared_memory
         self.agent_factory = self.agent_factory[0] if isinstance(self.agent_factory, tuple) else self.agent_factory
@@ -82,7 +87,7 @@ class PlanningAgent(BaseAgent):
         self.scheduler = DeadlineAwareScheduler(risk_threshold=config.get('risk_threshold', 0.7))
         self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
-        logger.info(f"PlanningAgent initialized. World state: {self.world_state}")
+        logger.info(f"PlanningAgent succesfully initialized")
 
         # Task head registry
         self.task_heads = {
@@ -499,32 +504,6 @@ class PlanningAgent(BaseAgent):
         
         return True
 
-    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
-        """Decomposes the goal task into a plan of primitive tasks."""
-        self._planning_start_time = time.time()
-        plan = self.decompose_task(goal_task)
-        self._planning_end_time = time.time()
-    
-        if plan is None:
-            goal_task.status = TaskStatus.FAILED
-            logger.error("Failed to generate plan.")
-            return None
-    
-        # Execute scheduling
-        scheduled_tasks = self._convert_to_schedule_format(plan)
-        risk_assessor = self.shared_memory.get('risk_assessor')
-    
-        schedule = self.scheduler.schedule(
-            tasks=scheduled_tasks,
-            agents=self._get_available_agents(),
-            risk_assessor=risk_assessor,
-            state=self.world_state
-        )
-    
-        logger.info(f"Plan generated with {len(plan)} steps.")
-        self.current_plan = plan
-        return self._convert_to_plan(schedule)
-
     def copy(self):
         new_task = Task(name=self.name, type=self.type)
         # Copy other attributes like preconditions, effects, etc.
@@ -550,8 +529,64 @@ class PlanningAgent(BaseAgent):
         """Get agent capabilities from collaborative agent's registry"""
         return self.shared_memory.get('agent_registry', {})
 
+    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
+        """Decomposes the goal task into a plan of primitive tasks."""
+        self._planning_start_time = time.time()
+        plan = self.decompose_task(goal_task)
+        # Integrated safety check
+        try:
+            if not self.safety_planner.safety_check(plan):
+                raise AcademicPlanningError("Plan failed initial safety validation")
+        except (ResourceViolation, TemporalViolation) as e:
+            logger.error(f"Safety violation in generated plan: {str(e)}")
+            return self._handle_safety_violation(goal_task, e)
+        self._planning_end_time = time.time()
+    
+        if plan is None:
+            goal_task.status = TaskStatus.FAILED
+            logger.error("Failed to generate plan.")
+            return None
+    
+        # Execute scheduling
+        scheduled_tasks = self._convert_to_schedule_format(plan)
+        risk_assessor = self.shared_memory.get('risk_assessor')
+    
+        schedule = self.scheduler.schedule(
+            tasks=scheduled_tasks,
+            agents=self._get_available_agents(),
+            risk_assessor=risk_assessor,
+            state=self.world_state
+        )
+    
+        logger.info(f"Plan generated with {len(plan)} steps.")
+        self.current_plan = plan
+        return self._convert_to_plan(schedule)
+
     def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
         """Executes a plan of primitive tasks. Tracks success, updates statistics, and handles failures."""
+        for idx, task in enumerate(plan):
+            try:
+                # Pre-execution safety check
+                self.safety_planner._validate_equipment_constraints(task)
+                self.safety_planner._validate_temporal_constraints(task)
+                
+                # Execute task
+                self._execute_action(task)
+                
+                # Update resource monitor
+                self.safety_planner.resource_monitor.update_allocations(
+                    task.resource_requirements
+                )
+                
+            except SafetyMarginError as e:
+                logger.warning(f"Safety margin exceeded: {str(e)}")
+                recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
+                if recovery_plan:
+                    return self.execute_plan(recovery_plan, goal_task)
+                else:
+                    task.status = TaskStatus.FAILED
+                    break
+
         self.current_plan = plan
         executed_successfully = True
         plan_idx = 0
@@ -1119,165 +1154,51 @@ class ExplanatoryPlanner(PlanningAgent):
         """Memoization cache for common decompositions (Markovitch & Scott 1988)"""
         self.decomposition_cache = {}
 
-    def decompose_task(self, task: Task) -> Optional[List[Task]]:
-        """Memoized version of decomposition"""
-        cache_key = (task.name, task.selected_method, frozenset(self.world_state.items()))
-        if cache_key in self.decomposition_cache:
-            return self.decomposition_cache[cache_key]
+    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
+        """Augmented decomposition with safety-aware distribution"""
+        try:
+            # Attempt distributed decomposition first
+            return self.safety_planner.distributed_decomposition(task_to_decompose)
+        except ResourceViolation:
+            logger.info("Falling back to local decomposition")
+            return self._local_decomposition(task_to_decompose)
 
-        result = super().decompose_task(task)
-        self.decomposition_cache[cache_key] = result
-        return result
+    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
+        """Integrated safety violation recovery"""
+        logger.warning(f"Initial plan failed safety checks. Attempting repair...")
+        
+        # Get safety-aware repair candidates
+        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
+        
+        # Validate and select best candidate
+        for candidate in candidates:
+            if self.safety_planner.safety_check(candidate):
+                logger.info("Found valid safety-compliant alternative plan")
+                return candidate
+                
+        logger.error("No safe alternatives found")
+        return None
+
+    def interactive_adjustment(self, adjustment: dict):
+        """Expose safety planner's adjustment interface"""
+        self.safety_planner.interactive_adjustment_handler(adjustment)
+        self.current_plan = self.safety_planner.current_plan
 
 if __name__ == "__main__":
     print("\n=== Running Planning Agent Demo ===")
-    
+
     # Mock environment setup
     from unittest.mock import Mock
-    
-    # Define sample tasks
-    class BreakfastTask(Task):
-        def __init__(self):
-            super().__init__("prepare_breakfast", TaskType.ABSTRACT)
-            self.methods = [
-                [make_coffee_task(), toast_bread_task()],  # Method 0
-                [brew_tea_task(), cook_eggs_task()]        # Method 1
-            ]
-
-    class toast_bread_task(Task):
-        def __init__(self):
-            super().__init__("toast_bread", TaskType.ABSTRACT)
-            self.methods = [
-                [use_toaster_task()],
-                [use_oven_task()]  # Now it is defined!
-            ]
-
-    class make_coffee_task(Task):
-        def __init__(self):
-            super().__init__("make_coffee", TaskType.PRIMITIVE, preconditions=[lambda s: s.get('has_water', False)],
-                             effects=[lambda s: s.update({'coffee_made': True})])
-            self.preconditions = [lambda s: s.get('has_water', False)]
-            self.effects = [lambda s: s.update({'coffee_made': True})]
- 
-    class brew_tea_task(Task):
-        def __init__(self):
-            super().__init__("brew_tea", TaskType.PRIMITIVE)
-            self.preconditions = [lambda s: s.get('has_water', False)]
-            self.effects = [lambda s: s.update({'tea_made': True})]
-    
-    class cook_eggs_task(Task):
-        def __init__(self):
-            super().__init__("cook_eggs", TaskType.PRIMITIVE)
-            self.preconditions = [lambda s: s.get('oven_available', False)]
-            self.effects = [lambda s: s.update({'eggs_cooked': True})]
-    
-    class use_oven_task(Task):
-        def __init__(self):
-            super().__init__("use_oven", TaskType.PRIMITIVE)
-            self.preconditions = [lambda s: s.get('oven_available', False)]
-            self.effects = [lambda s: s.update({'toast_done': True})]
-           
-    class use_toaster_task(Task):
-        def __init__(self):
-            super().__init__("use_toaster", TaskType.PRIMITIVE)
-            self.preconditions = [lambda s: s.get('toaster_available', False)]
-            self.effects = [lambda s: s.update({'toast_done': True})]
-
-    # Initialize agent with sample world state
     mock_agent = Mock()
     mock_agent.shared_memory = {
         'text_encoder': Mock(),
         'risk_assessor': lambda x: 0.3,
         'agent_registry': {'chef_agent': {'capabilities': ['food_prep']}}
     }
-    
+
     planner = PlanningAgent(
         shared_memory=mock_agent.shared_memory,
         agent_factory=None,
         config={'risk_threshold': 0.4}
     )
-
-    # Register tasks
-    planner.register_task(BreakfastTask())
-    planner.register_task(toast_bread_task())
-    planner.register_task(use_toaster_task())
-    planner.register_task(make_coffee_task())
-    planner.register_task(brew_tea_task())
-    planner.register_task(cook_eggs_task())
-    planner.register_task(use_oven_task())
-
-    # Set initial world state
-    planner.world_state = {
-        'has_water': True,
-        'toaster_available': False,  # Simulate broken toaster
-        'oven_available': True
-    }
-
-    # Generate plan
-    print("\n=== Generating Initial Plan ===")
-    goal_task = BreakfastTask()
-    plan = planner.generate_plan(goal_task)
-    
-    if plan:
-        print(f"\nGenerated Plan Steps:")
-        for i, task in enumerate(plan, 1):
-            print(f"{i}. {task.name} (Method {task.selected_method})")
-
-    # Execute plan
-    print("\n=== Executing Plan ===")
-    if plan is not None:
-        result = planner.execute_plan(plan, goal_task)
-        print(f"\nExecution Result: {result['status']}")
-        print(f"Final World State: {result['world_state']}")
-    else:
-        print("\nPlan generation failed. No execution performed.")
-
-    # Demonstrate replanning
-    print("\n=== Simulating Replanning Scenario ===")
-    if plan:
-        failed_task_for_replan = next((t for t in plan if t.name == "toast_bread"), None)
-        
-        if failed_task_for_replan:
-            print(f"Attempting to replan based on hypothetical failure in: {failed_task_for_replan.name}")
-            original_toast_bread_task = None
-            toast_bread_template_for_replan = planner.task_library.get("toast_bread")
-            if toast_bread_template_for_replan:
-
-                toast_bread_template_for_replan.status = TaskStatus.FAILED 
-
-                print(f"Simulating failure of a method for: {toast_bread_template_for_replan.name}")
-                new_plan = planner.replan(toast_bread_template_for_replan) # Pass the task that needs replanning
-
-                if new_plan:
-                    print("\nReplanned Steps:")
-                    for i, task in enumerate(new_plan, 1):
-                        method_info = f" (Method {task.selected_method})" if task.type == TaskType.ABSTRACT else ""
-                        print(f"{i}. {task.name}{method_info}")
-                    
-                    print("\n=== Executing Replanned Version ===")
-                    planner.world_state['toaster_available'] = False
-                    planner.world_state['oven_available'] = True
-
-                    if goal_task:
-                         goal_task.status = TaskStatus.PENDING
-
-                    replan_result = planner.execute_plan(new_plan, goal_task)
-                    print(f"\nReplan Result: {replan_result['status']}")
-                    print(f"Updated World State: {replan_result['world_state']}")
-                else:
-                    print(f"Replanning failed for {toast_bread_template_for_replan.name}!")
-            else:
-                print("Could not find 'toast_bread' task in library for replanning demo.")
-        else:
-            print("Could not find 'toast_bread' task in the plan for replanning demo, or plan is empty.")
-    else:
-        print("Initial plan generation failed, skipping replanning demo.")
-
-    # Show method statistics
-    print("\n=== Method Performance Statistics ===")
-    for (task, method), stats in planner.method_stats.items():
-        if stats['total'] > 0:
-            success_rate = stats['success']/stats['total']
-            print(f"{task} Method {method}: {success_rate:.1%} success rate")
-
     print("\n=== Demo Completed ===\n")
