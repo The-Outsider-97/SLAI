@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 SLAI Learning Agent: Core Component for Autonomous Learning & Improvement
 
@@ -39,7 +41,7 @@ from logs.logger import get_logger
 
 logger = get_logger("Learning Agent")
 
-LOCAL_CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
+LOCAL_CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
 
 def validation_logic(self):
     required_params = {
