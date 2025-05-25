@@ -27,23 +27,25 @@ import time
 import torch
 import numpy as np
 import torch.nn as nn
-import time as timedelta
 import torch.nn.functional as F
 import statsmodels.formula.api as smf
 
+from datetime import timedelta
 from collections import defaultdict, deque
 
-from src.agents.alignment.alignment_monitor import AlignmentMonitor
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.learning.learning_memory import LearningMemory
+from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from src.agents.adaptive.policy_manager import PolicyManager
 from src.agents.adaptive.parameter_tuner import LearningParameterTuner
-from src.agents.adaptive.memory_system import MultiModalMemory
+from src.agents.adaptive.reinforcement_learning import ReinforcementLearning, Transition
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
 
 logger = get_logger("Adaptive Agent")
 
-CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+LOCAL_ALIGNMENT_CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+LOCAL_ADAPTIVE_CONFIG_PATH = "src/agents/adaptive/configs/adaptive_config.yaml"
 
 class AdaptiveAgent(BaseAgent):
     """
@@ -51,7 +53,7 @@ class AdaptiveAgent(BaseAgent):
     Continuously improves from feedback, success/failure, and demonstrations.
     """
     
-    def __init__(self, shared_memory, agent_factory, config=None, learning_params=None, args=(), kwargs={}):
+    def __init__(self, shared_memory, agent_factory, config=None, args=(), kwargs={}):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
@@ -64,17 +66,16 @@ class AdaptiveAgent(BaseAgent):
         self.agent_factory = agent_factory
         self.episodic_memory = deque(maxlen=1000)  # Recent experiences
         self.semantic_memory = defaultdict(dict)   # Conceptual knowledge
-        self.learning_params = {
-            'learning_rate': 0.01,
-            'exploration_rate': 0.3,
-            'discount_factor': 0.95,
-            'temperature': 1.0,  # For softmax decision making
-            'memory_capacity': 1000,
-            **({} if learning_params is None else learning_params)
-        }
+
         state_dim = self.config.get('state_dim', 10)
         num_actions = self.config.get('num_actions', 2)
-        self.policy = PolicyManager(state_dim, num_actions)
+        
+        self.rl_engine = ReinforcementLearning(
+            config=config,
+            learning_memory=LearningMemory(config),
+            multimodal_memory=MultiModalMemory(config)
+        )
+
         self.recent_rewards = deque(maxlen=100)
         self.episode_reward = 0.0
         self.training = False
@@ -92,16 +93,6 @@ class AdaptiveAgent(BaseAgent):
         state_dim = self.config.get('state_dim', 10)
         num_handlers = self.config.get('num_handlers', 3)
 
-        # Core subsystems
-        from src.collaborative.task_router import AdaptiveRouter
-        self.memory = MultiModalMemory(config)
-        self.tuner = LearningParameterTuner(learning_params)
-        self.router = AdaptiveRouter(config)
-        self.policy = PolicyManager(config['state_dim'], config['num_actions'])
-        self.replay = ExperienceReplayManager(
-            self.memory.replay_buffer, 
-            self.policy.network
-        )
 
         self.routing_policy = nn.Sequential(
             nn.Linear(state_dim, 64),
@@ -125,48 +116,70 @@ class AdaptiveAgent(BaseAgent):
             'message_routing': self._routing_skill
         }
 
-        # Alignment implementation
-        self.alignment_monitor = AlignmentMonitor(
-            sensitive_attributes=['gender', 'age_group'],
-            config=CONFIG_PATH(
-                fairness_metrics=['demographic_parity', 'equal_opportunity'],
-                drift_threshold=0.1
-            )
-        )
-
         self.task_scheduler = DeadlineAwareScheduler(
             risk_threshold=config.get('risk_threshold', 0.7),
             retry_policy=config.get('retry_policy', {'max_attempts': 3, 'backoff_factor': 1.5})
-        )
-
-        from src.utils.replay_buffer import DistributedReplayBuffer, ExperienceReplayManager
-        self.replay_buffer = DistributedReplayBuffer(
-            capacity=config.get('replay_capacity', 100000),
-            prioritization_alpha=config.get('priority_alpha', 0.6),
-            staleness_threshold=timedelta(
-                days=config.get('experience_staleness_days', 1)
-            )
         )
 
         # Add priority experience replay parameters
         self.per_beta = config.get('per_beta', 0.4)
         self.per_epsilon = config.get('per_epsilon', 1e-6)
 
+        self._init_subsystems(learning_params=None)
+
         
-        logger.info("AdaptiveAgent initialized with parameters: %s", self.learning_params)
+        logger.info("AdaptiveAgent initialized with skills: %s", self.skills)
+
+    def _init_subsystems(self, learning_params=None):
+        # Core subsystems
+        from src.agents.collaborative.task_router import AdaptiveRouter
+        from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer
+
+        self.learning_params = {
+            'learning_rate': 0.01,
+            'exploration_rate': 0.3,
+            'discount_factor': 0.95,
+            'temperature': 1.0,  # For softmax decision making
+            'memory_capacity': 1000,
+            **({} if learning_params is None else learning_params)
+        }
+
+        self.memory = MultiModalMemory(config)
+        self.tuner = LearningParameterTuner(learning_params)
+        self.router = AdaptiveRouter(config)
+        self.policy = PolicyManager(config['state_dim'], config['num_actions'])
+
+        self.replay_buffer = DistributedReplayBuffer(
+            user_config={
+                'distributed': {
+                    'capacity': config.get('replay_capacity', 100000),
+                    'prioritization_alpha': config.get('priority_alpha', 0.6),
+                    'staleness_threshold_days': config.get('experience_staleness_days', 1)
+                }
+            }
+        )
+
+        logger.info("Subcomponents initialized with parameters: %s", self.learning_params)
 
     def _store_experience(self, state, action, reward):
-        """Store experience in prioritized replay buffer"""
-        self.memory.store_experience(state, action, reward)
-        next_state = self._extract_routing_features(state)  # Or get actual next state
-        self.replay_buffer.push(
-            agent_id=self.agent_id,
-            state=state,
-            action=action,
-            reward=reward,
-            next_state=next_state,
-            done=False
-        )
+        """Store experience in memory systems with type checking."""
+        # Validate reward type
+        if not isinstance(reward, (int, float)):
+            raise TypeError(f"Reward must be numeric. Received type: {type(reward)}")
+        
+        experience = {
+            'state': state,
+            'action': action,
+            'reward': reward,
+            'timestamp': time.time()
+        }
+        
+        self.episodic_memory.append(experience)
+        
+        # Store in semantic memory if significant
+        if abs(reward) > 1.0:
+            key = f"state_{hash(state) % 1000}"
+            self.semantic_memory[key][action] = reward
 
     def update_recovery_success(self, strategy_name, success=True):
         if success:
@@ -185,55 +198,173 @@ class AdaptiveAgent(BaseAgent):
 
     def _take_action(self, state, action):
         """
-        Simulate taking an action in the environment.
+        Simulates complex environment dynamics with multiple state dimensions
+        and realistic physical constraints.
         
-        Args:
-            state: Current state
-            action: Action to take
-            
-        Returns:
-            tuple: (next_state, reward)
+        State Components:
+        0: x_position (0-100) 
+        1: y_position (0-100)
+        2: velocity (0-10)
+        3: energy (0-100)
+        4: cargo (0-50)
+        5: integrity (0-100)
+        6: temperature (-50-100)
+        
+        Actions:
+        0: Accelerate
+        1: Decelerate
+        2: Turn left
+        3: Turn right
+        4: Collect resource
+        5: Repair system
+        6: Cool system
         """
-        # Simple environment dynamics
-        if action == 0:  # Action 0
-            next_state = tuple(s + 1 for s in state)
-            reward = -0.1 + random.random() * 0.2
-        else:  # Action 1
-            next_state = tuple(s * 1.5 for s in state)
-            reward = sum(state) / 10 + random.random() * 0.5
-
-        done = self._is_terminal_state(next_state)
-        return next_state, reward, done
+        # Convert state to mutable list
+        state = list(state)
+        reward = 0
+        done = False
+        action_success = True
+        stochasticity = random.random()
+        
+        # Physical constraints
+        MAX_VELOCITY = 10
+        MAX_ENERGY = 100
+        MAX_TEMP = 100
+        CARGO_CAPACITY = 50
+        
+        # Action effects with stochastic outcomes
+        try:
+            if action == 0:  # Accelerate
+                if state[3] > 5 and state[6] < 80:
+                    state[2] = min(state[2] + 1 + 0.5*stochasticity, MAX_VELOCITY)
+                    state[3] -= 3 * (1 + state[2]/MAX_VELOCITY)
+                    state[6] += 2
+                    reward += state[2] * 0.2
+                else:
+                    action_success = False
+                    reward -= 1
+    
+            elif action == 1:  # Decelerate
+                state[2] = max(state[2] - 1 - stochasticity, 0)
+                state[6] -= 1
+                reward += state[2] * 0.1
+    
+            elif action == 2:  # Turn left
+                new_y = state[1] + state[2] * (0.8 + stochasticity*0.4)
+                if 0 <= new_y <= 100:
+                    state[1] = new_y
+                    reward += abs(state[2]) * 0.05
+                else:
+                    reward -= 2  # Wall collision
+    
+            elif action == 3:  # Turn right
+                new_x = state[0] + state[2] * (0.8 + stochasticity*0.4)
+                if 0 <= new_x <= 100:
+                    state[0] = new_x
+                    reward += abs(state[2]) * 0.05
+                else:
+                    reward -= 2  # Wall collision
+    
+            elif action == 4:  # Collect resource
+                if state[4] < CARGO_CAPACITY and state[3] > 10:
+                    collection = min(3 * (1 + stochasticity), CARGO_CAPACITY - state[4])
+                    state[4] += collection
+                    state[3] -= 5
+                    reward += collection * 0.7
+                    state[6] += 1
+                else:
+                    action_success = False
+                    reward -= 0.5
+    
+            elif action == 5:  # Repair system
+                if state[3] > 20:
+                    repair_amount = 10 * (0.5 + stochasticity)
+                    state[5] = min(state[5] + repair_amount, 100)
+                    state[3] -= 15
+                    reward += repair_amount * 0.3
+                    state[6] += 2
+                else:
+                    action_success = False
+    
+            elif action == 6:  # Cool system
+                cooling = 5 * (0.8 + stochasticity*0.4)
+                state[6] = max(state[6] - cooling, -50)
+                state[3] -= 2
+                reward += cooling * 0.2
+    
+            # Environmental dynamics
+            state[3] = max(state[3] - 0.1 * state[2], 0)  # Energy drain
+            state[6] += 0.05 * state[2]**2  # Friction heating
+            if random.random() < 0.1:  # Random environmental events
+                state[6] += 5 * random.random()
+                
+        except Exception as e:
+            logger.error(f"Action execution error: {str(e)}")
+            reward -= 5
+            action_success = False
+    
+        # Terminal conditions
+        done = any([
+            state[3] <= 0,  # No energy
+            state[5] <= 0,  # System failure
+            state[6] >= MAX_TEMP,  # Overheating
+            (state[0] >= 95 and state[1] >= 95)  # Reached target zone
+        ])
+        
+        # Shaping rewards
+        if not action_success:
+            reward -= 0.3
+        if done and state[3] > 0:
+            reward += 100 * (state[4]/CARGO_CAPACITY)  # Delivery bonus
+        if state[6] > 75:
+            reward -= 0.2 * (state[6] - 75)  # Overheating penalty
+            
+        # Clamp state values
+        state = (
+            max(min(state[0], 100), 0),
+            max(min(state[1], 100), 0),
+            max(min(state[2], MAX_VELOCITY), 0),
+            max(min(state[3], MAX_ENERGY), 0),
+            max(min(state[4], CARGO_CAPACITY), 0),
+            max(min(state[5], 100), 0),
+            max(min(state[6], MAX_TEMP), -50)
+        )
+    
+        return tuple(state), reward, done
 
     def train(self, num_episodes=1000):
         self.training = True
         for episode in range(num_episodes):
-            self.episode_reward = 0.0
-            state = self.env.reset()
-            done = False
+            state = self._get_initial_state()
+            episode_reward = 0
             
-            while not done:
-                action = self.select_action(state)
-                next_state, reward, done = self.env.step(action)
-                self._update_model(state, action, reward, next_state)
-                self.episode_reward += reward
+            while not self._is_terminal_state(state):
+                # Get action from RL engine
+                action_tensor = self._select_action(state)
+                action = action_tensor.item()
+                next_state, reward, done = self._take_action(state, action) # Environment interaction
+                loss = self._update_policy(state, action, reward, next_state) # Update policy
+                
+                # Track rewards
+                episode_reward += reward
                 state = next_state
+    
+            # Update exploration parameters
+            self.rl_engine.epsilon *= self.rl_engine.epsilon_decay
+            self.rl_engine.epsilon = max(
+                self.rl_engine.min_epsilon, 
+                self.rl_engine.epsilon
+            )
+    
+            logger.info(f"Episode {episode} | Reward: {episode_reward:.2f} | Loss: {loss:.4f}")
 
-            # Update parameter tuner with recent performance
-            self.recent_rewards.append(self.episode_reward)
-            self.tuner.update_performance(self.episode_reward)
-            self.tuner.adapt(list(self.recent_rewards)[-10:])  # Last 10 episodes
-            self.tuner.decay_exploration()
-
-            # Apply tuned parameters
-            self.learning_rate = self.tuner.params['learning_rate']
-            self.exploration_rate = self.tuner.params['exploration_rate']
-
-            logger.info(f"Episode {episode} Reward: {self.episode_reward:.2f} "
-                       f"LR: {self.learning_rate:.4f} "
-                       f"Exploration: {self.exploration_rate:.2f}")
-
-        self.training = False
+    def _consolidate_memory(self):
+        """Delegate memory consolidation to RL subsystem"""
+        self.rl_engine.local_memory.consolidate()
+        self.rl_engine.memory.consolidate()
+        
+        # Preserve existing memory logic
+        super()._consolidate_memory()
 
     def _apply_alignment_corrections(self, report):
         """Adjust behavior based on alignment monitoring"""
@@ -245,12 +376,7 @@ class AdaptiveAgent(BaseAgent):
     def evaluate(self, eval_episodes=10):
         """
         Evaluate the agent's performance without learning.
-        
-        Args:
-            eval_episodes (int): Number of evaluation episodes
-            
-        Returns:
-            float: Average reward across episodes
+
         """
         logger.info("Evaluating agent over %d episodes", eval_episodes)
         rewards = []
@@ -261,8 +387,11 @@ class AdaptiveAgent(BaseAgent):
             
             while not self._is_terminal_state(state):
                 action = self._select_action(state, explore=False)
-                state, reward = self._take_action(state, action)
+                next_state, reward, done = self._take_action(state, action)  # Capture all three values
                 episode_reward += reward
+                state = next_state
+                if done:  # Exit early if terminal state reached
+                    break
             
             rewards.append(episode_reward)
         
@@ -294,37 +423,34 @@ class AdaptiveAgent(BaseAgent):
         logger.info("Demonstration learning complete")
     
     def _select_action(self, state, explore=True):
-        state_features = self._extract_features(state)
-        return self.policy.get_action(state_features, explore=explore)
+        """Delegate action selection to RL engine"""
+        state_tensor = torch.FloatTensor(self._extract_features(state))
+        return self.rl_engine.select_action(state_tensor, explore=explore)
 
     def _compute_policy(self, state):
         state_features = self._extract_features(state)
         return self.policy.compute_policy(state_features)
 
     def _update_policy(self, state, action, reward, next_state):
-        """Policy update with TD error calculation for prioritization"""
-        # Get current and next state values
-        current_value = self.value_estimates.get(state, 0)
-        next_value = self.value_estimates.get(next_state, 0)
+        """Store experience and update RL policy"""
+        # Convert to proper tensor format
+        state_features = torch.FloatTensor(self._extract_features(state))
+        next_features = torch.FloatTensor(self._extract_features(next_state))
         
-        # Calculate TD error with discount factor
-        td_target = reward + self.learning_params['discount_factor'] * next_value
-        td_error = td_target - current_value
+        # Create transition
+        transition = Transition(
+            state=state_features,
+            action=torch.LongTensor([action]),
+            reward=reward,
+            next_state=next_features,
+            done=self._is_terminal_state(next_state)
+        )
         
-        # Get policy gradient (existing logic)
-        state_features = self._extract_features(state)
-        hidden = np.tanh(np.dot(state_features, self.policy_weights['input_layer']))
-        hidden = np.tanh(np.dot(hidden, self.policy_weights['hidden_layer']))
-        grad = hidden * (1 if action == 0 else -1)  # Simplified gradient
+        # Store in RL memory
+        self.rl_engine.learner_memory.add(transition)
         
-        # Update weights with learning rate
-        update = self.learning_params['learning_rate'] * td_error * grad
-        self.policy_weights['output_layer'] += update
-        
-        # Store experience in buffer (now handled by replay buffer)
-        self._store_experience(state, action, reward)
-        
-        return abs(td_error) + 1e-5
+        # Perform policy update
+        return self.rl_engine.update_policy()
 
     def _update_value_estimates(self, state, reward, next_state):
         """
@@ -443,12 +569,25 @@ class AdaptiveAgent(BaseAgent):
         return self.shared_memory.get(key, None)
 
     def _get_initial_state(self):
-        """Generate an initial state for an episode"""
-        return tuple(np.random.randint(0, 10, size=3))
+        """Generate an initial state with 7 elements as defined in _take_action"""
+        return (
+            random.uniform(0, 100),   # x_position
+            random.uniform(0, 100),   # y_position
+            random.uniform(0, 10),    # velocity
+            random.uniform(50, 100),  # energy
+            0,                        # cargo
+            100,                      # integrity
+            random.uniform(-50, 50)   # temperature
+        )
     
     def _is_terminal_state(self, state):
-        """Check if a state is terminal"""
-        return sum(state) > 25  # Simple terminal condition
+        """Check if a state is terminal based on actual state components"""
+        return any([
+            state[3] <= 0,        # No energy
+            state[5] <= 0,        # System failure
+            state[6] >= 100,      # Overheating
+            (state[0] >= 95 and state[1] >= 95)  # Reached target zone
+        ])
         
     def _extract_features(self, state):
         """Convert state into feature vector"""
@@ -591,10 +730,37 @@ if __name__ == "__main__":
         'per_beta': 0.4,
         'per_epsilon': 1e-6,
         'risk_threshold': 0.7,
-        'retry_policy': {'max_attempts': 3, 'backoff_factor': 1.5}
+        'retry_policy': {'max_attempts': 3, 'backoff_factor': 1.5},
+        'replay_config': {  # Add replay configuration
+            'batch_size': 64,
+            'per_beta': 0.6
+        }
     }
 
-    adaptive = AdaptiveAgent(shared_memory, agent_factory, config=config, learning_params=None)
+    adaptive = AdaptiveAgent(shared_memory, agent_factory, config=config)
 
     print(adaptive)
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+
+    state = (4, 2, 3, 100, 0, 100, 50)
+    action = 1          # Valid action index
+    reward = 2.5        # Numeric reward
+    storage = adaptive._store_experience(state, action, reward)
+
+    print(storage)
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+
+    action = adaptive._take_action(state, action)
+
+    print(action)
+
+    print("\n* * * * * Phase 4 * * * * *\n")
+
+    eval_episodes=20
+
+    eval = adaptive.evaluate(eval_episodes=eval_episodes)
+
+    print(eval)
     print("\n=== Successfully Ran Adaptive Agent ===\n")
