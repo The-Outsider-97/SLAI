@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Perception Agent:
 - Weight initialization
