@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Reasoning Agent for Scalable Autonomous Intelligence
 Features:
