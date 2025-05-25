@@ -5,14 +5,31 @@ Implements multi-level certification process based on:
 - EU AI Act risk classification
 """
 
-import datetime
+import json, yaml
 import hashlib
-import json
 
+from datetime import datetime
 from pathlib import Path
 from enum import Enum, auto
 from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
+
+from logs.logger import get_logger
+
+logger = get_logger("Certification Framework")
+
+CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class CertificationLevel(Enum):
     """SAE J3016-inspired levels"""
@@ -66,16 +83,21 @@ class CertificationStatus:
 class CertificationManager:
     """End-to-end certification lifecycle handler"""
     
-    def __init__(self, domain: str = "automotive"):
+    def __init__(self, config, domain: str = "automotive"):
+        config = load_config() or {}
+        self.config = config.get('certification_manager', {})
         self.domain = domain
         self.requirements = self._load_domain_requirements()
         self.current_level = CertificationLevel.DEVELOPMENT
         self.evidence_registry = []
-        
+
+        logger.info(f"Certification Manager succesfully initialized")
+ 
     def _load_domain_requirements(self) -> Dict[CertificationLevel, List[CertificationRequirement]]:
         """Load requirements from JSON template file"""
-        template_path = Path(__file__).parent / "certification_templates.json"
-        
+        template_path = Path(__file__).parent.parent.parent / self.config.get('template_path')
+        print(f"Looking for templates at: {template_path}")
+
         try:
             with open(template_path, 'r') as f:
                 templates = json.load(f)
@@ -107,7 +129,7 @@ class CertificationManager:
         self.evidence_registry.append({
             "timestamp": evidence["timestamp"],
             "type": evidence["type"],
-            "content_hash": hash(str(evidence))
+            "content_hash": hashlib.sha256(json.dumps(evidence).encode()).hexdigest()
         })
     
     def evaluate_certification(self) -> tuple[bool, List[str]]:
@@ -150,6 +172,8 @@ class CertificationAuditor:
         self.safety_case = SafetyCase()
         self.status = CertificationStatus()
 
+        logger.info(f"Certification Auditor succesfully initialized")
+ 
     def assess_iso25010(self, metrics: Dict[str, float]):
         checks = {
             "reliability": metrics.get("mtbf", 0) > 1000,
@@ -203,6 +227,7 @@ class CertificationAuditor:
 
 # === Example usage ===
 if __name__ == "__main__":
+    print("\n=== Running Certification Framework ===\n")
     auditor = CertificationAuditor()
 
     # Simulated inputs
@@ -217,3 +242,23 @@ if __name__ == "__main__":
     print("UL 4600:", auditor.finalize_ul4600(["Unit test log", "Simulation results"]))
     print("NIST RMF:", auditor.integrate_nist_rmf({"distribution_shift": 0.25, "fairness_score": 0.75}))
     print("Final Report:", auditor.generate_certificate_report())
+
+    print(f"\n* * * * * Phase 2 - Evidence Submission * * * * *\n")
+    config = load_config()
+    domain = "automotive"
+    valid_evidence = {
+        "timestamp": datetime.now().isoformat(),
+        "type": ["safety_report", "test_logs"],
+        "content": "Simulation passed 10k scenario tests"
+    }
+
+    manager = CertificationManager(config, domain=domain)
+    manager.submit_evidence(valid_evidence)
+
+    print(f"\n* * * * * Phase 3 - Certification Check * * * * *\n")
+    passed, failures = manager.evaluate_certification()
+
+    logger.info(f"{manager}")
+    print(f"Certification Status: {'PASSED' if passed else 'FAILED'}")
+    print(f"Unmet Requirements: {failures}")
+    print("\n=== Successfully Ran Certification Framework ===\n")
