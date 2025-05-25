@@ -38,6 +38,9 @@ class HyperparamConfigGenerator:
 
         return {"hyperparameters": raw.get("hyperparameters", [])}
 
+    def create_default_config(self):
+        return []
+
     def transform_for_grid(self, config: dict) -> dict:
         """
         Transform parsed YAML config to grid search format.
@@ -68,7 +71,7 @@ class HyperparamConfigGenerator:
                     param["step"]
                 ))
             elif param["type"] == "categorical":
-                transformed["values"] = param["choices"]
+                transformed["values"] = param["values"]
 
             # Preserve optional metadata
             for meta in ("prior", "prior_research", "hardware_constraints", "physiological_basis"):
@@ -91,21 +94,26 @@ class HyperparamConfigGenerator:
         """
         bayesian_config = {"hyperparameters": []}
         for param in config["hyperparameters"]:
-            transformed = {
-                "name": param["name"],
-                "type": param["type"]
-            }
-
+            transformed = {"name": param["name"], "type": param["type"]}
+    
             if param["type"] in ["int", "float"]:
+                # Extract min/max from values if not explicitly defined
+                if "min" not in param or "max" not in param:
+                    if "values" in param:
+                        param["min"] = min(param["values"])
+                        param["max"] = max(param["values"])
+                    else:
+                        raise KeyError(f"Parameter {param['name']} missing 'values' or 'min'/'max'.")
+                
                 transformed["min"] = param["min"]
                 transformed["max"] = param["max"]
+                
                 if "prior" in param:
                     transformed["prior"] = param["prior"]
             elif param["type"] == "categorical":
-                transformed["choices"] = param["choices"]
-
+                transformed["choices"] = param["values"]
+    
             bayesian_config["hyperparameters"].append(transformed)
-
         return bayesian_config
 
     def generate_from_yaml(self, yaml_path: str, name_prefix="hyperparam_config"):
