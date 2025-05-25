@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence)
 Implements core RAG functionality with TF-IDF based retrieval from scratch
@@ -26,10 +28,16 @@ from mlxtend.frequent_patterns import apriori
 from mlxtend.preprocessing import TransactionEncoder
 
 from src.agents.base_agent import BaseAgent
+from src.agents.knowledge.knowledge_memory import KnowledgeMemory
+from src.agents.knowledge.governor import Governor
 from src.agents.knowledge.rule_engine import RuleEngine
+from src.agents.knowledge.knowledge_cache import KnowledgeCache
+from src.agents.knowledge.perform_action import PerformAction
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Knowledge Agent")
+
+LOCAL_CONFIG_PATH="src/agents/knowledge/configs/knowledge_config.yaml"
 
 def cosine_sim(v1, v2):
     v1, v2 = np.array(v1), np.array(v2)
@@ -38,42 +46,82 @@ def cosine_sim(v1, v2):
 
 
 class KnowledgeAgent(BaseAgent):
-    def __init__(self, shared_memory, agent_factory, config=None, language_agent=None, knowledge_agent_dir=None, persist_file: str = None, args=(), kwargs={}):
+    def __init__(self,
+                 agent_factory,
+                 config=None,
+                 persist_file: str = None, args=(), kwargs={}):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
             config=config
         )
         self.knowledge_agent = []
+        self.embedding_fallback = None
+        self.stop_words = set()
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.cache = {}
+        self.cache = KnowledgeCache() or {}
+        self.memory = KnowledgeMemory() or defaultdict(dict)
         self.cache_size = 1000
         self.vocabulary = set()
         self.document_frequency = defaultdict(int)
         self.total_documents = 0
         self.persist_file = persist_file
-        self.memory = defaultdict(dict)
         self.doc_vectors = {}
-        self.stopwords = set([
-            'a', 'an', 'the', 'and', 'or', 'in', 'on', 'at', 'to', 'of',
-            'for', 'with', 'as', 'by', 'that', 'this', 'it', 'is', 'are',
-            'was', 'were', 'be', 'been', 'being', 'from', 'have', 'has',
-            'had', 'do', 'does', 'did', 'will', 'would', 'should', 'can',
-            'could', 'not', 'but', 'he', 'she', 'his', 'her', 'they', 'them',
-            'their', 'you', 'your', 'we', 'our', 'us', 'i', 'me', 'my', 'mine'
-            'if', 'then', 'when', 'which', 'what', 'how', 'while', 'after',
-            'before', 'who', 'where', 'why', 'so', 'because', 'than', 'just', 'also'
-        ])
         self.rule_engine = RuleEngine()
+        self.perform_action = PerformAction()
         self.ontology = defaultdict(lambda: {'type': None, 'relations': set()})
+        self.governor = self._initialize_governance()
+        # self._initialize_semantic_fallback(language_agent)
 
-        # Semantic fallback
+    def _initialize_semantic_fallback(self, language_agent):
+        """
+        Configure embedding fallback and stopwords using the provided language agent.
+        """
         self.language_agent = language_agent
-        self.embedding_fallback = self.language_agent.embedder if self.language_agent else None
+    
+        # Set up embedding fallback
+        if self.language_agent and hasattr(self.language_agent, "embedder"):
+            self.embedding_fallback = self.language_agent.embedder
+        else:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.embedding_fallback = SentenceTransformer("all-MiniLM-L6-v2")
+                logger.warning("LanguageAgent has no embedder; default model loaded as fallback.")
+            except Exception as e:
+                self.embedding_fallback = None
+                logger.error(f"Failed to load default embedding model: {e}")
+    
+        # Set up stopwords
+        self.initialize_stopwords()
 
-        if knowledge_agent_dir:
-            self.load_from_directory(knowledge_agent_dir)
+    def initialize_stopwords(self):
+        """Retrieve stopwords from the NLPEngine via the initialized language_agent."""
+        try:
+            if self.language_agent:
+                # Access NLPEngine's STOPWORDS from the language_agent
+                self.stop_words = self.language_agent.nlp_engine.STOPWORDS
+                logger.info("Using NLP Engine's stopwords from language_agent")
+            else:
+                # Fallback to class-level STOPWORDS if language_agent is unavailable
+                from src.agents.language.nlp_engine import NLPEngine
+                self.stop_words = NLPEngine.STOPWORDS
+                logger.warning("Language agent not provided; using default NLP Engine stopwords")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize stopwords: {e}")
+            self.stop_words = set()
+
+    def _initialize_governance(self):
+        """Conditionally create governor based on config"""
+        if self.config.get('governor.enabled', True):
+            governor = Governor(
+                knowledge_agent=self,
+                config_file_path=LOCAL_CONFIG_PATH
+            )
+            logger.info("Governance subsystem initialized")
+            return governor
+        logger.info("Governance subsystem disabled")
+        return None
 
     def _safe_create_language_agent(self):
         try:
@@ -113,10 +161,57 @@ class KnowledgeAgent(BaseAgent):
         """Integrate structured knowledge from knowledge_db.json"""
         with open(db_path, 'r') as f:
             data = json.load(f)
-            for triple in data["knowledge"]:
+            for triple in data.get("knowledge", []):
                 self.add_document(triple[0], metadata={"type": "fact", "confidence": triple[1]})
-            for rule in data["rules"]:
-                self.rule_engine.add_rule(*rule)
+            for rule in data.get("rules", []):
+                try:
+                    name, fn_name, weight = rule
+                    # Use a placeholder rule function (you may later resolve `fn_name` from a registry)
+                    dummy_rule = lambda kg: {}
+                    self._safe_add_rule((name, dummy_rule, weight))
+                except Exception as e:
+                    logger.warning(f"Failed to validate rule {rule}: {e}")
+
+    def _update_knowledge_db(self, new_rules):
+        """Append new rules to the knowledge DB file specified in self.persist_file."""
+        if not self.persist_file:
+            logger.warning("No persist_file set; skipping knowledge DB update.")
+            return
+    
+        try:
+            # Load existing DB
+            if os.path.exists(self.persist_file):
+                with open(self.persist_file, "r", encoding="utf-8") as f:
+                    db = json.load(f)
+            else:
+                db = {"knowledge": [], "rules": []}
+    
+            for rule in new_rules:
+                name, func, weight = rule
+                db["rules"].append([name, func.__name__, weight])  # Save function name
+    
+            with open(self.persist_file, "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=4)
+    
+            logger.info(f"Appended {len(new_rules)} discovered rules to {self.persist_file}")
+        except Exception as e:
+            logger.error(f"Failed to update knowledge DB: {e}", exc_info=True)
+
+    def _safe_add_rule(self, rule):
+        """
+        Validate rule via AZR before adding.
+        rule: tuple -> (rule_name: str, rule_fn: Callable, weight: float)
+        """
+        rule_name, rule_fn, _ = rule
+        # Simplified placeholder check using rule name
+        contradiction_score = self.agent_factory.validate_with_azr((rule_name, "is", "inconsistent"))
+
+        
+        if contradiction_score < 0.3:
+            self.rule_engine.rules.append(rule)
+            logger.info(f"Rule accepted by AZR: {rule_name}")
+        else:
+            logger.warning(f"Rule rejected by AZR (contradiction_score={contradiction_score:.2f}): {rule_name}")
 
     def discover_rules(self, min_support=0.1):
         """Mine association rules from knowledge triples"""
@@ -132,18 +227,21 @@ class KnowledgeAgent(BaseAgent):
         te_ary = te.fit(transactions).transform(transactions)
         df = pd.DataFrame(te_ary, columns=te.columns_)
         freq_items = apriori(df, min_support=min_support, use_colnames=True)
-        
+
         # Convert to logical rules
         new_rules = []
         for _, row in freq_items.iterrows():
             itemset = list(row['itemsets'])
             if len(itemset) == 2:
                 rule_name = f"MLDiscoveredRule:{'→'.join(itemset)}"
-                new_rules.append((rule_name, lambda kg: self._apply_ml_rule(kg, itemset), 0.65))
+                rule = (rule_name, lambda kg: self._apply_ml_rule(kg, itemset), 0.65)
+                self._safe_add_rule(rule)
         
         # Update RuleEngine and save to knowledge_db.json
         self.rule_engine.rules.extend(new_rules)
         self._update_knowledge_db(new_rules)
+
+        return
 
     def _apply_ml_rule(self, knowledge_graph, pattern):
         """Auto-generated rule application logic"""
@@ -156,14 +254,14 @@ class KnowledgeAgent(BaseAgent):
     def retrieve(self, query, k=5, use_ontology=True, similarity_threshold=0.2):
         cache_key = hashlib.sha256(query.encode()).hexdigest()
         start_time = time.time()
-        cache_hit = cache_key in self.cache
+        cache_hit = self.cache.get(cache_key) is not None
         self.performance_metrics['retrieval_times'].append(time.time() - start_time)
         self.performance_metrics['cache_hits'].append(1 if cache_hit else 0)
         
-        self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in results])
 
-        if cache_key in self.cache:
-            return self.cache[cache_key]
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
         # Preprocess and validate
         query_tokens = self._preprocess(query)
@@ -179,7 +277,9 @@ class KnowledgeAgent(BaseAgent):
         # Calculate document vectors and similarities
         similarities = []
         for doc in self.knowledge_agent:
-            doc_vec = self.doc_vectors[doc['doc_id']]  # Precomputed    
+            doc_vec = self.doc_vectors[doc['doc_id']]  # Precomputed  
+            if doc_vec.size == 0:
+                continue
             similarity = cosine_sim(query_vector, doc_vec)
             if similarity < similarity_threshold and self.embedding_fallback:
                 try:
@@ -196,11 +296,15 @@ class KnowledgeAgent(BaseAgent):
         if len(self.cache) > self.cache_size:
             self.cache.popitem()
         self.cache[cache_key] = results
+
+        self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in results])
     
         if use_ontology:
             query_terms = self._preprocess(query)
             expanded_query = self._expand_with_ontology(query_terms)
-            return super().retrieve(expanded_query, k=k)
+            #return super().retrieve(expanded_query, k=k)
+            return self.retrieve(expanded_query, k=k, use_ontology=False)
+        
         
         # Apply inference rules to results
         knowledge_graph = {doc['doc_id']: doc['text'] for _, doc in results}
@@ -209,7 +313,19 @@ class KnowledgeAgent(BaseAgent):
         # Inferred knowledge to results
         for fact, conf in inferred.items():
             results.append((conf, {'text': fact, 'metadata': {'inferred': True}}))
-        
+
+        # Governance audit point
+        if self.governor:
+            self.governor.audit_retrieval(
+                query=query,
+                results=results,
+                context={
+                    'timestamp': time.time(),
+                    'user': self.shared_memory.get('current_user'),
+                    'module': 'knowledge_retrieval'
+                }
+            )
+
         return nlargest(k, results, key=lambda x: x[0])
 
     def _expand_with_ontology(self, terms):
@@ -267,7 +383,7 @@ class KnowledgeAgent(BaseAgent):
         # Lowercase and remove special characters
         text = re.sub(r'[^a-zA-Z0-9\s]', '', text.lower())
         # Tokenize and remove stopwords
-        tokens = [token for token in text.split() if token not in self.stopwords]
+        tokens = [token for token in text.split() if token not in self.stop_words]
         return tokens
 
     def _calculate_tfidf(self, tokens, is_query=False):
@@ -495,3 +611,77 @@ class KnowledgeAgent(BaseAgent):
     def broadcast_knowledge(self, tag="knowledge_snippet"):
         for idx, doc in enumerate(self.knowledge_agent[-5:]):
             self.shared_memory.set(f"{tag}:{idx}", doc)
+
+
+if __name__ == "__main__":
+    print("")
+    print("\n=== Knowledge Agent ===")
+    print("")
+
+    shared_memory = {}
+    agent_factory = lambda: None
+    monitor = KnowledgeAgent(agent_factory=None)
+    print("")
+    print("\n=== Successfully ran the Knowledge Agent ===\n")
+
+if __name__ == "__main__":
+    import yaml
+    import pprint
+    from src.agents.language_agent import LanguageAgent
+
+    print("\n=== Knowledge Agent ===\n")
+
+    # Load configuration with UTF-8 decoding
+    with open("src/agents/knowledge/configs/knowledge_config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    class SharedMemory:
+        def __init__(self):
+            self.store = {}
+        def set(self, key, value):
+            self.store[key] = value
+        def get(self, key, default=None):
+            return self.store.get(key, default)
+
+    shared_memory = SharedMemory()
+    agent_factory = lambda: None
+
+    language_agent = LanguageAgent(agent_factory, shared_memory,config=config)
+
+    agent = KnowledgeAgent(
+        agent_factory=agent_factory,
+        config=config,
+        persist_file=config["knowledge_memory"]["persist_file"]
+    )
+    if config["governor"].get("enabled", False) and agent.governor:
+        audit = agent.governor.full_audit()
+
+    print("🧠 KnowledgeAgent Initialized\n")
+
+    db_path = config["knowledge_memory"]["persist_file"]
+    if db_path and os.path.exists(db_path):
+        agent.load_knowledge_db(db_path)
+        print(f"📥 Loaded structured knowledge from {db_path}")
+    agent.initialize_stopwords()
+    agent._initialize_semantic_fallback(language_agent)
+    agent.add_document("Penguins are birds that cannot fly.", metadata={"source": "example_doc.txt"})
+    agent.add_to_ontology("penguin", "is_a", "bird")
+    print("➕ Sample document and ontology entry added.\n")
+
+    query = "Can penguins fly?"
+    print(f"🔍 Query: {query}")
+    results = agent.retrieve(query)
+    for score, doc in results:
+        print(f"[{score:.2f}] {doc['text']}")
+
+    if config["knowledge_memory"].get("auto_discover_rules", False):
+        agent.discover_rules()
+        print("🔎 Auto-discovered rules and updated rule engine.")
+
+    if config["governor"].get("enabled", False) and agent.governor:
+        audit = agent.governor.full_audit()
+        print("\n🛡️ Governance Audit:")
+        pprint.pprint(audit)
+
+    agent.memory.save(config["knowledge_memory"]["persist_file"])
+    print(f"\n💾 Knowledge saved to {config['knowledge_memory']['persist_file']}")
