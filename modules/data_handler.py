@@ -1,6 +1,7 @@
-import math
+
+import re
 import csv
-import logging
+import math
 import numpy as np
 import pandas as pd
 import os, sys, psutil
@@ -10,12 +11,14 @@ from sklearn.utils import shuffle
 from collections import defaultdict
 from typing import List, Dict, Tuple
 
-logger = logging.getLogger('SafeAI.DataHandler')
-logger.setLevel(logging.INFO)
+from src.agents.collaborative.shared_memory import SharedMemory
+from logs.logger import get_logger
+
+logger = get_logger('SafeAI.DataHandler')
 
 class DataHandler:
-    def __init__(self, chunk_size=10000, max_rows=None, shared_memory=None):
-        self.shared_memory = shared_memory
+    def __init__(self, chunk_size=10000, max_rows=None, config=None):
+        self.shared_memory = SharedMemory(config)
         self.chunk_size = chunk_size
         self.max_rows = max_rows
         self.scaler = None
@@ -140,8 +143,12 @@ class DataHandler:
         # Imputation methods
         if 'imputation' in strategy:
             if strategy['imputation'].startswith('knn'):
-                k = int(strategy['imputation'].split('(')[1][:-1])
-                self.imputer = self._knn_imputer(k=k)
+                match = re.search(r'k=(\d+)', strategy['imputation'])
+                if match:
+                    k = int(match.group(1))
+                    self.imputer = self._knn_imputer(k=k)
+                else:
+                    raise ValueError("Invalid format for KNN imputation. Use 'knn(k=3)'")
                 
     def _knn_imputer(self, k=3):
         """Basic KNN imputation without external dependencies"""
@@ -259,6 +266,6 @@ if __name__ == '__main__':
         'imputation': 'knn(k=3)'
     })
 
-    data = handler.load_data("dataset.csv")
-    data = handler.preprocess_data(data)
+    data = handler.load_data("data/users.csv")
+    data = handler.preprocess_data(data, label_column="target")
     fairness_report = handler.check_data_fairness(data)
