@@ -146,7 +146,9 @@ class ResourceUtilizationEvaluator:
             "## System Health Status\n"
         ]
         visualizer = get_visualizer()
-        visualizer.add_metrics()
+        if 'descriptive_stats' in results:
+            visualizer.add_metrics("descriptive_stats", results['descriptive_stats'])
+
 
         # Health status indicators
         for metric, status in results['health_status'].items():
