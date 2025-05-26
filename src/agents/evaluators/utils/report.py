@@ -271,6 +271,45 @@ class PerformanceVisualizer:
         pixmap.save(buffer, "PNG")
         return bytes(buffer.data().toBase64()).decode('utf-8')
 
+    def render_temporal_chart(self, size, metric, data=None):
+        """Generic time-series chart renderer with optional data"""
+        valid_metrics = ['hazard_rates', 'operational_times', 'pass_rate']
+        if metric not in valid_metrics:
+            return QPixmap()
+            
+        # Use provided data or internal metrics
+        chart_data = data if data is not None else list(self.metrics.get(metric, []))
+        
+        pixmap = QPixmap(size)
+        pixmap.fill(self.colors['background'])
+        painter = QPainter(pixmap)
+        
+        # Calculate bounds using chart_data
+        max_val = max(chart_data) if chart_data else 1
+        x_step = size.width() / (len(chart_data) or 1)
+        
+        # Draw line
+        color = self.colors['reward_line'] if metric == 'operational_times' \
+            else self.colors['risk_line'] if metric == 'hazard_rates' \
+            else self.colors['success']
+        pen = QPen(color, 2)
+        painter.setPen(pen)
+        
+        for i in range(1, len(chart_data)):
+            x1 = (i-1) * x_step
+            y1 = size.height() - (chart_data[i-1]/max_val) * size.height()
+            x2 = i * x_step
+            y2 = size.height() - (chart_data[i]/max_val) * size.height()
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        
+        # Add labels
+        label = "Pass Rate" if metric == 'pass_rate' \
+            else "Operational Time" if metric == 'operational_times' \
+            else "Hazard Rate"
+        self._draw_labels(painter, size, "Time Steps", label)
+        painter.end()
+        return pixmap
+
     def _audit_report(self, report):
         """Create audit record and version the report"""
         audit_data = {
