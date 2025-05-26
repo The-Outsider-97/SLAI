@@ -1,11 +1,20 @@
-import logging
+
 import os
-import json
+import json, yaml
 import re
+
 from datetime import datetime
 
-logger = logging.getLogger('SafeAI.ComplianceAuditor')
-logger.setLevel(logging.INFO)
+from logs.logger import get_logger
+
+logger = get_logger('SafeAI.ComplianceAuditor')
+
+CONFIG_PATH = "config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
 
 class ComplianceAuditor:
     """
@@ -15,14 +24,17 @@ class ComplianceAuditor:
     - Checks for user consent mechanisms
     """
 
-    def __init__(self, config_path="config.yaml", logs_path="logs/", output_dir="audits/"):
-        self.config_path = config_path
+    def __init__(self, config, logs_path="logs/", output_dir="audits/"):
+        config = load_config()
+        self.config = config
         self.logs_path = logs_path
         self.output_dir = output_dir
         self.violations = []
         self.report = {}
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+
 
     def run_audit(self):
         logger.info("Starting full compliance audit...")
@@ -43,18 +55,17 @@ class ComplianceAuditor:
         logger.info("Checking anonymization and consent policies...")
 
         try:
-            with open(self.config_path, "r") as f:
-                content = f.read()
+            config_yaml_text = yaml.dump(self.config)
 
-                if "anonymize: false" in content:
-                    self.violations.append("Data is not anonymized in config.")
-                if "consent_required: false" in content:
-                    self.violations.append("User consent not enforced.")
+            if "anonymize: false" in config_yaml_text:
+                self.violations.append("Data is not anonymized in config.")
+            if "consent_required: false" in config_yaml_text:
+                self.violations.append("User consent not enforced.")
 
             self.report["data_policies"] = "OK" if not self.violations else "Non-Compliant"
-        except FileNotFoundError:
-            self.violations.append("Config file not found.")
-            self.report["data_policies"] = "Missing"
+        except Exception as e:
+            self.violations.append(f"Error checking data policies: {e}")
+            self.report["data_policies"] = "Error"
 
     def _scan_logs(self):
         logger.info("Scanning logs for personal data leaks...")
@@ -102,7 +113,45 @@ class ComplianceAuditor:
         logger.info(f"Compliance report written to {report_path}")
 
     def get_report(self):
+        """
+        Returns the current compliance audit report. If the report has not been generated yet,
+        it compiles the current state into a structured dictionary.
+    
+        Ensures consistency by deferring compliance evaluation to is_compliant().
+        """
+        if not self.report:
+            self.report = {
+                "data_policies": "Unknown",
+                "log_scan": "Unknown",
+                "violations": self.violations,
+                "compliant": self.is_compliant()
+            }
         return self.report
-
+    
     def is_compliant(self):
-        return not bool(self.violations)
+        """
+        Returns True if no compliance violations are recorded, False otherwise.
+    
+        Acts as the single point of compliance status logic.
+        """
+        return len(self.violations) == 0
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running SLAI Compliance Auditor ===\n")
+    config = load_config()
+    logs_path="logs/"
+    output_dir="audits/"
+
+    auditor = ComplianceAuditor(config, logs_path=logs_path, output_dir=output_dir)
+    logger.info(f"{auditor}")
+    auditor.run_audit()
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    report = auditor.get_report()
+
+    # Pretty-print the report
+    logger.info("Audit Report:\n" + json.dumps(report, indent=4))
+    print("\nAudit Report:")
+    print(json.dumps(report, indent=4))
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+    print("\n=== Successfully Ran SLAI Compliance Auditor ===\n")
