@@ -177,7 +177,8 @@ class Generator:
         for _ in range(max_length):
             # Prepare input
             input_tensor = torch.tensor(generated).unsqueeze(0)
-            attention_tensor = torch.tensor(attention_mask).unsqueeze(0)
+            attention_tensor = torch.tensor(attention_mask, dtype=torch.bool).unsqueeze(0)
+            # attention_tensor = torch.tensor(attention_mask).unsqueeze(0)
             # embeddings = self.text_encoder.embedding(input_tensor)
 
             # Run transformer in causal mode
@@ -188,7 +189,8 @@ class Generator:
                     input_tensor.squeeze(0)  # Remove batch dimension
                 ).unsqueeze(0),  # Restore batch dimension
                 style_id=0,
-                attention_mask=torch.ones_like(input_tensor),
+                # attention_mask=torch.ones_like(input_tensor),
+                attention_mask=torch.ones_like(input_tensor, dtype=torch.bool),
                 causal=True
             )
 
@@ -233,7 +235,8 @@ class Generator:
                 hidden_states = self.text_encoder.transformer.forward(
                     x=torch.index_select(self.text_encoder.embedding.data, 0, input_tensor),
                     style_id=0,
-                    attention_mask=torch.ones_like(input_tensor),
+                    # attention_mask=torch.ones_like(input_tensor),
+                    attention_mask=torch.ones_like(input_tensor, dtype=torch.bool),
                     causal=True
                 )
                 last_hidden = hidden_states[:, -1, :]
