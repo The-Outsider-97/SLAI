@@ -131,6 +131,7 @@ Note: If you see an error about execution policy:
    pip install flask_talisman
    pip install flask_sqlalchemy
    pip install apscheduler
+   pip install resource
 
    python -m nltk.downloader punkt
    ```
