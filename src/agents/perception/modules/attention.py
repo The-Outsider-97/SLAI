@@ -70,7 +70,7 @@ class EfficientAttention(torch.nn.Module):
             attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
 
         if mask is not None:
-            mask = mask.to(self.device)
+            mask = mask.to(self.device).bool()  # Enforce boolean type
             attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
 
         attn_probs = self.dropout(torch.softmax(attn_scores, dim=-1))
