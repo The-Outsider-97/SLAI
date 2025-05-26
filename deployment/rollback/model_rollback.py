@@ -70,23 +70,37 @@ def rollback_model(models_dir='models/', backup_dir='models/backups/'):
     logger.info(f"Rollback to {latest_backup.name} completed. Current state backed up to {current_backup.name}")
     return True
 
-def rollforward_model(models_dir='models/', backup_dir='models/backups/'):
+def rollforward_model(models_dir='models/', backup_dir='models/backups/', target_backup=None):
     models_path = Path(models_dir)
     backup_path = Path(backup_dir)
-    
+
+    if not backup_path.exists():
+        raise FileNotFoundError(f"Backup directory {backup_dir} does not exist")
+
+    if not any(backup_path.iterdir()):
+        raise ValueError("Backup directory is empty")
+
+    # 2. Find target backup
     backups = sorted([d for d in backup_path.iterdir() if d.is_dir() and d.name.startswith("rollback_")], 
-                    key=lambda x: x.name)
+                    key=lambda x: x.name, reverse=True)
     if not backups:
         raise ValueError("No valid backups available")
     
+    if target_backup:
+        target = next((b for b in backups if b.name == target_backup), None)
+        if not target:
+            raise ValueError(f"Backup {target_backup} not found")
+    else:
+        target = backups[0]
+
     # Find the most recent backup after current state
     current_version = datetime.now().strftime("%Y%m%d_%H%M%S")
     newer_backups = [b for b in backups if b.name > f"rollback_{current_version}"]
     if not newer_backups:
         raise ValueError("No newer version to roll forward to")
-    
+
     target_backup = newer_backups[-1]
-    
+
     # Backup current state
     current_backup = backup_path / f"rollforward_{current_version}"
     current_backup.mkdir(parents=True, exist_ok=True)
@@ -98,7 +112,7 @@ def rollforward_model(models_dir='models/', backup_dir='models/backups/'):
             shutil.copytree(item, dest)
         else:
             shutil.copy2(item, dest)
-    
+
     # Restore target
     for item in models_path.iterdir():
         if item.name == 'backups':
@@ -107,13 +121,13 @@ def rollforward_model(models_dir='models/', backup_dir='models/backups/'):
             shutil.rmtree(item)
         else:
             item.unlink()
-    
+
     for item in target_backup.iterdir():
         dest = models_path / item.name
         if item.is_dir():
             shutil.copytree(item, dest)
         else:
             shutil.copy2(item, dest)
-    
+
     logger.info(f"Rollforward to {target_backup.name} completed.")
     return True
