@@ -266,15 +266,62 @@ class EvaluatorsMemory:
         except:
             return 0
 
-    def search_entries(self, search_term: str) -> List[Dict]:
-        """Basic content search within stored entries"""
+    def search_entries(self,
+                       search_term: str,
+                       fields: Optional[List[str]] = None,
+                       tags: Optional[List[str]] = None,
+                       case_sensitive: bool = False) -> List[Dict]:
+        """
+        Perform a flexible content search across stored entries.
+
+        Parameters:
+            search_term (str): The term or phrase to search for.
+            fields (List[str], optional): Specific data fields to restrict the search to.
+            tags (List[str], optional): Restrict search to entries with any of the given tags.
+            case_sensitive (bool): Whether the search should be case sensitive.
+    
+        Returns:
+            List[Dict]: Entries matching the search criteria.
+        """
+        if not search_term:
+            logger.warning("No search term provided to search_entries.")
+            return []
+
         results = []
-        for entry_id, entry in self.store.items():
-            try:
-                if search_term.lower() in str(entry['data']).lower():
-                    results.append(entry)
-            except:
-                continue
+        search_func = (lambda content: search_term in content) if case_sensitive else \
+                      (lambda content: search_term.lower() in content.lower())
+
+        with self.lock:
+            entry_ids = self.store.keys()
+
+            # Filter by tags if specified
+            if tags:
+                filtered_ids = set()
+                for tag in tags:
+                    filtered_ids.update(self.tag_index.get(tag, []))
+                entry_ids = filtered_ids & self.store.keys()
+
+            for entry_id in entry_ids:
+                entry = self.store.get(entry_id)
+                if not entry:
+                    continue
+
+                try:
+                    data = entry['data']
+                    if fields:
+                        # Only search in the specified fields
+                        content_to_search = " ".join(str(data.get(field, "")) for field in fields)
+                    else:
+                        # Search the whole data dict
+                        content_to_search = str(data)
+
+                    if search_func(content_to_search):
+                        results.append(entry)
+
+                except Exception as e:
+                    logger.error(f"Error during search in entry {entry_id}: {e}")
+                    continue
+
         return results
 
 # ====================== Usage Example ======================
@@ -301,6 +348,16 @@ if __name__ == "__main__":
 
     print("Memory Capacity:", memory._manage_capacity())
 
-    #print(f"\n* * * * * Phase 3 * * * * *\n")
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+    search_term=None
+    fields = None
+    tags = None
+    case_sensitive = False
 
+    search = memory.search_entries(
+        search_term=search_term,
+        fields=fields,
+        tags=tags,
+        case_sensitive=case_sensitive)
+    logger.info(f"{search}")
     print("\n=== Successfully Ran Adaptive Risk ===\n")
