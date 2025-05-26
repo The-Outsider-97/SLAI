@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, delete_tag, rollforward_to_next_tag
+from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, rollforward_to_next_tag, get_sorted_tags
 from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity, rollforward_model
 from src.tuning.tuner import HyperparamTuner as BaseTuner
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
@@ -91,12 +91,13 @@ class InfrastructureManager:
             return None
 
     def emergency_rollback(self):
-        """Safe rollback with uncommitted change protection"""
+        """Safe rollback entry point"""
         status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
         if status.strip():
             logger.error("Aborting rollback: Uncommitted changes detected")
             raise RuntimeError("Commit changes before rollback")
-        return super().emergency_rollback()
+        
+        return self.rollback.full_rollback()
 
     def _get_last_stable_version(self) -> Dict[str, str]:
         """Retrieve last validated system state by checking git and model backups."""
@@ -164,13 +165,62 @@ class RollbackSystem:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-    def full_rollback(self, commit_hash: str = "HEAD^"):
-        confirm = input("Confirm full rollback? (y/n) ").lower()
-        if confirm != 'y':
-            logger.info("Rollback cancelled")
+    def full_rollback(self):
+        """Interactive rollback with confirmation and version selection"""
+        print("\n=== ROLLBACK WARNING ===")
+        print("This will revert both code and model to previous versions.")
+        print("Any uncommitted changes will be lost!\n")
+        
+        confirm = input("Are you absolutely sure? (type 'confirm' to proceed): ").lower()
+        if confirm != 'confirm':
+            logger.info("Rollback aborted by user")
             return False
-        logger.info("Executing safe system rollback...")
-        self._create_backup()
+
+        # Get available versions
+        code_versions = self.get_available_code_versions()
+        model_versions = self.get_available_model_versions()
+
+        if not code_versions or not model_versions:
+            logger.error("No rollback targets available")
+            return False
+
+        # Display code versions
+        print("\nAvailable code versions:")
+        for idx, (tag, ts) in enumerate(code_versions[:10]):
+            print(f"{idx+1}. {tag} ({ts})")
+
+        # Get user selection
+        try:
+            code_choice = int(input("\nEnter code version number: "))-1
+            selected_code = code_versions[code_choice][0]
+            
+            print("\nAvailable model versions:")
+            for idx, (name, ts) in enumerate(model_versions[:10]):
+                print(f"{idx+1}. {name} ({ts.strftime('%Y-%m-%d %H:%M')})")
+            
+            model_choice = int(input("\nEnter model version number: "))-1
+            selected_model = model_versions[model_choice][0]
+        except (ValueError, IndexError):
+            logger.error("Invalid selection")
+            return False
+
+        # Execute rollback
+        return self._commit_rollbacks(selected_code, selected_model)
+
+    def get_available_code_versions(self):
+        
+        return [(tag, ts.isoformat()) for tag, ts in get_sorted_tags()]
+
+    def get_available_model_versions(self):
+        backups = sorted(
+            [d for d in self.backup_dir.iterdir() if d.is_dir() and d.name.startswith("rollback_")],
+            key=lambda x: x.name, 
+            reverse=True
+        )
+        return [
+            (b.name, datetime.strptime(b.name.split("_")[1], "%Y%m%d_%H%M%S")) 
+            for b in backups
+        ]
 
     def _create_backup(self):
         pass
