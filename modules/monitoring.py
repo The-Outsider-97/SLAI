@@ -5,8 +5,8 @@ import time
 import math
 import platform
 
+from datetime import timezone, datetime, timedelta
 from collections import deque, defaultdict
-from datetime import datetime, timedelta
 
 from logs.logger import get_logger
 
@@ -42,27 +42,57 @@ class Monitoring:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         self._load_history()
 
+        logger.info("SLAI Monitoring System succesfully initialized")
+
     def _init_resource_baseline(self):
         """Establish baseline for system resource metrics"""
         self._system_baseline = {
             'cpu': self._get_cpu_usage(),
             'memory': self._get_memory_usage(),
-            'timestamp': time.time()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
 
     def _get_cpu_usage(self):
         """Cross-platform CPU usage approximation"""
         if platform.system() == 'Windows':
-            return float(os.popen('wmic cpu get loadpercentage').read().split()[2])
+            output = os.popen('wmic cpu get loadpercentage /value').read()
+            for line in output.splitlines():
+                if "LoadPercentage" in line:
+                    try:
+                        return float(line.strip().split('=')[1])
+                    except (IndexError, ValueError):
+                        break
+            raise RuntimeError("Unable to parse CPU usage from WMIC output.")
         else:
-            return float(os.popen(r"top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\([0-9.]*\)%* id.*/\1/'").read().strip())
+            output = os.popen(r"top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\([0-9.]*\)%* id.*/\1/'").read().strip()
+            return 100.0 - float(output)
 
     def _get_memory_usage(self):
         """Memory usage percentage without psutil"""
         if platform.system() == 'Windows':
-            total = int(os.popen('wmic ComputerSystem get TotalPhysicalMemory').read().split()[2])
-            free = int(os.popen('wmic OS get FreePhysicalMemory').read().split()[2])
-            return (total - free) / total * 100
+            try:
+                total_output = os.popen('wmic ComputerSystem get TotalPhysicalMemory /value').read()
+                free_output = os.popen('wmic OS get FreePhysicalMemory /value').read()
+    
+                total = None
+                free_kb = None
+    
+                for line in total_output.splitlines():
+                    if "TotalPhysicalMemory" in line:
+                        total = int(line.strip().split('=')[1])
+    
+                for line in free_output.splitlines():
+                    if "FreePhysicalMemory" in line:
+                        free_kb = int(line.strip().split('=')[1])  # in KB
+    
+                if total is None or free_kb is None:
+                    raise RuntimeError("Unable to parse memory usage from WMIC output.")
+    
+                free = free_kb * 1024  # Convert KB to Bytes
+                return (total - free) / total * 100
+    
+            except (IndexError, ValueError, RuntimeError) as e:
+                raise RuntimeError(f"Memory usage parsing failed: {e}")
         else:
             with open('/proc/meminfo') as f:
                 mem = f.readlines()
@@ -84,7 +114,7 @@ class Monitoring:
 
     def record(self, module_name, metrics: dict, tags=None):
         """Enhanced recording with statistical tracking"""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         entry = {
             "timestamp": timestamp,
             "module": module_name,
@@ -238,8 +268,11 @@ class Monitoring:
         print(f"Time window: Last {hours} hours")
         
         # Calculate time boundary
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
-        recent = [e for e in self.history if datetime.fromisoformat(e['timestamp']) > cutoff]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        recent = [
+            e for e in self.history 
+            if datetime.fromisoformat(e['timestamp']).replace(tzinfo=timezone.utc) > cutoff
+        ]
         
         # System health metrics
         print(f"\nSystem Health:")
@@ -271,3 +304,37 @@ class Monitoring:
                 line = f"{metric}{{module='{entry['module']}'}} {value}"
                 output.append(line)
         return '\n'.join(output)
+    
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running SLAI Monitoring System ===\n")
+    shared_memory=None
+    alert_config=None
+    slo_config=None
+    max_history = 1000
+    window_size=30
+    output_path="logs/metrics_log.jsonl"
+    monitor = Monitoring(
+        shared_memory=shared_memory,
+        alert_config=alert_config,
+        output_path=output_path,
+        max_history=max_history,
+        window_size=window_size,
+        slo_config=slo_config
+    )
+    
+    logger.info(f"{monitor}")
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    module_name="SLAI Monitoring"
+    metrics= {'latency_ms': 123, 'error_count': 0}
+    tags=None
+
+    final = monitor.record(module_name=module_name, metrics=metrics, tags=tags)
+    
+    logger.info(f"{final}")
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+    hours = 24
+
+    logger.info(f"{monitor.print_summary(hours=hours)}")
+    print("\n=== Successfully Ran SLAI Monitoring System ===\n")
