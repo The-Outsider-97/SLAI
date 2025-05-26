@@ -152,7 +152,8 @@ class StatisticalEvaluator:
             "### Descriptive Statistics\n"
         ]
         visualizer = get_visualizer()
-        visualizer.add_metrics()
+        if 'descriptive_stats' in results:
+            visualizer.add_metrics("descriptive_stats", results['descriptive_stats'])
 
         # Descriptive stats table
         for name, stats in results['descriptive_stats'].items():
