@@ -1,24 +1,24 @@
 """
-BASE_INFRA.PY - Core Infrastructure Components
-Implements version control, rollback, and hyperparameter tuning foundations
+Implements STPA (Leveson, 2011) and ISO 21448 (SOTIF) risk frameworks
+with dynamic Bayesian adaptation based on:
+- Barber, D. (2012) Bayesian Reasoning and Machine Learning
+- Kaplan, S. (1997) The Words of Risk Analysis
 """
 
-import subprocess
-import hashlib
-import json, yaml
+import os
 import numpy as np
+import yaml, json
+import jsonschema
 
-from pathlib import Path
-from typing import Dict, Any, Optional
+from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Any
 
-from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, delete_tag, rollforward_to_next_tag
-from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity, rollforward_model
-from src.tuning.tuner import HyperparamTuner as BaseTuner
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
 from logs.logger import get_logger
 
-logger = get_logger("Infrastructure Manager")
+logger = get_logger("Adaptive Risk")
 
 CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
 
@@ -33,291 +33,295 @@ def get_merged_config(user_config=None):
         base_config.update(user_config)
     return base_config
 
-class InfrastructureManager:
-    """Orchestrates core infrastructure operations"""
-    
-    def __init__(self, config_path=CONFIG_PATH):
-        self.full_config = load_config(config_path)
-        # Extract infrastructure manager specific config
-        self.config = self.full_config.get('infrastructure_manager', {})
-        
-        # Initialize components with proper configuration
-        self.memory = EvaluatorsMemory(self.full_config)
-        self.rollback = RollbackSystem(self.config)
-        self.tuner = self._init_tuner()
+SAFETY_CASE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "metadata": {"type": "object"},
+        "system_description": {"type": "object"},
+        "control_structure": {"type": "object"},
+        "safety_requirements": {"type": "object"},
+        "hazard_analysis": {"type": "object"},
+        "evidence_base": {"type": "object"},
+        "validation": {"type": "object"}
+    },
+    "required": ["metadata", "hazard_analysis", "safety_requirements"]
+}
 
-        logger.info("Infrastructure Manager initialized with %s strategy",
-                   self.config.get('tuning_strategy', 'bayesian'))
 
-    def _init_tuner(self):
-        """Initialize tuner using infrastructure manager config"""
-        return HyperparamTuner(
-            evaluation_function=self._agent_evaluator,
-            strategy=self.config.get('tuning_strategy', 'bayesian'),
-            n_calls=self.config.get('n_calls', 20),
-            n_random_starts=self.config.get('n_random_starts', 5),
-            config_path="src/tuning/configs/hyperparam.yaml"
-        )
-
-    def _agent_evaluator(self, params):
-        """Integrated evaluation function using agent's metrics"""
-        # Actual implementation would use agent's performance metrics
-        risk_score = self.config['risk_adaptation'].get('initial_hazard_rates', 0.2)
-        return risk_score * np.random.rand()  # Placeholder
-
-    def full_tuning_cycle(self):
-        """Complete tuning cycle with integrated risk management"""
-        try:
-            result = self.tuner.run_safe_tuning()
-            self._update_risk_profile(result)
-            return result
-        except Exception as e:
-            logger.error("Tuning cycle failed: %s", str(e))
-            self.rollback.full_rollback()
-            raise
-
-    def _update_risk_profile(self, tuning_result):
-        """Update risk adaptation parameters based on tuning results"""
-        new_rate = tuning_result.get('score', 0.2) * 0.95
-        self.config['risk_adaptation']['initial_hazard_rates'] = new_rate
-        logger.info("Updated risk profile to %.2f", new_rate)
-
-    def automated_tuning_cycle(self):
-        """Complete tuning cycle with safety mechanisms"""
-        try:
-            return self.tuner.run_safe_tuning()
-        except Exception as e:
-            logger.error(f"Automated tuning cycle failed: {str(e)}")
-            return None
-
-    def emergency_rollback(self):
-        """Safe rollback with uncommitted change protection"""
-        status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
-        if status.strip():
-            logger.error("Aborting rollback: Uncommitted changes detected")
-            raise RuntimeError("Commit changes before rollback")
-        return super().emergency_rollback()
-
-    def _get_last_stable_version(self) -> Dict[str, str]:
-        """Retrieve last validated system state by checking git and model backups."""
-        result = subprocess.check_output(['git', 'describe', '--abbrev=0']).decode().strip()
-        try:
-            # 1. Get previous Git commit (one before HEAD)
-            prev_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD~1']).decode().strip()
-
-            # 2. Get the latest model backup available
-            backup_dir = Path(self.config['rollback']['backup_dir'])
-            backups = sorted(backup_dir.glob('*.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
-
-            if not backups:
-                raise FileNotFoundError("No model backups found!")
-
-            latest_backup = backups[0]
-            model_version = latest_backup.stem  # Example: "v1.4.2"
-
-            # 3. Optionally verify integrity
-            if not validate_backup_integrity(latest_backup, latest_backup):
-                raise ValueError("Latest model backup integrity check failed.")
-
-            return {'commit': result, 'model': result.lstrip('v')}
-
-        except Exception as e:
-            logger.error(f"Failed to retrieve last stable version: {str(e)}")
-            # As fallback: assume current commit and no model rollback
-            current_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
-            return {
-                'commit': current_commit,
-                'model': 'unknown'
-            }
-
-    def rollforward(self):
-        """Roll forward to a newer system version if available"""
-        try:
-            return rollforward_model()
-        except Exception as e:
-            logger.error(f"Rollforward failed: {str(e)}")
-            return False
-
-    def rollforward_code(self):
-        """Roll forward to a newer code version if available"""
-        try:
-            status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
-            if status.strip():
-                logger.error("Aborting rollforward: Uncommitted changes detected")
-                raise RuntimeError("Commit changes before rollforward")
-            
-            return rollforward_to_next_tag()
-        except Exception as e:
-            logger.error(f"Code rollforward failed: {str(e)}")
-            return False
-
-class RollbackSystem:
-    """Implements atomic rollback operations across code and model versions"""
+class RiskAdaptation:
+    """Real-time risk assessment engine with Bayesian updating"""
     
     def __init__(self, config):
-        self.backup_dir = Path(config.get('backup_dir', 'models/backups/'))
-        self.model_dir = Path(config.get('model_dir', 'models/'))
-        self._verify_directories()
+        config = load_config() or {}
+        self.config = config.get('risk_adaptation', {})
+        memory = EvaluatorsMemory(config)
+        self.memory = memory
+        self.risk_model = self._initialize_model()
+        self.observation_history = []
+        self.safety_case_versions = {}
+        self._init_report_scheduler()
 
-    def _verify_directories(self):
-        """Ensure required directories exist with proper permissions"""
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.model_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Risk Adaptation succesfully initialized")
 
-    def full_rollback(self, commit_hash: str = "HEAD^"):
-        confirm = input("Confirm full rollback? (y/n) ").lower()
-        if confirm != 'y':
-            logger.info("Rollback cancelled")
-            return False
-        logger.info("Executing safe system rollback...")
-        self._create_backup()
-
-    def _create_backup(self):
-        pass
-
-        try:
-            # Check for uncommitted changes
-            status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
-            if status.strip():
-                logger.error("Aborting rollback: Uncommitted changes detected")
-                raise RuntimeError("Commit changes before rollback")
-            
-            subprocess.run(['git', 'checkout', commit_hash, '--', '.'], check=True)
-            logger.info(f"Checked out files from {commit_hash}")
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Rollback failed: {str(e)}")
-            return False
-
-    def _rollback_code_prepare(self, commit_hash: str) -> bool:
-        """Validate and stage code rollback"""
-        try:
-            # Verify commit exists
-            subprocess.run(['git', 'cat-file', '-e', commit_hash], check=True)
-            logger.info(f"Validated commit {commit_hash} for rollback")
-            return True
-        except subprocess.CalledProcessError:
-            logger.error(f"Invalid commit hash: {commit_hash}")
-            return False
-
-    def _rollback_model_prepare(self, model_version: str) -> bool:
-        """Validate model backup integrity"""
-        model_path = self.backup_dir / f"{model_version}.pt"
-        current_model = self.model_dir / "current.pt"
-        
-        if not validate_backup_integrity(model_path, current_model):
-            logger.error(f"Model backup integrity check failed for {model_version}")
-            return False
-        return True
-
-    def _commit_rollbacks(self, commit_hash: str, model_version: str) -> bool:
-        """Execute the actual rollback operations"""
-        try:
-            # Reset code
-            reset_to_commit(commit_hash, hard=True)
-            # Restore model
-            rollback_model(str(self.model_dir), str(self.backup_dir))
-            logger.info(f"Successfully rolled back to commit {commit_hash} and model {model_version}")
-            return True
-        except Exception as e:
-            logger.error(f"Rollback commit failed: {str(e)}")
-            return False
-
-    def rollforward_code(self):
-        try:
-            status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
-            if status.strip():
-                logger.info("Stashing uncommitted changes temporarily...")
-                subprocess.run(['git', 'stash', '--include-untracked'], check=True)
-                
-            success = rollforward_to_next_tag()
-            
-            if status.strip():
-                subprocess.run(['git', 'stash', 'pop'], check=True)
-            return success
-        except Exception as e:
-            logger.error(f"Code rollforward failed: {str(e)}")
-            return False
-
-class HyperparamTuner(BaseTuner):
-    """Extended tuner with rollback integration"""
-    def __init__(self, evaluation_function, strategy='bayesian', 
-                 n_calls=20, n_random_starts=5, **kwargs):
-        super().__init__(
-            evaluation_function=evaluation_function,
-            strategy=strategy,
-            n_calls=n_calls,
-            n_random_starts=n_random_starts,
-            config_path=self._get_config_path(strategy),
-            allow_generate=True
-        )
-        self.rollback = RollbackSystem(kwargs.get('rollback_config', {}))
-        self.best_state = None
-
-    def _get_config_path(self, strategy):
-        """Resolve config path based on strategy"""
-        return f"src/tuning/configs/generated_config_{strategy}.json"
-
-    def _create_snapshot(self) -> Dict[str, Any]:
-        """Capture current system state for potential rollback"""
+    def _initialize_model(self) -> Dict[str, Tuple[float, float]]:
+        """Create prior distributions for each hazard"""
         return {
-            'model_hash': self._model_checksum(),
-            'commit_hash': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip(),
-            'timestamp': datetime.now().isoformat()
+            hazard: (rate, rate * 0.1)
+            for hazard, rate in [
+                ("default_hazard", self.config.get('initial_hazard_rates', 0.1))
+            ]
         }
-
-    def _model_checksum(self) -> str:
-        """Generate content hash for current model"""
-        model_file = self.rollback.model_dir / "current.pt"
-        return hashlib.sha256(model_file.read_bytes()).hexdigest()
-
-    def run_safe_tuning(self):
-        """Execute tuning with automatic rollback on failure"""
-        initial_state = self._create_snapshot()
+    
+    def _init_report_scheduler(self):
+        """Initialize automated report generation"""
+        self.scheduler = BackgroundScheduler()
+        self.scheduler.add_job(
+            self.generate_automated_report,
+            'interval',
+            hours=24,
+            next_run_time=datetime.now()
+        )
+        self.scheduler.start()
+    
+    def update_model(self, observations: Dict[str, int], operational_time: float):
+        """
+        Bayesian update of risk parameters using operational data
         
+        Args:
+            observations: Count of observed hazards
+            operational_time: Total operational hours
+        """
+        uncertainty_window = self.config.get('uncertainty_window', 1000)
+        learning_rate = self.config.get('learning_rate', 0.01)
+        for hazard, count in observations.items():
+            if hazard not in self.risk_model:
+                continue
+                
+            prior_mean, prior_var = self.risk_model[hazard]
+            
+            # Calculate posterior
+            obs_rate = count / operational_time
+            weight = min(1.0, len(self.observation_history)/uncertainty_window)
+
+            new_mean = (1-weight)*prior_mean + weight*obs_rate
+            new_var = prior_var * (1 - learning_rate)
+            
+            self.risk_model[hazard] = (new_mean, new_var)
+        
+        self.observation_history.append((observations, operational_time))
+    
+    def get_current_risk(self, hazard: str) -> Dict[str, Any]:
+        """Returns comprehensive risk analysis for a specific hazard"""
+        if hazard not in self.risk_model:
+            logger.warning(f"Hazard '{hazard}' not found in risk model")
+            return {}
+        
+        mean, var = self.risk_model[hazard]
+        std_dev = np.sqrt(var)
+        
+        # Calculate trend data
+        historical_means = [obs[0].get(hazard, 0) for obs in self.observation_history]
+        trend = np.polyfit(range(len(historical_means)), historical_means, 1)[0] if historical_means else 0
+        
+        return {
+            "hazard_id": hazard,
+            "risk_metrics": {
+                "current_mean": float(mean),
+                "variance": float(var),
+                "standard_deviation": float(std_dev),
+                "confidence_intervals": {
+                    "90%": (mean - 1.645*std_dev, mean + 1.645*std_dev),
+                    "95%": (mean - 1.96*std_dev, mean + 1.96*std_dev),
+                    "99%": (mean - 2.576*std_dev, mean + 2.576*std_dev)
+                }
+            },
+            "trend_analysis": {
+                "historical_data_points": len(historical_means),
+                "slope": float(trend),
+                "stability": "improving" if trend < 0 else "degrading" if trend > 0 else "stable"
+            },
+            "last_updated": datetime.now().isoformat()
+        }
+    
+    def generate_safety_case(self) -> Dict:
+        """STAMP-based safety argument structure with JSON template"""
+        template = {
+            "metadata": {
+                #**template['metadata'],
+                "system": "Autonomous Decision System",
+                "version": f"1.{len(self.safety_case_versions)+1}",
+                "generation_date": datetime.now().isoformat(),
+                "standard_compliance": ["STPA", "ISO 21448"]
+            },
+            "system_description": {
+                "purpose": "AI-driven operational decision system",
+                "boundary_conditions": "Urban environment operations",
+                "operational_domain": "Mixed traffic scenarios"
+            },
+            "control_structure": {
+                "controllers": ["Planning Module", "Risk Assessment Engine"],
+                "actuators": ["Motion Controller", "Communication Interface"],
+                "sensors": ["Lidar", "Camera", "V2X"],
+                "controlled_processes": ["Vehicle Trajectory", "Collision Avoidance"]
+            },
+            "safety_requirements": {
+                "goals": [
+                    {
+                        "id": f"SG-{hazard.upper()}",
+                        "description": f"Maintain {hazard} rate below {2*mean:.1e}/hr",
+                        "verification_method": "Operational monitoring",
+                        "target_value": 2*mean
+                    }
+                    for hazard, (mean, _) in self.risk_model.items()
+                ]
+            },
+            "hazard_analysis": {
+                "identified_hazards": [
+                    {
+                        "id": f"HAZ-{hazard.upper()}",
+                        "description": hazard,
+                        "current_risk": self.get_current_risk(hazard),
+                        "mitigation_strategy": "Dynamic risk adaptation",
+                        "safety_constraints": [
+                            f"System shall maintain {hazard} occurrence below {2*self.risk_model[hazard][0]:.1e}/hr"
+                        ]
+                    }
+                    for hazard in self.risk_model.keys()
+                ]
+            },
+            "evidence_base": {
+                "operational_history": {
+                    "total_operational_hours": sum(t for _, t in self.observation_history),
+                    "observed_events": [
+                        {
+                            "hazard": hazard,
+                            "total_occurrences": sum(obs.get(hazard, 0) for obs, _ in self.observation_history),
+                            "last_occurrence": next(
+                                (datetime.fromtimestamp(ts).isoformat()
+                                 for obs, ts in reversed(self.observation_history)
+                                 if hazard in obs), "Never")
+                        }
+                        for hazard in self.risk_model.keys()
+                    ]
+                },
+                "model_parameters": {
+                    "learning_rate": self.config.get('learning_rate'),
+                    "update_window": self.config.get('uncertainty_window'),
+                    "model_version": "Bayesian-1.3"
+                }
+            },
+            "validation": {
+                "assumptions": [
+                    "Environmental conditions remain within operational design domain",
+                    "Sensor inputs maintain minimum required accuracy"
+                ],
+                "limitations": [
+                    "Does not account for unknown-unknown failure modes",
+                    "Assumes continuous power supply"
+                ]
+            }
+        }
         try:
-            result = super().run_tuning_pipeline()
-            if result['score'] < self.config.get('tuning', {}).get('min_score', 0.7):
-                raise ValueError("Tuning resulted in suboptimal model")
-            return result
-        except Exception as e:
-            logger.error(f"Tuning failed, initiating rollback: {str(e)}")
-            self._execute_rollback(initial_state)
+            jsonschema.validate(instance=template, schema=SAFETY_CASE_SCHEMA)
+        except jsonschema.ValidationError as e:
+            logger.error(f"Safety case validation failed: {str(e)}")
             raise
 
-    def _execute_rollback(self, snapshot: Dict[str, Any]):
-        """Restore system state from snapshot"""
-        logger.info("Initiating tuning rollback...")
-        success = self.rollback.full_rollback(
-            commit_hash=snapshot['commit_hash'],
-            model_version=snapshot['model_hash'][:8]
+        # Store in memory with versioning
+        case_id = f"safety_case_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.memory.add(
+            entry=template,
+            tags=["safety_case", "automated_report"],
+            priority="high"
         )
+        self.safety_case_versions[case_id] = template
+        self._generate_documentation(template)
+
+        return template
+
+    def _generate_documentation(self, safety_case: Dict):
+        """Generate Markdown documentation"""
+        doc_content = f"""# Safety Case Documentation\n\nVersion {safety_case['metadata']['version']}\n\n"""
         
-        if success:
-            logger.info("Successfully restored pre-tuning state")
-        else:
-            logger.critical("Failed to restore system state after tuning failure!")
+        # System Description
+        doc_content += "## System Description\n"
+        doc_content += f"**Purpose**: {safety_case['system_description']['purpose']}\n\n"
+        
+        # Hazard Analysis
+        doc_content += "## Hazard Analysis\n"
+        for hazard in safety_case['hazard_analysis']['identified_hazards']:
+            doc_content += f"### {hazard['description']}\n"
+            doc_content += f"**Current Risk Level**: {hazard['current_risk']['risk_metrics']['current_mean']}\n\n"
+        
+        # Save to docs directory
+        os.makedirs("src/agents/evaluators/docs/safety_cases", exist_ok=True)
+        filename = f"src/agents/evaluators/docs/safety_cases/case_v{safety_case['metadata']['version']}.md"
+        with open(filename, 'w') as f:
+            f.write(doc_content)
+            
+        logger.info(f"Generated documentation at {filename}")
+
+    def generate_automated_report(self):
+        """Generate comprehensive report package"""
+        report = {
+            "timestamp": datetime.now().isoformat(),
+            "safety_cases": list(self.safety_case_versions.values())[-3:],
+            "current_risks": [
+                self.get_current_risk(hazard)
+                for hazard in self.risk_model.keys()
+            ],
+            "system_status": {
+                "operational_hours": sum(t for _, t in self.observation_history),
+                "memory_usage": self.memory.get_statistics()
+            }
+        }
+        
+        # Save report
+        filename = f"src/agents/evaluators/reports/risk_report_{datetime.now().strftime('%Y%m%d')}.json"
+        os.makedirs("reports", exist_ok=True)
+        with open(filename, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        # Store report in memory
+        self.memory.add(
+            entry=report,
+            tags=["automated_report"],
+            priority="medium"
+        )
+        logger.info(f"Generated automated report: {filename}")
+        return filename
+
+    def get_safety_case_history(self) -> List[Dict]:
+        """Retrieve historical safety cases"""
+        return self.memory.get(tag="safety_case")
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Adaptive Risk ===\n")
+    config = load_config()
+    risk = RiskAdaptation(config)
 
-    infra = InfrastructureManager()
-    
-    try:
-        print("\nAttempting code rollforward...")
-        if infra.rollforward_code():
-            print("✅ Successfully rolled forward code version")
-            
-        print("\nAttempting model rollforward...")
-        if infra.rollforward():
-            print("✅ Successfully rolled forward model version")
-            
-    except Exception as e:
-        print(f"❌ Rollforward failed: {str(e)}")
-    
+    print(f"{risk}")
     print(f"\n* * * * * Phase 2 * * * * *\n")
 
+    risk.generate_safety_case()
+
+    logger.info("Audit Report:\n" + json.dumps(risk.generate_safety_case(), indent=4))
+    print(json.dumps (risk.generate_safety_case(), indent=4))
     print(f"\n* * * * * Phase 3 * * * * *\n")
+    # Generate and store safety case
+    safety_case = risk.generate_safety_case()
+    
+    # Access documentation
+    risk._generate_documentation(safety_case)
+    
+    # Get historical cases
+    history = risk.get_safety_case_history()
+    
+    # Manual report trigger
+    risk.generate_automated_report()
+    
+    # Validate existing case
+    jsonschema.validate(instance=history[0], schema=SAFETY_CASE_SCHEMA)
 
     print("\n=== Successfully Ran Adaptive Risk ===\n")
