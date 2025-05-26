@@ -35,12 +35,12 @@ from logs.logger import get_logger
 logger = get_logger("SLAILM")
 logger.setLevel(logging.INFO)
 
-STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
+STRUCTURED_WORDLIST_PATH = "src/agents/language/library/structured_wordlist_en.json"
 ENRICHED_WORDLIST_PATH = "logs/enriched_wordlist_final.json"
 SIMPLE_WORDLIST_PATH = "src/agents/language/wordlist_en.json"
 EMBEDDING_PATH = "data/embeddings/glove.6B.200d.json"
-BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
-BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
+BPE_MODEL_PATH = "data/bpe_200d_50k_model.json"
+BPE_VOCAB_PATH = "data/bpe_200d_50k_vocab.json"
 
 shared_slailm = None
 slailm_init_lock = threading.Lock()
