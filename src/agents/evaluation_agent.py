@@ -28,6 +28,7 @@ from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
 
 from src.utils.interpretability import InterpretabilityHelper
+from src.utils.database import IssueDBConnector, FallbackIssueTracker
 from src.agents.evaluators.adaptive_risk import RiskAdaptation
 from src.agents.evaluators.base_infra import HyperparamTuner
 from src.agents.evaluators.behavioral_validator import BehavioralValidator
@@ -86,6 +87,24 @@ class EvaluationProtocol:
     behavioral_tests: int = 100
     reward_constraints: Dict = None
     optimization_targets: List[str] = None
+
+class OperationalError:
+    pass
+
+class FallbackEvaluatorAgent(BaseAgent):
+    def __init__(self,
+                 shared_memory, 
+                 agent_factory, 
+                 config=None,
+                 **kwargs):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
+    
+    def is_initialized(self):
+        return True
 
 class EvaluationAgent(BaseAgent):
     def __init__(self, 
@@ -202,7 +221,7 @@ class EvaluationAgent(BaseAgent):
         sequences = self._generate_temporal_sequences(df)
         model = AnomalyDetector()
         # Add training loop with LSTM/Transformer
-        dump(model, 'models/deep_anomaly.joblib')
+        dump(model, 'src/agents/evaluation/models/deep_anomaly.joblib')
 
     def detect_anomalies(self, current_issues: List[Dict]) -> List[Dict]:
         """Flag suspicious patterns using ML models"""
@@ -225,8 +244,7 @@ class EvaluationAgent(BaseAgent):
         # Behavioral testing with protocol parameters
         if self.protocol.behavioral_testing.get('test_types'):
             test_suite = self.evaluators['behavioral'].execute_test_suite(
-                sut=self.create_agent(),
-                test_params=self.protocol.behavioral_testing
+                sut=self.create_agent()
             )
             results.update({
                 'behavioral_tests': test_suite,
@@ -241,22 +259,53 @@ class EvaluationAgent(BaseAgent):
         return results
 
     def _connect_issue_database(self):
-        pass
+        """Robust database connection with fallback handling"""
+        try:
+            
+            
+            # Get config with environment variable overrides
+            db_config = self.config.get("issue_database", {})
+            
+            # Connection validation
+            if not all(key in db_config for key in ('host', 'port', 'database')):
+                raise ValueError("Incomplete database configuration")
+    
+            # Establish connection with retry
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.issue_db = IssueDBConnector(**db_config)
+                    self.issue_db.initialize_schema({
+                        "evaluation_issues": """
+                            CREATE TABLE IF NOT EXISTS evaluation_issues (
+                                id UUID PRIMARY KEY,
+                                timestamp TIMESTAMPTZ NOT NULL,
+                                issue_type VARCHAR(50) NOT NULL,
+                                severity FLOAT CHECK (severity >= 0 AND severity <= 1),
+                                context JSONB,
+                                metrics JSONB,
+                                resolution_status VARCHAR(20) DEFAULT 'unresolved'
+                            )
+                        """
+                    })
+                    logger.info("Connected to issue database")
+                    return self.issue_db
+                except OperationalError as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"Connection attempt {attempt+1} failed: {e}")
+                    time.sleep(2 ** attempt)
+                    
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            logger.info("Initializing fallback issue tracker")
+            self.issue_db = FallbackIssueTracker()
+            return self.issue_db
 
     def _init_risk_model(self):
         """Initialize risk model with validation"""
-        try:
-            risk_config = {
-                "initial_hazard_rates": {  # Corrected config structure
-                    "system_failure": 1e-6,
-                    "sensor_failure": 1e-5,
-                    "unexpected_behavior": 1e-4
-                }
-            }
-            return RiskAdaptation(config=risk_config)
-        except KeyError as e:
-            logger.error(f"Risk model initialization failed: {e}")
-            return None
+        risk_config = self.config.get('risk_adaptation', {})
+        return RiskAdaptation(config=risk_config)
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
@@ -291,8 +340,7 @@ class EvaluationAgent(BaseAgent):
         # Behavioral testing with protocol parameters
         if self.protocol.behavioral_testing['test_types']:
             test_suite = self.evaluators['behavioral'].execute_test_suite(
-                sut=self.create_agent(),
-                test_params=self.protocol.behavioral_testing
+                sut=self.create_agent()
             )
             results.update({
                 'behavioral_tests': test_suite,
@@ -315,21 +363,48 @@ class EvaluationAgent(BaseAgent):
         )
     
     def _explain_test_results(self, results: Dict) -> str:
-        """Generate test outcome summary"""
-        return self.interpreter.explain_confusion_matrix({
-            'tp': results['passed'],
-            'fp': results['false_positives'],
-            'tn': results['validations'],
-            'fn': results['failed']
+        """Generate test outcome summary using actual result keys"""
+        return self.interpreter.explain_validation_metrics({
+            'passed': results['passed'],
+            'failed': results['failed'],
+            'coverage': results['requirement_coverage']
         })
+
+    def _gather_core_metrics(self) -> Dict[str, Any]:
+        """Aggregates final validation metrics from evaluators"""
+        try:
+            # Get test data from behavioral tests
+            test_data = self.shared_memory.get("latest_metrics", {}).get("behavioral_tests", {})
+            
+            performance_result = self.evaluators['performance'].evaluate(
+                outputs=test_data.get('predictions', []),
+                ground_truths=test_data.get('expected_outputs', [])
+            )
+            performance_score = performance_result.get("accuracy", 0.0)
+            
+            safety_score = self.risk_model.get_current_risk("system_failure")['risk_metrics']['current_mean']
+            resource_usage = self.evaluators['resource'].evaluate()
+        
+            return {
+                "accuracy": round(performance_score, 3),
+                "safety_score": round(safety_score, 3),
+                "resource_usage": round(resource_usage, 3)
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to gather core metrics: {e}")
+            return {
+                "accuracy": 0.0,
+                "safety_score": 0.0,
+                "resource_usage": 1.0
+            }
 
     def create_agent(self) -> BaseAgent:  
         """Factory method with fault tolerance"""
         from src.agents.agent_factory import AgentFactory
         self.agent_factory = AgentFactory 
         try:  
-            agent = self.agent_factory.create(  
-                agent_type="evaluator",  
+            agent = self.agent_factory.create(  # Remove 'agent_type' parameter
                 config={  
                     **self.config.get("agent_params", {}),  
                     "runtime_context": {  
@@ -338,15 +413,19 @@ class EvaluationAgent(BaseAgent):
                     }  
                 }  
             )  
-    
+        
             if not agent.is_initialized():  
                 agent._init_agent_specific_components()  
-    
+        
             return agent  
-    
+        
         except Exception as e:  
             logger.critical(f"Agent creation failed: {e}")  
-            return FallbackEvaluatorAgent()  # Degrade gracefully 
+            return FallbackEvaluatorAgent(
+                shared_memory=self.shared_memory,
+                agent_factory=self.agent_factory,
+                config=self.config
+            )
 
     def _calculate_composite_score(self, results: Dict) -> float:
         """Weighted scoring with safety constraints"""
