@@ -11,35 +11,58 @@ Key Features:
 4. Modular design with failure mode analysis (Ibrahim et al. 2021)
 """
 
-import json
 import os
-import hashlib
-import subprocess
-import numpy as np
-import math
 import time
-from dataclasses import dataclass, field
+import math
+import hashlib
+import json, yaml
+import numpy as np
+import pandas as pd
+import torch.nn as nn
+
 from datetime import datetime
+from joblib import load, dump
+from dataclasses import dataclass, field
 from collections import defaultdict, deque
+from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
-from modules.monitoring import Monitoring
-from modules.model_trainer import ModelTrainer
-from deployment.git_ops.version_ops import create_and_push_tag
+
+from src.utils.interpretability import InterpretabilityHelper
+from src.agents.evaluators.adaptive_risk import RiskAdaptation
+from src.agents.evaluators.base_infra import HyperparamTuner
+from src.agents.evaluators.behavioral_validator import BehavioralValidator
 from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
 from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
 from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
-from src.agents.evaluators.adaptive_risk import RiskAdaptation
-from src.agents.evaluators.base_infra import RollbackSystem, HyperparamTuner
-from src.agents.evaluators.certification_framework import CertificationManager, CertificationAuditor
-from src.agents.evaluators.documentation import AuditTrail
 from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
-from src.agents.base_agent import BaseAgent
-from src.tuning.tuner import HyperparamTuner
+from src.agents.evaluators.utils.validation_protocol import ValidationProtocol
+from src.agents.evaluators.utils.static_analyzer import StaticAnalyzer
 from src.agents.safety.safety_guard import SafetyGuard
-from src.utils.interpretability import InterpretabilityHelper
+from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Evaluation Agent")
+
+LOCAL_CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
+TUNER_CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
+
+class AnomalyDetector(nn.Module):
+    def __init__(self, input_dim=20):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(32, 64),
+            nn.ReLU(),
+            nn.Linear(64, input_dim)
+        )
+        
+    def forward(self, x):
+        z = self.encoder(x)
+        return self.decoder(z)
 
 @dataclass
 class RiskModelParameters:
@@ -55,6 +78,15 @@ class RiskModelParameters:
         "critical": (0.7, 1.0)
     })
 
+# ------------------------ Operational Infrastructure ------------------------ #
+@dataclass
+class EvaluationProtocol:
+    """Unified configuration for evaluation pipelines"""
+    static_analysis: bool = True
+    behavioral_tests: int = 100
+    reward_constraints: Dict = None
+    optimization_targets: List[str] = None
+
 class EvaluationAgent(BaseAgent):
     def __init__(self, 
                  shared_memory, 
@@ -64,69 +96,172 @@ class EvaluationAgent(BaseAgent):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config or {}
+            config=config
         )
+        # Load config from file if not provided
+        if self.config is None:
+            self.config = self._load_config_from_file(LOCAL_CONFIG_PATH)
+        
         # Initialize core components
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.config = config
-        
-        # Initialize dependent agents through factory
-        self.reasoning_agent = self._init_reasoning_agent()
-        self.safety_agent = self._init_safety_agent()
+
+        self.anomaly_model = self._init_anomaly_detector()
+        self.issue_db = self._connect_issue_database()
         
         # Core services with fallback initialization
+        self.evaluators = self._init_evaluators_modules()
+        self.protocol = self._init_validation_protocol()
+        self.interpreter = InterpretabilityHelper()
         self.risk_model = self._init_risk_model()
-        self.certifier = self._init_certification_manager()
         self.tuner = self._init_hyperparam_tuner()
 
-    def _init_reasoning_agent(self):
-        """Initialize reasoning agent with proper dependencies"""
-        reasoning_config = self.config.get("reasoning_config", {})
-        return self.agent_factory.create(
-            "reasoning", 
-            {
-                "init_args": {
-                    "shared_memory": self.shared_memory,
-                    "agent_factory": self.agent_factory,
-                    **reasoning_config.get("init_args", {})
-                }
-            }
-        )
+    def _init_evaluators_modules(self):
+        """Initialize all evaluator modules using loaded config"""
+        return {
+            'behavioral': BehavioralValidator(config=self.config.get('behavioral_evaluator', {})),
+            'performance': PerformanceEvaluator(config=self.config.get('performance_evaluator', {})),
+            'efficiency': EfficiencyEvaluator(config=self.config.get('efficiency_evaluator', {})),
+            'statistical': StatisticalEvaluator(config=self.config.get('statistical_evaluator', {})),
+            'resource': ResourceUtilizationEvaluator(config=self.config.get('resource_utilization_evaluator', {}))
+        }
 
-    def _init_safety_agent(self):
-        """Initialize safety agent with fallback"""
+    def _init_validation_protocol(self) -> ValidationProtocol:
+        """Initialize validated protocol configuration"""
+        raw_config = self.config or self._load_config_from_file(LOCAL_CONFIG_PATH)
+        
+        # Handle nested config structure
+        protocol_config = raw_config.get("validation_protocol", {})
+        
         try:
-            return self.agent_factory.create("safety", self.config.get("safety", {}))
+            protocol = ValidationProtocol(**protocol_config)
+            protocol.validate_configuration()
+            return protocol
+        except (TypeError, ValueError) as e:
+            logger.error(f"Invalid protocol config: {e}. Using defaults.")
+            return ValidationProtocol()  # Fallback to dataclass defaults
+
+    def _load_config_from_file(self, config_path: str) -> Dict:
+        """Load YAML configuration file"""
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
         except Exception as e:
-            logger.error(f"Safety agent init failed: {e}")
-            return None
+            logger.error(f"Failed to load config: {e}")
+            return {}
+
+    def _init_anomaly_detector(self):
+        """Load or train anomaly detection model"""
+        try:
+            return load('models/anomaly_detector.joblib')
+        except FileNotFoundError:
+            return self._train_anomaly_model()
+
+    def _train_anomaly_model(self):
+        """Train ensemble model on historical bug patterns"""
+        df = pd.DataFrame(self._load_training_data())
+        
+        # Feature engineering
+        features = df[[
+            'severity', 'cognitive_complexity', 
+            'data_flow_depth', 'security_risk'
+        ]]
+        
+        # Hybrid detection model
+        model = IsolationForest(
+            n_estimators=200,
+            contamination=0.01,
+            random_state=42
+        ).fit(features)
+        
+        # Deep autoencoder for temporal patterns
+        if len(df) > 1000:
+            self._train_deep_anomaly_detector(df)
+            
+        return model
+
+    def _load_training_data(self):
+        return [
+            {
+                'severity': 0.8,
+                'cognitive_complexity': 3.5,
+                'data_flow_depth': 2,
+                'security_risk': 0.9
+            },
+            {
+                'severity': 0.3,
+                'cognitive_complexity': 2.1,
+                'data_flow_depth': 1,
+                'security_risk': 0.1
+            }
+            # Add more examples as needed
+        ]
+
+    def _train_deep_anomaly_detector(self, df):
+        """Train neural model on sequence patterns"""
+        sequences = self._generate_temporal_sequences(df)
+        model = AnomalyDetector()
+        # Add training loop with LSTM/Transformer
+        dump(model, 'models/deep_anomaly.joblib')
+
+    def detect_anomalies(self, current_issues: List[Dict]) -> List[Dict]:
+        """Flag suspicious patterns using ML models"""
+        features = self._extract_ml_features(current_issues)
+        predictions = self.anomaly_model.predict(features)
+        return [issue for issue, pred in zip(current_issues, predictions) if pred == -1]
+
+    def execute_validation_cycle(self, params: Dict) -> Dict:
+        """Updated validation with ML integration"""
+        results = {}
+        # results = super().execute_validation_cycle(params)
+
+        # Static analysis using protocol configuration
+        if self.protocol.static_analysis.get('enable', False):
+            analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
+            static_results = analyzer.full_analysis()
+            results['static_analysis'] = static_results  # Store full results
+            results['static_analysis_explanation'] = self._explain_static_results(static_results)
+    
+        # Behavioral testing with protocol parameters
+        if self.protocol.behavioral_testing.get('test_types'):
+            test_suite = self.evaluators['behavioral'].execute_test_suite(
+                sut=self.create_agent(),
+                test_params=self.protocol.behavioral_testing
+            )
+            results.update({
+                'behavioral_tests': test_suite,
+                'test_explanation': self._explain_test_results(test_suite)
+            })
+
+        # Enhanced analysis
+        if self.config.get('ml_anomaly_detection', True):
+            anomalies = self.detect_anomalies(results.get('issues', []))
+            results['ml_anomalies'] = anomalies
+            
+        return results
+
+    def _connect_issue_database(self):
+        pass
 
     def _init_risk_model(self):
         """Initialize risk model with validation"""
         try:
-            return RiskAdaptation(
-                params=RiskModelParameters(
-                    initial_hazard_rates=self.config.get("risk_params", {})
-                )
-            )
+            risk_config = {
+                "initial_hazard_rates": {  # Corrected config structure
+                    "system_failure": 1e-6,
+                    "sensor_failure": 1e-5,
+                    "unexpected_behavior": 1e-4
+                }
+            }
+            return RiskAdaptation(config=risk_config)
         except KeyError as e:
             logger.error(f"Risk model initialization failed: {e}")
-            return None
-
-    def _init_certification_manager(self):
-        try:
-            return CertificationManager(
-                domain=self.config.get("domain", "automotive")
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize CertificationManager: {e}")
             return None
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
         return HyperparamTuner(
-            config_path="src/tuning/configs/hyperparam.yaml",
+            tuner_config=TUNER_CONFIG_PATH,
             evaluation_function=self.evaluate_hyperparameters,
             strategy=self.config.get("tuning_strategy", "bayesian")
         )
@@ -141,13 +276,77 @@ class EvaluationAgent(BaseAgent):
             return -float('inf')
 
     def execute_validation_cycle(self, params: Dict) -> Dict:
-        """Execute complete validation pipeline"""
-        return {
-            "accuracy": 0.92,
-            "safety_score": 0.85,
-            "resource_usage": 0.75,
-            "timestamp": datetime.now().isoformat()
-        }
+        """Protocol-driven validation with explanations"""
+        results = {}
+        
+        # Static analysis using protocol configuration
+        if self.protocol.static_analysis['enable']:
+            analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
+            static_results = analyzer.full_analysis()
+            results.update({
+                'static_analysis': static_results,
+                'static_analysis_explanation': self._explain_static_results(static_results)
+            })
+    
+        # Behavioral testing with protocol parameters
+        if self.protocol.behavioral_testing['test_types']:
+            test_suite = self.evaluators['behavioral'].execute_test_suite(
+                sut=self.create_agent(),
+                test_params=self.protocol.behavioral_testing
+            )
+            results.update({
+                'behavioral_tests': test_suite,
+                'test_explanation': self._explain_test_results(test_suite)
+            })
+    
+        # Add protocol-compliant metrics
+        results.update(self._gather_core_metrics())
+        return results
+
+    def _explain_static_results(self, static_results: Dict) -> str:
+        """Generate human-readable analysis"""
+        security_metrics = static_results.get('security_metrics', {})
+        return (
+            f"Code Quality Report:\n"
+            f"- Technical Debt Ratio: {static_results.get('technical_debt', 0):.1%} "
+            f"(Threshold: {self.protocol.static_analysis['code_quality']['tech_debt_threshold']:.1%})\n"
+            f"- Critical Security Issues: {security_metrics.get('critical_count', 0)} "
+            f"(Max Allowed: {self.protocol.static_analysis['security']['max_critical']})"
+        )
+    
+    def _explain_test_results(self, results: Dict) -> str:
+        """Generate test outcome summary"""
+        return self.interpreter.explain_confusion_matrix({
+            'tp': results['passed'],
+            'fp': results['false_positives'],
+            'tn': results['validations'],
+            'fn': results['failed']
+        })
+
+    def create_agent(self) -> BaseAgent:  
+        """Factory method with fault tolerance"""
+        from src.agents.agent_factory import AgentFactory
+        self.agent_factory = AgentFactory 
+        try:  
+            agent = self.agent_factory.create(  
+                agent_type="evaluator",  
+                config={  
+                    **self.config.get("agent_params", {}),  
+                    "runtime_context": {  
+                        "risk_model": self.risk_model,  
+                        "evaluators": self.evaluators  
+                    }  
+                }  
+            )  
+    
+            if not agent.is_initialized():  
+                agent._init_agent_specific_components()  
+    
+            return agent  
+    
+        except Exception as e:  
+            logger.critical(f"Agent creation failed: {e}")  
+            return FallbackEvaluatorAgent()  # Degrade gracefully 
 
     def _calculate_composite_score(self, results: Dict) -> float:
         """Weighted scoring with safety constraints"""
@@ -160,10 +359,25 @@ class EvaluationAgent(BaseAgent):
 
     def log_evaluation(self, results: Dict) -> None:
         """Secure logging with privacy checks"""
+        if not isinstance(results, dict):
+            logger.error("Invalid results format - expected dictionary")
+            return
+        
         sanitized = self._sanitize_results(results)
         self._store_metrics(sanitized)
         self._update_risk_model(sanitized)
-        self._generate_certification(sanitized)
+
+    def _get_safety_compliance(self) -> str:
+        """Check against protocol safety requirements"""
+        safety_params = self.protocol.safety_constraints['risk_mitigation']
+        current_safety = self.risk_model.get_current_metrics()
+        
+        compliance = {
+            'positional': current_safety['position_margin'] >= safety_params['safety_margins']['positional'],
+            'temporal': current_safety['time_margin'] >= safety_params['safety_margins']['temporal'],
+            'fail_operational': safety_params['fail_operational']
+        }
+        return "Compliant" if all(compliance.values()) else "Non-compliant"
 
     def _sanitize_results(self, results: Dict) -> Dict:
         """Apply privacy protections and validation"""
@@ -192,108 +406,6 @@ class EvaluationAgent(BaseAgent):
                 )
             except KeyError as e:
                 logger.error(f"Risk update failed: {e}")
-
-    def _generate_certification(self, results: Dict) -> None:
-        """Handle certification process"""
-        if self.certifier and self.reasoning_agent:
-            evidence = {
-                "results": results,
-                "risk_assessment": self.risk_model.get_current_risk("system_failure") if self.risk_model else None,
-                "reasoning_validation": self.reasoning_agent.validate_results(results)
-            }
-            self.certifier.submit_evidence(evidence)
-
-# ------------------------ Core Evaluation Modules ------------------------ #
-class StaticAnalyzer:
-    """
-    Static code analysis engine with automatic remediation
-    Implements code quality metrics from Baev et al. (2023)
-    """
-    
-    def __init__(self, codebase_path: str, thresholds: Dict[str, Any] = None):
-        self.codebase_path = codebase_path
-        self.thresholds = thresholds or {
-            'critical_severity': 1,
-            'tech_debt_ratio': 0.2,
-            'security_issues': 0
-        }
-
-    def run_pylint_analysis(self) -> List[Dict]:
-        """Execute static analysis using modified Google code quality guidelines"""
-        try:
-            result = subprocess.run(
-                ['pylint', self.codebase_path, '--output-format=json'],
-                capture_output=True, text=True, check=True
-            )
-            return json.loads(result.stdout)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Static analysis failed: {e.stderr}")
-            return []
-
-    def evaluate_technical_debt(self, issues: List[Dict]) -> float:
-        """Calculate TD ratio using ISO/IEC 5055 standards"""
-        critical = sum(1 for i in issues if i['severity'] >= 3)
-        return critical / len(issues) if issues else 0.0
-
-    def security_audit(self, issues: List[Dict]) -> int:
-        """OWASP Top 10 vulnerability detection"""
-        return sum(1 for i in issues if 'security' in i['message'].lower())
-
-    def full_analysis(self) -> Dict[str, Any]:
-        """Comprehensive code health report"""
-        issues = self.run_pylint_analysis()
-        return {
-            'technical_debt': self.evaluate_technical_debt(issues),
-            'security_issues': self.security_audit(issues),
-            'critical_count': sum(1 for i in issues if i['severity'] > 3)
-        }
-
-class BehavioralValidator:
-    """
-    Behavioral testing framework implementing
-    the SUT: System Under Test paradigm from Ammann & Black (2014)
-    """
-    
-    def __init__(self, test_cases: List[Dict] = None):
-        self.test_cases = test_cases or []
-        self.failure_modes = []
-
-    def add_test_case(self, scenario: Dict, oracle: callable):
-        """Add test case using Given-When-Then pattern"""
-        self.test_cases.append({
-            'scenario': scenario,
-            'oracle': oracle,
-            'metadata': {'added': datetime.now()}
-        })
-
-    def execute_test_suite(self, sut: callable) -> Dict[str, Any]:
-        """Execute full test battery with temporal isolation"""
-        results = {'passed': 0, 'failed': 0, 'anomalies': []}
-        
-        for test in self.test_cases:
-            try:
-                output = sut(test['scenario'])
-                if test['oracle'](output):
-                    results['passed'] += 1
-                else:
-                    results['failed'] += 1
-                    self._analyze_failure(test, output)
-            except Exception as e:
-                logger.error(f"Test execution error: {str(e)}")
-                results['anomalies'].append({
-                    'test': test,
-                    'error': str(e)
-                })
-
-        return results
-
-    def _analyze_failure(self, test: Dict, output: Any):
-        """Failure mode analysis using FMEA methodology"""
-        self.failure_modes.append({
-            'test_id': hash(str(test['scenario'])),
-            'output': output,
-            'timestamp': datetime.now()
-        })
 
 class SafetyRewardModel:
     """
@@ -402,15 +514,6 @@ class MultiObjectiveEvaluator:
                      sum((x - sum(b)/n2)**2 for x in b)) / (n1 + n2 - 2)
         return (sum(a)/n1 - sum(b)/n2) / math.sqrt(var_pooled)
 
-# ------------------------ Operational Infrastructure ------------------------ #
-@dataclass
-class EvaluationProtocol:
-    """Unified configuration for evaluation pipelines"""
-    static_analysis: bool = True
-    behavioral_tests: int = 100
-    reward_constraints: Dict = None
-    optimization_targets: List[str] = None
-
 class AIValidationSuite:
     """Orchestrates complete validation lifecycle"""
     
@@ -466,200 +569,37 @@ class AIValidationSuite:
             f"Behavioral failures: {self.artifacts['behavioral_results']['failed']}"
         ]
 
-@dataclass
-class ValidationProtocol:
-    """
-    Comprehensive validation configuration based on:
-    - ISO/IEC 25010 (Software Quality Requirements)
-    - UL 4600 (Standard for Safety for Autonomous Vehicles)
-    - EU AI Act (Risk-based Classification)
-    """
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Evaluation Agent ===\n")
+    class SharedMemory:
+        def __init__(self, config=None):
+            self.data = {}
     
-    # Static Analysis Configuration
-    static_analysis: Dict = field(default_factory=lambda: {
-        'enable': True,
-        'security': {
-            'owasp_top_10': True,
-            'cwe_top_25': True,
-            'max_critical': 0,
-            'max_high': 3
-        },
-        'code_quality': {
-            'tech_debt_threshold': 0.15,
-            'test_coverage': 0.8,
-            'complexity': {
-                'cyclomatic': 15,
-                'cognitive': 20
-            }
-        }
-    })
+        def set(self, key, value):
+            self.data[key] = value
     
-    # Dynamic Testing Parameters
-    behavioral_testing: Dict = field(default_factory=lambda: {
-        'test_types': ['unit', 'integration', 'adversarial', 'stress'],
-        'sample_size': {
-            'nominal': 1000,
-            'edge_cases': 100,
-            'adversarial': 50
-        },
-        'failure_tolerance': {
-            'critical': 0,
-            'high': 0.01,
-            'medium': 0.05
-        }
-    })
+        def append(self, key, value):  # <-- fix here
+            if key not in self.data or not isinstance(self.data[key], list):
+                self.data[key] = []
+            self.data[key].append(value)
     
-    # Safety & Ethics Configuration
-    safety_constraints: Dict = field(default_factory=lambda: {
-        'operational_design_domain': {
-            'geography': 'global',
-            'speed_range': (0, 120),  # km/h
-            'weather_conditions': ['clear', 'rain', 'snow']
-        },
-        'risk_mitigation': {
-            'safety_margins': {
-                'positional': 1.5,  # meters
-                'temporal': 2.0      # seconds
-            },
-            'fail_operational': True
-        },
-        'ethical_requirements': {
-            'fairness_threshold': 0.8,
-            'bias_detection': ['gender', 'ethnicity', 'age'],
-            'transparency': ['decision_logging', 'explanation_generation']
-        }
-    })
+        def get(self, key, default=None):
+            return self.data.get(key, default)
     
-    # Performance Benchmarks
-    performance_metrics: Dict = field(default_factory=lambda: {
-        'accuracy': {
-            'min_precision': 0.95,
-            'min_recall': 0.90,
-            'f1_threshold': 0.925
-        },
-        'efficiency': {
-            'max_inference_time': 100,  # ms
-            'max_memory_usage': 512,    # MB
-            'energy_efficiency': 0.5    # Joules/inference
-        },
-        'robustness': {
-            'noise_tolerance': 0.2,
-            'adversarial_accuracy': 0.85,
-            'distribution_shift': 0.15
-        }
-    })
-    
-    # Compliance & Certification
-    compliance: Dict = field(default_factory=lambda: {
-        'regulatory_frameworks': ['ISO 26262', 'EU AI Act', 'SAE J3016'],
-        'certification_level': 'ASIL-D',
-        'documentation': {
-            'required': ['safety_case', 'test_reports', 'risk_assessment'],
-            'format': 'ISO/IEC 15288'
-        }
-    })
-    
-    # Operational Parameters
-    operational: Dict = field(default_factory=lambda: {
-        'update_policy': {
-            'retrain_threshold': 0.10,
-            'rollback_strategy': 'versioned',
-            'validation_frequency': 'continuous'
-        },
-        'resource_constraints': {
-            'max_compute_time': 3600,  # seconds
-            'allowed_hardware': ['CPU', 'GPU'],
-            'privacy': ['differential_privacy', 'on-device_processing']
-        }
-    })
+    config = None
+    shared_memory = SharedMemory(config=None)
+    agent_factory = lambda: None
 
-    def validate_configuration(self):
-        """
-        Formally verify that validation protocol settings are internally consistent,
-        complete, and compatible with certification templates.
-        Raises ValueError if inconsistencies are found.
-        """
-        import json
-        from pathlib import Path
-    
-        errors = []
-    
-        # 1. Validate Static Analysis Config
-        if not isinstance(self.static_analysis, dict):
-            errors.append("Static analysis configuration must be a dictionary.")
-    
-        sec = self.static_analysis.get('security', {})
-        if sec:
-            for key in ['owasp_top_10', 'cwe_top_25', 'max_critical', 'max_high']:
-                if key not in sec:
-                    errors.append(f"Missing security config: {key}")
-    
-        code_quality = self.static_analysis.get('code_quality', {})
-        if code_quality:
-            for key in ['tech_debt_threshold', 'test_coverage', 'complexity']:
-                if key not in code_quality:
-                    errors.append(f"Missing code quality config: {key}")
-    
-        complexity = code_quality.get('complexity', {})
-        for c_key in ['cyclomatic', 'cognitive']:
-            if c_key not in complexity:
-                errors.append(f"Missing complexity threshold: {c_key}")
-    
-        # 2. Validate Behavioral Testing
-        bt = self.behavioral_testing
-        if not isinstance(bt.get('test_types', []), list):
-            errors.append("Test types must be a list.")
-        if 'sample_size' not in bt or 'failure_tolerance' not in bt:
-            errors.append("Behavioral testing must define sample_size and failure_tolerance.")
-    
-        # 3. Validate Safety Constraints
-        sc = self.safety_constraints
-        if 'operational_design_domain' not in sc:
-            errors.append("Safety constraints must define an operational design domain.")
-        if 'ethical_requirements' not in sc:
-            errors.append("Safety constraints must define ethical requirements.")
-    
-        # 4. Validate Performance Metrics
-        perf = self.performance_metrics
-        required_perf = ['accuracy', 'efficiency', 'robustness']
-        for metric in required_perf:
-            if metric not in perf:
-                errors.append(f"Performance metric missing: {metric}")
-    
-        # 5. Validate Compliance Targets
-        comp = self.compliance
-        if 'regulatory_frameworks' not in comp:
-            errors.append("Compliance section missing regulatory frameworks.")
-        if 'certification_level' not in comp:
-            errors.append("Compliance section missing certification level.")
-    
-        # 6. Validate Operational Parameters
-        op = self.operational
-        if 'update_policy' not in op or 'resource_constraints' not in op:
-            errors.append("Operational section must define update_policy and resource_constraints.")
-    
-        # 7. Cross-check with Certification Templates
-        try:
-            cert_path = Path("evaluators/config/certification_templates.json")
-            if not cert_path.exists():
-                cert_path = Path("certification_templates.json")
-            templates = json.loads(cert_path.read_text())
-    
-            domain = "automotive"  # Default fallback domain
-            domains = templates.keys()
-    
-            if domain not in domains:
-                errors.append(f"Domain '{domain}' not found in certification templates.")
-    
-            levels = ['DEVELOPMENT', 'PILOT', 'DEPLOYMENT', 'CRITICAL']
-            for lvl in levels:
-                if lvl not in templates.get(domain, {}):
-                    errors.append(f"Certification template missing phase: {lvl}")
-        except Exception as e:
-            errors.append(f"Certification template verification failed: {str(e)}")
-    
-        # 8. Final Decision
-        if errors:
-            raise ValueError(f"ValidationProtocol consistency check failed:\n" + "\n".join(errors))
-        else:
-            print("[ValidationProtocol] Configuration validated successfully.")
+    agent = EvaluationAgent(shared_memory, agent_factory, config={})
+    print(agent)
+    print(f"\n* * * * * Phase 2 - Logging * * * * *\n")
+    results={}
+    log = agent.log_evaluation(results=results)
+
+    logger.info(f"{log}")
+    print(f"\n* * * * * Phase 3 - Validation * * * * *\n")
+    validation_params = {}
+    results = agent.execute_validation_cycle(validation_params)
+
+    print("\n=== Successfully Ran Evaluation Agent ===\n")
