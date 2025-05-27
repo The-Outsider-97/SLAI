@@ -2,6 +2,9 @@
 import yaml, json
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from typing import Dict, Any
 
 from src.agents.perception.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer
