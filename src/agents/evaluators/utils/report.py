@@ -146,6 +146,19 @@ class PerformanceVisualizer:
         painter.end()
         return pixmap
 
+    def compute_metric(self) -> float:
+        """
+        Compute a normalized accuracy or performance score.
+        Returns a float between 0 and 1.
+        """
+        try:
+            passed = self.metrics.get("passed", 0)
+            total = self.metrics.get("total", passed)
+            return round(passed / total, 3) if total > 0 else 0.0
+        except Exception as e:
+            logger.error(f"Failed to compute performance metric: {e}")
+            return 0.0
+
     def render_temporal_chart(self, size, metric):
         """Generic time-series chart renderer"""
         valid_metrics = ['hazard_rates', 'operational_times']
