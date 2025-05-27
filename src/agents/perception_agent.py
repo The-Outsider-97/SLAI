@@ -200,7 +200,23 @@ class PerceptionAgent(BaseAgent):
                     top_p=self.config.get('top_p', 0.0)
                 )
             self._cache['generated_text'] = generated_text
-        return torch.matmul(TensorOps.layer_norm(fused), self.projection.data)
+    
+        # Add reconstruction
+        losses = {}
+        if 'vision' in embeddings:
+            recon_vision = self.decoders['vision'](embeddings['vision'])
+            losses['vision'] = self.recon_loss['vision'](recon_vision, inputs['vision'])
+
+        if 'audio' in embeddings:
+            recon_audio = self.decoders['audio'](embeddings['audio'])
+            losses['audio'] = self.recon_loss['audio'](recon_audio, inputs['audio'])
+
+        #if 'text' in embeddings:  # <-- add this in v.1.9.0
+        #    recon_text = self.decoders['text'](embeddings['text'])
+        #    losses['text'] = self.recon_loss['text'](recon_text, inputs['text'])
+
+        return fused, losses  # Return both fused embeddings and losses
+        #return torch.matmul(TensorOps.layer_norm(fused), self.projection.data)
 
     #def backward(self, dout):
     #    # Backward through projection layer
