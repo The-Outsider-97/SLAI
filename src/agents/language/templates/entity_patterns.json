@@ -1,0 +1,57 @@
+{
+  "LOCATION": {
+    "pattern": "(Paris|London|New York|Tokyo|Berlin|Rome|California|Germany|Main Street|[A-Z][a-zA-Z\\s]+(?:, [A-Z]{2})?|near me)",
+    "components": {}
+  },
+  "DATE_TIME": {
+    "pattern": "(today|tomorrow|yesterday|next week|last month|this evening|tonight|now|\\d{1,2}/\\d{1,2}/(?:\\d{4}|\\d{2})|\\d{4}-\\d{2}-\\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?|at 5 pm|7am|noon|midnight|\\d{1,2}:\\d{2}\\s?(?:[apAP][mM])?)",
+    "components": {},
+    "validation": "temporal"
+  },
+  "TIME": {
+    "pattern": "([0-2]?[0-9]:[0-5][0-9](?:\\s?[AP]M)?)",
+    "components": {},
+    "validation": "temporal"
+  },
+  "DURATION": {
+    "pattern": "(\\d+\\s+(?:minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)|for 5 minutes|in an hour|for a few seconds)",
+    "components": {},
+    "validation": "duration"
+  },
+  "NUMBER": {
+    "pattern": "(-?\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|a couple|a few)",
+    "components": {},
+    "validation": "quantity"
+  },
+  "TIME_UNIT": {
+    "pattern": "(second|seconds|sec|minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)",
+    "components": {},
+    "validation": "quantity"
+  },
+  "SONG_NAME": {
+    "pattern": "([A-Za-z0-9\\s']+)",
+    "components": {}
+  },
+  "ARTIST_NAME": {
+    "pattern": "([A-Za-z\\s\\.]+)",
+    "components": {}
+  },
+  "GENRE": {
+    "pattern": "(rock|pop|jazz|classical|electronic|hip hop|blues|country|reggae)",
+    "components": {},
+    "validation": "term"
+  },
+  "TERM": {
+    "pattern": "([a-zA-Z0-9\\s]+)",
+    "components": {},
+    "validation": "term"
+  },
+  "CUISINE_TYPE": {
+    "pattern": "(italian|chinese|mexican|indian|thai|japanese|french|pizza|burgers|sushi)",
+    "components": {}
+  },
+  "FOOD_TYPE": {
+    "pattern": "(pizza|pasta|sushi|tacos|burgers|salad|steak|seafood)",
+    "components": {}
+  }
+}
