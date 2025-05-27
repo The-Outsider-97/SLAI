@@ -1,1479 +1,434 @@
-import re
-import math
-import json
-import copy
-import random
-import numpy as np
-import logging as logger
-from pathlib import Path
-from typing import Optional, Any, List, Union, Tuple
-from src.agents.language.language_profiles import MORPHOLOGY_RULES
-from collections import defaultdict, deque, Counter
+"""
+Core Function:
+Analyzes syntax and structure of the input to validate grammar, detect mistakes, or help with reformulations.
 
-# === Configuration ===
-STRUCTURED_WORDLIST_PATH = "src/agents/language/structured_wordlist_en.json"
+Responsibilities:
+Perform syntax parsing (with help from NLPEngine)
+Apply grammar rule checks (e.g., subject-verb agreement)
+Suggest corrections or reformulate malformed input
+Classify sentence type (declarative, interrogative, etc.)
+
+Why it matters:
+Adds grammatical intelligence, improves clarity, and can assist both interpretation (for ambiguous input) and generation (polished output).
+"""
+import yaml
+
+from typing import List, Dict, Tuple, Optional, Any
+from dataclasses import dataclass, field
+
+from src.agents.language.utils.rules import Rules #, DependencyRelation
+from logs.logger import get_logger
+
+logger = get_logger("Grammar Processor")
+
+CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
+
+@dataclass
+class InputToken:
+    """
+    Expected structure for tokens passed to GrammarProcessor.
+    This should be constructed by the main agent pipeline from NLPEngine's output.
+    """
+    text: str
+    lemma: str
+    pos: str      # Universal POS tag (e.g., 'VERB', 'NOUN', 'PRON')
+    index: int    # Index of the token within its sentence (0-based)
+    head: int     # Index of the head token in the sentence (-1 or self.index for root)
+    dep: str      # Dependency relation to the head (e.g., 'nsubj', 'obj', 'aux')
+    start_char_abs: int # Absolute start char offset in the original full text
+    end_char_abs: int   # Absolute end char offset in the original full text (inclusive)
+
+@dataclass
+class GrammarIssue:
+    description: str
+    # Character indices in the original full text
+    source_text_char_span: Tuple[int, int]
+    # Inclusive start and end indices of relevant tokens within their sentence
+    source_sentence_token_indices_span: Tuple[int, int]
+    severity: str = "warning" # e.g., "warning", "error"
+    suggestion: Optional[str] = None
+
+@dataclass
+class GrammarAnalysisResult:
+    original_text_snippet: str # Could be the full text or a relevant snippet
+    is_grammatical: bool
+    sentence_analyses: List[Dict[str, Any]]
+    # Each dict in sentence_analyses:
+    #   - text: str (the sentence text, reconstructed from input tokens)
+    #   - type: str (declarative, interrogative, etc.)
+    #   - issues: List[GrammarIssue]
+    #   - original_sentence_token_count: int
 
 class GrammarProcessor:
-    """Implements formal grammar systems based on Chomsky hierarchy and information theory"""
-    # Universal POS Tags (Petrov et al., 2012)
+    # _UPOS_MAP could be used for internal normalization if NLPEngine POS tags vary
     _UPOS_MAP = {
-        # Open class words
-        'noun': 'NOUN',        # Common nouns
-        'propn': 'PROPN',      # Proper nouns (New York, Alice)
-        'verb': 'VERB',        # Main verbs (eat, run)
-        'aux': 'AUX',          # Auxiliaries (will, would, be)
-        'adjective': 'ADJ',    # Adjectives (happy, big)
-        'adverb': 'ADV',       # Adverbs (quickly, very)
-        'numeral': 'NUM',      # Numerals (7, twenty-three)
-        
-        # Closed class words
-        'determiner': 'DET',   # Determiners (the, a, some)
-        'pronoun': 'PRON',     # Pronouns (I, you, they)
-        'preposition': 'ADP',  # Prepositions (in, on, at)
-        'conjunction': 'CCONJ',# Coordinating conjunctions (and, or)
-        'subord': 'SCONJ',     # Subordinating conjunctions (if, because)
-        'particle': 'PART',    # Particles (to, 's)
-        'interjection': 'INTJ',# Interjections (oh, wow)
-        
-        # Special categories
-        'symbol': 'SYM',       # Symbols ($, %, ©)
-        'punct': 'PUNCT',      # Punctuation
-        'wh-word': 'PRON',     # WH-words (what, who)
-        'existential': 'EX',   # Existential 'there'
+        'noun': 'NOUN', 'propn': 'PROPN', 'verb': 'VERB', 'aux': 'AUX',
+        'adjective': 'ADJ', 'adverb': 'ADV', 'numeral': 'NUM',
+        'determiner': 'DET', 'pronoun': 'PRON', 'preposition': 'ADP',
+        'conjunction': 'CCONJ', 'subord': 'SCONJ', 'particle': 'PART',
+        'interjection': 'INTJ', 'symbol': 'SYM', 'punct': 'PUNCT',
     }
 
-    def __init__(self, lang='en', structured_wordlist=None, wordlist=None,
-                 nlg_templates=None, rules_path=None, knowledge_agent=None):
-        self._wordlist = None
-        self._structured_wordlist = None
+    def __init__(self, config):
 
-        if not self._validate_wordlist_integrity():
-            raise ValueError("Wordlist failed integrity check")
+        self.config = config
+        self.rule_engine = Rules()
+        self.rule_engine._verb_rules()
+        logger.info("Grammar Processor initialized...")
 
-        self.morph_rules = MORPHOLOGY_RULES[lang]
-        self.reset_parser_state()
-        self.knowledge_base = knowledge_agent
-
-        if structured_wordlist is not None:
-            self.pos_map = self._convert_structured_wordlist(structured_wordlist)
-        else:
-            self.pos_map = self._load_pos_data()
-        if wordlist is not None:
-            self.wordlist = wordlist
-        else:
-            self.wordlist = {}
-        if nlg_templates is not None:
-            self.nlg_templates = nlg_templates
-        else:
-            from src.agents.language.resource_loader import ResourceLoader
-            self.nlg_templates = ResourceLoader.get_nlg_templates()
-        self._build_pos_patterns()
-        if rules_path:
-            self._load_custom_cfg_rules(rules_path)
-        # CFG rules to use standardized tags
-        self.cfg_rules = {
-            # Sentence level rules
-            'S': [
-                ['DECLARATIVE'], 
-                ['INTERROGATIVE'],
-                ['IMPERATIVE'],
-                ['EXCLAMATORY']
-            ],
-            
-            # Declarative structure (Chomsky, 1965)
-            'DECLARATIVE': [
-                ['NP', 'VP'],
-                ['ADV_PHRASE', 'NP', 'VP']
-            ],
-            
-            # Interrogative structures
-            'INTERROGATIVE': [
-                ['AUX', 'NP', 'VP', 'PUNCT_QM'],
-                ['WH_PHRASE', 'AUX', 'NP', 'VP', 'PUNCT_QM']
-            ],
-            
-            # Noun phrase expansions (Radford, 1988)
-            'NP': [
-                ['DET', 'NOMINAL'], 
-                ['PROPN'],
-                ['PRON'],
-                ['NOMINAL'],
-                ['NP', 'PP'],       # Recursive prepositional attachment
-                ['NP', 'REL_CLAUSE'] # Relative clauses
-            ],
-            
-            'NOMINAL': [
-                ['ADJ_PHRASE', 'NOUN'],
-                ['NOUN', 'ADJ_PHRASE'],
-                ['NUM', 'NOUN']
-            ],
-            
-            # Verb phrase expansions (Pollard & Sag, 1994)
-            'VP': [
-                ['V', 'NP'],        # Transitive
-                ['V', 'PP'],        # Prepositional
-                ['V', 'ADJ_PHRASE'],# Copular
-                ['V', 'ADV'],       # Intransitive
-                ['AUX', 'VP'],      # Auxiliary chains
-                ['V', 'S']          # Sentential complements
-            ],
-            
-            # Phrase extensions
-            'PP': [['ADP', 'NP']],          # Prepositional phrase
-            'ADJ_PHRASE': [                # Adjective phrase
-                ['ADJ'], 
-                ['ADV', 'ADJ'], 
-                ['ADJ', 'PP']
-            ],
-            'ADV_PHRASE': [                # Adverb phrase
-                ['ADV'], 
-                ['ADV', 'ADV_PHRASE']
-            ],
-            
-            # Special constructions
-            'WH_PHRASE': [['PRON_WH'], ['ADV_WH']],
-            'REL_CLAUSE': [['PRON_REL', 'VP']],
-            'PUNCT_QM': [['PUNCT']]  # Question mark
-        }
-
-        # Add feature constraints (Gazdar et al., 1985)
-        self.feature_constraints = {
-            'NP': {
-                'NUMBER': ['sg', 'pl'],
-                'CASE': ['nom', 'acc']
-            },
-            'V': {
-                'TENSE': ['pres', 'past'],
-                'AGREEMENT': ['3sg']
-            },
-            'DET-NOUN': {
-                'NUMBER_AGREEMENT': True
-            }
-        }
-
-        self.ngram_model = defaultdict(lambda: defaultdict(int))
-        self._build_ngram_model()
-        self.stemmer = self.PorterStemmer()
-        self.entity_tracker = {
-            'entities': deque(maxlen=10),
-            'pronouns': {
-                'he': ['male', 'singular'], # Subject pronouns
-                'she': ['female', 'singular'],
-                'they': ['neutral', 'plural'],
-                'it': ['neutral', 'singular'],
-
-                'him': ['male', 'singular', 'object'], # Object pronouns
-                'her': ['female', 'singular', 'object'],
-                'them': ['neutral', 'plural', 'object'],
-
-                'his': ['male', 'singular', 'possessive'], # Possessive pronouns
-                'hers': ['female', 'singular', 'possessive'],
-                'theirs': ['neutral', 'plural', 'possessive'],
-                'its': ['neutral', 'singular', 'possessive'],
-
-                'himself': ['male', 'singular', 'reflexive'], # Reflexive pronouns
-                'herself': ['female', 'singular', 'reflexive'],
-                'themself': ['neutral', 'singular', 'reflexive'],
-                'themselves': ['neutral', 'plural', 'reflexive'],
-                'itself': ['neutral', 'singular', 'reflexive']
-
-            },
-            'entities': deque(maxlen=15)  # Increased buffer size
-        }
-
-        self.pos_patterns = [
-            # Proper nouns (must come first to prevent substring matches)
-            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),
-            
-            # Core POS patterns with descending specificity
-            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
-            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
-            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
-            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
-            
-            # Closed class words
-            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
-            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
-            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
-            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
-            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
-            
-            # Special categories
-            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
-            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
-            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
-            
-            # Auxiliaries and modals
-            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
-            
-            # Fallback patterns (lower priority)
-            (re.compile(r'\b\w+\b'), 'NOUN')  # Default catch-all
-        ]
-
-        # This ensures that _expand_with_synonyms() has access to the enriched synonyms.
-        self._wordlist = {"words": structured_wordlist} if structured_wordlist else {"words": {}}
+    def _reconstruct_sentence_text(self, sentence_tokens: List[InputToken]) -> str:
+        """Reconstructs sentence text from InputToken list for display."""
+        if not sentence_tokens:
+            return ""
+        return " ".join(token.text for token in sentence_tokens)
 
 
-    @property
-    def structured_wordlist(self):
-        if self._wordlist is None:
-            with open(STRUCTURED_WORDLIST_PATH) as f:
-                self._wordlist = json.load(f)
-        return self._wordlist
-
-    def _validate_wordlist_integrity(self):
-        required_keys = {'pos', 'synonyms', 'related_terms'}
-        for word, entry in self.structured_wordlist['words'].items():
-            if not isinstance(entry, dict):
-                return False
-            if not required_keys.issubset(entry.keys()):
-                return False
-        return True
-
-    def extract_entities(self, text, pos_tags):
+    def analyze_text(self, sentences: List[List[InputToken]], full_text_snippet: Optional[str] = None) -> GrammarAnalysisResult:
         """
-        Extracts basic named entities using noun/proper noun clusters.
+        Analyzes a list of sentences, where each sentence is a list of InputTokens.
+        `full_text_snippet` is optional, used for context in GrammarAnalysisResult.
         """
-        entities = {}
-        current_entity = []
+        if not sentences:
+            logger.warning("Received empty sentence list for analysis.")
+            return GrammarAnalysisResult(original_text_snippet=full_text_snippet or "",
+                                         is_grammatical=True, sentence_analyses=[])
 
-        for word, tag in pos_tags:
-            if tag in {"NOUN", "PROPN"}:
-                current_entity.append(word)
-            else:
-                if current_entity:
-                    key = " ".join(current_entity)
-                    entities[key] = {"type": "noun_phrase"}
-                    current_entity = []
+        all_issues_overall: List[GrammarIssue] = []
+        sentence_analyses_results: List[Dict[str, Any]] = []
 
-        if current_entity:
-            key = " ".join(current_entity)
-            entities[key] = {"type": "noun_phrase"}
+        for sentence_tokens in sentences:
+            if not sentence_tokens:
+                continue
 
-        return entities
+            current_sentence_issues: List[GrammarIssue] = []
+            sentence_text_reconstructed = self._reconstruct_sentence_text(sentence_tokens)
+            
+            sentence_type = self._classify_sentence_type(sentence_tokens)
+            
+            sv_agreement_issues = self._check_subject_verb_agreement(sentence_tokens)
+            current_sentence_issues.extend(sv_agreement_issues)
+            
+            # TODO: Add calls to other grammar check methods here using sentence_tokens
 
-    def _convert_structured_wordlist(self, structured_wordlist: dict) -> dict:
-        if not isinstance(structured_wordlist, dict):
-            raise ValueError("structured_wordlist must be a dict, got {}".format(type(structured_wordlist).__name__))
-        pos_mapping = {}
-        from collections import Counter
-        for word, entry in structured_wordlist.items():
-            tag_counter = Counter()
-            for raw_tag in entry.get("pos", []):
-                normalized = raw_tag.lower().strip()
-                upos_tag = self._UPOS_MAP.get(normalized)
-                if upos_tag:
-                    tag_counter[upos_tag] += 1
-            if tag_counter:
-                pos_mapping[word.lower()] = tag_counter.most_common(1)[0][0]
-        return pos_mapping
-
-    def _load_custom_cfg_rules(self, rules_path: Union[str, Path]):
-        try:
-            rules_path = Path(rules_path)
-            if rules_path.is_file():
-                with open(rules_path, 'r') as f:
-                    custom_rules = json.load(f)
-                    if isinstance(custom_rules, dict):
-                        self.cfg_rules.update(custom_rules)
-        except Exception as e:
-            logger.warning(f"Failed to load custom grammar rules from {rules_path}: {e}")
-
-    def _is_coreferent(self, word):
-        """Enhanced coreference resolution with case sensitivity"""
-        word_lower = word.lower()
-        current_pos = self._get_pos_tag(word)
-        
-        # Check all pronoun types
-        if word_lower not in self.entity_tracker['pronouns']:
-            return False
-        
-        pronoun_props = self.entity_tracker['pronouns'][word_lower]
-        
-        # Special handling for "her" ambiguity (can be possessive or object)
-        if word_lower == 'her':
-            if current_pos == 'PRON':  # Object pronoun
-                pronoun_props = ['female', 'singular', 'object']
-            else:  # Possessive determiner
-                return False  # Treat as new reference
-        
-        # Search strategy based on pronoun type
-        search_window = None
-        if pronoun_props[2] == 'reflexive':
-            # Reflexives typically refer to recent subjects
-            search_window = [e for e in self.entity_tracker['entities'] 
-                            if e['properties'].get('grammar_role') == 'subject']
-        else:
-            search_window = self.entity_tracker['entities']
-        
-        # Property matching with case sensitivity
-        for entity in reversed(search_window):
-            if self._match_properties(entity['properties'], pronoun_props):
-                # Additional check for case matching
-                if self._check_case_compatibility(word, entity['text']):
-                    return True
-        
-        return False
-
-    def _check_case_compatibility(self, pronoun, antecedent):
-        """Verify case agreement between pronoun and antecedent"""
-        pronoun_lower = pronoun.lower()
-        
-        # Subject pronouns must follow sentence boundaries
-        if pronoun_lower in ['he', 'she', 'they', 'it']:
-            return pronoun[0].isupper()  # Must be capitalized
-        
-        # Object pronouns typically don't start sentences
-        if pronoun_lower in ['him', 'her', 'them']:
-            return not pronoun[0].isupper()
-        
-        # Possessives can appear anywhere
-        return True
-
-    def _update_discourse_context(self, word, is_sentence_start):
-        """Enhanced with grammatical role tracking"""
-        current_pos = self._get_pos_tag(word)
-        
-        if is_sentence_start:
-            self.entity_tracker['entities'] = deque(maxlen=15)
-            self.current_subject = None
-        
-        # Track grammatical roles
-        grammar_role = None
-        if current_pos in ['NOUN', 'PROPN', 'PRON']:
-            if len(self.entity_tracker['entities']) == 0 or is_sentence_start:
-                grammar_role = 'subject'
-                self.current_subject = word.lower()
-            else:
-                grammar_role = 'object'
-        
-        if current_pos in ['NOUN', 'PROPN']:
-            self.entity_tracker['entities'].append({
-                'text': word.lower(),
-                'position': len(self.previous_words),
-                'properties': {
-                    **self._get_entity_properties(word),
-                    'grammar_role': grammar_role,
-                    'is_definite': word.lower() in ['the', 'this', 'that']
-                }
+            all_issues_overall.extend(current_sentence_issues)
+            sentence_analyses_results.append({
+                "text": sentence_text_reconstructed,
+                "type": sentence_type,
+                "issues": current_sentence_issues,
+                "original_sentence_token_count": len(sentence_tokens)
             })
 
-    def _validate_cfg_rules(self):
-        """Detect left-recursive cycles in CFG rules using DFS (Johnson, 1975)
-        Raises:
-            ValueError: If infinite recursion is detected
-        Returns:
-            dict: Rule dependency graph for visualization
-        """
-        # Build adjacency list
-        graph = {non_terminal: set() for non_terminal in self.cfg_rules}
-        for lhs, productions in self.cfg_rules.items():
-            for production in productions:
-                for symbol in production:
-                    if symbol in self.cfg_rules:  # Only non-terminals
-                        graph[lhs].add(symbol)
-
-        # Check for cycles using iterative DFS
-        visited = set()
-        recursion_stack = set()
-        dependency_graph = {}
-
-        def _detect_cycles(symbol):
-            """Modified DFS cycle detection (Tarjan, 1972)"""
-            nonlocal dependency_graph
-            visited.add(symbol)
-            recursion_stack.add(symbol)
-            dependency_graph[symbol] = []
-
-            for neighbor in graph[symbol]:
-                dependency_graph[symbol].append(neighbor)
-                if neighbor not in visited:
-                    if _detect_cycles(neighbor):
-                        return True
-                elif neighbor in recursion_stack:
-                    # Highlight the cyclic path
-                    cycle_path = list(recursion_stack) + [neighbor]
-                    raise ValueError(
-                        f"Infinite recursion detected: {' → '.join(cycle_path)}\n"
-                        f"Offending rule: {symbol} → {' '.join(production)}"
-                    )
-            
-            recursion_stack.remove(symbol)
-            return False
-
-        # Check all non-terminals
-        for non_terminal in self.cfg_rules:
-            if non_terminal not in visited:
-                if _detect_cycles(non_terminal):
-                    # This line won't be reached due to immediate exception
-                    pass
-
-        return dependency_graph
-
-    def _safe_add_rule(self, lhs, production):
-        """Safely add new CFG rule with cycle checking"""
-        old_rules = self.cfg_rules.get(lhs, [])
-        self.cfg_rules[lhs] = old_rules + [production]
+        is_overall_grammatical = not any(issue.severity == "error" for issue_list in sentence_analyses_results for issue in issue_list["issues"])
         
-        try:
-            dep_graph = self._validate_cfg_rules()
-        except ValueError as e:
-            # Revert changes if unsafe
-            self.cfg_rules[lhs] = old_rules
-            raise RuntimeError(
-                f"Rule addition rejected: {lhs} → {' '.join(production)}\n"
-                f"Reason: {str(e)}"
-            ) from e
-        
-        return dep_graph
+        display_text = full_text_snippet
+        if not display_text and sentences and sentences[0]:
+             display_text = self._reconstruct_sentence_text(sentences[0])
+             if len(sentences) > 1: display_text += "..."
 
-    def _load_pos_data(self):
-        """Convert custom tags to Universal Dependencies scheme with frequency-based disambiguation"""
-        pos_path = Path(__file__).parent / "structured_wordlist_en.json"
-        
-        try:
-            with open(pos_path, 'r') as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to load POS data: {str(e)}")
-            return {}
 
-        pos_mapping = {}
-        for word, entry in data['words'].items():
-            tag_counter = Counter()
-            
-            for raw_tag in entry['pos']:
-                normalized = raw_tag.lower().strip()
-                if upos_tag := self._UPOS_MAP.get(normalized):
-                    tag_counter[upos_tag] += 1
+        return GrammarAnalysisResult(
+            original_text_snippet=display_text or "N/A",
+            is_grammatical=is_overall_grammatical,
+            sentence_analyses=sentence_analyses_results
+        )
+
+    def _classify_sentence_type(self, sentence_tokens: List[InputToken]) -> str:
+        if not sentence_tokens:
+            return "EMPTY"
+
+        last_token = sentence_tokens[-1]
+        if last_token.text == '?':
+            return 'INTERROGATIVE'
+        if last_token.text == '!':
+            return 'EXCLAMATORY'
+
+        first_token = sentence_tokens[0]
+        # Imperative: often starts with a base form verb, subject is implied 'you'
+        if first_token.pos == 'VERB' and first_token.lemma == first_token.text: # Heuristic for base form
+            # Ensure it's not part of a question ("Do you...")
+            is_aux_question_start = (first_token.pos == 'AUX' and len(sentence_tokens) > 1 and
+                                     any(tok.dep == 'nsubj' and tok.head == first_token.index for tok in sentence_tokens[1:]))
+            if not is_aux_question_start:
+                # Check if there's an explicit subject
+                has_explicit_subject = any(tok.dep == 'nsubj' for tok in sentence_tokens)
+                if not has_explicit_subject:
+                    return 'IMPERATIVE'
+        
+        # WH-questions (heuristic, might misclassify WH-clauses in declaratives)
+        wh_words = {'who', 'what', 'where', 'when', 'why', 'how', 'which'}
+        if first_token.lemma.lower() in wh_words and last_token.text != '.': # Avoid "Who knows."
+             # A more robust check would involve looking at the main verb structure
+             return 'INTERROGATIVE'
+
+
+        return 'DECLARATIVE'
+
+    def _get_token_number_and_person(self, token: InputToken) -> Tuple[Optional[str], Optional[str]]:
+        """Infers number and person from token's POS and text. More heuristic than spaCy's morph."""
+        number: Optional[str] = None
+        person: Optional[str] = None
+        
+        # Pronoun checks (most reliable for person/number without full morphology)
+        if token.pos == 'PRON' or token.pos.startswith('PRP'): # PRP is Penn Treebank for Pronoun
+            text_lower = token.text.lower()
+            if text_lower in ["i", "me", "myself"]:
+                number, person = "singular", "1st"
+            elif text_lower in ["we", "us", "ourselves"]:
+                number, person = "plural", "1st"
+            elif text_lower in ["you", "yourself", "yourselves"]:
+                person = "2nd"
+                number = "singular_or_plural" # 'you' is ambiguous
+            elif text_lower in ["he", "him", "himself", "she", "her", "herself", "it", "itself"]:
+                number, person = "singular", "3rd"
+            elif text_lower in ["they", "them", "themselves"]:
+                number, person = "plural", "3rd"
+
+        # Noun checks for number
+        elif token.pos == 'NOUN' or token.pos == 'PROPN':
+            if token.pos == 'NNS' or token.pos == 'NNPS': # Penn Treebank plural tags
+                number = "plural"
+            elif token.text.lower().endswith('s') and not token.lemma.lower().endswith('s') and token.text.lower() != token.lemma.lower() + 's':
+                # Heuristic: ends in 's', lemma doesn't, not just lemma+'s' (e.g. "bus" vs "buses")
+                # This is imperfect (e.g., "series", "news")
+                if token.text.lower() not in ["series", "news", "mathematics", "physics"]: # common exceptions
+                     number = "plural"
                 else:
-                    logger.debug(f"Unmapped POS tag: {raw_tag} for word {word}")
-
-            if tag_counter:
-                # Select most frequent tag, with random tiebreaker
-                max_freq = max(tag_counter.values())
-                candidates = [tag for tag, count in tag_counter.items() if count == max_freq]
-                selected_tag = random.choice(candidates) if len(candidates) > 1 else candidates[0]
-                pos_mapping[word.lower()] = selected_tag
+                     number = "singular" # assume singular for exceptions
             else:
-                # Fallback to noun for content words, determiner for short words
-                default_tag = 'NOUN' if len(word) > 3 else 'DET'
-                pos_mapping[word.lower()] = default_tag
-                logger.warning(f"No valid POS tags for {word}, defaulting to {default_tag}")
+                number = "singular"
+            person = "3rd" # Nouns are typically 3rd person
 
-        return pos_mapping
-
-    def _pos_tag(self, text: str) -> List[Tuple[str, str]]:
-        """
-        Tokenize and apply POS tagging to input text using internal POS map and stem fallback.
-        """
-        tokens = re.findall(r'\b\w+\b', text)
-        tagged = [(token, self._get_pos_tag(token)) for token in tokens]
-        return tagged
-
-    def _get_pos_tag(self, word):
-        """Get standardized POS tag with fallback"""
-        base_tag = self.pos_map.get(word.lower()) or \
-                  self.pos_map.get(self.stemmer.stem(word.lower()))
+        # Default to 3rd person singular if unknown, a common case
+        if number is None: number = "singular"
+        if person is None: person = "3rd"
         
-        # Enhanced unknown word handling (Mikolov et al., 2013)
-        if not base_tag:
-            return self._guess_pos_by_morphology(word)
+        return number, person
+
+    def _suggest_verb_form(self, verb_lemma: str, subject_number: Optional[str], subject_person: Optional[str], verb_tense: str = "present") -> str:
+        if verb_tense.lower() == "present":
+            if subject_number == "singular" and subject_person == "3rd":
+                if verb_lemma in self.rule_engine.irregular_verbs_present_singular:
+                    return self.rule_engine.irregular_verbs_present_singular[verb_lemma]
+                if verb_lemma.endswith('y') and len(verb_lemma) > 1 and verb_lemma[-2].lower() not in 'aeiou':
+                    return verb_lemma[:-1] + 'ies'
+                if verb_lemma.endswith(('s', 'x', 'z', 'ch', 'sh')):
+                    return verb_lemma + 'es'
+                return verb_lemma + 's'
+            else:
+                if verb_lemma in self.rule_engine.irregular_verbs_present_plural:
+                    return self.rule_engine.irregular_verbs_present_plural[verb_lemma]
+                return verb_lemma
+        return verb_lemma
+
+    def _check_subject_verb_agreement(self, sentence_tokens: List[InputToken]) -> List[GrammarIssue]:
+        issues: List[GrammarIssue] = []
         
-        return base_tag
-
-    def _load_econ_lexicon(self):
-        """Financial Sentiment Lexicon from FinancialTracker (shared for NLP-based agents)"""
-        return {
-            'positive': {
-                'bullish', 'growth', 'buy', 'strong', 'surge', 'rally', 'gain', 
-                'profit', 'upside', 'outperform', 'recovery', 'breakout', 'boom',
-                'soar', 'target', 'undervalued', 'dividend', 'premium', 'stable',
-                'rebound', 'momentum', 'innovative', 'leadership', 'upgrade',
-                'opportunity', 'success', 'record', 'beat', 'raise', 'trending',
-                'accumulate', 'hold', 'long', 'bull', 'green', 'positive', 'strong',
-                'resilient', 'robust', 'thrive', 'accelerate', 'superior', 'peak',
-                'promising', 'dominant', 'breakthrough', 'optimal', 'efficient',
-                'sustainable', 'hodl', 'moon', 'lambo', 'fomo', 'yolo', 'rocket',
-                'adoption', 'institutional', 'partnership', 'burn', 'deflationary'
-            },
-            'negative': {
-                'bearish', 'loss', 'sell', 'weak', 'crash', 'plunge', 'decline',
-                'downturn', 'risk', 'warning', 'volatile', 'fraud', 'bankrupt',
-                'default', 'short', 'dump', 'bubble', 'correction', 'manipulation',
-                'recession', 'downgrade', 'distress', 'failure', 'bear', 'red',
-                'negative', 'warning', 'caution', 'overbought', 'overvalued',
-                'uncertainty', 'fear', 'volatility', 'liquidate', 'capitulation',
-                'contraction', 'headwind', 'insolvent', 'delist', 'regulation',
-                'hack', 'exploit', 'rugpull', 'ponzi', 'wash', 'fud', 'rekt',
-                'bagholder', 'dump', 'correction', 'sink', 'collapse', 'bleed',
-                'stagnant', 'dilution', 'inflation', 'deficit', 'warn', 'sue',
-                'investigate', 'scam', 'vulnerability', 'attack', 'compromise'
-            }
-        }
-
-    def detect_intent(self, text: str) -> str:
-        """
-        Enhanced intent recognizer using financial sentiment lexicon and rule patterns.
-        """
-        lowered = text.lower()
-        lexicon = self._load_econ_lexicon()  # Pull sentiment terms from FinancialTracker
-        
-        pos_hits = [word for word in lexicon['positive'] if word in lowered]
-        neg_hits = [word for word in lexicon['negative'] if word in lowered]
-
-        # Simple rule priority based on term presence
-        if any(word in lowered for word in ["buy", "accumulate", "long"]) or len(pos_hits) > len(neg_hits):
-            return "buy_signal"
-        if any(word in lowered for word in ["sell", "short", "dump"]) or len(neg_hits) > len(pos_hits):
-            return "sell_signal"
-        if any(word in lowered for word in ["hold", "wait", "stable"]):
-            return "hold_signal"
-        if any(word in lowered for word in ["risk", "volatility", "uncertainty", "fear", "warning"]):
-            return "risk_assessment"
-        
-        return "unknown"
-
-    def _guess_pos_by_morphology(self, word):
-        """Advanced morphological analysis using linguistic patterns (Aronoff, 1976)"""
-        word_lower = word.lower()
-        
-        # Check for nominal morphology (Bauer, 1983)
-        if re.search(r'(tion|ment|ness|ity|acy|ism|ship|hood|dom|ee|eer|ist)$', word_lower):
-            return 'NOUN'
-        
-        # Verbal inflections (Bybee, 1985)
-        if re.search(r'(ate|ify|ize|ise|en|ish|fy|esce)$', word_lower):
-            return 'VERB'
-        
-        # Adjectival suffixes (Marchand, 1969)
-        if re.search(r'(able|ible|ive|ous|ic|ary|ful|less|ish|ese|most|like)$', word_lower):
-            return 'ADJ'
-        
-        # Adverbial markers (Payne, 1997)
-        if re.search(r'(wise|ward|wards|way|ways|where)$', word_lower):
-            return 'ADV'
-        
-        # Pronominal patterns (Quirk et al., 1985)
-        if re.search(r'(self|selves|thing|body|one|where)$', word_lower):
-            return 'PRON'
-        
-        # Determiner morphology (Dryer, 2005)
-        if re.search(r'(th|se|ch|wh|ev|at)$', word_lower) and len(word_lower) < 5:
-            return 'DET'
-        
-        # Prepositional patterns (Huddleston & Pullum, 2002)
-        if re.search(r'(ward|side|neath|tween|mong|pon|mid|anti|non)$', word_lower):
-            return 'ADP'
-        
-        # Numeral detection (Hurford, 1975)
-        if re.search(r'^\d+([.,]\d+)?(th|st|nd|rd)?$', word_lower):
-            return 'NUM'
-        
-        # Conjunction patterns (Halliday, 1985)
-        if re.search(r'(though|while|whereas|because|unless|until|than|ther)$', word_lower):
-            return 'SCONJ' if len(word_lower) > 4 else 'CCONJ'
-        
-        # Derivational prefixes (Katamba, 1993)
-        prefixes = {
-            'un': 'ADJ', 're': 'VERB', 'pre': 'VERB', 
-            'dis': 'VERB', 'mis': 'VERB', 'non': 'ADJ'
-        }
-        for prefix, pos in prefixes.items():
-            if word_lower.startswith(prefix):
-                return pos
-        
-        # Reduplication patterns (Inkelas & Zoll, 2005)
-        if re.match(r'(\w{2,})\1$', word_lower):  # e.g., "bye-bye"
-            return 'NOUN'
-        
-        # Compound words (Lieber, 2009)
-        if '-' in word_lower:
-            components = word_lower.split('-')
-            if len(components) > 1:
-                return self._analyze_compound(components)
-        
-        # Capitalization check for proper nouns (Chomsky, 1970)
-        if word[0].isupper() and not self._is_sentence_initial(word):
-            return 'PROPN'
-        
-        # Requires precomputed character n-gram weights
-        char_ngrams = [word_lower[i:i+3] for i in range(len(word_lower)-2)]
-        noun_score = sum(1 for ng in char_ngrams if ng in {'ion','ment','nes'})
-        verb_score = sum(1 for ng in char_ngrams if ng in {'ing','ate','ify'})
-        return 'NOUN' if noun_score > verb_score else 'VERB'
-
-    def semantic_distance(self, w1, w2):
-        if w1 in self.glove and w2 in self.glove:
-            vec1 = np.array(self.glove[w1])
-            vec2 = np.array(self.glove[w2])
-            return 1 - np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-5)
-        return float('inf')
-
-    def _analyze_compound(self, components):
-        """Compound analysis with dedicated idiom processing layer"""
-        # Phase 0: Idiom detection (Fernando & Flavell, 1981)
-        idiom_result = self._detect_idiomatic_expression(components)
-        if idiom_result:
-            return idiom_result
-
-        """Advanced compound word and MWE analysis incorporating:
-        - Lexicalized Tree Substitution Grammar (Sag et al., 2002)
-        - Construction Grammar (Goldberg, 2006)
-        - Idiom Principle (Sinclair, 1991)
-        """
-        compound_str = '-'.join(components).lower()
-        
-        # Phase 1: Fixed MWEs detection
-        if self._is_lexicalized_mwe(compound_str):
-            return self._get_mwe_category(compound_str)
-        
-        # Phase 2: Semi-fixed patterns
-        mwe_type = self._detect_semi_fixed_pattern(components)
-        if mwe_type:
-            return mwe_type
-        
-        # Phase 3: Morphosyntactic analysis
-        return self._morphological_compound_analysis(components)
-
-    def _is_lexicalized_mwe(self, compound):
-        """Check against known MWEs using:
-        - Non-compositionality criterion (Nunberg et al., 1994)
-        - Institutionalization metric (Bauer, 1983)
-        """
-        LEXICALIZED_MWES = {
-            # Verb-Noun MWEs
-            'take-place': 'VERB',
-            'give-way': 'VERB',
-            
-            # Adjective-Noun MWEs
-            'red-tape': 'NOUN',
-            'high-school': 'NOUN',
-            
-            # Prepositional MWEs
-            'in-spite-of': 'ADP',
-            'by-means-of': 'ADP',
-            
-            # Institutionalized phrases
-            'attorney-general': 'NOUN',
-            'mother-in-law': 'NOUN'
-        }
-        return compound in LEXICALIZED_MWES
-
-    def _get_mwe_category(self, mwe):
-        """Return syntactic head category following:
-        - Right-hand Head Rule (Williams, 1981)
-        - Lexical Inheritance Principles (Pollard & Sag, 1994)
-        """
-        MWE_CATEGORIES = {
-            'VERB': {'take', 'give', 'make', 'do'},
-            'NOUN': {'school', 'law', 'tape', 'general'},
-            'ADJ': {'free', 'high', 'low', 'wide'},
-            'ADV': {'how', 'when', 'where', 'why'}
-        }
-        
-        last_component = mwe.split('-')[-1]
-        for cat, markers in MWE_CATEGORIES.items():
-            if last_component in markers:
-                return cat
-        return 'NOUN'  # Default nominal category
-
-    def _detect_semi_fixed_pattern(self, components):
-        """Identify productive MWE patterns using:
-        - Construction Grammar templates (Goldberg, 2006)
-        - Lexical-grammatical continua (Bybee, 2010)
-        """
-        # Verb-Particle constructions
-        if (len(components) == 2 and 
-            self._get_pos_tag(components[0]) == 'VERB' and
-            components[1] in {'up', 'down', 'in', 'out'}):
-            return 'VERB'
-        
-        # Light verb constructions
-        if (len(components) == 2 and
-            components[0] in {'take', 'make', 'do'} and
-            self._get_pos_tag(components[1]) == 'NOUN'):
-            return 'VERB'
-        
-        # Comparative compounds
-        if (len(components) == 3 and
-            components[1] == 'than' and
-            self._get_pos_tag(components[0]) == 'ADJ'):
-            return 'ADJ'
-        
-        return None
-
-    def _morphological_compound_analysis(self, components):
-        """Determine category via morphological structure using:
-        - Lexeme-based morphology (Aronoff, 1994)
-        - Hierarchical word formation (Selkirk, 1982)
-        """
-        last_pos = self._get_pos_tag(components[-1])
-        first_pos = self._get_pos_tag(components[0])
-        
-        # Noun-noun compounds
-        if last_pos == 'NOUN':
-            return 'NOUN'
-        
-        # Adjective-noun compounds
-        if last_pos == 'NOUN' and first_pos == 'ADJ':
-            return 'NOUN'
-        
-        # Verb-particle compounds
-        if first_pos == 'VERB' and len(components[-1]) <= 3:
-            return 'VERB'
-        
-        # Default to right-headedness
-        return last_pos
-
-    def _is_lexicalized_mwe(self, compound):
-        """Check against known MWEs using:
-        - Non-compositionality criterion (Nunberg et al., 1994)
-        - Institutionalization metric (Bauer, 1983)
-        """
-        LEXICALIZED_MWES = {
-            # Verb-Noun MWEs
-            'take-place': 'VERB',
-            'give-way': 'VERB',
-            
-            # Adjective-Noun MWEs
-            'red-tape': 'NOUN',
-            'high-school': 'NOUN',
-            
-            # Prepositional MWEs
-            'in-spite-of': 'ADP',
-            'by-means-of': 'ADP',
-            
-            # Institutionalized phrases
-            'attorney-general': 'NOUN',
-            'mother-in-law': 'NOUN'
-        }
-        return compound in LEXICALIZED_MWES
-
-    def _get_mwe_category(self, mwe):
-        """Return syntactic head category following:
-        - Right-hand Head Rule (Williams, 1981)
-        - Lexical Inheritance Principles (Pollard & Sag, 1994)
-        """
-        MWE_CATEGORIES = {
-            'VERB': {'take', 'give', 'make', 'do'},
-            'NOUN': {'school', 'law', 'tape', 'general'},
-            'ADJ': {'free', 'high', 'low', 'wide'},
-            'ADV': {'how', 'when', 'where', 'why'}
-        }
-        
-        last_component = mwe.split('-')[-1]
-        for cat, markers in MWE_CATEGORIES.items():
-            if last_component in markers:
-                return cat
-        return 'NOUN'  # Default nominal category
-
-    def _detect_semi_fixed_pattern(self, components):
-        """Identify productive MWE patterns using:
-        - Construction Grammar templates (Goldberg, 2006)
-        - Lexical-grammatical continua (Bybee, 2010)
-        """
-        # Verb-Particle constructions
-        if (len(components) == 2 and 
-            self._get_pos_tag(components[0]) == 'VERB' and
-            components[1] in {'up', 'down', 'in', 'out'}):
-            return 'VERB'
-        
-        # Light verb constructions
-        if (len(components) == 2 and
-            components[0] in {'take', 'make', 'do'} and
-            self._get_pos_tag(components[1]) == 'NOUN'):
-            return 'VERB'
-        
-        # Comparative compounds
-        if (len(components) == 3 and
-            components[1] == 'than' and
-            self._get_pos_tag(components[0]) == 'ADJ'):
-            return 'ADJ'
-        
-        return None
-
-    def _morphological_compound_analysis(self, components):
-        """Determine category via morphological structure using:
-        - Lexeme-based morphology (Aronoff, 1994)
-        - Hierarchical word formation (Selkirk, 1982)
-        """
-        last_pos = self._get_pos_tag(components[-1])
-        first_pos = self._get_pos_tag(components[0])
-        
-        # Noun-noun compounds
-        if last_pos == 'NOUN':
-            return 'NOUN'
-        
-        # Adjective-noun compounds
-        if last_pos == 'NOUN' and first_pos == 'ADJ':
-            return 'NOUN'
-        
-        # Verb-particle compounds
-        if first_pos == 'VERB' and len(components[-1]) <= 3:
-            return 'VERB'
-        
-        # Default to right-headedness
-        return last_pos
-
-    def _is_sentence_initial(self, word):
-        """Determines if word is sentence-initial using context-aware analysis
-        Implements principles from:
-        - Sentence boundary detection (Palmer & Hearst, 1997)
-        - Functional Sentence Perspective (Firbas, 1964)
-        - Discourse Representation Theory (Kamp & Reyle, 1993)
-        """
-        # Get access to parsing state through the processor's context tracking
-        if not hasattr(self, 'current_sentence'):
-            # Initialize document structure tracking
-            self.current_sentence = 0
-            self.previous_words = []
-            self.document_structure = {
-                'paragraph_starts': [0],
-                'sentence_breaks': []
-            }
-
-        # Context analysis factors
-        position_factors = {
-            'is_absolute_start': len(self.previous_words) == 0,
-            'follows_sentence_break': self._precedes_sentence_break(),
-            'capitalization': word[0].isupper(),
-            'previous_punctuation': self._get_previous_punctuation(),
-            'in_quotation_context': self._in_quotation_sequence(),
-            'known_proper_noun': self.pos_map.get(word.lower()) == 'PROPN'
-        }
-
-        # Sentence boundary detection rules
-        sentence_start = (
-            # Case 1: Absolute document start
-            position_factors['is_absolute_start'] or
-            
-            # Case 2: After sentence-final punctuation
-            (position_factors['follows_sentence_break'] and
-            position_factors['capitalization'] and
-            not position_factors['known_proper_noun']) or
-            
-            # Case 3: After closing quotation with sentence-final punctuation
-            (position_factors['in_quotation_context'] and
-            position_factors['previous_punctuation'] in {'."', '!"', '?"'} and
-            position_factors['capitalization']) or
-            
-            # Case 4: Following paragraph break
-            (self.current_sentence in 
-            self.document_structure['paragraph_starts'])
-        )
-
-        # Update document structure tracking
-        if sentence_start:
-            self.document_structure['sentence_breaks'].append(
-                len(self.previous_words))
-            self.current_sentence += 1
-
-        # Add word to processing history
-        self.previous_words.append(word)
-        
-        return sentence_start
-
-    def _precedes_sentence_break(self):
-        """Check if previous context indicates sentence boundary"""
-        if len(self.previous_words) < 1:
-            return False
-            
-        last_token = self.previous_words[-1]
-        sentence_final_punct = {'。', '.', '!', '?'}  # Multi-lingual support
-        
-        # Check for sentence-final punctuation patterns
-        return any(
-            c in sentence_final_punct for c in last_token
-        ) and not self._is_abbreviation(last_token)
-
-    def _get_previous_punctuation(self):
-        """Get trailing punctuation from previous word"""
-        if len(self.previous_words) < 1:
-            return ''
-        
-        prev_word = self.previous_words[-1]
-        return ''.join(c for c in prev_word if c in {'.', '!', '?', '"', "'"})
-
-    def _in_quotation_sequence(self):
-        """Check for nested quotation context"""
-        quote_chars = {'"', "'", '“', '”', '‘', '’'}
-        quote_stack = []
-        
-        for char in ''.join(self.previous_words):
-            if char in {'“', '‘', '"', "'"}:
-                quote_stack.append(char)
-            elif char in {'”', '’'} and quote_stack:
-                quote_stack.pop()
-        
-        return len(quote_stack) > 0
-
-    def _is_abbreviation(self, token):
-        """Check if token is a known abbreviation (simplified)"""
-        abbreviations = {
-            'mr.', 'mrs.', 'dr.', 'prof.', 'etc.', 'e.g.', 'i.e.',
-            'vs.', 'jan.', 'feb.', 'a.m.', 'p.m.', 'u.s.', 'u.k.'
-        }
-        return token.lower() in abbreviations
-
-    def _is_sentence_final_punct(self, char):
-        """Check if character is sentence-final punctuation"""
-        return char in {'.', '!', '?', '。', '！', '？'}
-
-    class PorterStemmer:
-        """Implementation of Porter's stemming algorithm (1980)"""
-        def __init__(self):
-            self.vowels = {'a', 'e', 'i', 'o', 'u'}
-
-        def stem(self, word):
-            """Main stemming algorithm"""
-            if len(word) < 3:
-                return word.lower()
-
-            word = self.step1a(word.lower())
-            word = self.step1b(word)
-            word = self.step1c(word)
-            word = self.step2(word)
-            word = self.step3(word)
-            word = self.step4(word)
-            word = self.step5a(word)
-            word = self.step5b(word)
-            
-            return word
-
-        def measure(self, stem):
-            """Calculate the 'measure' (VC sequence count)"""
-            count = 0
-            prev_vowel = False
-            for char in stem:
-                if char in self.vowels:
-                    prev_vowel = True
-                else:
-                    if prev_vowel:
-                        count += 1
-                    prev_vowel = False
-            return count
-
-        def has_vowel(self, stem):
-            """Check if stem contains any vowels"""
-            return any(char in self.vowels for char in stem)
-
-        def ends_with_double(self, word):
-            """Check for double consonant ending"""
-            return len(word) > 1 and word[-1] == word[-2] and word[-1] not in self.vowels
-
-        def replace_suffix(self, word, old, new, measure=None):
-            """Conditional suffix replacement"""
-            if word.endswith(old):
-                base = word[:-len(old)]
-                if measure is None or self.measure(base) > measure:
-                    return base + new
-            return word
-
-        def step1a(self, word):
-            """Plurals and past participles"""
-            for suffix in ['sses', 'ies', 'ss', 's']:
-                if word.endswith(suffix):
-                    if suffix == 'sses':
-                        return word[:-4] + 'ss'
-                    elif suffix == 'ies':
-                        return word[:-3] + 'i'
-                    elif suffix == 'ss':
-                        return word
-                    elif suffix == 's' and self.has_vowel(word[:-1]):
-                        return word[:-1]
-            return word
-
-        def step1b(self, word):
-            """Verb endings"""
-            if word.endswith('eed'):
-                base = word[:-3]
-                if self.measure(base) > 0:
-                    return base + 'ee'
-            elif word.endswith(('ed', 'ing')):
-                base = word[:-2] if word.endswith('ed') else word[:-3]
-                if self.has_vowel(base):
-                    word = self.step1b_adjust(base)
-            return word
-
-        def step1b_adjust(self, base):
-            """Additional adjustments for step1b"""
-            for suffix in ['at', 'bl', 'iz']:
-                if base.endswith(suffix):
-                    return base + 'e'
-            if self.ends_with_double(base) and not base.endswith(('l', 's', 'z')):
-                return base[:-1]
-            if self.measure(base) == 1 and self.ends_cvc(base):
-                return base + 'e'
-            return base
-
-        def step1c(self, word):
-            """Replace y with i if preceded by vowel"""
-            if word.endswith('y') and self.has_vowel(word[:-1]):
-                return word[:-1] + 'i'
-            return word
-
-        def step2(self, word):
-            """Double-derivational suffixes"""
-            replacements = {
-                'ational': 'ate', 'tional': 'tion', 'enci': 'ence',
-                'anci': 'ance', 'izer': 'ize', 'abli': 'able',
-                'alli': 'al', 'entli': 'ent', 'eli': 'e',
-                'ousli': 'ous', 'ization': 'ize', 'ation': 'ate',
-                'ator': 'ate', 'alism': 'al', 'iveness': 'ive',
-                'fulness': 'ful', 'ousness': 'ous', 'aliti': 'al',
-                'iviti': 'ive', 'biliti': 'ble'
-            }
-            for suffix, replacement in replacements.items():
-                if word.endswith(suffix):
-                    base = word[:-len(suffix)]
-                    if self.measure(base) > 0:
-                        return base + replacement
-            return word
-
-        def step3(self, word):
-            """Replace -ic-, -full, -ness etc."""
-            replacements = {
-                'icate': 'ic', 'ative': '', 'alize': 'al',
-                'iciti': 'ic', 'ical': 'ic', 'ful': '',
-                'ness': ''
-            }
-            for suffix, replacement in replacements.items():
-                if word.endswith(suffix):
-                    base = word[:-len(suffix)]
-                    if self.measure(base) > 0:
-                        return base + replacement
-            return word
-
-        def step4(self, word):
-            """Remove -ant, -ence, etc."""
-            suffixes = [
-                'al', 'ance', 'ence', 'er', 'ic', 'able', 'ible',
-                'ant', 'ement', 'ment', 'ent', 'ion', 'ou', 'ism',
-                'ate', 'iti', 'ous', 'ive', 'ize'
-            ]
-            for suffix in suffixes:
-                if word.endswith(suffix):
-                    base = word[:-len(suffix)]
-                    if self.measure(base) > 1:
-                        if suffix == 'ion' and base[-1] in {'s', 't'}:
-                            return base
-                        return base
-            return word
-
-        def step5a(self, word):
-            """Remove final 'e' if measure > 1"""
-            if word.endswith('e'):
-                base = word[:-1]
-                if self.measure(base) > 1:
-                    return base
-                if self.measure(base) == 1 and not self.ends_cvc(base):
-                    return base
-            return word
-
-        def step5b(self, word):
-            """Remove double consonant ending"""
-            if self.measure(word) > 1 and self.ends_with_double(word) and word.endswith('l'):
-                return word[:-1]
-            return word
-
-        def ends_cvc(self, word):
-            """Check CVC pattern where last C is not w, x or y"""
-            if len(word) < 3:
-                return False
-            return (word[-1] not in self.vowels and 
-                    word[-2] in self.vowels and 
-                    word[-3] not in self.vowels and 
-                    word[-1] not in {'w', 'x', 'y'})
-
-    def _build_ngram_model(self):
-        """Construct n-gram model with incremental learning capabilities
-        Implements:
-        - Base frequencies from Brown Corpus (Francis & Kucera, 1982)
-        - Exponential decay for model adaptation (Anderson, 1990)
-        - Online learning framework (Bottou, 1998)
-        """
-        # Initialize with Brown Corpus baseline
-        self.ngram_model = defaultdict(lambda: defaultdict(float))
-        
-        # Base frequencies (preserve as floating point for decay)
-        base_frequencies = {
-            'DET': {'NOUN': 89412,'ADJ': 18765},
-            'ADJ': {'NOUN': 23451},
-            'NUM': {'NOUN': 15678},
-            'NOUN': {'VERB': 67342},
-            'AUX': {'VERB': 44531},
-            'ADV': {'VERB': 22345},
-            'ADP': {'NOUN': 55678, 'PROPN': 12345},
-            'CCONJ': {'NOUN': 33219},
-            'SCONJ': {'VERB': 11234},
-            'PRON': {'VERB': 44231},
-            'VERB': {'ADV': 15673},
-            'INTJ': {'PUNCT': 5123},
-            'SYM': {'NUM': 2345}
-        }
-        
-        # Convert to float for decay operations
-        self.ngram_model = defaultdict(lambda: defaultdict(float))
-        for prev_tag, next_tags in base_frequencies.items():
-            for next_tag, count in next_tags.items():
-                self.ngram_model[prev_tag][next_tag] = float(count)
-
-        # Enhanced fallback using weighted average
-        noun_total = sum(self.ngram_model['NOUN'].values())
-        self.ngram_model['UNKNOWN'] = defaultdict(
-            lambda: noun_total / (1000 + noun_total)  # Bayesian smoothing
-        )
-    
-        # Initialize learning parameters
-        self.decay_factor = 0.999  # Memory decay rate (Anderson, 1990)
-        self.learning_rate = 0.01  # SGD-inspired rate (Bottou, 1998)
-    
-    def update_ngram_model(self, tag_sequence):
-        """Incremental update with exponential recency weighting
-        Implements:
-        - Online learning (Collins, 2002)
-        - Adaptive decay (Katz, 1987)
-        """
-        # Apply decay to existing counts
-        for prev_tag in self.ngram_model:
-            for next_tag in self.ngram_model[prev_tag]:
-                self.ngram_model[prev_tag][next_tag] *= self.decay_factor
-
-        # Add new observations
-        for i in range(len(tag_sequence)-1):
-            prev_tag = tag_sequence[i]
-            next_tag = tag_sequence[i+1]
-            
-            # Smoothing factor based on Zipf's law (Zipf, 1935)
-            smoothing = 1 / (1 + math.log1p(self.ngram_model[prev_tag][next_tag]))
-            
-            # Update rule with adaptive learning rate
-            self.ngram_model[prev_tag][next_tag] += self.learning_rate * smoothing
-
-    def process_sentence(self, sentence):
-        """Full processing pipeline with incremental learning"""
-        # Parse and validate sentence
-        if not self.parse_grammar(sentence):
-            return False
-        
-        # Get POS tags
-        words = re.findall(r'\b\w+\b', sentence.lower())
-        tag_sequence = [self._get_pos_tag(word) for word in words]
-        
-        # Update model with decayed learning
-        self.update_ngram_model(tag_sequence)
-        
-        return True
-
-    def _build_pos_patterns(self):
-        """Generate regex patterns from wordlist data with frequency weighting"""
-        pos_groups = defaultdict(list)
-        
-        # Group words by their POS tags from JSON data
-        for word, tag in self.pos_map.items():
-            pos_groups[tag].append(re.escape(word))  # Escape special chars
-        
-        # Create regex patterns for each POS group
-        self.pos_patterns = []
-
-        # Add fallback morphological patterns (lower priority)
-        self.pos_patterns.extend([
-            (re.compile(r'\b[A-Z][a-z]+\b'), 'PROPN'),  # Proper nouns
-            (re.compile(r'\b\w+(tion|ment|ness|ity|acy|ism)\b', re.IGNORECASE), 'NOUN'),
-            (re.compile(r'\b\w+(ed|ing|ate|ify|ize|ise|en)\b', re.IGNORECASE), 'VERB'),
-            (re.compile(r'\b\w+(able|ible|ive|ous|ic|ary|ful|less)\b', re.IGNORECASE), 'ADJ'),
-            (re.compile(r'\b\w+ly\b', re.IGNORECASE), 'ADV'),
-            (re.compile(r'\b(the|a|an|this|that|these|those)\b', re.IGNORECASE), 'DET'),
-            (re.compile(r'\b(I|you|he|she|it|we|they|me|him|her|us|them)\b', re.IGNORECASE), 'PRON'),
-            (re.compile(r'\b(in|on|at|with|by|for|from|to|of|about|as|into)\b', re.IGNORECASE), 'ADP'),
-            (re.compile(r'\b(and|or|but)\b', re.IGNORECASE), 'CCONJ'),
-            (re.compile(r'\b(if|because|when|while|although)\b', re.IGNORECASE), 'SCONJ'),
-            (re.compile(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b'), 'NUM'),
-            (re.compile(r'\b(oh|wow|ouch|oops|hey|ah|uh|hmm)\b', re.IGNORECASE), 'INTJ'),
-            (re.compile(r'[.,!?;:"]'), 'PUNCT'),
-            (re.compile(r'\b(am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must)\b', re.IGNORECASE), 'AUX'),
-        ])
-
-        # Add patterns from structured wordlist groups
-        for pos, words in pos_groups.items():
-            if words:
-                # Sort to prioritize longer words
-                words_sorted = sorted(words, key=len, reverse=True)
-                pattern = r'\b(' + '|'.join(words_sorted) + r')\b'
-                self.pos_patterns.append(
-                    (re.compile(pattern, re.IGNORECASE), pos)
-                )
-        
-        # Add fallback patterns (lower priority)
-        self.pos_patterns.extend([
-            (re.compile(r'\b\w+\b'), 'NOUN')  # Catch-all
-        ])
-
-    def parse_grammar(self, text, unk_count, sentence, max_length=20):
-        """CYK parser with length limiting and fail-fast"""
-        if unk_count / len(tokens) > 0.3:
-            logger.warning("High unknown token rate; reprocessing with GrammarProcessor.")
-            tokens = self.grammar_processor.retokenize(text)
-        
-        words = re.findall(r'\b\w+\b', sentence.lower())
-        n = len(words)
-
-        # Fail-fast for long sentences (Church & Patil, 1982)
-        if n > max_length:
-            logger.warning(f"Sentence length {n} exceeds safety threshold {max_length}, skipping parse")
-            return True  # Bypass check for performance
-        
-        # Initialize parse table with early termination
-        try:
-            table = [[set() for _ in range(n+1)] for _ in range(n+1)]
-        except MemoryError:
-            logger.error("Memory error initializing parse table")
-            return False
-
-        # POS tagging with fail-safe
-        pos_tags = []
-        for word in words:
-            try:
-                pos_tags.append(self._get_pos_tag(word))
-            except Exception as e:
-                logger.error(f"POS tagging failed for '{word}': {str(e)}")
-                pos_tags.append('NOUN')
-
-        # CYK algorithm with early bailout
-        for length in range(1, n+1):
-            for i in range(n - length + 2):
-                if not table[i][length]:  # Skip empty cells early
-                    continue
-                    
-                # Short-circuit if root symbol found early
-                if i == 0 and length == n and 'S' in table[i][length]:
-                    return True
+        for token_idx, current_token in enumerate(sentence_tokens):
+            # Consider VERB and AUX as potential main verbs of a clause
+            if current_token.pos in ('VERB', 'AUX'):
+                verb = current_token
                 
-        table = [[set() for _ in range(n+1)] for _ in range(n+1)]
-        
-        # POS tagging using regex patterns
-        pos_tags = []
-        for word in words:
-            for pattern, tag in self.pos_patterns:
-                if re.match(pattern, word):
-                    pos_tags.append(tag)
-                    break
-            else:
-                pos_tags.append('NOUN')  # Default to noun
-        
-        # Initialize table
-        for i in range(n):
-            table[i][1].update(self._get_symbols(pos_tags[i]))
+                # Find subjects of this verb using dependency relations
+                # A subject's head will be the verb, and its dep relation 'nsubj' or 'nsubjpass'
+                subjects = [
+                    s_tok for s_tok in sentence_tokens 
+                    if s_tok.head == verb.index and s_tok.dep in ("nsubj", "nsubjpass")
+                ]
+
+                for subject in subjects:
+                    # Basic check for present tense verbs (more complex for past/perfect etc.)
+                    # This assumes NLPEngine provides good POS and Lemma.
+                    # A simple heuristic: if the verb is not lemmatized to 'be'/'have' and is in base form or ends with 's'
+                    is_present_tense_candidate = True # Assume present unless clear indicators otherwise
+                    if verb.pos == 'VERB':
+                        if verb.lemma == verb.text and not verb.text.endswith('s'): # Base form, e.g. "go"
+                            pass
+                        elif verb.text.endswith('s') and verb.lemma + 's' == verb.text: # e.g. "goes"
+                            pass
+                        elif verb.lemma == "be" and verb.text.lower() not in ["is", "are", "am"]: # past forms of be
+                            is_present_tense_candidate = False
+                        elif verb.lemma == "have" and verb.text.lower() not in ["has", "have"]: # past form had
+                            is_present_tense_candidate = False
+                        # Add more heuristics if needed, or rely on more detailed tense info from NLPEngine
+                        # if NLPEngine provided `token.tense == 'PAST'`, this would be easier.
+
+                    if not is_present_tense_candidate:
+                        continue
+
+                    subj_number, subj_person = self._get_token_number_and_person(subject)
+                    verb_text_lower = verb.text.lower()
+                    
+                    agreement_error = False
+                    suggested_verb = verb.text # Default to current form
+
+                    if subj_number == "singular" and subj_person == "3rd":
+                        expected_form = self._suggest_verb_form(verb.lemma, "singular", "3rd")
+                        if verb_text_lower != expected_form.lower():
+                            # Specific check for "be": "he are" -> "he is"
+                            if verb.lemma == "be" and verb_text_lower != "is":
+                                agreement_error = True
+                            # Check for common regular verb errors: "he go" -> "he goes"
+                            elif verb.lemma != "be" and verb.text == verb.lemma: # base form used
+                                agreement_error = True
+                            # Check for "he don't"
+                            elif verb.lemma == "do" and verb_text_lower == "don't":
+                                agreement_error = True
+
+                    elif subj_number == "plural" or \
+                         (subj_number == "singular_or_plural" and subj_person == "2nd") or \
+                         (subj_number == "singular" and subj_person == "1st"):
+                        expected_form = self._suggest_verb_form(verb.lemma, subj_number, subj_person)
+                        if verb_text_lower != expected_form.lower():
+                            # Specific check for "be": "they is" -> "they are", "I is" -> "I am"
+                            if verb.lemma == "be":
+                                if subj_person == "1st" and subj_number == "singular" and verb_text_lower != "am":
+                                    agreement_error = True
+                                elif not (subj_person == "1st" and subj_number == "singular") and verb_text_lower != "are":
+                                    agreement_error = True
+                            # Check for common regular verb errors: "they goes" -> "they go"
+                            elif verb.lemma != "be" and verb_text_lower.endswith('s') and verb.lemma + 's' == verb_text_lower:
+                                agreement_error = True
+                    
+                    if agreement_error:
+                        suggested_verb = self._suggest_verb_form(verb.lemma, subj_number, subj_person)
+                        issues.append(GrammarIssue(
+                            description=f"Potential subject-verb agreement error: Subject '{subject.text}' "
+                                        f"({subj_number or 'unknown'}/{subj_person or 'unknown'}) "
+                                        f"with verb '{verb.text}'.",
+                            source_text_char_span=(verb.start_char_abs, verb.end_char_abs),
+                            source_sentence_token_indices_span=(subject.index, verb.index), # span from subj to verb
+                            severity="error",
+                            suggestion=f"Consider using '{suggested_verb}'."
+                        ))
+        return issues
+
+# Example usage (requires manual setup of InputToken list):
+if __name__ == "__main__":
+    logger.info("Running GrammarProcessor (spaCy-free) standalone example...")
+    
+    test_config_data = load_config() # Load from actual config file
+    gp = GrammarProcessor(config=test_config_data)
+
+    # --- Helper to simulate NLPEngine output for testing ---
+    # In a real scenario, NLPEngine would produce this.
+    # This is a very basic mock dependency "parser".
+    def mock_tokenize_and_parse(text: str) -> List[InputToken]:
+        words = text.split()
+        tokens = []
+        char_offset = 0
+        # Simple POS and lemma, basic head assignment (verb is root, others attach to previous or verb)
+        # THIS IS HIGHLY SIMPLIFIED AND NOT A REAL PARSER.
+        root_index = -1
+        for i, word_text in enumerate(words):
+            # Rudimentary POS tagging for testing
+            pos = "NOUN"
+            lemma = word_text.lower()
+            if word_text.lower() in ["is", "are", "was", "were", "am", "has", "have", "do", "does", "goes"]:
+                pos = "VERB" # Actually AUX or VERB
+                if root_index == -1: root_index = i
+            elif word_text.lower() in ["cat", "cats", "fish", "apples", "park", "system", "data", "committee", "friends", "concert"]:
+                pos = "NOUN"
+            elif word_text.lower() in ["i", "she", "they", "he", "my"]:
+                pos = "PRON"
+            elif word_text.endswith("?") or word_text.endswith(".") or word_text.endswith("!"):
+                pos = "PUNCT"
             
-        # CYK algorithm
-        for length in range(2, n+1):
-            for i in range(n-length+2):
-                for k in range(1, length):
-                    j = i + k
-                    for B in table[i][k]:
-                        for C in table[j][length-k]:
-                            for A in self.cfg_rules:
-                                if [B, C] in self.cfg_rules[A]:
-                                    table[i][length].add(A)
+            # Lemma for common irregulars
+            if word_text.lower() == "eats": lemma = "eat"
+            if word_text.lower() == "goes": lemma = "go"
+            if word_text.lower() == "is": lemma = "be"
+            if word_text.lower() == "are": lemma = "be"
+            if word_text.lower() == "don't": lemma = "do" # and "not" implicitly
+
+
+            # Rudimentary dependency head assignment (highly simplified)
+            head_idx = -1
+            dep_rel = "dep" # generic dependency
+            if pos == "VERB" and i == root_index : # Main verb is root
+                 head_idx = i # root points to self or -1
+                 dep_rel = "root"
+            elif pos == "NOUN" or pos == "PRON":
+                if root_index != -1:
+                    head_idx = root_index
+                    dep_rel = "nsubj" if i < root_index else "obj" # very naive
+                else: # No verb found yet, attach to previous if exists
+                    head_idx = i-1 if i > 0 else i
+            elif pos == "PUNCT":
+                head_idx = i-1 if i > 0 else i
+                dep_rel = "punct"
+            else: # Other tags
+                head_idx = i-1 if i > 0 else i # attach to previous
+
+            if i == 0 and dep_rel != "root": # first word cannot attach to -1
+                if root_index == -1 or root_index == 0 : # if it is the root or no root found yet
+                    head_idx = i
+                    if dep_rel != "root": dep_rel = "root" # make it root if not already
+                elif root_index > 0 :
+                    head_idx = root_index
+
+
+            start_char = char_offset
+            end_char = char_offset + len(word_text) - 1
+            tokens.append(InputToken(
+                text=word_text, lemma=lemma, pos=pos, index=i,
+                head=head_idx, dep=dep_rel,
+                start_char_abs=start_char, end_char_abs=end_char
+            ))
+            char_offset += len(word_text) + 1 # Add 1 for space
+        return tokens
+    # --- End of mock helper ---
+
+    test_sentences_text = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Cats eats fish.", # Error
+        "What time is it?",
+        "Go home now!",
+        "She like apples.", # Error
+        "They goes to the park.", # Error
+        "I am happy.",
+        "An error occur in the system.", # Error
+        "Data were processed.",
+        "The committee decide.", # Error
+        "My friends and I is going to the concert.", # Error (complex subject, simplified mock won't catch well)
+        "He don't know." # Error
+    ]
+
+    for i, text_example in enumerate(test_sentences_text):
+        print(f"\n--- Test Case {i+1} ---")
+        print(f"Input Text: {text_example}")
         
-        return 'S' in table[0][n]
-
-    def generate_sentence(self, seed_words):
-        """Generative grammar using Markov chain (Shannon, 1948)"""
-        current_tag = 'DET'  # Start with determiner
-        sentence = []
-        max_length = 8
+        # Simulate NLPEngine providing a list of sentences (here, each test is one sentence)
+        sentence_as_input_tokens = [mock_tokenize_and_parse(text_example)]
         
-        while len(sentence) < max_length:
-            next_tags = self.ngram_model[current_tag]
-            total = sum(next_tags.values())
-            if total == 0: break
-            
-            # Select next tag using probability distribution
-            rand = random.uniform(0, 1)
-            cumulative = 0
-            for tag, count in next_tags.items():
-                prob = count / total
-                cumulative += prob
-                if rand <= cumulative:
-                    current_tag = tag
-                    if len(sentence) == 0:  # only expand at start
-                        expanded = self._expand_with_synonyms(seed_words)
-                    else:
-                        expanded = seed_words
-                    sentence.append(self._sample_word(tag, expanded))
-                    break
+        analysis_result = gp.analyze_text(sentence_as_input_tokens, full_text_snippet=text_example)
         
-        return ' '.join(sentence)
-
-    def _expand_with_synonyms(self, seed_words: List[str], max_expansions: int = 3) -> List[str]:
-        """
-        Expand the seed words using synonyms from structured_wordlist.
-        """
-        if not hasattr(self, 'structured_wordlist') or not isinstance(self.structured_wordlist, dict):
-            return seed_words
-
-        enriched = []
-        seen = set(seed_words)
-
-        for word in seed_words:
-            enriched.append(word)
-            entry = self.structured_wordlist.get("words", {}).get(word.lower())
-            if not entry:
-                continue
-            synonyms = entry.get("synonyms", [])
-            for syn in synonyms:
-                if syn not in seen:
-                    enriched.append(syn)
-                    seen.add(syn)
-                    if len(enriched) - len(seed_words) >= max_expansions:
-                        break
-        return enriched
-
-    def _sample_word(self, tag, seed_words):
-        """Word selection using TF-IDF similarity (Salton, 1971)"""
-        candidates = [w for w in seed_words 
-                     if any(re.match(p, w) for p,t in self.pos_patterns if t == tag)]
-        
-        if not candidates:
-            return self._get_default_word(tag)
-            
-        # Simple frequency-based selection
-        return max(set(candidates), key=candidates.count)
-
-    def compose_sentence(self, facts: dict) -> str:
-        """
-        Takes structured agent facts and generates a grammatically correct sentence.
-        """
-        event = facts.get("event", "unknown_event")
-        agent = facts.get("agent", "agent")
-        value = facts.get("value", None)
-        metric = facts.get("metric", "metric")
-
-        if event == "training_complete" and value is not None:
-            return f"{agent} has successfully completed training with a {metric} score of {value:.2f}."
-        elif event == "failure":
-            return f"{agent} encountered an error during training."
+        if analysis_result:
+            print(f"Overall Grammatical: {analysis_result.is_grammatical}")
+            for sent_analysis in analysis_result.sentence_analyses:
+                print(f"  Sentence: '{sent_analysis['text']}'")
+                print(f"  Type: {sent_analysis['type']}")
+                if sent_analysis['issues']:
+                    print("  Issues Found:")
+                    for issue in sent_analysis['issues']:
+                        issue_text_snippet = text_example[issue.source_text_char_span[0] : issue.source_text_char_span[1]+1]
+                        print(f"    - Desc: {issue.description}")
+                        print(f"      Affected Text: '{issue_text_snippet}', Severity: {issue.severity}")
+                        if issue.suggestion:
+                            print(f"      Suggestion: {issue.suggestion}")
+                else:
+                    print("  No issues found in this sentence.")
         else:
-            return f"{agent} reported event '{event}' with value {value}."
+            print("Analysis failed.")
 
-    def _get_symbols(self, tag):
-        """Get non-terminals producing the given POS tag"""
-        return [A for A, prods in self.cfg_rules.items() 
-                for prod in prods if tag in prod]
-
-    def _get_default_word(self, tag):
-        defaults = {'DET': 'the', 'NOUN': 'thing', 'VERB': 'is'}
-        return defaults.get(tag, '')
-
-    def reset_parser_state(self):
-        """Reset all document-tracking state variables"""
-        self.current_sentence = 0
-        self.previous_words = []
-        self.document_structure = {
-            'paragraph_starts': [0],
-            'sentence_breaks': [],
-            'current_quotes': []
-        }
-        self.quote_stack = []  # Added for better quotation tracking
-
-    def is_grammatical(self, text: str) -> bool:
-        """Check if the input text is grammatically valid using the CYK parser."""
-        return self.parse_grammar(text)
-
-    def process(self, linguistic_frame, raw_response):
-        if self.is_grammatical(raw_response):
-            return raw_response
-        else:
-            return self.rephrase_response(linguistic_frame, raw_response)
-
-    def rephrase_response(self, linguistic_frame: dict, raw_response: str) -> str:
-        """Rephrase a sentence using seed words or structured templates."""
-        # Extract seed words (nouns, verbs, adjectives) from raw_response
-        words = re.findall(r'\b\w+\b', raw_response.lower())
-        pos_tags = [(word, self._get_pos_tag(word)) for word in words]
-        seed_words = [word for word, tag in pos_tags if tag in {'NOUN', 'VERB', 'ADJ', 'PROPN'}]
-
-        # Attempt 3 times to generate a grammatical sentence
-        for _ in range(3):
-            generated = self.generate_sentence(seed_words)
-            if self.is_grammatical(generated):
-                return generated.capitalize() + '.'  # Ensure punctuation
-
-        # Fallback to structured template using linguistic_frame
-        event = linguistic_frame.get("event", "unknown_event")
-        agent = linguistic_frame.get("agent", "The system")
-        metric = linguistic_frame.get("metric", "performance")
-        value = linguistic_frame.get("value", None)
-
-        if event == "training_complete" and value is not None:
-            return f"{agent} completed training with a {metric} score of {value}."
-        elif event == "failure":
-            return f"{agent} encountered an error."
-        else:
-            return f"{agent} reports: '{event}'."
-
-class EnhancedLanguageAgent():
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.grammar = GrammarProcessor()
-        self.syntax_buffer = deque(maxlen=5)  # Working memory for syntax
-
-    def process_input(self, user_input, is_new_document=False):
-        if self._detect_document_boundary(user_input):
-            self.reset_parser_state()
-        """Augmented processing pipeline with grammatical analysis"""
-        # Stage 0: Syntactic validation
-        if not self.grammar.parse_grammar(user_input):
-            return "I notice a grammatical irregularity. Could you rephrase?"
-        
-        # Original processing pipeline
-        clean_input = self.safety.sanitize(user_input)
-        frame = self.nlu.parse(clean_input)
-        
-        # Stage 2.5: Context-aware generation
-        response = self._generate_grammatical_response(frame, clean_input)
-        
-        # Update context with grammatical features
-        self._update_syntax_model(response)
-        
-        return response
-
-    def reset_parser_state(self, preserve_history=False):
-        if preserve_history:
-            self.document_structure['previous_documents'].append(
-                copy.deepcopy(
-                    self.document_structure))
-        """Public method to reset parser state between documents"""
-        self.grammar.reset_parser_state()
-        self.syntax_buffer.clear()
-
-    def _generate_grammatical_response(self, frame, input_text):
-        """Generate responses using formal grammar constraints"""
-        seed_words = input_text.split() + list(frame.entities.values())
-        
-        # Attempt 3 times to generate grammatical sentence
-        for _ in range(3):
-            generated = self.grammar.generate_sentence(seed_words)
-            if self.grammar.parse_grammar(generated):
-                return generated.capitalize()
-        
-        # Fallback to template-based generation
-        return super().generate_response(input_text)
-
-    def _update_syntax_model(self, sentence):
-        """Adaptive learning using error-driven approach (Brill, 1995)"""
-        tags = [tag for word, tag in self._pos_tag(sentence)]
-        for i in range(len(tags)-1):
-            self.grammar.ngram_model[tags[i]][tags[i+1]] += 1
-
-    def _pos_tag(self, text):
-        """Rule-based POS tagging (Greene & Rubin, 1971)"""
-        return [(word, self._get_pos_tag(word)) for word in text.split()]
-
-    def _get_pos_tag(self, word):
-        for pattern, tag in self.grammar.pos_patterns:
-            if re.match(pattern, word):
-                return tag
-        return 'NOUN'  # Default to noun
+    print("\nStandalone example finished.")
