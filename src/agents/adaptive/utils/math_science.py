@@ -77,13 +77,18 @@ def mse_derivative(y_true: list, y_pred: list) -> list:
     return [2*(p - t)/len(y_true) for t, p in zip(y_true, y_pred)]
 
 def cross_entropy(y_true: list, y_pred: list, epsilon: float = 1e-12) -> float:
-    """Cross Entropy Loss (log loss)"""
+    """Cross Entropy Loss (log loss) for binary and multi-class classification"""
     if len(y_true) != len(y_pred):
         raise ValueError("Input lists must have the same length.")
-    return -sum(t * math.log(p + epsilon) for t, p in zip(y_true, y_pred))
+    total_loss = 0.0
+    for t, p in zip(y_true, y_pred):
+        # Clip predictions to avoid log(0)
+        p_clipped = max(min(p, 1 - epsilon), epsilon)
+        total_loss += t * math.log(p_clipped) + (1 - t) * math.log(1 - p_clipped)
+    return -total_loss / len(y_true)  # Average over all samples
 
 def cross_entropy_derivative(y_true: list, y_pred: list) -> list:
-    """Derivative for cross entropy with softmax activation"""
+    """Derivative of cross-entropy loss with respect to pre-activation (z) for sigmoid output"""
     return [p - t for t, p in zip(y_true, y_pred)]
 
 # --- Numerical Methods ---
