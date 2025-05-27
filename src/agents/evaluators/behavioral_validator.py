@@ -50,16 +50,20 @@ class BehavioralValidator:
     def execute_test_suite(self, sut: callable) -> Dict[str, Any]:
         """Execute full test battery with enhanced tracking"""
         results = {
-            'passed': 0, 
-            'failed': 0, 
+            'passed': 0,
+            'failed': 0,
+            'predictions': [],
             'anomalies': [],
             'requirement_coverage': 0,
-            'failure_modes': []
+            'failure_modes': [],
+            'expected_outputs': []
         }
         
         for test in self.test_cases:
             try:
                 output = sut(test['scenario'])
+                results['predictions'].append(output)
+                results['expected_outputs'].append(test['scenario'].get('expected_output'))
                 if test['oracle'](output):
                     results['passed'] += 1
                     if 'requirement_id' in test['scenario']:
