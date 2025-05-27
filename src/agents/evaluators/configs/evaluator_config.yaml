@@ -9,6 +9,14 @@ evaluators_memory:
   access_count: 0
   eviction_policy: 'FIFO'
 
+issue_database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  database: safety_issues
+  user: ${DB_USER:admin}
+  password: ${DB_PASSWORD:securepassword}
+  pool_size: 5
+  timeout: 5.0
 
 automated_reporting:
   interval_hours: 24
@@ -17,7 +25,10 @@ automated_reporting:
 risk_adaptation:
   learning_rate: 0.05
   uncertainty_window: 1000
-  initial_hazard_rates: 0.2
+  initial_hazard_rates:
+    system_failure: 0.000001
+    sensor_failure: 0.00001
+    unexpected_behavior: 0.0001
 
 certification_manager:
   system: 'AI Agent'
@@ -51,6 +62,7 @@ documentation:
 performance_visualizer:
   max_points: 100
   colors:
+    pass_rate: [100, 149, 237]  # Cornflower blue
     background: [30, 30, 30]    # Dark gray
     text: [255, 255, 255]       # White
     reward_line: [0, 191, 99]   # Green
@@ -133,6 +145,20 @@ resource_utilization_evaluator:
   enable_historical: true
   store_results: true
 
+behavioral_evaluator:
+  thresholds:
+    pass_rate: 0.95
+    failure_tolerance: 0.05
+  weights:
+    test_coverage: 0.4
+    pass_rate: 0.3
+    requirement_coverage: 0.3
+  enable_historical: true
+  store_results: true
+  mutation_testing: false
+  max_failure_modes: 10
+  requirement_tags: []
+
 infrastructure_manager:
   tuning_strategy: bayesian
   n_calls: 20
@@ -140,3 +166,41 @@ infrastructure_manager:
   rollback_config:
     backup_dir: "models/backups/"
     model_dir: "models/"
+
+ml_anomaly_detection:
+  training_interval: 24  # Hours
+  feature_weights:
+    severity: 0.4
+    complexity: 0.3
+    data_flow: 0.2
+    security: 0.5
+  model_params:
+    contamination: 0.01
+    n_estimators: 200
+  deep_model:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+
+data_flow_analysis:
+  max_call_depth: 10
+  track_types: True
+  analyze_taint: True
+  vulnerability_patterns:
+    - "sql_injection"
+    - "xss"
+    - "path_traversal"
+
+static_analysis:
+  enable: true
+  security:
+    owasp_top_10: true
+    cwe_top_25: true
+    max_critical: 0
+    max_high: 3
+  code_quality:
+    tech_debt_threshold: 0.15
+    test_coverage: 0.8
+    complexity:
+      cyclomatic: 15
+      cognitive: 20
