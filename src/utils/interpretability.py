@@ -1,3 +1,5 @@
+from typing import Dict
+
 class InterpretabilityHelper:
     """Helper to explain evaluation results in plain language"""
     
@@ -26,14 +28,6 @@ class InterpretabilityHelper:
             return f"Certification conditionally approved at level {level}. Requires further validation."
 
     @staticmethod
-    def explain_feature_importance(features: dict, top_n: int = 3) -> str:
-        sorted_features = sorted(features.items(), key=lambda x: x[1], reverse=True)[:top_n]
-        explanation = "Most influential factors:\n"
-        for i, (feature, importance) in enumerate(sorted_features, 1):
-            explanation += f"{i}. {feature}: {importance:.2f} impact\n"
-        return explanation
-
-    @staticmethod
     def generate_compliance_report(metrics: dict) -> str:
         report = "Compliance Summary:\n"
         report += f"- Safety: {metrics.get('safety', 'Not assessed')}\n"
@@ -43,6 +37,14 @@ class InterpretabilityHelper:
         return report
 
     @staticmethod
+    def explain_feature_importance(features: dict, top_n: int = 3) -> str:
+        sorted_features = sorted(features.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        explanation = "Most influential factors:\n"
+        for i, (feature, importance) in enumerate(sorted_features, 1):
+            explanation += f"{i}. {feature}: {importance:.2f} impact\n"
+        return explanation
+
+    @staticmethod
     def explain_confusion_matrix(matrix: dict) -> str:
         return (
             f"Error Analysis:\n"
@@ -50,6 +52,15 @@ class InterpretabilityHelper:
             f"- False Positives: {matrix.get('fp', 0)} (Type I errors)\n"
             f"- True Negatives: {matrix.get('tn', 0)}\n"
             f"- False Negatives: {matrix.get('fn', 0)} (Type II errors)"
+        )
+
+    @staticmethod
+    def explain_validation_metrics(metrics: Dict) -> str:
+        return (
+            f"Validation Summary:\n"
+            f"- Passed: {metrics['passed']}\n"
+            f"- Failed: {metrics['failed']}\n"
+            f"- Requirement Coverage: {metrics['coverage']}"
         )
 
 if __name__ == "__main__":
