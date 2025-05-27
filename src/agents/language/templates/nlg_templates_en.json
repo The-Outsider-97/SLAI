@@ -1,0 +1,196 @@
+{
+  "inflectional_morphology": {
+    "nouns": {
+      "plural": {
+        "rules": [
+          {
+            "description": "Add '-s' suffix",
+            "pattern": "default",
+            "examples": ["cat -> cats", "dog -> dogs"]
+          },
+          {
+            "description": "Add '-es' for words ending in [s, sh, ch, x, z]",
+            "pattern": "[s|sh|ch|x|z]$",
+            "examples": ["bus -> buses", "fox -> foxes"]
+          },
+          {
+            "description": "Replace '-y' with '-ies' for consonant + y",
+            "pattern": "[^aeiou]y$",
+            "replacement": "ies",
+            "examples": ["city -> cities", "baby -> babies"]
+          },
+          {
+            "description": "Add '-s' for vowel + y",
+            "pattern": "[aeiou]y$",
+            "examples": ["boy -> boys", "day -> days"]
+          },
+          {
+            "description": "Replace '-f/-fe' with '-ves'",
+            "pattern": "[f|fe]$",
+            "replacement": "ves",
+            "examples": ["wolf -> wolves", "wife -> wives"]
+          }
+        ],
+        "irregulars": [
+          "child -> children",
+          "foot -> feet",
+          "mouse -> mice",
+          "tooth -> teeth"
+        ]
+      },
+      "possessive": {
+        "rules": [
+          {
+            "description": "Add \"'s\" to singular nouns",
+            "examples": ["dog -> dog's", "Chris -> Chris's"]
+          },
+          {
+            "description": "Add apostrophe only to plural nouns ending in -s",
+            "examples": ["dogs -> dogs'", "players -> players'"]
+          }
+        ]
+      }
+    },
+    "verbs": {
+      "third_person_singular": {
+        "rules": [
+          {
+            "description": "Add '-s'",
+            "pattern": "default",
+            "examples": ["run -> runs", "eat -> eats"]
+          },
+          {
+            "description": "Add '-es' for [s, sh, ch, x, z, o] endings",
+            "pattern": "[s|sh|ch|x|z|o]$",
+            "examples": ["pass -> passes", "go -> goes"]
+          },
+          {
+            "description": "Replace '-y' with '-ies' for consonant + y",
+            "pattern": "[^aeiou]y$",
+            "replacement": "ies",
+            "examples": ["study -> studies", "fly -> flies"]
+          }
+        ]
+      },
+      "past_tense": {
+        "rules": [
+          {
+            "description": "Add '-ed'",
+            "pattern": "default",
+            "examples": ["walk -> walked", "play -> played"]
+          },
+          {
+            "description": "Add '-d' for silent -e",
+            "pattern": "e$",
+            "examples": ["dance -> danced", "smile -> smiled"]
+          },
+          {
+            "description": "Double consonant + '-ed' for CVC pattern",
+            "pattern": "[^aeiou][aeiou][^aeiou]$",
+            "examples": ["stop -> stopped", "plan -> planned"]
+          }
+        ],
+        "irregulars": [
+          "go -> went",
+          "sing -> sang",
+          "be -> was/were",
+          "have -> had"
+        ]
+      },
+      "present_participle": {
+        "rules": [
+          {
+            "description": "Add '-ing'",
+            "pattern": "default",
+            "examples": ["work -> working", "play -> playing"]
+          },
+          {
+            "description": "Remove '-e' + '-ing'",
+            "pattern": "e$",
+            "examples": ["make -> making", "write -> writing"]
+          },
+          {
+            "description": "Double consonant + '-ing' for CVC pattern",
+            "pattern": "[^aeiou][aeiou][^aeiou]$",
+            "examples": ["run -> running", "swim -> swimming"]
+          }
+        ]
+      }
+    },
+    "adjectives": {
+      "comparative": {
+        "rules": [
+          {
+            "description": "Add '-er'",
+            "pattern": "default",
+            "examples": ["fast -> faster", "small -> smaller"]
+          },
+          {
+            "description": "Replace '-y' with '-ier'",
+            "pattern": "y$",
+            "examples": ["happy -> happier", "heavy -> heavier"]
+          },
+          {
+            "description": "Use 'more' for multi-syllable adjectives",
+            "pattern": "syllables >= 2",
+            "examples": ["beautiful -> more beautiful"]
+          }
+        ],
+        "irregulars": ["good -> better", "bad -> worse", "far -> farther"]
+      },
+      "superlative": {
+        "rules": [
+          {
+            "description": "Add '-est'",
+            "examples": ["fast -> fastest", "small -> smallest"]
+          },
+          {
+            "description": "Replace '-y' with '-iest'",
+            "examples": ["happy -> happiest", "heavy -> heaviest"]
+          },
+          {
+            "description": "Use 'most' for multi-syllable adjectives",
+            "examples": ["beautiful -> most beautiful"]
+          }
+        ],
+        "irregulars": ["good -> best", "bad -> worst", "far -> farthest"]
+      }
+    }
+  },
+  "derivational_morphology": {
+    "prefixes": [
+      {
+        "affix": "un-",
+        "function": "negation",
+        "examples": ["happy -> unhappy", "do -> undo"]
+      },
+      {
+        "affix": "re-",
+        "function": "repetition",
+        "examples": ["do -> redo", "write -> rewrite"]
+      },
+      {
+        "affix": "dis-",
+        "function": "negation",
+        "examples": ["agree -> disagree", "honest -> dishonest"]
+      }
+    ],
+    "suffixes": [
+      {
+        "affix": "-able",
+        "function": "adjective formation",
+        "examples": ["read -> readable", "love -> lovable"]
+      },
+      {
+        "affix": "-ly",
+        "function": "adverb formation",
+        "examples": ["quick -> quickly", "happy -> happily"]
+      },
+      {
+        "affix": "-ness",
+        "function": "noun formation",
+        "examples": ["happy -> happiness", "kind -> kindness"]
+      }
+    ]
+  }
+}
