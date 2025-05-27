@@ -56,12 +56,12 @@ class PerceptionAgent(BaseAgent):
             'audio': AudioDecoder(config=load_config(LOCAL_CONFIG_PATH))
             # 'text': TextDecoder(config=load_config(LOCAL_CONFIG_PATH)) # <-- add this in v.1.9.0
         })
-        
+
         # Reconstruction losses
         self.recon_loss = nn.ModuleDict({
             'vision': nn.MSELoss(),
             'audio': nn.L1Loss()  # Better for waveforms
-            # 'text': nn.() # <-- add this in v.1.9.0
+            # 'text': nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id) # <-- add this in v.1.9.0
         })
                      
         self.modalities = config.get('perception', {}).get('modalities', ['text', 'vision', 'audio'])
