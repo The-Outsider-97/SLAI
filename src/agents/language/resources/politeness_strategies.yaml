@@ -1,0 +1,36 @@
+strategies:
+  hedging:
+    - "perhaps"
+    - "maybe"
+    - "I think"
+    - "possibly"
+    - "it seems"
+    - "might be"
+    - "could be"
+  
+  boosters:
+    - "clearly"
+    - "obviously"
+    - "undoubtedly"
+    - "certainly"
+    - "definitely"
+    - "absolutely"
+    - "without doubt"
+
+  indirect_requests:
+    - "Would you mind"
+    - "Could you possibly"
+    - "I was wondering if"
+    - "If it's not too much trouble"
+
+  apologies:
+    - "I'm sorry"
+    - "My apologies"
+    - "Pardon me"
+    - "Excuse me"
+
+  honorifics:
+    - "Mr."
+    - "Ms."
+    - "Dr."
+    - "Professor"
