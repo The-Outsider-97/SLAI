@@ -3,12 +3,13 @@ import json
 
 from pathlib import Path
 from typing import Dict
-from dataclasses import field
+from dataclasses import dataclass, field
 
 from logs.logger import get_logger
 
 logger = get_logger("Validation Protocol")
 
+@dataclass
 class ValidationProtocol:
     """
     Comprehensive validation configuration based on:
