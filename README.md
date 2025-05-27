@@ -133,6 +133,7 @@ Note: If you see an error about execution policy:
    pip install apscheduler
    pip install resource
    pip install astor
+   pip install z3
 
    python -m nltk.downloader punkt
    ```
