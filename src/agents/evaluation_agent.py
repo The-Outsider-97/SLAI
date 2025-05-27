@@ -230,33 +230,66 @@ class EvaluationAgent(BaseAgent):
         return [issue for issue, pred in zip(current_issues, predictions) if pred == -1]
 
     def execute_validation_cycle(self, params: Dict) -> Dict:
-        """Updated validation with ML integration"""
+        """Comprehensive evaluation across all dimensions"""
         results = {}
-        # results = super().execute_validation_cycle(params)
-
-        # Static analysis using protocol configuration
-        if self.protocol.static_analysis.get('enable', False):
+        
+        # Static Analysis
+        if self.protocol.static_analysis['enable']:
             analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
             static_results = analyzer.full_analysis()
-            results['static_analysis'] = static_results  # Store full results
-            results['static_analysis_explanation'] = self._explain_static_results(static_results)
+            results.update({
+                'static_analysis': static_results,
+                'static_analysis_explanation': self._explain_static_results(static_results)
+            })
     
-        # Behavioral testing with protocol parameters
-        if self.protocol.behavioral_testing.get('test_types'):
+        # Behavioral Testing
+        if self.protocol.behavioral_testing['test_types']:
             test_suite = self.evaluators['behavioral'].execute_test_suite(
                 sut=self.create_agent()
             )
-            results.update({
-                'behavioral_tests': test_suite,
-                'test_explanation': self._explain_test_results(test_suite)
-            })
-
-        # Enhanced analysis
-        if self.config.get('ml_anomaly_detection', True):
-            anomalies = self.detect_anomalies(results.get('issues', []))
-            results['ml_anomalies'] = anomalies
+            results['behavioral'] = test_suite
+            results['test_explanation'] = self._explain_test_results(test_suite)
+    
+            # Subsequent evaluators using behavioral test results
+            outputs = test_suite.get('predictions', [])
+            truths = test_suite.get('expected_outputs', [])
             
+            # Performance Evaluation
+            results['performance'] = self.evaluators['performance'].evaluate(
+                outputs=outputs,
+                ground_truths=truths
+            )
+    
+            # Efficiency Evaluation
+            results['efficiency'] = self.evaluators['efficiency'].evaluate(
+                outputs=outputs,
+                ground_truths=truths
+            )
+    
+        # Resource Utilization (always runs)
+        results['resource'] = self.evaluators['resource'].evaluate()
+    
+        # Statistical Evaluation (requires historical context)
+        statistical_data = self._prepare_statistical_dataset()
+        results['statistical'] = self.evaluators['statistical'].evaluate(
+            datasets=statistical_data
+        )
+    
+        # Add aggregated metrics
+        results.update(self._gather_core_metrics(results))
+        
         return results
+
+    def _prepare_statistical_dataset(self) -> Dict[str, List[float]]:
+        """Prepare historical data for statistical analysis"""
+        return {
+            'current_run': self.shared_memory.get("latest_metrics", {}).get('performance', {}).get('accuracy_history', []),
+            'previous_runs': [
+                entry['performance']['accuracy'] 
+                for entry in self.shared_memory.get("metric_history", [])
+                if 'performance' in entry
+            ]
+        }
 
     def _connect_issue_database(self):
         """Robust database connection with fallback handling"""
@@ -324,33 +357,6 @@ class EvaluationAgent(BaseAgent):
             logger.error(f"Evaluation failed: {e}")
             return -float('inf')
 
-    def execute_validation_cycle(self, params: Dict) -> Dict:
-        """Protocol-driven validation with explanations"""
-        results = {}
-        
-        # Static analysis using protocol configuration
-        if self.protocol.static_analysis['enable']:
-            analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
-            static_results = analyzer.full_analysis()
-            results.update({
-                'static_analysis': static_results,
-                'static_analysis_explanation': self._explain_static_results(static_results)
-            })
-    
-        # Behavioral testing with protocol parameters
-        if self.protocol.behavioral_testing['test_types']:
-            test_suite = self.evaluators['behavioral'].execute_test_suite(
-                sut=self.create_agent()
-            )
-            results.update({
-                'behavioral_tests': test_suite,
-                'test_explanation': self._explain_test_results(test_suite)
-            })
-    
-        # Add protocol-compliant metrics
-        results.update(self._gather_core_metrics())
-        return results
-
     def _explain_static_results(self, static_results: Dict) -> str:
         """Generate human-readable analysis"""
         security_metrics = static_results.get('security_metrics', {})
@@ -370,34 +376,15 @@ class EvaluationAgent(BaseAgent):
             'coverage': results['requirement_coverage']
         })
 
-    def _gather_core_metrics(self) -> Dict[str, Any]:
-        """Aggregates final validation metrics from evaluators"""
-        try:
-            # Get test data from behavioral tests
-            test_data = self.shared_memory.get("latest_metrics", {}).get("behavioral_tests", {})
-            
-            performance_result = self.evaluators['performance'].evaluate(
-                outputs=test_data.get('predictions', []),
-                ground_truths=test_data.get('expected_outputs', [])
-            )
-            performance_score = performance_result.get("accuracy", 0.0)
-            
-            safety_score = self.risk_model.get_current_risk("system_failure")['risk_metrics']['current_mean']
-            resource_usage = self.evaluators['resource'].evaluate()
-        
-            return {
-                "accuracy": round(performance_score, 3),
-                "safety_score": round(safety_score, 3),
-                "resource_usage": round(resource_usage, 3)
-            }
-        
-        except Exception as e:
-            logger.error(f"Failed to gather core metrics: {e}")
-            return {
-                "accuracy": 0.0,
-                "safety_score": 0.0,
-                "resource_usage": 1.0
-            }
+    def _gather_core_metrics(self, raw_results: Dict) -> Dict[str, Any]:
+        """Aggregate metrics from all evaluators"""
+        return {
+            "accuracy": raw_results['performance'].get('accuracy', 0.0),
+            "efficiency": raw_results['efficiency'].get('score', 0.0),
+            "safety_score": self.risk_model.get_current_risk("system_failure")['risk_metrics']['current_mean'],
+            "resource_usage": raw_results['resource']['composite_score'],
+            "statistical_significance": raw_results['statistical']['hypothesis_tests'].get('main_effect', {}).get('p_value', 1.0)
+        }
 
     def create_agent(self) -> BaseAgent:  
         """Factory method with fault tolerance"""
