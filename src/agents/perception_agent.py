@@ -50,6 +50,20 @@ class PerceptionAgent(BaseAgent):
         self.audio_encoder = AudioEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
         self.text_encoder = TextEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
 
+        # Add decoders
+        self.decoders = nn.ModuleDict({
+            'vision': VisionDecoder(config=load_config(LOCAL_CONFIG_PATH)),
+            'audio': AudioDecoder(config=load_config(LOCAL_CONFIG_PATH))
+            # 'text': TextDecoder(config=load_config(LOCAL_CONFIG_PATH)) # <-- add this in v.1.9.0
+        })
+        
+        # Reconstruction losses
+        self.recon_loss = nn.ModuleDict({
+            'vision': nn.MSELoss(),
+            'audio': nn.L1Loss()  # Better for waveforms
+            # 'text': nn.() # <-- add this in v.1.9.0
+        })
+                     
         self.modalities = config.get('perception', {}).get('modalities', ['text', 'vision', 'audio'])
         self.encoders = OrderedDict()
         if 'vision' in self.modalities:
