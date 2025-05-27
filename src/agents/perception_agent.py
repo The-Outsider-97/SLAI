@@ -92,6 +92,18 @@ class PerceptionAgent(BaseAgent):
         logger.info(f"Perception Agent has succesfully initialized with:\n")
         logger.info(f"\n- {self.vision_encoder}\n- {self.text_encoder}\n- {self.audio_encoder}")
 
+    def compute_loss(self, inputs, labels):
+        # Text reconstruction loss
+        text_logits = self._cache['text_logits']
+        loss_text = self.text_loss(
+            text_logits.view(-1, self.tokenizer.vocab_size),
+            labels['text'].view(-1)
+        )
+        
+        # Vision/audio losses from before
+        total_loss = loss_text + loss_vision + loss_audio
+        return total_loss
+
     def convert_audio_weights(self, weights):
         """Convert custom audio weights to HF-style for all layers"""
         new_w = {}
