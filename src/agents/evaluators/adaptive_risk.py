@@ -65,13 +65,16 @@ class RiskAdaptation:
 
     def _initialize_model(self) -> Dict[str, Tuple[float, float]]:
         """Create prior distributions for each hazard"""
+        self.observation_history = [
+            ({h: 0 for h in self.config.get('initial_hazard_rates', {})}, 1.0)
+            for _ in range(2)
+        ]
+        
         return {
-            hazard: (rate, rate * 0.1)
-            for hazard, rate in [
-                ("default_hazard", self.config.get('initial_hazard_rates', 0.1))
-            ]
+            hazard: (float(rate), float(rate) * 0.1)
+            for hazard, rate in self.config.get('initial_hazard_rates', {}).items()
         }
-    
+
     def _init_report_scheduler(self):
         """Initialize automated report generation"""
         self.scheduler = BackgroundScheduler()
@@ -82,7 +85,7 @@ class RiskAdaptation:
             next_run_time=datetime.now()
         )
         self.scheduler.start()
-    
+
     def update_model(self, observations: Dict[str, int], operational_time: float):
         """
         Bayesian update of risk parameters using operational data
@@ -91,6 +94,13 @@ class RiskAdaptation:
             observations: Count of observed hazards
             operational_time: Total operational hours
         """
+        if operational_time <= 0:
+            logger.warning("Invalid operational time - skipping update")
+            return
+            
+        if not any(count > 0 for count in observations.values()):
+            logger.debug("No relevant observations - skipping update")
+            return
         uncertainty_window = self.config.get('uncertainty_window', 1000)
         learning_rate = self.config.get('learning_rate', 0.01)
         for hazard, count in observations.items():
@@ -121,8 +131,13 @@ class RiskAdaptation:
         
         # Calculate trend data
         historical_means = [obs[0].get(hazard, 0) for obs in self.observation_history]
-        trend = np.polyfit(range(len(historical_means)), historical_means, 1)[0] if historical_means else 0
-        
+        if len(historical_means) >= 2:
+            try:
+                trend = np.polyfit(range(len(historical_means)), historical_means, 1)[0]
+            except np.linalg.LinAlgError:
+                trend = 0.0  # Fallback for numerical instability
+        else:
+            trend = 0.0  # Insufficient data
         return {
             "hazard_id": hazard,
             "risk_metrics": {
