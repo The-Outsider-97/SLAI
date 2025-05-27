@@ -132,7 +132,7 @@ Note: If you see an error about execution policy:
    pip install flask_sqlalchemy
    pip install apscheduler
    pip install resource
-   pip install pycg
+   pip install astor
 
    python -m nltk.downloader punkt
    ```
