@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple, List, Type
 
+from models.reasoner import BasicZeroReasoner
+
 from profiling_utils import memory_profile, time_profile, start_memory_tracing, display_top_memory_sources
 #from src.utils.system_optimizer import SystemOptimizer
 #from src.agents.adaptive_agent import AdaptiveAgent
@@ -24,7 +26,7 @@ from src.agents.learning.slaienv import SLAIEnv
 #from src.agents.perception_agent import PerceptionAgent
 #from src.agents.planning_agent import PlanningAgent
 #from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.safety_agent import SafeAI_Agent, SafetyAgentConfig
+from src.agents.safety_agent import SafetyAgent, SafetyAgentConfig
 from src.agents.factory.agent_meta_data import AgentMetaData, load_config
 from src.agents.factory.metrics_adapter import MetricsAdapter
 from models.slai_lm import get_shared_slailm
@@ -44,6 +46,7 @@ class AgentFactory:
         self.meta_registry = {}
         self.instance_cache = {}
         self.metrics_adapter = MetricsAdapter()
+        self.bzr = BasicZeroReasoner()
         
         self._register_core_agents(config.get('agent-network', {}))
         self._validate_agent_metadata()
@@ -70,6 +73,11 @@ class AgentFactory:
                 'dependencies': self._resolve_dependencies(agent_config),
                 'instance': None
             }
+
+    
+    def validate_with_azr(self, triple):
+        result = self.bzr.check_contradiction(triple)
+        return result.get("contradiction_score", 0.0)
 
     def _validate_agent_metadata(self):
         """Validate all registered agent metadata"""
