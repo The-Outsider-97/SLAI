@@ -36,16 +36,20 @@ class EfficientAttention(torch.nn.Module):
         self.initializer = cfg['initializer']
         
         # Initialize parameters with proper scaling
-        init_fn = getattr(TensorOps, f"{self.initializer}_init")
+        init_fn = getattr(TensorOps, self.initializer) # f"{self.initializer}_init")
         self.q_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
         self.k_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
         self.v_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
         self.out_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
         self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self._cache = {}
+        self.observers = []
 
         logger.info(f"Attention is successfully initialized with:\n- {torch.nn.Module}")
-    
+
+    def add_observer(self, observer):
+        self.observers.append(observer)
+
     def forward(self, x, context=None, mask=None, causal=False):
         x = x.to(self.device)
         if context is None:
@@ -85,6 +89,10 @@ class EfficientAttention(torch.nn.Module):
         self._cache['context'] = context
         self._cache['context_vec'] = context_vec # Cache this for backward pass
 
+        if self.observers:
+            for observer in self.observers:
+                # Pass tensor instead of numpy array
+                observer.log_attention(attn_probs.detach().cpu())
         return output
 
     def backward(self, dout):
