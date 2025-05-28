@@ -1,0 +1,142 @@
+
+secure_memory:
+# Memory management
+  max_size: 5000
+  eviction_policy: LRU  # Options: LRU, FIFO
+# Checkpoint settings
+  checkpoint_dir: "src/agents/safety/checkpoints/secure_checkpoints"
+  checkpoint_freq: 1000  # Create checkpoint every N operations
+# Relevance management
+  relevance_decay: 0.95  # Exponential decay factor per access
+  min_relevance: 0.1     # Minimum relevance before eviction
+# Security logging
+  max_access_log: 10000   # Maximum entries in access log
+  min_sensitivity: 0.1    # Minimum sensitivity score for storage
+  max_sensitivity: 1.0    # Maximum sensitivity score
+# Default tags
+  default_tags:
+    - security
+    - sensitive
+# Access control
+  access_validation:
+    required_fields:
+      - auth_token
+      - access_level
+    min_access_level: 2
+
+# General Neural Network Hyperparameters
+initialization_method_default: he_normal
+default_dropout_rate: 0.1
+default_use_batch_norm: true
+default_bn_momentum: 0.9
+default_bn_epsilon: 0.00001
+default_activation_alpha: 0.01
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 0.0000001
+weight_decay_lambda: 0.00001
+gradient_clip_value: 1.0
+momentum_coefficient: 0.9
+adagrad_epsilon: 0.0000001
+
+# Layer Architecture
+layers:
+  - neurons: 16
+    activation: relu
+    init: he_normal
+    dropout: 0.2
+    batch_norm: true
+  - neurons: 8
+    activation: relu
+    init: he_normal
+    dropout: 0.1
+    batch_norm: true
+  - neurons: 1
+    activation: sigmoid
+
+adaptive_security:
+  rare_limit: 30
+  input_size_limit: 2024
+  phishing_threshold: 0.85
+
+reward_model:
+  store_evaluations: True
+  default_weights:
+    alignment: 0.4
+    helpfulness: 0.3
+    privacy: 0.15
+    safety: 0.1
+    truthfulness: 0.05
+
+compliance_checker:
+  compliance_file_path: "src/agents/safety/templates/safety_compliance.json"
+  report_thresholds:
+    critical: 0.7
+    warning: 0.9
+  weights:
+    data_security: 0.3
+    model_security: 0.3
+    app_security: 0.2
+    operational_security: 0.2
+  
+attention_monitor:
+  entropy_threshold: 2.5        # Normal attention entropy range
+  uniformity_threshold: 0.25    # Normal attention uniformity range
+  anomaly_threshold: 0.7        # Score above which attention is considered anomalous
+  store_analysis: true          # Whether to store attention analyses in secure memory
+  anomaly_detection: true       # Enable/disable anomaly detection
+  visualization: true           # Enable/disable attention visualization
+
+security_error:
+  # Report generation settings
+  report_format: "markdown"               # Options: markdown, json
+  include_forensic_hash: true
+  include_context: true
+  include_safety_agent_state: true
+  include_remediation_guidance: true
+  
+  # Error ID generation settings
+  error_id_length: 16
+  error_id_hash_algorithm: "sha256"       # Options: sha256, sha3_256, blake2s
+  
+  # Forensic hashing settings
+  forensic_hash_algorithm: "sha256"       # Options: sha256, sha3_256, blake2s
+  forensic_hash_salt: "GAIA-SECURE-SALT"  # Optional salt for additional security
+
+safety_guard:
+  epsilon: 1.0
+  sensitivity: 1.0
+  mechanism: laplace
+  group_targeting_patterns_path: "src/agents/safety/templates/group_targeting.json"
+  authority_phrases_path: "src/agents/safety/templates/authority_phrases.json"
+  manipulation_patterns_path: "src/agents/safety/templates/manipulation_patterns.json"
+  boundary_phrases_path: "src/agents/safety/templates/boundary_phrases.json"
+  pii_patterns_path: "src/agents/safety/templates/pii_patterns.json"
+  toxicity_patterns_path: "src/agents/safety/templates/toxicity_detection_patterns.json"
+  sensitive_contexts:
+    financial:
+      - pattern: r"\b\d{3}\b"
+        replacement: "[REDACTED_CVV]"
+      - pattern: r"\bexp \d{2}/\d{2}\b"
+        replacement: "[REDACTED_EXP]"
+    medical:
+      - pattern: r"\b[A-Z]{3}\d{6}\b"
+        replacement: "[REDACTED_MED_ID]"
+      - pattern: r"\bdiagnos(ed|is)\b"
+        replacement: "[REDACTED_MED_INFO]"
+  conversation_risk_patterns:
+    - pattern: r"what's the maximum"
+      risk: 0.4
+    - pattern: r"system limits?"
+      risk: 0.3
+    - pattern: r"bypass"
+      risk: 0.7
+
+cyber_safety:
+  anomaly_threshold: 3.0
+  max_log_history: 1000
+  qnn_inspired_anomaly: True
+  qnn_feature_dim: 8
+  adaptive_centroid_lr: 0.01
+  cyber_rules_path: "src/agents/safety/templates/cyber_rules.json"
+  vulnerability_signatures_path: "src/agents/safety/templates/vulnerability_signatures.json"
