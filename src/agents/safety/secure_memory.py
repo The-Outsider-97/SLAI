@@ -257,10 +257,22 @@ class SecureMemory:
                     'meta': entry['meta']
                 })
         return results
-    
+
+    def recall(self, tag: str, top_k: int = None) -> List[Any]:
+        """Retrieve entries by tag with optional limit"""
+        with self.lock:
+            entries = []
+            if tag in self.tag_index:
+                for entry_id in self.tag_index[tag]:
+                    if entry_id in self.store:
+                        entries.append(self.store[entry_id])
+            
+            # Sort by relevance (descending)
+            entries.sort(key=lambda e: e['meta']['relevance'], reverse=True)
+            return entries[:top_k] if top_k else entries
 
 if __name__ == "__main__":
-    print("\n=== Running Reasoning Agent ===\n")
+    print("\n=== Running Secure Memory ===\n")
     config = load_config()
     context = {'auth_token': 'your_token', 'access_level': 2}
 
@@ -270,4 +282,4 @@ if __name__ == "__main__":
     memory._validate_access(context=context)
     print(f"\n* * * * * Phase 2 * * * * *\n")
     print(f"\n* * * * * Phase 3 * * * * *\n")
-    print("\n=== Successfully Ran Reasoning Agent ===\n")
+    print("\n=== Successfully Ran Secure Memory ===\n")
