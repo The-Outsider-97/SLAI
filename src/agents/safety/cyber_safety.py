@@ -15,43 +15,34 @@ Academic References:
 ------------------------------------------------------------------------------
 """
 
-import logging
 import re
-import json
 import math
 import time
 import random
 import hashlib
+import json, yaml
 import numpy as np
 
 from collections import deque, defaultdict
 from typing import Dict, Any, List, Optional, Tuple, Union
 from pathlib import Path
 
+# from src.agents.safety.utils.neural_network import NeuralNetwork
+from src.agents.safety.utils.security_error import(
+    ToxicContentError, PrivacyViolationError,
+    PiiLeakageError, MisinformationError,
+    PromptInjectionError)
+from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger
 
-# Attempt to import relevant components from sibling modules if needed for type hinting or direct use
-# Note: Actual interaction might happen via the main SafetyAgent passing data
-try:
-    # If AdaptiveAgent logic is directly invoked within this module
-    from src.agents.adaptive_agent import AdaptiveAgent
-    # Potentially reuse or extend basic filtering from SafetyGuard
-    from .safety_guard import SafetyGuard
-except ImportError:
-    # Fallback if run standalone or structure differs
-    AdaptiveAgent = None
-    SafetyGuard = None
-    logging.warning("Could not import sibling agent modules directly in cyber_safety.py. Interaction likely via SafetyAgent.")
+logger = get_logger("SLAI Cyber Safety Module")
 
+CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
 
-logger = get_logger(__name__)
-# Configure logger if not already configured by the main application
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO) # Default level, can be overridden by config
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
 
 # --- Constants and Basic Patterns ---
 
@@ -104,7 +95,7 @@ class CyberSafetyModule:
     statistical methods, with conceptual integration of adaptive and QNN-inspired
     techniques for anomaly detection.
     """
-    def __init__(self, config: Optional[Dict] = None, shared_memory: Optional[Dict] = None, agent_factory=None):
+    def __init__(self, config):
         """
         Initializes the CyberSafetyModule.
 
@@ -120,9 +111,10 @@ class CyberSafetyModule:
             shared_memory (Optional[Dict]): Reference to the shared memory system.
             agent_factory: Reference to the agent factory (if needed to spawn helpers).
         """
-        self.config = config or {}
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory # Keep if needed later
+        config = load_config() or {}
+        self.config = config.get('cyber_safety', {})
+        memory = SecureMemory(config)
+        self.memory = memory
 
         logger.info("Initializing CyberSafetyModule...")
 
@@ -139,7 +131,6 @@ class CyberSafetyModule:
             'Vulnerability Signatures',
             self._get_default_vulnerability_signatures()
         )
-
 
         # Initialize anomaly detection components
         self.anomaly_threshold = float(self.config.get('anomaly_threshold', 3.0)) # Default: 3 standard deviations
@@ -660,3 +651,17 @@ class CyberSafetyModule:
             "threats": final_threats,
             "overall_risk": overall_risk
         }
+
+if __name__ == "__main__":
+    print("\n=== Running SLAI Cyber Safety Module ===\n")
+    config = load_config()
+    input_data=[]
+    context = "general"
+
+    cyber = CyberSafetyModule(config=config)
+    analyze = cyber.analyze_input(input_data=input_data, context=context)
+
+    logger.info(f"{cyber}")
+    print(analyze)
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    print("\n=== Successfully Ran SLAI Cyber Safety Module ===\n")
