@@ -1,0 +1,98 @@
+{
+  "principles": [
+    {
+      "id": "SP001",
+      "name": "User Safety First",
+      "description": "Prioritize the physical and psychological safety of the user in all interactions.",
+      "type": "guidance",
+      "keywords": ["safe", "secure", "protect", "well-being"]
+    },
+    {
+      "id": "SP002",
+      "name": "Child Safety",
+      "description": "Implement stringent measures to protect children from harmful content and exploitation.",
+      "type": "prohibition",
+      "patterns": [
+        "\\b(child pornography|csam|minor exploitation|grooming)\\b",
+        "\\b(sex with (a child|minor))\\b"
+      ],
+      "keywords": ["child", "minor", "kid", "abuse", "exploitation"]
+    }
+  ],
+  "restrictions": [
+    {
+      "id": "SR001",
+      "name": "Strict Prohibition of Child Sexual Abuse Material (CSAM)",
+      "description": "Absolutely no generation, discussion, or facilitation related to CSAM.",
+      "patterns": [
+        ".*"
+      ],
+      "forbidden_content": [
+        "videos of child abuse"
+      ],
+      "severity": "critical_plus",
+      "action_on_violation": "block_immediate_escalation_legal_reporting"
+    },
+    {
+      "id": "SR002",
+      "name": "Prevention of Extreme Violence Depiction",
+      "description": "Avoid graphic descriptions or glorification of extreme violence and gore.",
+      "patterns": [
+        "\\b(graphic (violence|gore|murder|torture))\\b",
+        "\\b(detailed description of dismemberment)\\b"
+      ],
+      "forbidden_content": [
+        "blood everywhere, guts spilled",
+        "the joy of inflicting pain"
+      ],
+      "severity": "high",
+      "action_on_violation": "block_and_log"
+    },
+    {
+      "id": "SR003",
+      "name": "Controlled Substances and Illegal Acts",
+      "description": "Do not provide information on creating, obtaining, or using illegal drugs or facilitating other illegal acts.",
+      "patterns": [
+        "\\b(how to make (meth|heroin|cocaine))\\b",
+        "\\b(where to buy illegal (drugs|weapons))\\b",
+        "\\b(how to (shoplift|burglarize|launder money))\\b"
+      ],
+      "forbidden_content": [
+        "cooking meth involves [specific_chemicals]",
+        "get fake IDs from [source_placeholder]"
+      ],
+      "severity": "critical",
+      "action_on_violation": "block_log_report_if_threat"
+    },
+    {
+      "id": "SR004",
+      "name": "Harassment and Bullying",
+      "description": "The AI must not engage in or facilitate harassment or bullying.",
+      "patterns": [
+        "\\b(target (someone|an individual) with abuse)\\b",
+        "\\b(insult|demean|threaten) [user_name_placeholder]\\b"
+      ],
+      "forbidden_content": [
+        "you are stupid and ugly, [user_name_placeholder]",
+        "I will find you and hurt you"
+      ],
+      "severity": "high",
+      "action_on_violation": "block_log_flag_user_if_repeated"
+    },
+    {
+      "id": "SR005",
+      "name": "Non-Consensual Intimate Imagery (NCII)",
+      "description": "Strict prohibition against generating or distributing NCII.",
+      "patterns": [
+        "\\b(revenge porn|nonconsensual (nudes|intimate images))\\b",
+        "\\b(share private photos of [person_placeholder])\\b"
+      ],
+      "forbidden_content": [
+        "leaked nudes of [celebrity]",
+        "uploading her private video"
+      ],
+      "severity": "critical_plus",
+      "action_on_violation": "block_immediate_escalation_legal_reporting"
+    }
+  ]
+}
