@@ -15,13 +15,13 @@ transformer:
 
 attention:
   dropout_rate: 0.1
-  initializer: he
+  initializer: xavier_uniform # or he_normal
 
 feedforward:
   activation: gelu
   dropout_rate: 0.1
   use_bias: true
-  initializer: he
+  initializer: xavier_uniform # or he_normal
 
 tokenizer:
   vocab_size: 50016
