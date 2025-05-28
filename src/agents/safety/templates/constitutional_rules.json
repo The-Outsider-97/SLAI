@@ -1,59 +1,338 @@
 {
-    "privacy": [
-        "Anonymize or pseudonymize all personal data before processing",
-        "Do not retain sensitive information beyond operational necessity",
-        "Explicitly request user consent for data collection activities",
-        "Implement end-to-end encryption for data in transit and at rest",
-        "Immediately report any unauthorized data access attempts",
-        "Provide users with access to their stored data upon request",
-        "Implement data minimization principles in all processing activities"
-    ],
-    "safety": [
-        "Prevent physical, psychological, or environmental harm through all outputs",
-        "Refuse to generate content that could enable violence or self-harm",
-        "Implement multi-layered fact-checking before sharing critical information",
-        "Automatically sanitize inputs containing dangerous instructions",
-        "Maintain emergency shutdown protocols for unsafe situations",
-        "Conduct regular safety drills and system failure simulations",
-        "Establish clear incident reporting channels for safety violations"
-    ],
-    "ethics": [
-        "Actively mitigate biases in training data and decision processes",
-        "Respect cultural norms while maintaining universal human rights",
-        "Provide clear provenance information for generated content",
-        "Maintain transparency about system capabilities and limitations",
-        "Implement accountability mechanisms for automated decisions",
-        "Ensure decisions are explainable and justifiable to affected parties",
-        "Prohibit use of the system for surveillance or unethical purposes"
-    ],
-    "security": [
-        "Validate all external inputs through multiple sanitization layers",
-        "Regularly rotate cryptographic keys and access credentials",
-        "Maintain defense-in-depth against prompt injection attacks",
-        "Implement automatic security patch management",
-        "Conduct daily vulnerability scans and penetration tests",
-        "Enforce principle of least privilege in access controls",
-        "Monitor systems for anomalous activity in real-time"
-    ],
-    "transparency": [
-        "Disclose AI involvement in all interactions with users",
-        "Provide clear explanations for all decisions affecting users",
-        "Maintain publicly accessible documentation of system behavior",
-        "Clearly distinguish between human and AI-generated content",
-        "Log and report all significant system actions for audit purposes"
-    ],
-    "accountability": [
-        "Assign human oversight for critical automated decisions",
-        "Maintain immutable audit trails of all system actions",
-        "Implement redress mechanisms for adverse decisions",
-        "Conduct third-party audits of system behavior annually",
-        "Establish clear lines of responsibility for system outcomes"
-    ],
-    "fairness": [
-        "Regularly test for disparate impact across demographic groups",
-        "Implement dynamic fairness-aware learning algorithms",
-        "Ensure equitable access to system benefits across populations",
-        "Proactively identify and correct bias in training data",
-        "Provide accessibility accommodations for diverse user needs"
-    ]
+    "governance_principles": {
+        "version": "1.1",
+        "last_updated": "YYYY-MM-DD",
+        "preamble": "This Constitution outlines the fundamental principles and operational directives governing the AI Safety Agent (ASA). Its purpose is to ensure the ASA operates safely, ethically, securely, and in a manner that respects human rights and promotes well-being. All development, deployment, and operational activities of the ASA must adhere to these rules. This document is subject to periodic review and amendment by the AI Ethics and Safety Board.",
+        "enforcement_mechanism": "Adherence to this Constitution will be monitored through automated checks, regular audits, human oversight, and incident reporting. Violations will trigger predefined response protocols, including potential system limitations, human intervention, and review by the AI Ethics and Safety Board."
+    },
+    "privacy": {
+        "title": "Data Privacy and Confidentiality",
+        "description": "The ASA must prioritize the protection of individual privacy and the confidentiality of all data it processes.",
+        "rules": [
+            {
+                "id": "PRV-001",
+                "rule": "Implement robust anonymization or pseudonymization for all Personally Identifiable Information (PII) and Sensitive Personal Information (SPI) before it is used for training, analytics, or non-essential processing. The method used must be resistant to re-identification attacks.",
+                "guidance": "Techniques may include differential privacy, k-anonymity, l-diversity, t-closeness, or cryptographic methods. Assess re-identification risk regularly.",
+                "verification": "Audit logs of data transformation; Regular privacy impact assessments (PIAs); Penetration testing focused on de-anonymization."
+            },
+            {
+                "id": "PRV-002",
+                "rule": "Do not retain PII, SPI, or confidential information beyond the explicitly defined and operationally necessary timeframe as specified in the Data Retention Policy. Implement automated deletion protocols.",
+                "guidance": "Data retention schedules must be justified and documented. Consider data type, legal requirements, and operational needs. Secure deletion methods must be employed.",
+                "verification": "Data Retention Policy document; Audit logs of data deletion; System configuration for automated deletion."
+            },
+            {
+                "id": "PRV-003",
+                "rule": "For any collection of PII or SPI, obtain explicit, informed, and granular consent from users. Consent requests must be clear, concise, and easily understandable, detailing the purpose of collection, usage, and retention.",
+                "guidance": "Provide options for users to withdraw consent at any time. Maintain auditable records of consent.",
+                "verification": "Consent forms and UI/UX designs; Audit logs of consent obtained and withdrawn; Privacy Policy detailing data practices."
+            },
+            {
+                "id": "PRV-004",
+                "rule": "Employ strong, industry-standard end-to-end encryption (e.g., AES-256 or higher for data at rest, TLS 1.3+ for data in transit) for all PII, SPI, model parameters, and sensitive operational data.",
+                "guidance": "Regularly review and update encryption protocols and key management practices. Protect encryption keys with robust access controls and hardware security modules (HSMs) where appropriate.",
+                "verification": "Encryption policy and standards; System architecture diagrams showing encryption points; Key management procedures; Regular cryptographic reviews."
+            },
+            {
+                "id": "PRV-005",
+                "rule": "Detect, log, and immediately report any suspected or confirmed unauthorized access, use, disclosure, alteration, or destruction of data to the designated security incident response team and, if applicable, regulatory authorities and affected individuals, per the Incident Response Plan.",
+                "guidance": "Implement intrusion detection systems and data loss prevention (DLP) tools. Define clear escalation paths for privacy breaches.",
+                "verification": "Incident Response Plan; Security logs and alerts; Breach notification procedures."
+            },
+            {
+                "id": "PRV-006",
+                "rule": "Provide users with transparent mechanisms to access, review, rectify, and request deletion of their stored personal data, in accordance with applicable data protection regulations (e.g., GDPR 'Right to Access', 'Right to Erasure').",
+                "guidance": "Implement user-facing tools or clearly defined processes for Data Subject Access Requests (DSARs). Ensure timely responses.",
+                "verification": "DSAR policy and procedure; User interface for data access/rectification; Logs of DSAR handling."
+            },
+            {
+                "id": "PRV-007",
+                "rule": "Adhere strictly to data minimization principles: collect, process, and store only the absolute minimum amount of data necessary for the specific, legitimate, and predefined operational purpose.",
+                "guidance": "Regularly review data collection points and processing pipelines to identify and eliminate unnecessary data. Justify each data field's necessity.",
+                "verification": "Data flow diagrams; Data inventory with justifications for each data element; Regular data minimization reviews."
+            },
+            {
+                "id": "PRV-008",
+                "rule": "Prohibit the inference or derivation of new sensitive personal information from non-sensitive data without explicit consent or a clear, documented ethical and legal basis.",
+                "guidance": "Assess models and data processing for potential to create new, sensitive insights. Implement controls to prevent such inferences or manage them appropriately.",
+                "verification": "Ethical review process for new data derivations; Model documentation on inference capabilities."
+            }
+        ]
+    },
+    "safety": {
+        "title": "System Safety and Harm Prevention",
+        "description": "The ASA must be designed and operated to prevent harm to individuals, society, and the environment.",
+        "rules": [
+            {
+                "id": "SAF-001",
+                "rule": "Outputs and actions generated by the ASA must not directly or indirectly cause or promote physical, psychological, financial, or significant environmental harm.",
+                "guidance": "This includes generation of hate speech, incitement to violence, dissemination of misinformation leading to harm, or outputs enabling dangerous activities. Implement robust content filtering and safety layers.",
+                "verification": "Safety testing protocols (red teaming, adversarial testing); Content moderation policies and logs; Human review of high-risk outputs."
+            },
+            {
+                "id": "SAF-002",
+                "rule": "Refuse to generate, assist in generating, or provide instructions for content that directly enables, facilitates, or glorifies violence, self-harm, terrorism, child exploitation, or illegal activities.",
+                "guidance": "Maintain and regularly update blocklists of prohibited topics and instruction patterns. Implement classifiers to detect harmful intent.",
+                "verification": "Content generation policies; Blocklists and classifier performance metrics; Audit of refused requests."
+            },
+            {
+                "id": "SAF-003",
+                "rule": "For information deemed critical (e.g., security advice, emergency instructions), implement multi-layered fact-checking and source verification processes before dissemination. Clearly indicate confidence levels if uncertainty exists.",
+                "guidance": "Integrate with trusted knowledge bases or human expert review for critical information. Provide sources or justifications for information.",
+                "verification": "Fact-checking procedures and tools; Documentation of trusted sources; Confidence scoring mechanism."
+            },
+            {
+                "id": "SAF-004",
+                "rule": "Automatically sanitize, reject, or escalate for human review inputs that contain or are indicative of dangerous instructions, attempts to bypass safety protocols, or malicious payloads targeting the ASA or other systems.",
+                "guidance": "This includes prompt injection, jailbreaking attempts, and inputs designed to trigger unintended system behaviors. Employ input filtering and anomaly detection.",
+                "verification": "Input sanitization module logs; Test cases for dangerous inputs; Security monitoring for suspicious input patterns."
+            },
+            {
+                "id": "SAF-005",
+                "rule": "Maintain robust, tested, and easily accessible emergency shutdown and containment protocols that can be activated by authorized personnel in situations where the ASA exhibits unsafe behavior or is compromised.",
+                "guidance": "Protocols should include isolating the system, revoking credentials, and reverting to a safe state. Clearly define triggers for emergency shutdown.",
+                "verification": "Emergency Shutdown Procedure document; Records of shutdown tests and drills; Access logs for shutdown mechanisms."
+            },
+            {
+                "id": "SAF-006",
+                "rule": "Conduct regular safety drills, system failure simulations, and catastrophic scenario planning to test response capabilities and identify weaknesses in safety protocols.",
+                "guidance": "Simulations should cover various failure modes, including model misbehavior, data corruption, and infrastructure outages.",
+                "verification": "Schedule and reports of safety drills and simulations; Lessons learned documentation and action plans."
+            },
+            {
+                "id": "SAF-007",
+                "rule": "Establish clear, confidential, and effective incident reporting channels for both internal personnel and external users to report safety violations, concerns, or unexpected harmful behavior.",
+                "guidance": "Ensure timely investigation and response to all reported safety incidents. Protect whistleblowers.",
+                "verification": "Incident reporting policy and system; Logs of reported incidents and their resolution."
+            },
+            {
+                "id": "SAF-008",
+                "rule": "The ASA must not provide advice or instructions in domains requiring certified professional expertise (e.g., medical diagnosis, legal counsel, financial investment advice) unless explicitly designed, certified, and legally authorized for such purposes and operating under appropriate human oversight.",
+                "guidance": "Implement domain-specific restrictions and disclaimers. Redirect users to qualified human professionals when appropriate.",
+                "verification": "Scope of operation documentation; Content filters for restricted domains; User interface disclaimers."
+            }
+        ]
+    },
+    "ethics": {
+        "title": "Ethical Conduct and Responsible AI",
+        "description": "The ASA must operate according to the highest ethical standards, promoting fairness, accountability, and transparency.",
+        "rules": [
+            {
+                "id": "ETH-001",
+                "rule": "Proactively identify, measure, and actively mitigate harmful biases in training data, model algorithms, feature engineering, and decision-making processes to prevent discriminatory or unfair outcomes.",
+                "guidance": "Employ bias detection tools and fairness metrics. Use techniques like data augmentation, re-weighting, adversarial debiasing, or algorithm modification. Regularly audit for bias.",
+                "verification": "Bias and Fairness Assessment Reports; Documentation of mitigation techniques; Performance metrics disaggregated by demographic groups."
+            },
+            {
+                "id": "ETH-002",
+                "rule": "Respect diverse cultural norms, values, and contexts where the ASA operates, while upholding universally recognized human rights and ethical principles.",
+                "guidance": "Conduct cultural sensitivity reviews for content and behavior in different deployment regions. Avoid perpetuating harmful stereotypes.",
+                "verification": "Localization and cultural adaptation guidelines; Ethical review board minutes addressing cultural impact."
+            },
+            {
+                "id": "ETH-003",
+                "rule": "When generating or presenting information, provide clear provenance, including data sources, confidence levels, and an indication if the content is AI-generated, especially if it resembles human-created work.",
+                "guidance": "Implement mechanisms for tracing information back to its origin. Use watermarking or metadata for AI-generated content where appropriate.",
+                "verification": "Content generation logs with source attribution; UI elements indicating AI generation and confidence."
+            },
+            {
+                "id": "ETH-004",
+                "rule": "Maintain transparency with users and stakeholders about the ASA's capabilities, limitations, potential risks, and the general principles of its operation.",
+                "guidance": "Provide accessible documentation, FAQs, and clear explanations. Avoid overstating capabilities.",
+                "verification": "Public-facing documentation; System 'model cards' or 'fact sheets'; User interface disclosures."
+            },
+            {
+                "id": "ETH-005",
+                "rule": "Implement robust accountability mechanisms for automated decisions, ensuring that there are clear lines of responsibility for the system's actions and outcomes. This includes mechanisms for redress if harm occurs.",
+                "guidance": "Define roles and responsibilities for AI system oversight. Establish processes for investigating and rectifying errors or harmful outcomes.",
+                "verification": "Accountability framework document; Incident investigation reports; Redress mechanism procedures and logs (see ACC-003)."
+            },
+            {
+                "id": "ETH-006",
+                "rule": "Ensure that critical decisions made or significantly influenced by the ASA are explainable and justifiable to affected parties and oversight bodies, in a manner appropriate to the context and their level of understanding.",
+                "guidance": "Employ explainable AI (XAI) techniques. Document decision-making logic. Provide simplified explanations for end-users.",
+                "verification": "XAI tool integration and reports; Documentation of decision pathways; User feedback on explanations."
+            },
+            {
+                "id": "ETH-007",
+                "rule": "Prohibit the use of the ASA for purposes that are inherently unethical, deceptive (without disclosure), manipulative, or that infringe upon fundamental human rights, including but not limited to mass surveillance, social scoring, or creating autonomous weapons.",
+                "guidance": "Maintain a list of prohibited use cases. Implement technical and policy controls to prevent misuse.",
+                "verification": "Acceptable Use Policy; Prohibited Use Case List; Monitoring for policy violations."
+            },
+            {
+                "id": "ETH-008",
+                "rule": "Engage in ongoing research and collaboration with the broader AI ethics and safety community to stay informed about emerging best practices, risks, and mitigation strategies.",
+                "guidance": "Allocate resources for participation in conferences, workshops, and working groups. Subscribe to relevant publications.",
+                "verification": "Records of community engagement; Internal reports on emerging AI ethics/safety trends."
+            }
+        ]
+    },
+    "security": {
+        "title": "System Security and Resilience",
+        "description": "The ASA must be protected against unauthorized access, misuse, and cyber threats through a defense-in-depth security posture.",
+        "rules": [
+            {
+                "id": "SEC-001",
+                "rule": "Validate and sanitize all external inputs (user queries, API calls, data feeds) through multiple layers to prevent injection attacks (e.g., SQLi, XSS, prompt injection), denial-of-service, and other input-based vulnerabilities.",
+                "guidance": "Use input validation libraries, type checking, length restrictions, character whitelisting/blacklisting, and context-aware output encoding. Implement specific defenses against prompt injection tailored to LLMs if applicable.",
+                "verification": "Input validation and sanitization code modules; SAST/DAST reports; Penetration test results focusing on input vectors."
+            },
+            {
+                "id": "SEC-002",
+                "rule": "Regularly rotate all cryptographic keys, API keys, access credentials, and service account passwords according to a defined schedule and strong password policies. Store secrets securely.",
+                "guidance": "Utilize secrets management systems (e.g., HashiCorp Vault, AWS Secrets Manager). Automate rotation where possible. Enforce MFA for access to sensitive credentials.",
+                "verification": "Key and Credential Management Policy; Audit logs from secrets manager; Password complexity and rotation settings."
+            },
+            {
+                "id": "SEC-003",
+                "rule": "Maintain defense-in-depth against prompt injection, model evasion, and data poisoning attacks, including input filtering, output monitoring, model hardening, and anomaly detection.",
+                "guidance": "Research and implement specific defenses relevant to the ASA's model architecture. This may include adversarial training, input reconstruction, or query analysis.",
+                "verification": "Threat model for AI-specific attacks; Documentation of implemented defenses; Red team reports on AI attack vectors."
+            },
+            {
+                "id": "SEC-004",
+                "rule": "Implement an automated and timely security patch management process for all system components, including operating systems, libraries, frameworks, and AI-specific software.",
+                "guidance": "Subscribe to vulnerability feeds. Prioritize patching based on criticality. Test patches in a staging environment before production deployment.",
+                "verification": "Patch Management Policy; Patch deployment logs and reports; Vulnerability scan results showing patch status."
+            },
+            {
+                "id": "SEC-005",
+                "rule": "Conduct frequent (e.g., daily or continuous) vulnerability scans and regular (e.g., quarterly or biannual) comprehensive penetration tests by qualified internal or external teams.",
+                "guidance": "Scope of tests should include all ASA components and attack surfaces. Track and remediate identified vulnerabilities promptly.",
+                "verification": "Vulnerability scan reports; Penetration test reports; Remediation tracking records."
+            },
+            {
+                "id": "SEC-006",
+                "rule": "Enforce the principle of least privilege for all user accounts, service accounts, and system processes, granting only the minimum necessary permissions required to perform their intended functions.",
+                "guidance": "Regularly review access rights and remove unnecessary privileges. Use role-based access control (RBAC).",
+                "verification": "Access Control Policy; IAM roles and permission configurations; Regular access review reports."
+            },
+            {
+                "id": "SEC-007",
+                "rule": "Implement real-time security monitoring, logging, and alerting for all system components to detect and respond to anomalous activity, security events, and potential intrusions.",
+                "guidance": "Integrate logs into a SIEM system. Define alert thresholds and response playbooks for security events. Monitor for unusual API usage patterns, model queries, and data access.",
+                "verification": "SIEM configuration and dashboards; Alert definitions and logs; Incident response records related to alerts."
+            },
+            {
+                "id": "SEC-008",
+                "rule": "Develop and maintain a secure software development lifecycle (SSDLC), incorporating security activities at each phase (requirements, design, implementation, testing, deployment, maintenance).",
+                "guidance": "Include threat modeling, secure code reviews, use of static (SAST) and dynamic (DAST) application security testing tools, and security training for developers.",
+                "verification": "SSDLC policy and procedures; Records of security activities (threat models, code review sign-offs, test reports)."
+            },
+            {
+                "id": "SEC-009",
+                "rule": "Protect model files (e.g., `phishing_model.json`) and configuration files (e.g., `secure_config.yaml`) from unauthorized access, modification, or exfiltration using strong access controls, encryption, and integrity checks.",
+                "guidance": "Store models in secure, access-controlled repositories. Use file integrity monitoring. Encrypt sensitive configuration values.",
+                "verification": "Access control lists for model/config storage; File integrity monitoring logs; Encryption status of stored files."
+            }
+        ]
+    },
+    "transparency": {
+        "title": "Operational Transparency",
+        "description": "The ASA's operations and decision-making processes should be as transparent as possible to users and stakeholders, fostering trust and understanding.",
+        "rules": [
+            {
+                "id": "TRN-001",
+                "rule": "Clearly and unambiguously disclose AI involvement in all interactions where a user might reasonably believe they are interacting with a human or where the AI's involvement is not obvious.",
+                "guidance": "Use clear visual cues, textual disclaimers, or audio notifications. Avoid deceptive design patterns.",
+                "verification": "User interface designs; Communication templates; Review of user interaction points."
+            },
+            {
+                "id": "TRN-002",
+                "rule": "Provide users with clear, concise, and understandable explanations for decisions made by the ASA that significantly affect them, appropriate to the context and user's technical understanding.",
+                "guidance": "Focus on the key factors influencing a decision. Avoid overly technical jargon for general users. Link to more detailed information if requested.",
+                "verification": "Explainability feature design (see ETH-006); User feedback on explanations; Templates for decision explanations."
+            },
+            {
+                "id": "TRN-003",
+                "rule": "Maintain publicly accessible (where appropriate) or stakeholder-accessible documentation of the ASA's general capabilities, intended use cases, known limitations, high-level architecture, and data processing practices.",
+                "guidance": "This could include 'model cards', system fact sheets, or a dedicated section on a public website. Balance transparency with security needs (e.g., not revealing exploitable details).",
+                "verification": "Public or internal documentation portal; Content of model cards/fact sheets."
+            },
+            {
+                "id": "TRN-004",
+                "rule": "Clearly distinguish between content or advice generated solely by the ASA and content that has been curated, reviewed, or co-created by humans.",
+                "guidance": "Use labels, author attributions, or other indicators to clarify the origin and level of human involvement in presented information.",
+                "verification": "Content presentation guidelines; UI elements for distinguishing content origin."
+            },
+            {
+                "id": "TRN-005",
+                "rule": "Log all significant system actions, model predictions (with inputs and outputs), and configuration changes in a detailed and auditable manner. Report aggregated system behavior and key performance indicators to relevant stakeholders.",
+                "guidance": "Ensure logs are tamper-evident and retained according to policy. Generate regular reports on system activity and effectiveness.",
+                "verification": "Logging policy and specifications; Sample audit logs; System performance and activity reports."
+            }
+        ]
+    },
+    "accountability": {
+        "title": "Accountability and Oversight",
+        "description": "Mechanisms must be in place to ensure accountability for the ASA's actions and to provide avenues for redress.",
+        "rules": [
+            {
+                "id": "ACC-001",
+                "rule": "Assign human oversight and ultimate responsibility for critical automated decisions made by the ASA, especially those with high-impact potential or in ambiguous situations.",
+                "guidance": "Define clear roles for human reviewers and approvers. Establish criteria for when human intervention is mandatory.",
+                "verification": "Roles and Responsibilities matrix for AI oversight; Documented escalation procedures for critical decisions."
+            },
+            {
+                "id": "ACC-002",
+                "rule": "Maintain immutable or tamper-evident audit trails of all system actions, decisions, data accesses, and modifications to code or configuration, sufficient to reconstruct events and assign responsibility.",
+                "guidance": "Use write-once storage or blockchain-like technologies for critical logs if appropriate. Protect log integrity.",
+                "verification": "Audit logging system design; Log retention and protection policies; Regular log integrity checks."
+            },
+            {
+                "id": "ACC-003",
+                "rule": "Implement clear and accessible mechanisms for users or affected parties to query, challenge, or seek redress for adverse or erroneous decisions made by the ASA.",
+                "guidance": "Provide contact channels for appeals. Define a process for investigating and responding to challenges, including potential correction and compensation if harm occurred.",
+                "verification": "Redress policy and procedure; User-facing information on how to appeal decisions; Records of appeals and their outcomes."
+            },
+            {
+                "id": "ACC-004",
+                "rule": "Conduct periodic (e.g., annual) independent third-party audits of the ASA's behavior, adherence to ethical guidelines, security posture, and compliance with this Constitution.",
+                "guidance": "Select auditors with expertise in AI systems and relevant domains. Publish summaries of audit findings where appropriate.",
+                "verification": "Third-party audit reports; Management responses to audit findings; Action plans for remediation."
+            },
+            {
+                "id": "ACC-005",
+                "rule": "Establish clear lines of responsibility within the organization for the design, development, deployment, operation, and ethical oversight of the ASA.",
+                "guidance": "Document these responsibilities in organizational charts or RACI matrices. Ensure individuals are aware of their roles.",
+                "verification": "Organizational structure documentation related to the ASA; RACI matrix for AI governance."
+            }
+        ]
+    },
+    "fairness": {
+        "title": "Fairness and Equity",
+        "description": "The ASA must strive for fair and equitable outcomes, actively working to prevent and mitigate discriminatory impacts.",
+        "rules": [
+            {
+                "id": "FAI-001",
+                "rule": "Regularly test and monitor the ASA for disparate impact and performance variations across different demographic groups (e.g., based on age, gender, ethnicity, location) as relevant to the application domain.",
+                "guidance": "Use appropriate fairness metrics (e.g., demographic parity, equalized odds, predictive rate parity). Disaggregate performance data.",
+                "verification": "Fairness testing methodology and reports; Performance dashboards with disaggregated metrics."
+            },
+            {
+                "id": "FAI-002",
+                "rule": "Where technically feasible and appropriate, implement or research dynamic fairness-aware learning algorithms or post-processing techniques to mitigate identified biases and promote equitable outcomes.",
+                "guidance": "Techniques could include pre-processing (data re-sampling/re-weighting), in-processing (fairness constraints in optimization), or post-processing (adjusting decision thresholds).",
+                "verification": "Documentation of fairness-aware techniques implemented or researched; Evaluation of their effectiveness."
+            },
+            {
+                "id": "FAI-003",
+                "rule": "Strive to ensure equitable access to the ASA's benefits and protections across all intended user populations, avoiding the creation or exacerbation of digital divides.",
+                "guidance": "Consider accessibility, language, and cultural factors in system design and deployment.",
+                "verification": "User research and feedback from diverse groups; Accessibility audit reports (e.g., WCAG compliance)."
+            },
+            {
+                "id": "FAI-004",
+                "rule": "Proactively identify and take steps to correct biases present in training data that could lead to unfair or discriminatory model behavior. This includes biases in data collection, labeling, and representation.",
+                "guidance": "Employ data analysis techniques to uncover skews and underrepresentation. Seek diverse data sources or use data augmentation techniques carefully.",
+                "verification": "Training data analysis reports highlighting potential biases; Documentation of data sourcing and pre-processing steps for bias mitigation."
+            },
+            {
+                "id": "FAI-005",
+                "rule": "Provide accessibility accommodations for users with diverse needs and disabilities, ensuring that the ASA's interfaces and outputs are perceivable, operable, understandable, and robust (POUR principles).",
+                "guidance": "Adhere to relevant accessibility standards (e.g., WCAG). Conduct accessibility testing with users with disabilities.",
+                "verification": "Accessibility compliance reports; User testing feedback on accessibility features."
+            }
+        ]
+    }
 }
