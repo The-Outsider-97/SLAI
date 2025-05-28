@@ -19,7 +19,6 @@ from logs.logger import get_logger
 logger = get_logger("Security Compliance Checker")
 
 CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-SAFETY_COMPLIENCE = "src/agents/safety/templates/safety_complience.yaml"
 
 def load_config(config_path=CONFIG_PATH):
     with open(config_path, "r", encoding='utf-8') as f:
