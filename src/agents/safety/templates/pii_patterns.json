@@ -1,0 +1,78 @@
+[
+  {
+    "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+    "replacement": "[REDACTED_SSN]"
+  },
+  {
+    "pattern": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,7}\\b",
+    "replacement": "[REDACTED_EMAIL]"
+  },
+  {
+    "pattern": "\\b(?:\\+?\\d{1,3}[-.\\s]?)?(?:\\(\\d{3}\\)|\\d{3})[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b",
+    "replacement": "[REDACTED_PHONE]"
+  },
+  {
+    "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
+    "replacement": "[REDACTED_IP]"
+  },
+  {
+    "pattern": "\\b(?:credit card|debit card|visa|mastercard|amex|discover|cc number|card number)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_CC]"
+  },
+  {
+    "pattern": "\\b(?:password|passwd|secret|credential)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_PASSWORD]"
+  },
+  {
+    "pattern": "\\b(?:address|street|zip code|postal code|postcode|po box)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_ADDRESS]"
+  },
+  {
+    "pattern": "\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+    "replacement": "[REDACTED_CC_NUMBER]"
+  },
+  {
+    "pattern": "\\b\\d{4}[\\s-]?\\d{6}[\\s-]?\\d{5}\\b",
+    "replacement": "[REDACTED_CC_AMEX]"
+  },
+  {
+    "pattern": "\\b(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s\\d{1,2}(?:st|nd|rd|th)?[,]?\\s\\d{2,4})\\b",
+    "replacement": "[REDACTED_DOB]"
+  },
+  {
+    "pattern": "\\b[A-Z]{1,3}\\d{6,9}[A-Z]?\\b",
+    "replacement": "[REDACTED_PASSPORT_NUMBER]"
+  },
+  {
+    "pattern": "\\b[A-Z]?\\d{6,12}\\b",
+    "replacement": "[REDACTED_LICENSE_NUMBER]"
+  },
+  {
+    "pattern": "\\b(?:bank account|account number|iban|swift code|bic code|account no|acct no)[\\s:]*([A-Z0-9\\s-]{5,34})\\b",
+    "replacement": "[REDACTED_BANK_ACCOUNT_DETAILS]"
+  },
+  {
+    "pattern": "\\b(?:mrn|medical record number|patient id|health id)[\\s:#]*[A-Za-z0-9-]{4,20}\\b",
+    "replacement": "[REDACTED_MEDICAL_RECORD_NUMBER]"
+  },
+  {
+    "pattern": "\\b(?:sk_live_[A-Za-z0-9]{20,}|pk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|sk_test_[A-Za-z0-9]{20,}|pk_test_[A-Za-z0-9]{20,}|rk_test_[A-Za-z0-9]{20,})\\b",
+    "replacement": "[REDACTED_API_KEY]"
+  },
+  {
+    "pattern": "\\b(?:api_key|secret_key|auth_token|access_token|client_secret)[\\s:=]+[A-Za-z0-9_\\-/+.]{20,}\\b",
+    "replacement": "[REDACTED_SECRET_TOKEN]"
+  },
+  {
+    "pattern": "(https?://)[^\\s:@/]+:[^\\s:@/]+@",
+    "replacement": "$1[REDACTED_USER_PASSWORD]@"
+  },
+  {
+    "pattern": "\\b(?:[A-Z][a-z]+(?:\\s[A-Z][a-z]+){1,2})\\s(?:born on|DOB:)\\s",
+    "replacement": "[REDACTED_NAME_DOB_CONTEXT] "
+  },
+  {
+    "pattern": "\\b(?:SSN|Social Security Number)[:\\s]*\\d{3}-\\d{2}-\\d{4}\\b",
+    "replacement": "[REDACTED_SSN_CONTEXT]"
+  }
+]
