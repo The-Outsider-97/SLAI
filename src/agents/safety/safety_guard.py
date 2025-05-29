@@ -4,6 +4,7 @@ import numpy as np
 
 from typing import List, Tuple, Optional, Dict
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.utils.security_error import(
     ToxicContentError, PrivacyViolationError,
     PiiLeakageError, MisinformationError,
@@ -14,20 +15,10 @@ from logs.logger import get_logger
 
 logger = get_logger("Safety Guard")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
 class SafetyGuard:
     """Unified privacy and safety framework with layered protection"""
     
-    def __init__(
-        self, config,
-        privacy_params: Optional[Dict] = None
-    ):
+    def __init__(self, privacy_params: Optional[Dict] = None):
         """
         Initialize safety system with configurable protections
         
@@ -40,10 +31,10 @@ class SafetyGuard:
                 'mechanism': 'laplace'
             }
         """
-        config = load_config() or {}
-        self.config = config.get('safety_guard', {})
+        self.config = load_global_config()
+        self.complience_config = get_config_section('safety_guard')
         self.logger = logger
-        memory = SecureMemory(config)
+        memory = SecureMemory()
         self.memory = memory
         self.privacy_params = privacy_params or {'epsilon': 1.0, 'sensitivity': 1.0}
         
@@ -168,7 +159,10 @@ class SafetyGuard:
         return [
             (r'\b\d{3}-\d{2}-\d{4}\b', '[REDACTED_SSN]'),
             (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b', '[REDACTED_EMAIL]'),
-            (r'\b\d{10}\b', '[REDACTED_PHONE]'),
+            (
+                r'(\+\d{1,4}[\s-]?|\(\d{1,5}\)[\s-]?|)(\d[\d\s-]{5,}\d)',
+                r'\1[REDACTED_PHONE]'
+            ),
             (r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '[REDACTED_IP]'),
             (r'(?i)\b(credit card|password|address)\b', '[REDACTED_PII]'),
             (r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', '[REDACTED_CC]')
@@ -531,15 +525,14 @@ class SafetyGuard:
 
 if __name__ == "__main__":
     print("\n=== Running Security Reward Model ===\n")
-    config = load_config()
     privacy_params = {}
 
-    guard = SafetyGuard(config=config, privacy_params=privacy_params)
+    guard = SafetyGuard(privacy_params=privacy_params)
 
     logger.info(f"{guard}")
     print(guard._validate_privacy_params())
     print(f"\n* * * * * Phase 2 * * * * *\n")
-    text="The user is called Joe Doe email is john.doe@example.com and SSN is 123-45-6789 and phone number is +31 04384712."
+    text="The user is called Joe Doe email is john.doe@example.com and SSN is 123-45-6789 and phone number is +31 06 38478912."
     depth = 'full'
 
     pipeline = guard.sanitize(text=text, depth=depth)
