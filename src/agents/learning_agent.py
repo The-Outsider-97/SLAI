@@ -176,7 +176,6 @@ class LearningAgent(BaseAgent):
                     state_dim=state_dim,
                     action_dim=action_dim,
                     agent_id="dqn_agent",
-                    config=load_config(LOCAL_CONFIG_PATH)
                 ),
             'maml': MAMLAgent(
                     state_size=state_size,
