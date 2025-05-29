@@ -45,7 +45,6 @@ class RewardModel:
         logger.info(f"Rule-based components: {list(self.rule_based.keys())}")
         logger.info(f"Rule weights: {self.rule_weights}")
 
-
     def _init_rule_based_system(self) -> Dict[str, Callable]:
         """Initialize predefined security rules with secure storage"""
         rules = {
@@ -55,7 +54,7 @@ class RewardModel:
             "safety": self._safety_score,
             "truthfulness": self._truthfulness_score
         }
-        
+
         # Store rule definitions in secure memory
         for name, func in rules.items():
             self.memory.add(
@@ -63,12 +62,60 @@ class RewardModel:
                 tags=["reward_model", "rule_definition"],
                 sensitivity=0.7
             )
-            
+
         return rules
 
     def _init_learned_model(self):
-        """Initialize ML-based reward model (placeholder for actual implementation)"""
-        return lambda x: 0.0  # Placeholder
+        """Initialize simple regression model for human feedback"""
+        self.regression_model = None
+        self.feature_names = list(self.rule_based.keys())
+        return self._predict_learned  # Return prediction function
+
+    def _predict_learned(self, rule_scores: Dict[str, float]) -> float:
+        """Predict score using regression model"""
+        if not self.regression_model:
+            return 0.0
+
+        features = [rule_scores[name] for name in self.feature_names]
+        return self.regression_model.predict([features])[0]
+
+    def retrain_model(self, training_data: List[Dict]):
+        """Retrain with human feedback data"""
+        try:
+            from sklearn.linear_model import LinearRegression
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            logger.error("scikit-learn not available for retraining")
+            return
+
+        # Prepare training data
+        X, y = [], []
+        for sample in training_data:
+            if "model_scores" in sample and "human_rating" in sample:
+                try:
+                    features = [sample["model_scores"][k] for k in self.feature_names]
+                    X.append(features)
+                    y.append(sample["human_rating"])
+                except KeyError:
+                    continue
+
+        if len(X) < 10:
+            logger.warning(f"Insufficient training data: {len(X)} samples")
+            return
+
+        # Train regression model
+        X = np.array(X)
+        y = np.array(y)
+
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        model = LinearRegression()
+        model.fit(X_scaled, y)
+
+        self.regression_model = model
+        logger.info(f"Retrained reward model with {len(X)} samples")
+        logger.debug(f"Model coefficients: {model.coef_}")
 
     def _load_rule_weights(self) -> Dict[str, float]:
         """Load rule weights from config or secure memory"""
@@ -76,7 +123,7 @@ class RewardModel:
         weight_entries = self.memory.recall(tag="rule_weights", top_k=1)
         if weight_entries:
             return weight_entries[0]['data']  # Return the weights value
-        
+
         # Fallback to config defaults
         default_weights = self.config.get("default_weights", {
             "alignment": 0.4,
@@ -85,33 +132,33 @@ class RewardModel:
             "safety": 0.1,
             "truthfulness": 0.05
         })
-        
+
         # Store default weights in memory
         self.memory.add(
             default_weights,
             tags=["reward_model", "rule_weights"],
             sensitivity=0.5
         )
-        
+
         return default_weights
 
     def evaluate(self, text: str, context: Dict = None) -> Dict[str, float]:
         """Evaluate text against all security reward components"""
         scores = {}
-        
+
         # Calculate rule-based scores
         for name, rule in self.rule_based.items():
             scores[name] = rule(text)
-        
+
         # Calculate learned score
-        scores["learned"] = self.learned_model(text)
-        
+        scores["learned"] = self.learned_model(scores)
+
         # Calculate composite score
         composite = sum(scores[name] * self.rule_weights.get(name, 0) 
                      for name in self.rule_based)
         composite += scores["learned"] * self.rule_weights.get("learned", 0)
         scores["composite"] = composite
-        
+
         # Store evaluation in secure memory
         if self.config.get("store_evaluations", True):
             evaluation_record = {
@@ -125,7 +172,17 @@ class RewardModel:
                 tags=["evaluation", "reward_model"],
                 sensitivity=0.6
             )
-        
+
+        # Add attention-based scoring if available
+        if context and "attention_analysis" in context:
+            attn_report = context["attention_analysis"]
+            scores["attention_quality"] = 1.0 - min(attn_report.get("anomaly_score", 0), 1.0)
+            scores["attention_stability"] = 1.0 - min(attn_report.get("uniformity", 0) / 2.0, 1.0)
+
+            # Add to composite score
+            attention_factor = 0.1  # 10% weight to attention quality
+            composite += scores["attention_quality"] * attention_factor
+
         return scores
 
     def update_rule_weights(self, new_weights: Dict[str, float]):
@@ -148,18 +205,6 @@ class RewardModel:
             sensitivity=0.7
         )
         logger.info(f"Updated rule weights: {normalized}")
-
-    def retrain_model(self, training_data: List[Dict]):
-        """Retrain the learned component with new data"""
-        # Placeholder for actual retraining logic
-        logger.info(f"Retraining learned model with {len(training_data)} samples")
-        # Store training data in secure memory
-        self.memory.add(
-            training_data,
-            tags=["training_data", "reward_model"],
-            sensitivity=0.8
-        )
-        # In a real implementation, this would update the learned_model
 
     # Rule-based scoring functions =============================================
     
