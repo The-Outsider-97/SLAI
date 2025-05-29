@@ -99,3 +99,7 @@ Flask-Talisman==5.1.0
 Flask-Limiter==3.5.0
 bleach==6.0.0
 Werkzeug==2.3.7
+python-whois==0.9.0
+flask>=2.0.0
+django>=4.0
+fastapi>=0.85
