@@ -6,24 +6,12 @@ import threading
 
 from concurrent.futures import ThreadPoolExecutor
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.collaborative.registry import AgentRegistry
 from src.collaborative.task_router import TaskRouter
 from logs.logger import get_logger
 
 logger = get_logger("Collaboration Manager")
-
-CONFIG_PATH = "src/collaborative/configs/collaborative_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 class CollaborationManager:
     """
@@ -31,32 +19,36 @@ class CollaborationManager:
     using intelligent routing via TaskRouter and capability tracking in AgentRegistry.
     """
 
-    def __init__(self, shared_memory, user_config=None):
+    def __init__(self):
         """
         Initialize the collaboration manager with a registry and a task router.
 
         Args:
             shared_memory (dict, optional): Shared in-memory structure for tracking stats.
         """
-        base_config = load_config()
-        self.config = {**base_config.get('collaboration', {}), **(user_config or {})}
+        self.config = load_global_config()
+        self.manager_config = get_config_section('collaboration')
         
         # Extract parameters
-        self.MAX_CONCURRENT_TASKS = self.config.get('max_concurrent_tasks', 100)
-        self.LOAD_FACTOR = self.config.get('load_factor', 0.75)
-        self.health_check_interval = self.config.get('health_check_interval', 60)
+        self.MAX_CONCURRENT_TASKS = self.manager_config.get('max_concurrent_tasks', 100)
+        self.LOAD_FACTOR = self.manager_config.get('load_factor', 0.75)
+        self.health_check_interval = self.manager_config.get('health_check_interval', 60)
         
         # Initialize components
         self.shared_memory = shared_memory
-        self.registry = AgentRegistry(shared_memory=self.shared_memory)
-        self.router = TaskRouter(self.registry, shared_memory=self.shared_memory)
         self.executor = ThreadPoolExecutor(
-            max_workers=self.config.get('thread_pool_workers', 10)
+            max_workers=self.manager_config.get('thread_pool_workers', 10)
         )
+        self._init_components()
 
         logger.info(f"Collaboration Manager is successfully initialized")
     async def run_task_async(self, task_type, task_data):
         return await self.loop.run_in_executor(self.executor, self.run_task, task_type, task_data)
+
+    def _init_components(self):
+        self.registry = AgentRegistry(shared_memory=self.shared_memory)
+        self.router = TaskRouter(self.registry, shared_memory=self.shared_memory)
+
 
     def _init_health_monitor(self):
         def monitor():
@@ -160,7 +152,7 @@ if __name__ == "__main__":
     import time
     from src.collaborative.shared_memory import SharedMemory
     from src.agents.collaborative_agent import CollaborativeAgent
-    from src.utils.agent_factory import AgentFactory
+    from src.agents.agent_factory import AgentFactory
 
     # Initialize components
     shared_memory = SharedMemory(config={
@@ -173,7 +165,7 @@ if __name__ == "__main__":
         config={},
         shared_resources={"shared_memory": shared_memory}
         )
-    manager = CollaborationManager(shared_memory)
+    manager = CollaborationManager()
 
     # Define mock agents
     class TranslationAgent(CollaborativeAgent):
