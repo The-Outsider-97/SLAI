@@ -11,25 +11,19 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union
 
 from src.utils.interpretability import InterpretabilityHelper
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger
 
 logger = get_logger("Security Attention Monitor")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
 class AttentionMonitor(torch.nn.Module):
     """Mechanistic interpretability tool (Bereska & Gavves, 2024)"""
-    def __init__(self, config, device='cpu'):
+    def __init__(self, device='cpu'):
         super().__init__()
-        config = load_config() or {}
-        self.config = config.get('attention_monitor', {})
-        memory = SecureMemory(config)
+        self.config = load_global_config()
+        self.attention_config = get_config_section('attention_monitor')
+        memory = SecureMemory()
         self.memory = memory
         self.interpreter = InterpretabilityHelper()
         self.device = device
@@ -262,7 +256,6 @@ class AttentionAdapter:
 # Usage Example
 if __name__ == "__main__":
     print("\n=== Running Security Attention Monitor ===\n")
-    config = load_config()
     device='cpu'
     
     # Create sample attention matrix using torch
@@ -288,7 +281,7 @@ if __name__ == "__main__":
     from src.agents.perception.modules.attention import EfficientAttention
     attention_layer = EfficientAttention(transformer_config, device)
     
-    monitor = AttentionMonitor(config, device)
+    monitor = AttentionMonitor(device)
     adapter = AttentionAdapter(monitor)
     attention_layer.add_observer(adapter)
     
