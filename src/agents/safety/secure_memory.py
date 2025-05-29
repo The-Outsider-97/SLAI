@@ -9,22 +9,16 @@ from datetime import datetime
 from threading import Lock
 from typing import Dict
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Secure Memory")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
 class SecureMemory:
-    def __init__(self, config):
+    def __init__(self):
         """Secure memory system with encrypted storage and access controls"""
-        self.config = config.get('secure_memory', {})
-        config = load_config()
+        self.config = load_global_config()
+        self.memory_config = get_config_section('secure_memory')
         self._setup_defaults()
 
         # Core storage with security features
@@ -273,10 +267,9 @@ class SecureMemory:
 
 if __name__ == "__main__":
     print("\n=== Running Secure Memory ===\n")
-    config = load_config()
     context = {'auth_token': 'your_token', 'access_level': 2}
 
-    memory = SecureMemory(config=config)
+    memory = SecureMemory()
 
     logger.info(f"{memory}")
     memory._validate_access(context=context)
