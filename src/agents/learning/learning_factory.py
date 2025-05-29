@@ -105,8 +105,7 @@ class LearningFactory:
         self.dqn = DQNAgent(
             state_dim=state_dim,
             action_dim=action_dim,
-            agent_id="dqn_agent",
-            config=base_config.get('dqn', {})
+            agent_id="dqn_agent"
         )
     
         self.maml = MAMLAgent(
