@@ -2,43 +2,18 @@
 import pandas as pd
 import numpy as np
 import hashlib
-import yaml
 
 from typing import Dict, List, Optional, Union
 from scipy.stats import entropy
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
+from src.agents.adaptive.utils.sgd_regressor import SGDRegressor
 from logs.logger import get_logger
 
 logger = get_logger("Adaptive Memory")
-
-CONFIG_PATH = "src/agents/adaptive/configs/adaptive_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
-class SGDRegressor:
-    def __init__(self, eta0=0.01, learning_rate='constant'):
-        pass
 
 class MultiModalMemory:
     """Reinforcement Learning Optimized Memory System with:
@@ -47,12 +22,12 @@ class MultiModalMemory:
     - Causal analysis of policy changes
     - Automated parameter tuning memory
     """
-    def __init__(self, config):
-        config = load_config().get('adaptive_memory', {})
-        self.config = config
+    def __init__(self):
+        self.config = load_global_config()
+        self.rl_config = get_config_section('adaptive_memory')
 
         # Core memory stores
-        self.episodic = deque(maxlen=self.config.get('episodic_capacity', 1000))
+        self.episodic = deque(maxlen=self.rl_config.get('episodic_capacity', 1000))
         self.parameter_evolution = pd.DataFrame(columns=[  # Initialize DataFrame
             'timestamp', 'learning_rate', 'exploration_rate', 
             'discount_factor', 'temperature', 'performance'
@@ -69,14 +44,17 @@ class MultiModalMemory:
         self.causal_model = SGDRegressor(eta0=0.01, learning_rate='constant')
 
         # Replay Buffer
-        self.replay_buffer = DistributedReplayBuffer(config)
+        self._init_drb()
 
         # Forgetting Parameters
-        self.staleness_threshold = timedelta(days=config.get('experience_staleness_days', 7))
-        self.decay_rate = config.get('semantic_decay_rate', 0.9)
-        self.min_strength = config.get('min_memory_strength', 0.1)
+        self.staleness_threshold = timedelta(days=self.rl_config.get('experience_staleness_days', 7))
+        self.decay_rate = self.rl_config.get('semantic_decay_rate', 0.9)
+        self.min_strength = self.rl_config.get('min_memory_strength', 0.1)
         
         self.concept_drift_scores = []
+
+    def _init_drb(self):
+        self.replay_buffer = DistributedReplayBuffer()
 
     def store_experience(self, state, action, reward, context: Optional[Dict] = None):
         """Store experience with timestamp and initial strength"""
@@ -139,13 +117,14 @@ class MultiModalMemory:
 
     def _calculate_priority(self, reward: float) -> float:
         """Self-tuning priority calculation"""
-        alpha = self.config.get('priority_alpha', 0.6)
+        alpha = self.rl_config.get('priority_alpha', 0.6)
         return (abs(reward) + 0.01) ** alpha
+    
 
     def detect_drift(self, window_size: int = 30) -> bool:
         """Performance-based concept drift detection"""
         if len(self.parameter_evolution) < 2*window_size:
-            return False
+            return kl_div > self.rl_config.get('drift_threshold', 0.4)
             
         recent = self.parameter_evolution['performance'][-window_size:].values
         historical = self.parameter_evolution['performance'][-2*window_size:-window_size].values
@@ -169,7 +148,8 @@ class MultiModalMemory:
 
     def _update_semantic_memory(self, experience: Dict):
         """Convert high-impact experiences to semantic knowledge"""
-        if abs(experience['reward']) > self.config.semantic_threshold:
+        threshold = self.rl_config.get('semantic_threshold', 0.8)
+        if abs(experience['reward']) > threshold:
             context_key = f"ctx_{experience['context_hash'][:6]}"
             self.semantic[context_key] = {
                 'data': (experience['action'], experience['reward']),
@@ -229,12 +209,13 @@ class MultiModalMemory:
 
     def _prune_parameter_history(self):
         """Remove outdated parameter records"""
-        cutoff = datetime.now() - timedelta(days=self.config.param_retention_days)
+        retention_days = self.rl_config.get('param_retention_days', 7)
+        cutoff = datetime.now() - timedelta(days=retention_days)
         self.parameter_evolution = self.parameter_evolution[
             self.parameter_evolution['timestamp'] > cutoff
         ]
 
-    def retrieve(self, query, context: Optional[Dict] = None, recency_weight=0.7):
+    def retrieve(self, query, context: Optional[Dict] = None,):
         """Context-aware retrieval with parameter prioritization"""
         results = []
         
@@ -258,8 +239,10 @@ class MultiModalMemory:
                 'score': similarity,
                 'type': 'episodic'
             })
+
+        limit = self.rl_config.get('retrieval_limit', 5)
         
-        return sorted(results, key=lambda x: x['score'], reverse=True)[:self.config.get('retrieval_limit', 5)]
+        return sorted(results, key=lambda x: x['score'], reverse=True)[:limit]
 
     def _extract_parameter_features(self, query: str) -> Dict:
         """Convert text query to parameter space features"""
@@ -301,16 +284,17 @@ if __name__ == "__main__":
     import time
     
     test_config = {
-        'episodic_capacity': 1000,
-        'semantic_threshold': 0.8,
-        'priority_alpha': 0.6,
-        'param_retention_days': 7,
-        'drift_threshold': 0.4,
-        'retrieval_limit': 5,
-        'replay_capacity': 100000
-    }
+        'adaptive_memory': {
+            'episodic_capacity': 1000,
+            'semantic_threshold': 0.8,
+            'priority_alpha': 0.6,
+            'param_retention_days': 7,
+            'drift_threshold': 0.4,
+            'retrieval_limit': 5,
+            'replay_capacity': 100000
+    }}
     
-    memory = MultiModalMemory(config=test_config)
+    memory = MultiModalMemory()
     
     # Simulate RL parameter evolution
     for i in range(100):
