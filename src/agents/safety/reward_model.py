@@ -9,23 +9,17 @@ from datetime import timedelta, datetime
 from typing import Dict, List, Callable, Union
 
 from src.agents.evaluators.utils.report import get_visualizer
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger
 
 logger = get_logger("Security Reward Model")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
 class RewardModel:
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('reward_model', {})
-        memory = SecureMemory(config)
+    def __init__(self):
+        self.config = load_global_config()
+        self.reward_config = get_config_section('reward_model')
+        memory = SecureMemory()
         self.memory = memory
 
         self.rules = {
@@ -301,9 +295,8 @@ class RewardModel:
 if __name__ == "__main__":
     print("\n=== Running Security Reward Model ===\n")
     app = QApplication(sys.argv)
-    config = load_config()
 
-    reward = RewardModel(config=config)
+    reward = RewardModel()
 
     logger.info(f"{reward}")
     print(f"\n* * * * * Phase 2 * * * * *\n")    
