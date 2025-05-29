@@ -10,25 +10,13 @@ from collections import deque
 from typing import Any
 from dataclasses import dataclass
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from src.agents.adaptive.utils.neural_network import NeuralNetwork, NeuralLayer
 from logs.logger import get_logger
 
 logger = get_logger("Reinforcement Learning")
-
-CONFIG_PATH = "src/agents/adaptive/configs/adaptive_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 @dataclass
 class Transition:
@@ -126,36 +114,29 @@ class ReinforcementLearning(torch.nn.Module):
         - Schmidhuber (2015) - On Learning to Think
     """
 
-    def __init__(self, config, learning_memory: LearningMemory, multimodal_memory: MultiModalMemory):
+    def __init__(self):
         super().__init__()
-        base_config = load_config() or {}
-        self.config = config.get('adaptive_memory', {})
-        local_memory = MultiModalMemory(config)
-        self.local_memory = local_memory
-        learner_memory = LearningMemory(config)
-        self.learner_memory = learner_memory
+        self.config = load_global_config()
+        self.rl_config = get_config_section('adaptive_memory')
+        self.local_memory = MultiModalMemory()
+        self.learner_memory = LearningMemory(config=self.config)
         
         # Set default values for critical parameters
         self.config.setdefault('retrieval_limit', 5)
         self.config.setdefault('drift_threshold', 0.4)
-        self.buffer = deque(maxlen=config.get("replay_capacity", 100000))
+        self.buffer = deque(maxlen=self.rl_config.get("replay_capacity", 100000))
 
-        # Safely merge configurations
-        def safe_merge(base, user, section):
-            base_section = base.get(section, {}) or {}
-            user_section = user.get(section, {}) or {}
-            return {**base_section, **user_section}
-
+        # Create merged configuration by combining sections
         self.merged_config = {
-            'rl': safe_merge(base_config, config, 'rl'),
-            'policy_manager': safe_merge(base_config, config, 'policy_manager'),
-            'parameter_tuner': safe_merge(base_config, config, 'parameter_tuner'),
-            'adaptive_memory': safe_merge(base_config, config, 'adaptive_memory')
+            'rl': self._get_config_section('rl'),
+            'policy_manager': self._get_config_section('policy_manager'),
+            'parameter_tuner': self._get_config_section('parameter_tuner'),
+            'adaptive_memory': self._get_config_section('adaptive_memory')
         }
 
         # Neural Network setup
-        state_dim = self.merged_config['rl']['state_dim']
-        num_actions = self.merged_config['rl']['num_actions']
+        state_dim = self.merged_config['rl'].get('state_dim', 4)
+        num_actions = self.merged_config['rl'].get('num_actions', 2)
         self.num_actions = num_actions
 
         # Goal Conditioning
@@ -177,13 +158,14 @@ class ReinforcementLearning(torch.nn.Module):
             {'neurons': num_actions, 'activation': 'linear'}
         ]
 
-        self.target_net = NeuralNetwork(layer_config=layer_config,
-                num_inputs=state_dim,
-                 loss_function_name = 'mse', # New: 'mse' or 'cross_entropy'
-                 optimizer_name = 'sgd_momentum_adagrad', # New: 'sgd_momentum_adagrad', 'adam'
-                 initialization_method_default = 'he_normal',
-                 problem_type = 'regression', # New: 'regression' or 'classification' (binary/multiclass)
-                 config = None)
+        self.target_net = NeuralNetwork(
+            layer_config=layer_config,
+            num_inputs=state_dim,
+            loss_function_name='mse',
+            optimizer_name='sgd_momentum_adagrad',
+            initialization_method_default='he_normal',
+            problem_type='regression'
+        )
         self.policy_net = BayesianDQN(
             num_inputs=state_dim,
             layer_config=layer_config,
@@ -204,41 +186,45 @@ class ReinforcementLearning(torch.nn.Module):
                     {'neurons': 1, 'activation': 'linear'}
                 ]
             )
-            # self.value_optimizer = torch.optim.Adam(self.actor_critic.parameters())
 
         # Learning parameters with proper config access
-        self.gamma = self.merged_config['parameter_tuner']['base_discount_factor']
+        self.gamma = self.merged_config['parameter_tuner'].get('base_discount_factor', 0.95)
         self.tau = 0.005
         self.steps_done = 0
 
         # Exploration parameters from config
-        self.epsilon = self.merged_config['parameter_tuner']['base_exploration_rate']
-        self.min_epsilon = self.merged_config['parameter_tuner']['min_exploration']
-        self.epsilon_decay = self.merged_config['parameter_tuner']['exploration_decay']
+        self.epsilon = self.merged_config['parameter_tuner'].get('base_exploration_rate', 0.3)
+        self.min_epsilon = self.merged_config['parameter_tuner'].get('min_exploration', 0.01)
+        self.epsilon_decay = self.merged_config['parameter_tuner'].get('exploration_decay', 0.9995)
 
         # Reward normalization parameters
-        self.reward_normalization = config.get('reward_normalization', True)
-        self.reward_clip_range = config.get('reward_clip_range', (-1.0, 1.0))
-        self.reward_scale = config.get('reward_scale', 1.0)
-        self.reward_bias = config.get('reward_bias', 0.0)
-        self.reward_momentum = config.get('reward_momentum', 0.99)  # For running averages
+        self.reward_normalization = self.config.get('reward_normalization', True)
+        self.reward_clip_range = self.config.get('reward_clip_range', (-1.0, 1.0))
+        self.reward_scale = self.config.get('reward_scale', 1.0)
+        self.reward_bias = self.config.get('reward_bias', 0.0)
+        self.reward_momentum = self.config.get('reward_momentum', 0.99)
         
         # Initialize reward statistics
         self.reward_mean = 0.0
         self.reward_std = 1.0
         self.reward_max = 0.0
         self.reward_min = 0.0
-        self.reward_count = 1e-4  # Avoid division by zero
+        self.reward_count = 1e-4
 
         # Reward shaping parameters
-        self.reward_shaping = config.get('reward_shaping', True)
-        self.potential_scale = config.get('potential_scale', 0.1)
-        self.potential_discount = config.get('potential_discount', 0.95)
+        self.reward_shaping = self.config.get('reward_shaping', True)
+        self.potential_scale = self.config.get('potential_scale', 0.1)
+        self.potential_discount = self.config.get('potential_discount', 0.95)
 
         logger.info(f"Reinforcement Learning Succesfully initialized with:\n- {self.policy_net}\n- {num_actions}")
 
     def __len__(self):
         return len(self.buffer)
+
+    def _get_config_section(self, section_name: str) -> dict:
+        """Helper to get configuration section with fallback to empty dict"""
+        section = get_config_section(section_name)
+        return section if section is not None else {}
 
     def select_action(self, state, explore=True):
         """Enhanced action selection with uncertainty awareness and policy gradient support"""
@@ -595,16 +581,12 @@ if __name__ == "__main__":
             'base_discount_factor': 0.95
         }
     }
-    learning_memory=LearningMemory(config)
-    multimodal_memory=MultiModalMemory(config)
+    learning_memory=LearningMemory(config=config)
+    multimodal_memory=MultiModalMemory()
     explore=True
     state = np.random.rand(config['rl']['state_dim']).astype(np.float32)
 
-    agent = ReinforcementLearning(
-        config=config,
-        learning_memory=learning_memory,
-        multimodal_memory=multimodal_memory
-    )
+    agent = ReinforcementLearning()
     dummy_state = torch.randn(1, config['rl']['state_dim'])
     action_output = agent.select_action(dummy_state, explore=True)
     
@@ -630,12 +612,12 @@ if __name__ == "__main__":
     from collections import namedtuple
 
     env = gym.make("CartPole-v1")
-    config = load_config()
+    config = load_global_config()
     
     # --- RL agent and memory ---
-    learner_memory = LearningMemory(config)
-    adaptive_memory = MultiModalMemory(config)
-    agent = ReinforcementLearning(config, learner_memory, adaptive_memory)
+    learner_memory = LearningMemory(config=config)
+    adaptive_memory = MultiModalMemory()
+    agent = ReinforcementLearning()
     
     # --- Training parameters ---
     num_episodes = 100
