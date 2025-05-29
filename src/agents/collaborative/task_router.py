@@ -9,9 +9,10 @@ from sklearn.preprocessing import StandardScaler
 from typing import Callable
 from collections import deque
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
-logger = get_logger("SLAI.TaskRouter")
+logger = get_logger("SLAI Task Router")
 
 FALLBACK_PLANS = {
     "TranslateAndSummarize": ["Translate", "Summarize"],
@@ -54,20 +55,132 @@ def model_predict_func(df: pd.DataFrame) -> np.ndarray:
         # Fallback to simple heuristic
         return np.where(df['age'] > df['age'].median(), 1, 0).astype(np.float32)
 
-class AdaptiveRouter:
-    def __init__(self, config):
-        from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+class TaskRouter:
+    FALLBACK_PLANS = {
+        "train_model": ["retry_simple_trainer", "notify_human"],
+        "data_audit": ["emergency_data_cleaner"]
+    }
 
-        self.task_scheduler = DeadlineAwareScheduler(
-            config['risk_threshold'],
-            config['retry_policy']
-        )
+    def __init__(self):
+        self.config = load_global_config()
+        self.router_config = get_config_section('task_routing')
+
+        #self.adaptive_router = AdaptiveRouter()
+
+        logger.info(f"Rask Router succesfully intialized.")
+
+    def route(self, task_type, task_data):
+        eligible_agents = self.registry.get_agents_by_task(task_type)
+        context = self.shared_memory.get('task_context', {})
+
+        if not eligible_agents:
+            raise Exception(f"No agents found for task type '{task_type}'")
+
+        # Step 1: Rank agents by success history or priority
+        sorted_agents = self._rank_agents(eligible_agents)
+
+        # Step 2: Try each agent in order until success
+        for agent_name, agent, _ in sorted_agents:
+            try:
+                # Increment active tasks BEFORE execution
+                agent_stats = self.shared_memory.get("agent_stats") or {}
+                current_tasks = agent_stats.get(agent_name, {}).get("active_tasks", 0)
+                agent_stats[agent_name]["active_tasks"] = current_tasks + 1  # Thread-safe via SharedMemory
+
+                self.shared_memory.set("agent_stats", agent_stats)
+                logger.info(f"Routing task '{task_type}' to agent: {agent_name}")
+                result = agent.execute(task_data)
+
+                # Decrement on SUCCESS
+                agent_stats = self.shared_memory.get("agent_stats") or {}
+                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
+                self.shared_memory.set("agent_stats", agent_stats)
+
+                # Step 3: Log success to shared memory
+                self._record_success(agent_name)
+                return result
+
+            # Error handling
+            except Exception as e:
+                # Decrement on FAILURE
+                agent_stats = self.shared_memory.get("agent_stats") or {}
+                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
+                self.shared_memory.set("agent_stats", agent_stats)
+                logger.exception(f"Agent '{agent_name}' failed...")
+                self._record_failure(agent_name)
+                
+                #Fallback logic
+                if task_type in self.FALLBACK_PLANS:
+                    for subtask in self.FALLBACK_PLANS[task_type]:
+                        logger.info(f"Attempting fallback: {subtask}")
+                        try:
+                            return self.route(subtask, task_data)  # Recursive retry
+                        except Exception:
+                            raise RuntimeError(f"No agents found for task type '{task_type}'")
+
+        # If all fail
+        raise Exception(f"All agents failed for task type '{task_type}'")
+
+    def _rank_agents(self, agents):
+        ranked = []
+        agent_stats = self.shared_memory.get("agent_stats") or {}
+        
+        for name, agent in agents.items():
+            meta = agent_stats.get(name, {})
+            success = meta.get("successes", 0)
+            failures = meta.get("failures", 0)
+            total = success + failures
+            
+            # Dynamic weighting
+            success_rate = success / total if total > 0 else 1.0  # Favor new agents
+            priority = meta.get("priority", 0) * 0.2  # Configurable weight
+            load = meta.get("active_tasks", 0) * 0.3  # Penalize busy agents
+            
+            score = success_rate + priority - load
+            ranked.append((name, agent, score))
+        
+        # Sort by score descending
+        return sorted(ranked, key=lambda x: x[2], reverse=True)
+
+    def _record_success(self, agent_name):
+        stats = self.shared_memory.get("agent_stats", {})
+        entry = stats.get(agent_name, {"successes": 0, "failures": 0, "priority": 0})
+        entry["successes"] += 1
+        self.shared_memory.put("agent_stats", stats)
+
+    def _record_failure(self, agent_name):
+        stats = self.shared_memory.setdefault("agent_stats", {})
+        entry = stats.setdefault(agent_name, {"successes": 0, "failures": 0, "priority": 0})
+        entry["failures"] += 1
+        self.shared_memory.put("agent_stats", stats)
+
+class AdaptiveRouter:
+    def __init__(self):
+        self.config = load_global_config()
+        self.router_config = get_config_section('task_routing')
+        num_handlers = self.router_config.get('num_handlers', 2)
+        
         self.policy = nn.Sequential(
-            nn.Linear(config['state_dim'], 64),
+            nn.Linear(self.router_config.get('state_dim', 64), 64),
             nn.ReLU(),
-            nn.Linear(64, config['num_handlers'])
+            nn.Linear(64, num_handlers)
         )
         self.experience_buffer = deque(maxlen=1000)
+
+        self._init_planner()
+
+        logger.info(f"Adaptive Router succesfully intialized with:\n{self.experience_buffer}")
+
+    def _init_planner(self):
+        from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+
+        risk_threshold = self.router_config.get('risk_threshold', 0.7)
+        retry_policy = self.router_config.get('retry_policy', {'max_attempts': 3, 'backoff_factor': 1.5})
+        
+        self.task_scheduler = DeadlineAwareScheduler(
+            risk_threshold,
+            retry_policy
+        )
 
     def _init_alignment(self):
         from src.agents.alignment.alignment_monitor import AlignmentMonitor
@@ -176,112 +289,11 @@ class AdaptiveRouter:
             requirements.append('Analyze')
         return requirements
 
-class TaskRouter:
-    FALLBACK_PLANS = {
-        "train_model": ["retry_simple_trainer", "notify_human"],
-        "data_audit": ["emergency_data_cleaner"]
-    }
-
-    def __init__(self, registry, shared_memory, agent=None):
-        self.registry = registry
-        self.shared_memory = shared_memory
-        self.agent=agent
-
-    def route(self, task_type, task_data):
-        eligible_agents = self.registry.get_agents_by_task(task_type)
-        context = self.shared_memory.get('task_context', {})
-
-        if not eligible_agents:
-            raise Exception(f"No agents found for task type '{task_type}'")
-
-        # Step 1: Rank agents by success history or priority
-        sorted_agents = self._rank_agents(eligible_agents)
-
-        # Step 2: Try each agent in order until success
-        for agent_name, agent, _ in sorted_agents:
-            try:
-                # Increment active tasks BEFORE execution
-                agent_stats = self.shared_memory.get("agent_stats") or {}
-                current_tasks = agent_stats.get(agent_name, {}).get("active_tasks", 0)
-                agent_stats[agent_name]["active_tasks"] = current_tasks + 1  # Thread-safe via SharedMemory
-
-                self.shared_memory.set("agent_stats", agent_stats)
-                logger.info(f"Routing task '{task_type}' to agent: {agent_name}")
-                result = agent.execute(task_data)
-
-                # Decrement on SUCCESS
-                agent_stats = self.shared_memory.get("agent_stats") or {}
-                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
-                self.shared_memory.set("agent_stats", agent_stats)
-
-                # Step 3: Log success to shared memory
-                self._record_success(agent_name)
-                return result
-
-            # Error handling
-            except Exception as e:
-                # Decrement on FAILURE
-                agent_stats = self.shared_memory.get("agent_stats") or {}
-                agent_stats[agent_name]["active_tasks"] = max(0, current_tasks - 1)
-                self.shared_memory.set("agent_stats", agent_stats)
-                logger.exception(f"Agent '{agent_name}' failed...")
-                self._record_failure(agent_name)
-                
-                #Fallback logic
-                if task_type in self.FALLBACK_PLANS:
-                    for subtask in self.FALLBACK_PLANS[task_type]:
-                        logger.info(f"Attempting fallback: {subtask}")
-                        try:
-                            return self.route(subtask, task_data)  # Recursive retry
-                        except Exception:
-                            raise RuntimeError(f"No agents found for task type '{task_type}'")
-
-        # If all fail
-        raise Exception(f"All agents failed for task type '{task_type}'")
-
-    def _rank_agents(self, agents):
-        ranked = []
-        agent_stats = self.shared_memory.get("agent_stats") or {}
-        
-        for name, agent in agents.items():
-            meta = agent_stats.get(name, {})
-            success = meta.get("successes", 0)
-            failures = meta.get("failures", 0)
-            total = success + failures
-            
-            # Dynamic weighting
-            success_rate = success / total if total > 0 else 1.0  # Favor new agents
-            priority = meta.get("priority", 0) * 0.2  # Configurable weight
-            load = meta.get("active_tasks", 0) * 0.3  # Penalize busy agents
-            
-            score = success_rate + priority - load
-            ranked.append((name, agent, score))
-        
-        # Sort by score descending
-        return sorted(ranked, key=lambda x: x[2], reverse=True)
-
-    def _record_success(self, agent_name):
-        stats = self.shared_memory.get("agent_stats", {})
-        entry = stats.get(agent_name, {"successes": 0, "failures": 0, "priority": 0})
-        entry["successes"] += 1
-        self.shared_memory.put("agent_stats", stats)
-
-    def _record_failure(self, agent_name):
-        stats = self.shared_memory.setdefault("agent_stats", {})
-        entry = stats.setdefault(agent_name, {"successes": 0, "failures": 0, "priority": 0})
-        entry["failures"] += 1
-        self.shared_memory.put("agent_stats", stats)
-
 
 if __name__ == "__main__":
-    print("")
-    print("\n=== Running Task Router ===")
-    print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    router = TaskRouter(shared_memory=None, registry=None, agent=mock_agent)
-    print("")
+    print("\n=== Running Task Router ===\n")
+    router1 = TaskRouter()
+    print(router1)
     print("\n=== Successfully ran the Task Router ===\n")
 
 if __name__ == "__main__":
@@ -313,8 +325,8 @@ if __name__ == "__main__":
             }
     
     # Initialize router with mocked dependencies
-    router = AdaptiveRouter(config)
-    router.agent_factory = MockAgentFactory()
+    router2 = AdaptiveRouter()
+    router2.agent_factory = MockAgentFactory()
     
     # Test messages
     messages = [
@@ -338,12 +350,12 @@ if __name__ == "__main__":
     for idx, msg in enumerate(messages, 1):
         print(f"\nRouting Message {idx}:")
         try:
-            handler = router.route_message(msg, routing_table={})
+            handler = router2.route_message(msg, routing_table={})
             print(f"Assigned Handler: {handler}")
         except Exception as e:
             print(f"Routing failed: {str(e)}")
     
     # Inspect experience buffer
     print("\nExperience Buffer Contents:")
-    for exp in router.experience_buffer:
+    for exp in router2.experience_buffer:
         print(f"State: {exp['state']}, Action: {exp['action']}, Reward: {exp['reward']:.2f}")
