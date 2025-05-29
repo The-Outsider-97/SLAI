@@ -3,10 +3,8 @@ Provides a thread-safe, in-memory shared storage mechanism with features
 tailored for AI model coordination and data sharing within a single process.
 """
 
-import heapq
-import yaml
-import sys
 import time
+import heapq
 import pickle
 import random
 import fnmatch
@@ -15,26 +13,13 @@ import threading
 
 from pympler import asizeof
 from bisect import bisect_right
-from multiprocessing import Manager
-from typing import Tuple, Type, Any, Dict, OrderedDict
+from typing import Any, OrderedDict
 from collections import namedtuple, defaultdict, deque
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Shared Memory")
-
-CONFIG_PATH = "src/agents/collaborative/configs/collaborative_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 # Using deque for versions allows efficient append and potentially limiting version history size
 VersionedItem = namedtuple('VersionedItem', ['timestamp', 'value'])
@@ -54,36 +39,31 @@ class SharedMemory:
     """
     _instance = None
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls):
         if not cls._instance:
             cls._instance = super().__new__(cls)
             cls._instance.__initialized = False
         return cls._instance
     
-    def __init__(self, config):
-        from src.agents.collaborative.registry import AgentRegistry
-        from src.agents.collaborative.task_router import TaskRouter
+    def __init__(self):
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
         if self.__initialized:
             return
         self.__initialized = True
-        
-        base_config = load_config()
-        merged_config = {**base_config.get('shared_memory', {}), **(config or {})}
+        self.config = load_global_config()
+        self.memory_config = get_config_section('shared_memory')
 
         # Extract parameters from merged config
-        self.max_memory = merged_config.get('max_memory_mb', 100) * 1024**2
-        self._max_versions = merged_config.get('max_versions', 10)
-        self.ttl_check_interval = merged_config.get('ttl_check_interval', 30) # Default time-to-live
-        self.network_latency = merged_config.get('network_latency', 0.0)
-        self._default_ttl = merged_config.get('default_ttl', 3600)
+        self.max_memory = self.memory_config.get('max_memory_mb', 100) * 1024**2
+        self._max_versions = self.memory_config.get('max_versions', 10)
+        self.ttl_check_interval = self.memory_config.get('ttl_check_interval', 30) # Default time-to-live
+        self.network_latency = self.memory_config.get('network_latency', 0.0)
+        self._default_ttl = self.memory_config.get('default_ttl', 3600)
         self.data = {}
         self.callbacks = defaultdict(list)
         self._lock = threading.RLock()
         self.subscribers = {}
-        self.registry = AgentRegistry(shared_memory=self)
-        self.router = TaskRouter(self.registry, shared_memory=self)
 
         self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
         self._expiration = {}  # key -> expiry time
@@ -546,8 +526,7 @@ class SharedMemory:
 
 if __name__ == "__main__":
     print("\n=== Running Shared Memory ===\n")
-    sm_config = {"max_memory_mb": 200}  # Override default 100MB
-    sm = SharedMemory(sm_config)
+    sm = SharedMemory()
     print(f"\n======================================")
     print(sm.max_memory)  # Should output 200 * 1024^2
     print(sm._simulate_network())
@@ -555,7 +534,7 @@ if __name__ == "__main__":
     print("\n* * * * * Phase 2 * * * * *\n")
 
     weights = None
-    sm = SharedMemory({"network_latency": 0.2})
+    sm = SharedMemory()
     sm.network_latency = 0.5  # Uses property setter
 
     # Simulates 0.5s ± 0.05s delay during operations
