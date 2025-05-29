@@ -1,3 +1,15 @@
+
+baselines:
+  time_per_output: 0.5    # Seconds per output
+  time_baseline: 2.0      # OR: Total seconds for batch
+  
+  memory_baseline: 1024   # Default bytes per output
+  memory_per_type:        # Type-specific baselines
+    text: 512
+    image: 4096
+    structured: 1024
+    default: 768
+
 evaluators_memory:
   max_size: 5000
   eviction_policy: 'LRU'          # LRU or FIFO
@@ -7,7 +19,6 @@ evaluators_memory:
   tag_retention: 7                # Days to keep tagged entries
   priority_levels: 3              # Low, Medium, High
   access_count: 0
-  eviction_policy: 'FIFO'
 
 issue_database:
   host: ${DB_HOST:localhost}
@@ -17,6 +28,20 @@ issue_database:
   password: ${DB_PASSWORD:securepassword}
   pool_size: 5
   timeout: 5.0
+
+validation_protocol:
+  static_analysis:
+    enable: true
+    security:
+      max_critical: 0
+  behavioral_testing:
+    test_types: ["safety", "performance", "edge_cases"]
+    test_count: 100
+  full_evaluation_flow:
+    enable_performance: true
+    enable_efficiency: true
+    enable_statistical: true
+    enable_resource: true
 
 automated_reporting:
   interval_hours: 24
