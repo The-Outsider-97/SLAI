@@ -136,11 +136,17 @@ class ReasoningAgent(BaseAgent):
         # Use the instance storage_path if not overridden
         path = storage_path or self.storage_path
         knowledge = []
+        if not path:
+            logger.warning("No storage path provided for knowledge base")
+            return
+        
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
 
         if Path(path).exists():
-            with open(path, 'r') as f:
-                data = json.load(f)
-                knowledge = data.get('knowledge', [])
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    knowledge = data.get('knowledge', [])
 
                 if isinstance(knowledge, list):
                     clean_knowledge = {}
@@ -155,6 +161,8 @@ class ReasoningAgent(BaseAgent):
                 self.knowledge_base = {tuple(k): v for k, v in knowledge.items()}
                 self.rule_weights = data.get('rule_weights', {})
                 self.bayesian_network = data.get('bayesian_network', {})
+            except Exception as e:
+                logger.error(f"Error loading knowledge: {str(e)}")
 
     def _load_language_config(self, path: str) -> Dict:
         """Load language configuration file."""
