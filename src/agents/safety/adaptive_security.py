@@ -9,24 +9,13 @@ from datetime import datetime
 from collections import defaultdict, deque
 from typing import List, Dict, Tuple, Optional
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.utils.neural_network import NeuralNetwork
 from logs.logger import get_logger
 
 logger = get_logger("Adaptive Security System")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
 PHISHING_MODEL_PATH = "src/agents/safety/models/phishing_model.json"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 class AdaptiveSecurity:
     """
@@ -34,12 +23,10 @@ class AdaptiveSecurity:
     Combines neural networks with heuristic rules for multi-layered protection.
     """
     
-    def __init__(self, config):
-        self.safety_config = config
-        self.config = load_config().get('adaptive_security', {})
-
-        self.layer_config = self.safety_config.get('layers', [])
-        # self.nn = self._initialize_neural_network(num_inputs)
+    def __init__(self):
+        self.config = load_global_config()
+        self.adaptive_config = get_config_section('adaptive_security')
+        self.nn_layer_config = self.config.get('layers', [])
         self.request_tracker = defaultdict(lambda: deque(maxlen=100))  # Tracks requests per IP
         self.safe_package_hashes = self._load_trusted_hashes()
         
@@ -57,20 +44,6 @@ class AdaptiveSecurity:
         self.rate_limit = self.config.get('rate_limit', 30)  # Requests per minute
         self.input_size_limit = self.config.get('input_size_limit', 1024)  # KB
         self.phishing_threshold = self.config.get('phishing_threshold', 0.85)
-
-    #def _initialize_neural_network(self, num_inputs: int) -> NeuralNetwork:
-    #    try:
-    #        return NeuralNetwork.load_model(PHISHING_MODEL_PATH)
-    #    except FileNotFoundError:
-    #        logger.warning("No pre-trained model found. Initializing new model.")
-    #        return NeuralNetwork(
-    #            num_inputs=num_inputs,
-    #            layer_config=self.layer_config,
-    #            loss_function_name='cross_entropy',
-    #            optimizer_name='adam',
-    #            problem_type='binary_classification',
-    #            config=self.safety_config
-    #       )
 
     def _initialize_neural_network(self, model_type: str, num_inputs: int, model_path: str) -> NeuralNetwork:
         try:
@@ -349,10 +322,59 @@ class AdaptiveSecurity:
         return min(redirect_count / 5, 1.0)
 
     def _domain_age(self, url: str) -> float:
-        """Placeholder for domain age analysis (0.0 = new, 1.0 = established)"""
-        # In real implementation, this would query WHOIS data
-        # Simulating based on TLD - newer TLDs considered higher risk
-        tld = url.split('.')[-1].lower()
+        """Calculate domain age using WHOIS data"""
+        domain = self._extract_domain(url)
+        if not domain:
+            return 0.8  # Default to suspicious if domain extraction fails
+        try:
+            import whois
+            from whois.exceptions import WhoisCommandFailed, WhoisException
+            w = whois.whois(domain)
+            
+            domain = self._extract_domain(url)
+            if not domain:
+                return 0.8  # Default to suspicious if domain extraction fails
+
+            # Handle multiple creation dates
+            creation_date = w.creation_date
+            if isinstance(creation_date, list):
+                creation_date = creation_date[0]
+                
+            if not creation_date:
+                return 0.8  # Suspicious if no creation date
+                
+            # Calculate age in days
+            age_days = (datetime.now() - creation_date).days
+            
+            # Normalize to 0-1 scale (0=suspicious, 1=trusted)
+            if age_days < 30:    # < 1 month
+                return 0.2
+            elif age_days < 365:  # < 1 year
+                return 0.5
+            else:                 # > 1 year
+                return 0.0
+
+        except ImportError:
+            logger.error("python-whois package not installed!")
+            return self._domain_age_fallback(domain)
+        except (WhoisCommandFailed, WhoisException) as e:
+            logger.warning(f"WHOIS lookup failed for {domain}: {e}")
+            return 0.5
+        except Exception as e:
+            logger.error(f"Unexpected error during WHOIS lookup: {e}")
+            return 0.5
+    
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL"""
+        # Remove protocol and path
+        domain = re.sub(r'^https?://', '', url).split('/')[0]
+        # Remove port number if present
+        domain = domain.split(':')[0]
+        return domain
+
+    def _domain_age_fallback(self, domain: str) -> float:
+        """Fallback method when whois is not available"""
+        tld = domain.split('.')[-1].lower() if domain else ''
         established_tlds = {'com', 'org', 'net', 'edu', 'gov'}
         return 0.2 if tld in established_tlds else 0.8
 
@@ -385,9 +407,23 @@ class AdaptiveSecurity:
 
     # Utility Methods
     def _get_client_ip(self) -> str:
-        """Get client IP (simplified)"""
-        # Implementation would use actual request context
-        return "192.168.0.1"
+        """Get client IP from request context with multi-framework support"""
+        try:
+            # Flask
+            from flask import request as flask_request
+            try:
+                return flask_request.remote_addr
+            except RuntimeError as e:
+                # Handle "Working outside of request context" error
+                if "Working outside of request context" in str(e):
+                    logger.debug("Flask request context not available")
+                else:
+                    raise
+        except ImportError:
+            pass
+        
+        # Fallback for non-web contexts
+        return "127.0.0.1"
 
     def _block_ip(self, ip: str):
         """Block malicious IP"""
@@ -426,10 +462,27 @@ class AdaptiveSecurity:
         else:
             logger.error(f"Could not find neural network or save path for model type: {model_type}")
 
+# Add to FLASK
+# In web framework view (Flask example)
+# @app.route('/check-url', methods=['POST'])
+# def check_url():
+#     url = request.json['url']
+#     security_system = AdaptiveSecurity()
+#     result = security_system.analyze_url(
+#         url,
+#         client_ip=security_system._get_client_ip(request)
+#     )
+#     return jsonify(result)
+
+# In non-web context
+# security_system = AdaptiveSecurity()
+# result = security_system.analyze_url("http://example.com")
+
 if __name__ == "__main__":
     import time
-    config = load_config()
-    security_system = AdaptiveSecurity(config=config)
+    config = load_global_config()
+    security_system = AdaptiveSecurity()
+    security_system._get_client_ip = lambda: "192.168.1.100"
     
     # Example email analysis
     sample_email = {
