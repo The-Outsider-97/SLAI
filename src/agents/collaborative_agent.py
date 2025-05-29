@@ -10,7 +10,8 @@ Features:
 6. Performance tracking and metrics
 """
 
-import torch
+import logging
+import numpy as np
 import yaml
 import random
 import json
@@ -21,17 +22,19 @@ from typing import Dict, List, Optional, Any, Tuple, Union, Set
 from dataclasses import dataclass, asdict, field
 from collections import defaultdict
 from enum import Enum, auto
+from pathlib import Path
+from abc import ABC, abstractmethod
 from datetime import datetime
 
 from src.agents.agent_factory import AgentFactory
 from src.agents.language.grammar_processor import GrammarProcessor
 from src.agents.base_agent import BaseAgent
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
 from models.slai_lm_registry import SLAILMManager
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Agent Registry")
 
+# Scientific computing import with error handling
 try:
     from scipy.stats import beta
     SCI_AVAILABLE = True
@@ -78,6 +81,9 @@ class ThreadSafeSharedMemory:
         self._expirations = {}
     
     def get(self, key: str, default: Any = None) -> Any:
+        agent = self.registry.get(shared_memory=self.shared_memory, agent_factory=self.factory)
+        response = agent.perform_task(task)
+
         with self._lock:
             if key in self._expirations and self._expirations[key] < datetime.now().timestamp():
                 del self._data[key]
@@ -123,9 +129,79 @@ class BayesianThresholdAdapter:
             return 0.5  # Default prior
         return beta.ppf(percentile, self.alpha, self.beta)
 
+class TaskScheduler(ABC):
+    """Abstract scheduler interface"""
+    @abstractmethod
+    def schedule(self, tasks: List[Dict], agents: Dict[str, Any]) -> Dict:
+        pass
+
+class DeadlineAwareScheduler(TaskScheduler):
+    """Earliest Deadline First scheduler with capability matching"""
+    def schedule(self, tasks: List[Dict], agents: Dict[str, Any]) -> Dict:
+        # Validate input
+        if not tasks or not agents:
+            return {}
+            
+        # Sort by deadline then priority
+        sorted_tasks = sorted(
+            tasks,
+            key=lambda x: (x.get('deadline', float('inf')), 
+            -x.get('priority', 0))
+        )
+        
+        assignments = {}
+        agent_loads = {agent: 0.0 for agent in agents}
+        
+        for task in sorted_tasks:
+            task_id = task.get('id', str(hash(str(task))))
+            best_agent, best_score = None, -1
+            best_requirements = []
+            
+            for agent, details in agents.items():
+                # Skip overloaded agents
+                if agent_loads[agent] >= 1.0:
+                    continue
+                
+                # Calculate capability match
+                capabilities = set(details.get('capabilities', []))
+                requirements = set(task.get('requirements', []))
+                matched = list(capabilities & requirements)
+                match_score = len(matched) / max(1, len(requirements))
+                
+                # Adjust for load balancing
+                load_factor = 1 - details.get('current_load', 0)
+                total_score = match_score * load_factor
+                
+                if total_score > best_score:
+                    best_score = total_score
+                    best_agent = agent
+                    best_requirements = matched
+            
+            if best_agent:
+                # Calculate timing considering dependencies
+                duration = task.get('estimated_duration', 0)
+                dependencies = task.get('dependencies', [])
+                dep_end_times = [assignments[dep]['end_time'] for dep in dependencies if dep in assignments]
+                start_time = max(
+                    agent_loads[best_agent],
+                    max(dep_end_times, default=0)
+                )
+                end_time = start_time + duration
+                
+                assignments[task_id] = {
+                    'agent': best_agent,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'risk_score': task.get('estimated_risk', 0.5),
+                    'requirements_met': best_requirements,
+                    'task_type': task.get('type', 'unknown')
+                }
+                agent_loads[best_agent] = end_time
+        
+        return assignments
+
 
 class CollaborativeAgent(BaseAgent):
-    from src.utils.system_optimizer import SystemOptimizer
     """Main collaborative agent implementation"""
     
     def __init__(self, shared_memory, agent_factory: AgentFactory,
@@ -133,14 +209,65 @@ class CollaborativeAgent(BaseAgent):
                  risk_threshold=0.2, agent_network: Optional[Dict] = None,
                  config_path: Optional[str] = None):
         super().__init__("CollaborativeAgent", shared_memory)
+        self.registry = self.agent_factory
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.system_optimizer = self.SystemOptimizer()
         self.risk_threshold = max(0.0, min(1.0, risk_threshold))
+        self.agents = {}
+        self.shared_resources = {
+            "shared_memory": shared_memory,
+            "task_router": {}
+        }
 
-        # SIMPLIFIED AGENT ACCESS
-        self.agents = {}  # Now populated on-demand via factory
- 
+        config = config or {}
+        slailm_instance = SLAILMManager.get_instance("default",
+                                                     shared_memory=self.shared_resources.get("shared_memory"),
+                                                     agent_factory=self)
+
+        # Load config if needed
+        if config_path and not agent_network:
+            self.agent_network = self._load_config(config_path)
+        else:
+            self.agent_network = agent_network or {}
+
+        # Prefer manual config if valid
+        if isinstance(config, dict) and ("agents" in config or "agent-network" in config):
+            for agent_type, agent_cfg in config["agents"].items():
+                try:
+                    agent = self.factory.create(agent_type, agent_cfg)
+                    self.agents[agent_type] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to initialize {agent_type}: {e}")
+
+        elif self.agent_network:
+            for agent_name, agent_info in self.agent_network.items():
+                try:
+                    agent = self.agent_factory.create(agent_name, agent_info)
+                    self.agents[agent_name] = agent
+                except Exception as e:
+                    logging.warning(f"Failed to load {agent_name}: {e}")
+        else:
+            logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
+
+        logger.info(f"Initialized CollaborativeAgent with {len(self.agents)} agents")
+
+        # Core components
+        self.name = "CollaborativeAgent"
+        self.shared_resources = {
+            "shared_memory": {},  # Use actual shared components if needed
+            "task_router": {}
+        }
+        self.factory = AgentFactory(config=config, shared_resources=self.shared_resources)
+        from src.agents.learning_agent import LearningAgent
+        from src.agents.learning.slaienv import SLAIEnv
+        self.factory.register("learning",
+                              lambda config: LearningAgent(
+                                  agent_factory=self.factory,
+                                  env=SLAIEnv(shared_memory=self.shared_memory),
+                                  config=config,
+                                  shared_memory=self.shared_memory,
+                                  ))
+
         self.grammar = GrammarProcessor(lang='en')
         self.risk_model = {
             'task_risks': defaultdict(list),
@@ -149,16 +276,8 @@ class CollaborativeAgent(BaseAgent):
         }
         self.risk_model['thresholds']['default'] = BayesianThresholdAdapter()
         self.scheduler = DeadlineAwareScheduler()
+        self._init_performance_metrics()
         self.learning_subsystems = {}
-
-    def get_slai_lm(self):
-        from models.slai_lm import get_shared_slailm
-        return get_shared_slailm(
-            self.shared_memory,
-            shared_tokenizer=self.agent_factory.shared_tokenizer,
-            shared_text_encoder=self.agent_factory.shared_text_encoder,
-            agent_factory=self.agent_factory
-            )
 
     def _init_performance_metrics(self) -> None:
         """Initialize performance tracking metrics"""
@@ -170,6 +289,17 @@ class CollaborativeAgent(BaseAgent):
             'tasks_coordinated': 0,
             'coordination_failures': 0
         })
+
+    def _load_config(self, config_path: str) -> Dict:
+        """Load agent network configuration from YAML file"""
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+                logger.info(f"Loaded configuration from {config_path}")
+                return config.get('agent_network', {})
+        except Exception as e:
+            logger.error(f"Config load error: {e}")
+            return {}
 
     def _validate_risk_score(self, score: float) -> None:
         """Validate risk score is between 0.0 and 1.0"""
@@ -229,7 +359,9 @@ class CollaborativeAgent(BaseAgent):
 
     def coordinate_tasks(self, tasks, available_agents, optimization_goals=None, constraints=None):
         """        Full coordination pipeline with safety checks        """
-        from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, MetricBridge
+        agent_type = task["type"]
+        agent = self.registry.get(agent_type)
+        result = agent.perform_task(task)
 
         # Validate inputs
         if not tasks or not available_agents:
@@ -254,25 +386,19 @@ class CollaborativeAgent(BaseAgent):
         }
 
         # Collect fairness metrics (Added after safety checks)
-        self.metric_bridge = MetricBridge(self.factory, self.system_optimizer)
-        agent_task_map = defaultdict(list)
-        for task_id, assignment in optimized.items():
-            agent_task_map[assignment['agent']].append(task_id)
-        
-        positive_rates = {
-            agent: len(agent_task_map[agent]) / len(tasks)
-            for agent in self.agent_network
-        }
+        from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, MetricBridge
+        self.metric_bridge = MetricBridge(self.factory)
         
         metrics = {
             'demographic_parity_violations': FairnessMetrics.demographic_parity(
                 sensitive_groups=list(self.agent_network.keys()),
-                positive_rates=positive_rates
+                positive_rates={agent: len(assignments.get(agent, []))/len(tasks) 
+                                for agent in self.agent_network}
             )[0],
             'calibration_error': PerformanceMetrics.calibration_error(
-                y_true=torch.Tensor([t.get('priority', 0.5) for t in tasks]),
-                probs=torch.Tensor([a.get('optimization_score', 0.5) 
-                                for a in optimized.values()])
+                y_true=np.array([t.get('priority', 0.5) for t in tasks]),
+                probs=np.array([a.get('optimization_score', 0.5) 
+                                for a in assignments.values()])
             )
         }
         
@@ -287,32 +413,7 @@ class CollaborativeAgent(BaseAgent):
             'metadata': self._calculate_coordination_metrics(
                 optimized,
                 safety_checks)
-        }
-
-    def _calculate_coordination_metrics(self, assignments, safety_checks):
-        total_duration = 0
-        total_risk = 0
-        compliant_tasks = 0
-        for assignment in assignments.values():
-            duration = assignment.get("end_time", 0) - assignment.get("start_time", 0)
-            total_duration += duration
-
-        for task_id, check in safety_checks.items():
-            risk = check.get("risk_score", 1.0)
-            total_risk += risk
-            if check.get("risk_level", "") in ["low", "moderate"]:
-                compliant_tasks += 1
-
-        num_tasks = len(assignments) or 1
-        avg_risk = total_risk / num_tasks
-        safety_compliance = compliant_tasks / num_tasks
-
-        return {
-            "total_duration": round(total_duration, 2),
-            "average_risk_score": round(avg_risk, 2),
-            "safety_compliance": round(safety_compliance, 2),
-            "resource_utilization": f"{round(num_tasks / len(self.agent_factory.registry) * 100, 2)}%"
-        }
+        } or result
 
     def _apply_optimizations(
         self,
@@ -537,34 +638,61 @@ class CollaborativeAgent(BaseAgent):
             return RiskLevel.CRITICAL
 
     def generate(self, shared_memory, task_data: Union[str, dict]) -> str:
-        if "language" not in self.agents:
-            lang_agent = self.agent_factory.get("language")
-            self.agents["language"] = lang_agent  # CACHE FOR REUSE
+        from models.slai_lm import SLAILM, get_shared_slailm
 
-        prompt = task_data.get("prompt", "").strip()[:1000]
-        lang_agent = self.agents["language"]
-        lang_agent.dialogue_context.add(prompt)
+        llm = get_shared_slailm(shared_memory, agent_factory=self.factory)
+        agent = self.factory.create("language", {"llm": llm})
 
-        intent = lang_agent.parse_intent(prompt) or {"type": "unknown"}
-        if not isinstance(intent, dict):
-            logger.warning("Intent is not a dict; applying fallback.")
-            intent = {"type": str(intent), "confidence": 0.5}
+        try:
+            if isinstance(task_data, str):
+                task_data = {"task_type": "language", "prompt": task_data}
 
-        if intent.get("type", "").lower() in ["train", "learning", "learn"]:
-            agent_config = self._build_learning_config(intent)
-            agent = self.factory.get("learning", agent_config)
-            reward = agent.train_episode()
-            raw_facts = {
-                'agent': 'SLAI Learning Agent',
-                'event': 'training_complete',
-                'metric': 'reward',
-                'value': round(reward, 2)
-            }
-            return self.grammar.compose_sentence(raw_facts)
+            task_type = task_data.get("task_type", "general")
+            prompt = task_data.get("prompt", "").strip()[:1000]
 
-        frame = lang_agent.build_frame(prompt)
-        context = lang_agent.dialogue_context            
-        return lang_agent.generate(frame, prompt, context)
+            if not prompt:
+                raise ValueError("Empty input")
+
+            if "language" not in self.agents:
+                llm = SLAILM(shared_memory)
+                self.agents["language"] = self.factory.create(
+                    "language", {
+                        "llm": llm,
+                        "history": [],
+                        "summary": "",
+                        "memory_limit": 1000,
+                        "enable_summarization": True,
+                        "summarizer": None
+                    }
+                )
+
+            lang_agent = self.agents["language"]
+            lang_agent.dialogue_context.add(prompt)
+
+            intent = lang_agent.parse_intent(prompt) or {"type": "unknown"}
+            if not isinstance(intent, dict):
+                logger.warning("Intent is not a dict; applying fallback.")
+                intent = {"type": str(intent), "confidence": 0.5}
+
+            if intent.get("type", "").lower() in ["train", "learning", "learn"]:
+                agent_config = self._build_learning_config(intent)
+                agent = self.factory.create("learning", agent_config)
+                reward = agent.train_episode()
+                raw_facts = {
+                    'agent': 'SLAI Learning Agent',
+                    'event': 'training_complete',
+                    'metric': 'reward',
+                    'value': round(reward, 2)
+                }
+                return self.grammar.compose_sentence(raw_facts)
+
+            frame = lang_agent.build_frame(prompt)
+            context = lang_agent.dialogue_context            
+            return lang_agent.generate(frame, prompt, context)
+
+        except Exception as e:
+            logger.error(f"Generation failed: {str(e)}", exc_info=True)
+            return f"[System Error] Generation failed: {str(e)}"
 
     def _build_learning_config(self, config: Optional[Dict] = None) -> Dict:
         base_config = {
@@ -584,7 +712,7 @@ class CollaborativeAgent(BaseAgent):
         if isinstance(config, dict):
             base_config.update(config)
         else:
-            logger.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
+            logging.warning(f"CollaborativeAgent: Ignored invalid config type: {type(config)}")
 
         return base_config
 
@@ -636,7 +764,7 @@ class CollaborativeAgent(BaseAgent):
         ]
         
         # Agent-specific strategies
-        if self.agent_factory.has_agent(source_agent):
+        if source_agent in self.agent_network:
             if 'rl' in self.agent_network[source_agent].get('type', ''):
                 return "reduce_exploration_rate"
             elif 'planning' in self.agent_network[source_agent].get('type', ''):
@@ -678,22 +806,37 @@ class CollaborativeAgent(BaseAgent):
     def _select_optimal_agent(self, 
                             task: Dict[str, Any],
                             available_agents: List[str]) -> Optional[str]:
+        """
+        Select the best agent for a given task based on capabilities and risk profile.
+        
+        Args:
+            task: Task description dictionary
+            available_agents: List of available agent names
+            
+        Returns:
+            Name of selected agent or None if no suitable agent found
+        """
+        if not available_agents:
+            return None
+            
+        # Score agents based on capability matching and risk profile
         agent_scores = []
         for agent in available_agents:
-            if not self.agent_factory.has_agent(agent):
+            if agent not in self.agent_network:
                 continue
                 
-            capabilities = self.agent_factory.get_agent_capabilities(agent)
+            # Capability matching
             capability_match = sum(
                 1 for req in task.get('requirements', [])
-                if req in capabilities
+                if req in self.agent_network[agent].get('capabilities', [])
             ) / max(1, len(task.get('requirements', [])))
             
             # Risk adjustment
-            agent_risk = torch.mean(self.risk_model['agent_risks'].get(agent, [0.5]))
+            agent_risk = np.mean(self.risk_model['agent_risks'].get(agent, [0.5]))
             risk_factor = 1 - min(agent_risk, 0.9)  # Never go below 0.1
+            
             agent_scores.append((agent, capability_match * risk_factor))
-
+        
         if not agent_scores:
             return None
             
@@ -745,7 +888,7 @@ class CollaborativeAgent(BaseAgent):
                 return learner.execute_learning_task(params)
             else:
                 # Unified interface for other agents
-                agent = self.factory.get(
+                agent = self.factory.create(
                     agent_name.split('_')[0].lower(),  # Extract base agent type
                     {"shared_resources": self.shared_resources}
                 )
@@ -761,41 +904,19 @@ class CollaborativeAgent(BaseAgent):
             logger.error(f"Agent response error: {str(e)}")
             return f"[System Error] Agent communication failed"
 
-    def handle_agent_task(self, agent_type: str, prompt: str) -> str:
-        """
-        Dispatch agent task by type (e.g., 'learning', 'planning').
+    def agent_name(self, leaarner, params, plan, prompt):
+        """Specialized handler for learning subsystem"""  # <-- This causes syntax error
+        learner = self.learning_subsystems.get(agent_name.lower())
+        if not learner:
+            return f"[Error] Learning agent {agent_name} not found"
+        
+        # Parse learning parameters from prompt
+        params = self._parse_learning_parameters(prompt)
+        return learner.execute_learning_task(params)
 
-        Args:
-            agent_type (str): Type of agent ('learning', 'planning', etc.)
-            prompt (str): Natural language task description
-
-        Returns:
-            str: Response or result
-        """
-        try:
-            agent_key = agent_type.lower()
-
-            if "learning" in agent_key:
-                learner = self.learning_subsystems.get(agent_key)
-                if not learner:
-                    return f"[Error] Learning agent '{agent_key}' not found"
-                params = self._parse_learning_parameters(prompt)
-                return learner.execute_learning_task(params)
-
-            elif "planning" in agent_key:
-                agent = self.agents.get(agent_key)
-                if not agent:
-                    agent = self.factory.get(agent_key, {"shared_resources": self.shared_resources})
-                plan = agent.create_plan(prompt)
-                validation = agent.validate_plan(plan)
-                return f"Generated Plan:\n{plan.to_markdown()}\n\n{validation}"
-
-            else:
-                return f"[Error] Unknown agent type: {agent_type}"
-
-        except Exception as e:
-            logger.error(f"Failed to execute agent task: {str(e)}", exc_info=True)
-            return f"[System Error] Task execution failed: {str(e)}"
+        """Execute planning agent workflow with visualization"""
+        plan = agent.create_plan(prompt)
+        return f"Generated Plan:\n{plan.to_markdown()}\n\n{agent.validate_plan(plan)}"
 
     def _handle_safety_agent(self, agent, prompt):
         """Full safety assessment pipeline"""
@@ -838,39 +959,18 @@ class CollaborativeAgent(BaseAgent):
             "used_policy": policy_type
         }
 
-    def get_agent(self, agent_name: str) -> Any:
-        """Get agent instance with thread-safe pooling"""
-        try:
-            return self.agent_pool.get(agent_name)
-        except KeyError:
-            with self.factory._get_agent_context(agent_name) as agent:
-                self.agent_pool.put(agent_name, agent)
-                return agent
-
-    def _get_agent_safe(self, agent_type: str) -> Any:
-        """Thread-safe factory access with error handling"""
-        try:
-            return self.agent_factory.get_agent(agent_type)
-        except Exception as e:
-            logger.error(f"Failed to retrieve {agent_type}: {str(e)}")
-            return None
-
 class TestCollaborativeAgent(unittest.TestCase):
     """Comprehensive unit tests for CollaborativeAgent"""
     
     def setUp(self):
-        shared_memory = self.SharedMemory()
-        factory = AgentFactory(config={
-            'agent-network': {
-                'TestAgent': {
-                    'class': 'src.agents.testing_agent.TestAgent',
-                    'init_args': {'capabilities': ['testing']}
-                }
-            }
-        })
         self.agent = CollaborativeAgent(
-            shared_memory=shared_memory,
-            agent_factory=factory,
+            agent_network={
+                'TestAgent': {
+                    'type': 'testing',
+                    'capabilities': ['testing'],
+                    'components': ['test_module']
+                }
+            },
             risk_threshold=0.3
         )
 
@@ -911,7 +1011,33 @@ class TestCollaborativeAgent(unittest.TestCase):
         self.agent._validate_risk_score(0.0)
         self.agent._validate_risk_score(0.5)
         self.agent._validate_risk_score(1.0)
+    
 
+    def _calculate_coordination_metrics(self, assignments, safety_checks):
+        total_duration = 0
+        total_risk = 0
+        compliant_tasks = 0
+
+        for assignment in assignments.values():
+            duration = assignment.get("end_time", 0) - assignment.get("start_time", 0)
+            total_duration += duration
+
+        for task_id, check in safety_checks.items():
+            risk = check.get("risk_score", 1.0)
+            total_risk += risk
+            if check.get("risk_level", "") in ["low", "moderate"]:
+                compliant_tasks += 1
+
+        num_tasks = len(assignments) or 1
+        avg_risk = total_risk / num_tasks
+        safety_compliance = compliant_tasks / num_tasks
+
+        return {
+            "total_duration": round(total_duration, 2),
+            "average_risk_score": round(avg_risk, 2),
+            "safety_compliance": round(safety_compliance, 2),
+            "resource_utilization": f"{round(num_tasks / len(self.agent_network) * 100, 2)}%"
+        }
     def test_safety_assessment_serialization(self):
         assessment = SafetyAssessment(
             risk_score=0.7,
@@ -927,3 +1053,289 @@ class TestCollaborativeAgent(unittest.TestCase):
         self.assertEqual(assessment.risk_score, deserialized.risk_score)
         self.assertEqual(assessment.risk_level, deserialized.risk_level)
         self.assertEqual(assessment.recommended_action, deserialized.recommended_action)
+
+class MetricBridge:
+    def __init__(self, agent_factory):
+        self.factory = agent_factory
+        self.metrics_history = []
+        
+    def submit_metrics(self, metrics: dict):
+        """Implements exponential moving average from Brown's smoothing (1956)"""
+        self.metrics_history.append(metrics)
+        
+        # Weighted average (α=0.2)
+        decay_factor = 0.2
+        avg_metrics = {}
+        for key in metrics.keys():
+            series = [m.get(key, 0) for m in self.metrics_history[-10:]]
+            avg_metrics[key] = sum(
+                decay_factor*(1-decay_factor)**i * val 
+                for i, val in enumerate(reversed(series))
+            )
+            
+        # Thresholds from ISO/IEC 24029-1:2021 AI quality standards
+        if avg_metrics.get('demographic_parity_violations', 0) > 0.1:
+            self.factory.adapt_from_metrics(avg_metrics)
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize with complete agent network
+    agent = CollaborativeAgent(
+        agent_network={
+            # Safety and Coordination Agents
+            'SafeAI_Agent': {
+                'type': 'safety',
+                'capabilities': ['risk_assessment', 'threshold_adjustment'],
+                'components': ['safety_module']
+            },
+            
+            # Reinforcement Learning Agents
+            'DQN_Agent': {
+                'capabilities': ['deep_q_learning', 'experience_replay'],
+                'components': ['replay_buffer', 'q_network']
+            },
+            
+            # Specialized RL Agents
+            'MultiTaskRL_Agent': {
+                'type': 'multitask',
+                'capabilities': ['task_embedding', 'shared_representation'],
+                'components': ['task_encoder']
+            },
+            'MAML_Agent': {
+                'type': 'meta_learning',
+                'capabilities': ['few_shot_adaptation', 'gradient_based_meta'],
+                'components': ['meta_policy']
+            },
+            
+            # Financial/Technical Agents
+            'RSI_Agent': {
+                'type': 'technical',
+                'capabilities': ['market_analysis', 'trend_detection'],
+                'components': ['technical_indicators']
+            },
+            
+            # Cognitive Agents
+            'NL_Agent': {
+                'type': 'nlp',
+                'capabilities': ['language_understanding', 'text_generation'],
+                'components': ['language_model']
+            },
+            'Reasoning_Agent': {
+                'type': 'knowledge',
+                'capabilities': ['logical_inference', 'rule_based_reasoning'],
+                'components': ['knowledge_graph']
+            },
+            
+            # Planning/Execution Agents
+            'Planning_Agent': {
+                'type': 'planning',
+                'capabilities': ['task_decomposition', 'resource_scheduling'],
+                'components': ['planner_module']
+            },
+            'Execution_Agent': {
+                'type': 'action',
+                'capabilities': ['operation_execution', 'environment_interaction'],
+                'components': ['actuator_interface']
+            },
+            
+            # Perception Agents
+            'Perception_Agent': {
+                'type': 'sensors',
+                'capabilities': ['multimodal_fusion', 'feature_extraction'],
+                'components': ['sensor_processor']
+            },
+            
+            # Adaptive Agents
+            'Adaptive_Agent': {
+                'type': 'self_optimizing',
+                'capabilities': ['dynamic_parameter_adjustment', 'context_awareness'],
+                'components': ['adaptation_engine']
+            },
+            
+            # Evaluation Agents
+            'Evaluation_Agent': {
+                'type': 'metrics',
+                'capabilities': ['performance_analysis', 'statistical_testing'],
+                'components': ['metrics_dashboard']
+            }
+        },
+        risk_threshold=0.35
+    )
+
+    # Complex safety assessment scenario
+    task_data = {
+        'policy_risk_score': 0.62,
+        'task_type': 'cross_agent_coordination',
+        'source_agent': 'Adaptive_Agent',
+        'action_details': {
+            'type': 'system_parameter_update',
+            'tags': ['multitask', 'exploration_adjustment'],
+            'parameters': {
+                'exploration_rate': 0.25,
+                'learning_rate': 0.001,
+                'safety_margin': 0.15
+            }
+        }
+    }
+    
+    # Execute assessment with full agent context
+    result = agent.execute(task_data)
+    print("Multi-Agent Safety Assessment Result:")
+    print(f"Risk Level: {result['assessment']['risk_level']}")
+    print(f"Recommendation: {result['assessment']['recommended_action']}")
+    print(f"Affected Agents: {result['assessment']['affected_agents']}")
+    print("\nDetailed Assessment:")
+    print(json.dumps(result, indent=2))
+
+    # Demonstrate cross-agent coordination
+    print("\nPerformance Metrics Overview:")
+    print(f"Total Assessments: {result['performance_metrics']['assessments_completed']}")
+    print(f"System Interventions: {result['performance_metrics']['interventions']}")
+    print(f"Current False Positive Rate: {result['performance_metrics']['false_positives']/result['performance_metrics']['assessments_completed']:.2%}")
+
+# Enhanced Task Coordination Example
+    # Define a complex set of tasks with dependencies and constraints
+    tasks = [
+        {
+            'id': 't1',
+            'type': 'real_time_decision',
+            'requirements': ['low_latency', 'high_accuracy', 'safety_critical'],
+            'deadline': 0.5,  # seconds
+            'priority': 9,
+            'estimated_duration': 0.3,
+            'dependencies': []
+        },
+        {
+            'id': 't2',
+            'type': 'long_term_planning',
+            'requirements': ['strategic_thinking', 'resource_optimization', 'multi_agent'],
+            'deadline': 5.0,
+            'priority': 7,
+            'estimated_duration': 2.5,
+            'dependencies': ['t4']
+        },
+        {
+            'id': 't3',
+            'type': 'risk_assessment',
+            'requirements': ['safety_analysis', 'real_time_monitoring'],
+            'deadline': 1.0,
+            'priority': 8,
+            'estimated_duration': 0.8,
+            'dependencies': ['t1']
+        },
+        {
+            'id': 't4',
+            'type': 'data_processing',
+            'requirements': ['large_scale_processing', 'pattern_recognition'],
+            'deadline': 3.0,
+            'priority': 6,
+            'estimated_duration': 1.2,
+            'dependencies': []
+        }
+    ]
+
+    # Available agents with their capabilities and current workload
+    available_agents = {
+        'SafeAI_Agent': {
+            'capabilities': ['safety_analysis', 'risk_assessment'],
+            'current_load': 0.4,
+            'throughput': 5  # tasks/hour
+        },
+        'DQN_Agent': {
+            'capabilities': ['low_latency', 'high_accuracy'],
+            'current_load': 0.7,
+            'throughput': 20
+        },
+        'MultiTaskRL_Agent': {
+            'capabilities': ['multi_agent', 'resource_optimization'],
+            'current_load': 0.3,
+            'throughput': 15
+        },
+        'Planning_Agent': {
+            'capabilities': ['strategic_thinking', 'long_term_planning'],
+            'current_load': 0.5,
+            'throughput': 10
+        },
+        'Perception_Agent': {
+            'capabilities': ['pattern_recognition', 'real_time_monitoring'],
+            'current_load': 0.6,
+            'throughput': 18
+        }
+    }
+
+    # Execute coordination with optimization parameters
+    coordination_result = agent.coordinate_tasks(
+        tasks=tasks,
+        available_agents=available_agents,
+        optimization_goals=['minimize_risk', 'maximize_throughput'],
+        constraints={
+            'max_concurrent_tasks': 3,
+            'safety_threshold': 0.4
+        }
+    )
+
+    # Print structured results
+    print("\n=== Task Coordination Results ===")
+    print(f"Total Tasks: {len(tasks)}")
+    print(f"Successfully Assigned: {len(coordination_result['assignments'])}")
+    print(f"High Risk Tasks: {coordination_result['metadata']['high_risk_tasks']}")
+    
+    print("\nDetailed Assignments:")
+    for task_id, assignment in coordination_result['assignments'].items():
+        task = next(t for t in tasks if t['id'] == task_id)
+        risk_level = coordination_result['safety_checks'][task_id]['risk_level']
+        print(f"\nTask {task_id} ({task['type']}):")
+        print(f"  Assigned to: {assignment['agent']}")
+        print(f"  Start Time: {assignment['start_time']:.1f}s")
+        print(f"  End Time: {assignment['end_time']:.1f}s")
+        print(f"  Risk Assessment: {risk_level}")
+        print(f"  Requirements Met: {', '.join(assignment['requirements_met'])}")
+    print(f"Total Estimated Duration: {coordination_result['metadata']['total_duration']:.1f}s")
+    print(f"Resource Utilization: {coordination_result['metadata']['resource_utilization']:.1%}")
+    print(f"Safety Compliance: {coordination_result['metadata']['safety_compliance']:.1%}")
+
+    # Visualize schedule
+    print("\nGantt Chart Representation:")
+    for task_id, assignment in coordination_result['assignments'].items():
+        task = next(t for t in tasks if t['id'] == task_id)
+        duration = assignment['schedule']['end_time'] - assignment['schedule']['start_time']
+        bar = '█' * int(20 * duration / coordination_result['metadata']['total_duration'])
+        print(f"{task_id} [{bar}] {assignment['schedule']['start']:.1f}-{assignment['schedule']['end_time']:.1f}s ({assignment['agent']})")
+
+
+if __name__ == "__main__":
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        # Dummy data simulation for visualization
+        coordination_result = {
+            "assignments": {
+                0: {"agent": "Planning_Agent", "start_time": 0.0, "end_time": 5.5},
+                1: {"agent": "NL_Agent", "start_time": 5.5, "end_time": 10.0},
+                2: {"agent": "Execution_Agent", "start_time": 10.0, "end_time": 15.0},
+                3: {"agent": "Evaluation_Agent", "start_time": 15.0, "end_time": 18.0}
+            }
+        }
+        fig, ax = plt.subplots(figsize=(10, 6))
+        colors = plt.cm.tab10.colors
+        agent_color_map = {}
+        for i, (task_id, assignment) in enumerate(coordination_result["assignments"].items()):
+            agent = assignment["agent"]
+            start = assignment["start_time"]
+            end = assignment["end_time"]
+            duration = end - start
+            if agent not in agent_color_map:
+                agent_color_map[agent] = colors[len(agent_color_map) % len(colors)]
+            ax.barh(y=task_id, width=duration, left=start, height=0.5, color=agent_color_map[agent])
+            ax.text(start + duration / 2, task_id, agent, va="center", ha="center", color="white", fontsize=9)
+        ax.set_yticks([task_id for task_id in coordination_result["assignments"]])
+        ax.set_yticklabels([f"Task {task_id}" for task_id in coordination_result["assignments"]])
+        ax.set_xlabel("Time (s)")
+        ax.set_title("SLAI Agent Task Assignment Timeline")
+        legend_handles = [mpatches.Patch(color=color, label=agent) for agent, color in agent_color_map.items()]
+        ax.legend(handles=legend_handles, title="Agents", bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+        plt.savefig("/mnt/data/slai_gantt_chart_from_script.png")
+        print("✅ Gantt chart saved to slai_gantt_chart_from_script.png")
+    except Exception as e:
+        print("Gantt chart generation failed:", str(e))
