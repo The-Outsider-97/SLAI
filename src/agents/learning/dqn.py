@@ -29,12 +29,12 @@ Best Used When:
 import math
 import torch
 import random
-import os, sys
-import yaml
+import os
 import copy
 
 from collections import deque
 
+from src.agents.safety.utils.config_loader import load_global_config
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
 from src.utils.buffer.replay_buffer import ReplayBuffer
@@ -42,41 +42,27 @@ from logs.logger import get_logger
 
 logger = get_logger("Deep-Q Network Agent")
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 # ====================== Core DQN Agent ======================
 class DQNAgent:
     """Standard DQN agent with neural network function approximation"""
     
-    def __init__(self, agent_id, state_dim, action_dim, config):
+    def __init__(self, agent_id, state_dim, action_dim):
+        self.config = load_global_config()
+        
         self.agent_id = agent_id
-        base_config = load_config()
-
-        self.config = {
-                    'dqn': config.get('dqn', {}),
-                    'neural_network': base_config.get('neural_network', {})
-                }
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.hidden_dim = config.get('dqn', {}).get('hidden_size')
-        self.gamma = config.get('dqn', {}).get('gamma')
-        self.epsilon = config.get('dqn', {}).get('epsilon')
-        self.epsilon_min = config.get('dqn', {}).get('epsilon_min')
-        self.epsilon_decay = config.get('dqn', {}).get('epsilon_decay')
-        self.lr = config.get('dqn', {}).get('learning_rate')
-        self.batch_size = config.get('dqn', {}).get('batch_size')
-        self.target_update = config.get('dqn', {}).get('target_update_frequency')
+
+        # Get DQN-specific configuration
+        dqn_config = self.config.get('dqn', {})
+        self.hidden_dim = dqn_config.get('hidden_size', 128)
+        self.gamma = dqn_config.get('gamma', 0.99)
+        self.epsilon = dqn_config.get('epsilon', 1.0)
+        self.epsilon_min = dqn_config.get('epsilon_min', 0.01)
+        self.epsilon_decay = dqn_config.get('epsilon_decay', 0.995)
+        self.lr = dqn_config.get('learning_rate', 0.001)
+        self.batch_size = dqn_config.get('batch_size', 64)
+        self.target_update = dqn_config.get('target_update_frequency', 100)
 
         self.learning_memory = LearningMemory
         self.model_id = "DQN_Agent"
@@ -89,18 +75,22 @@ class DQNAgent:
             hidden_dim=self.hidden_dim
         )
         self.target_net = NeuralNetwork(
-            config=config,
+            config=self.config,  # Use self.config here
             input_dim=self.state_dim,
             output_dim=self.action_dim,
             hidden_dim=self.hidden_dim
         )
         self.update_target_net()
+        self._init_buffer()
 
         # Replay buffer
-        self.memory = ReplayBuffer(config.get('dqn', {}).get('buffer_size'))
+        logger.info("Deep-Q Network Agent has successfully initialized")
+
+    def _init_buffer(self):
+        # Use self.config to get buffer size
+        buffer_size = self.config.get('dqn', {}).get('buffer_size', 10000)
+        self.memory = ReplayBuffer(buffer_size)
         self.train_step = 0
-        
-        logger.info(f"Deep-Q Network Agent has succesfully initialized")
 
     def update_target_net(self):
         """Hard update target network weights"""
@@ -120,7 +110,7 @@ class DQNAgent:
     def train(self):
         """Single training step from replay buffer"""
         if len(self.memory) < self.batch_size:
-            return torch.tensor(50.0)
+            return None # torch.tensor(50.0)
         
         # Sample batch
         batch = self.memory.sample(self.batch_size)
@@ -156,18 +146,22 @@ class DQNAgent:
         self.train_step += 1
         if self.train_step % self.target_update == 0:
             self.update_target_net()
+
+        if loss is None:
+            loss = torch.mean(torch.square(current_q - target))
         
-        return loss or torch.mean(torch.square(current_q - target))
+        return loss.item() if isinstance(loss, torch.Tensor) else loss
+        # return loss or torch.mean(torch.square(current_q - target))
 
 
 # ====================== Evolutionary Optimization ======================
 class EvolutionaryTrainer:
     """Evolutionary hyperparameter optimization for DQN agents"""
     
-    def __init__(self, env, state_dim, action_dim, config):
-        base_config = load_config()
+    def __init__(self):
+        base_config = load_global_config()
         evolutionary_config = base_config.get('evolutionary', {})
-        
+
         self.pop_size = evolutionary_config.get('population_size', 10)
         self.generations = evolutionary_config.get('generations', 20)
         self.mutation_rate = evolutionary_config.get('mutation_rate', 0.2)
@@ -187,26 +181,26 @@ class EvolutionaryTrainer:
                 'batch_size': 64
             }
         }
-    
+
     def _mutate(self, config):
         """Mutate parameters under 'dqn' key"""
         mutated = copy.deepcopy(config)
         dqn_config = mutated['dqn']  # Access nested parameters
-        
+
         if torch.rand() < self.mutation_rate:
             dqn_config['gamma'] = torch.clip(dqn_config['gamma'] + torch.normal(0, 0.01), 0.9, 0.999)
-        
+
         if torch.rand() < self.mutation_rate:
             dqn_config['learning_rate'] = torch.clip(
                 dqn_config['learning_rate'] * torch.lognormal(0, 0.2), 1e-4, 1e-2)
-        
+
         if torch.rand() < self.mutation_rate:
             dqn_config['epsilon_decay'] = torch.clip(
                 dqn_config['epsilon_decay'] + torch.normal(0, 0.003), 0.99, 0.999)
-        
+
         if torch.rand() < self.mutation_rate:
             dqn_config['hidden_size'] = torch.choice([64, 128, 256])
-        
+
         return mutated
 
     def _evaluate(self, agent, episodes=3):
@@ -264,7 +258,7 @@ class UnifiedDQNAgent:
         if mode == 'standard':
             if state_dim is None or action_dim is None:
                 raise ValueError("State and action dimensions required for standard mode")
-            self.agent = DQNAgent(agent_id=self.agent_id, state_dim=state_dim, action_dim=action_dim, config=self.config)
+            self.agent = DQNAgent(agent_id=self.agent_id, state_dim=state_dim, action_dim=action_dim)
         elif mode == 'evolutionary':
             if not env or not state_dim or not action_dim:
                 raise ValueError("Evolutionary mode requires environment specs")
@@ -318,7 +312,10 @@ class UnifiedDQNAgent:
                     
                     loss = self.agent.train()
                     if loss is not None:
-                        losses.append(loss.item())
+                        if isinstance(loss, torch.Tensor):
+                            losses.append(loss.item())
+                        else:
+                            losses.append(loss)
                     
                     total_reward += reward
                     state = next_state
@@ -392,7 +389,7 @@ class UnifiedDQNAgent:
 if __name__ == "__main__":
     print("\n=== Running Deep-Q Network Agent ===\n")
 
-    config = load_config()
+    config = load_global_config()
     agent_id = None
 
     class MockEnv:
@@ -405,16 +402,10 @@ if __name__ == "__main__":
     agent1 = DQNAgent(
         state_dim=4, 
         action_dim=2, 
-        config=config,
         agent_id=agent_id
     )
     
-    agent2 = EvolutionaryTrainer(
-        env=MockEnv(),
-        state_dim=4,
-        action_dim=2,
-        config=config
-    )
+    agent2 = EvolutionaryTrainer()
     print(f"\n{agent1}\n{agent2}\n")
     print("\n=== Successfully Ran Deep-Q Network Agent ===\n")
 
@@ -422,7 +413,7 @@ if __name__ == "__main__":
     print("\n * * * * Phase 2 * * * *\n=== Running Deep-Q Network Agent ===\n")
 
     # Load config
-    config = load_config()
+    config = load_global_config()
 
     # Mock environment (replace with Gym-style env for real use)
     class MockEnv:
@@ -443,7 +434,6 @@ if __name__ == "__main__":
     agent1 = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
-        config=config,
         agent_id=agent_id
     )
     print(f"Initialized DQNAgent: {agent1.model_id}")
@@ -459,12 +449,7 @@ if __name__ == "__main__":
         state = next_state
 
     # --- 2. Evolutionary training interface ---
-    trainer = EvolutionaryTrainer(
-        env=env,
-        state_dim=state_dim,
-        action_dim=action_dim,
-        config=config
-    )
+    trainer = EvolutionaryTrainer()
     # Optional: evolve population
     # best_agent = trainer.evolve()
 
