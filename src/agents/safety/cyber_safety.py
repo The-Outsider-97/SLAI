@@ -27,22 +27,12 @@ from collections import deque, defaultdict
 from typing import Dict, Any, List, Optional, Tuple, Union
 from pathlib import Path
 
-# from src.agents.safety.utils.neural_network import NeuralNetwork
-from src.agents.safety.utils.security_error import(
-    ToxicContentError, PrivacyViolationError,
-    PiiLeakageError, MisinformationError,
-    PromptInjectionError)
+from src.agents.safety.utils.security_neural_network import SecurityNN, PyTorchSafetyModel
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger
 
 logger = get_logger("SLAI Cyber Safety Module")
-
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
 
 # --- Constants and Basic Patterns ---
 
@@ -95,7 +85,7 @@ class CyberSafetyModule:
     statistical methods, with conceptual integration of adaptive and QNN-inspired
     techniques for anomaly detection.
     """
-    def __init__(self, config):
+    def __init__(self):
         """
         Initializes the CyberSafetyModule.
 
@@ -111,12 +101,12 @@ class CyberSafetyModule:
             shared_memory (Optional[Dict]): Reference to the shared memory system.
             agent_factory: Reference to the agent factory (if needed to spawn helpers).
         """
-        config = load_config() or {}
-        self.config = config.get('cyber_safety', {})
-        memory = SecureMemory(config)
+        self.config = load_global_config()
+        self.cyber_config = get_config_section('cyber_safety')
+        memory = SecureMemory()
         self.memory = memory
 
-        logger.info("Initializing CyberSafetyModule...")
+        logger.info("Initializing Cyber Safety Module...")
 
         # Load extended security rules
         self.security_rules = self._load_json_resource(
@@ -148,8 +138,43 @@ class CyberSafetyModule:
             self.adaptive_centroid_lr = float(self.config.get('adaptive_centroid_lr', 0.01))
             # Initialize centroid lazily when first data point arrives
             self.qnn_state_representation = None # Represents the 'normal' cluster centroid
+        self.model = self._load_security_model()
+        logger.info(f"Cyber Safety Module initialized. Anomaly Threshold={self.anomaly_threshold}, QNN-Inspired={self.use_qnn_inspired}")
 
-        logger.info(f"CyberSafetyModule initialized. Anomaly Threshold={self.anomaly_threshold}, QNN-Inspired={self.use_qnn_inspired}")
+    def _load_security_model(self):
+        # Example model configuration for intrusion detection
+        layer_config = [
+            {'neurons': 16, 'activation': 'relu', 'dropout': 0.2, 'batch_norm': True},
+            {'neurons': 8, 'activation': 'relu', 'dropout': 0.1, 'batch_norm': True},
+            {'neurons': 1, 'activation': 'sigmoid'}
+        ]
+        
+        model = SecurityNN(
+            input_size=4,  # Number of input features
+            layer_config=layer_config,
+            problem_type='binary_classification'
+        )
+        
+        return PyTorchSafetyModel(model)
+    
+    def analyze_input(self, input_data):
+        # Preprocess input data
+        processed = self._preprocess(input_data)
+        
+        # Make prediction
+        prediction = self.model.predict(processed)
+        
+        # Generate security report
+        return {
+            'risk_score': float(prediction[0]),
+            'is_malicious': prediction[0] > 0.5,
+            'confidence': float(abs(prediction[0] - 0.5) * 2)
+        }
+    
+    def _preprocess(self, data):
+        # Convert raw data to model input format
+        # Implementation depends on data format
+        return np.array([[...]])  # Return numpy array
 
     def _get_default_security_rules(self) -> Dict:
         """Provides default security rules if none are loaded."""
@@ -392,6 +417,10 @@ class CyberSafetyModule:
         if not isinstance(event, dict) or 'timestamp' not in event:
              logger.warning("Invalid event format received for stream analysis. Skipping.")
              return {"anomaly_score": 0.0, "is_anomaly": False, "reason": "Invalid event format."}
+        
+        if 'timestamp' not in event:
+            logger.error("Event missing required 'timestamp' field")
+            return {"error": "Missing required field: timestamp"}
 
         self.event_log_history.append(event)
         event_type = event.get('type', 'unknown_event')
@@ -654,14 +683,26 @@ class CyberSafetyModule:
 
 if __name__ == "__main__":
     print("\n=== Running SLAI Cyber Safety Module ===\n")
-    config = load_config()
     input_data=[]
     context = "general"
 
-    cyber = CyberSafetyModule(config=config)
+    cyber = CyberSafetyModule()
     analyze = cyber.analyze_input(input_data=input_data, context=context)
 
     logger.info(f"{cyber}")
     print(analyze)
     print(f"\n* * * * * Phase 2 * * * * *\n")
+    event = {
+        'timestamp': time.time(),  # Required field
+        'type': 'user_message',
+        'user': 'test_user',
+        'ip_address': '192.168.1.1',
+        'details': {
+            'message': "We have a party at 6 at johnstreet no. 4, call me.",
+            'message_length': 45  # Numerical feature for analysis
+        }
+    }
+
+    stream = cyber.analyze_event_stream(event=event)
+    print(stream)
     print("\n=== Successfully Ran SLAI Cyber Safety Module ===\n")
