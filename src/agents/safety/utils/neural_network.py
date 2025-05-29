@@ -7,6 +7,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Dict, Any, Union
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.adaptive.utils.math_science import (
         sigmoid, sigmoid_derivative, relu, relu_derivative, tanh, tanh_derivative,
         leaky_relu, leaky_relu_derivative, elu, elu_derivative, swish, swish_derivative,
@@ -14,33 +15,6 @@ from src.agents.adaptive.utils.math_science import (
 from logs.logger import get_logger
 
 logger = get_logger("Cyber-Security Neural-Network")
-
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    """Loads a YAML configuration file."""
-    try:
-        with open(config_path, "r", encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        return config
-    except FileNotFoundError:
-        logger.warning(f"Configuration file not found at {config_path}. Returning empty config.")
-        return {}
-    except Exception as e:
-        logger.error(f"Error loading configuration from {config_path}: {e}")
-        return {}
-
-def get_merged_config(user_config=None):
-    """Merges a base configuration with a user-provided configuration."""
-    base_config = load_config()
-    if user_config:
-        # A simple update; for deep merging, a more sophisticated approach might be needed
-        for key, value in user_config.items():
-            if isinstance(value, dict) and isinstance(base_config.get(key), dict):
-                base_config[key].update(value)
-            else:
-                base_config[key] = value
-    return base_config
 
 # --- Activation Functions and their Derivatives (Referenced from math_science) ---
 ACTIVATION_FUNCTIONS: Dict[str, Tuple[Callable, Callable, bool]] = {
@@ -421,7 +395,14 @@ class NeuralNetwork:
         self.loss_function_name = loss_function_name.lower()
         self.optimizer_name = optimizer_name.lower()
         
-        self.config = get_merged_config(config) # Merges with base config from file
+        if config is None:
+            self.config = get_config_section('neural_network')
+        else:
+            self.config = config
+            
+        # Use self.config directly everywhere
+        self.layer_config = self.config.get('layers', [])
+        self.adam_beta1 = self.config.get('adam_beta1', 0.9)
         self._configure_loss_function()
         self._configure_optimizer_hyperparameters() # Sets up Adam params etc.
         self.output_layer_activation_is_softmax = False # Flag for special softmax handling
@@ -1136,7 +1117,7 @@ class NeuralNetwork:
 # --- Example Usage: Simplified Network Intrusion Detection ---
 if __name__ == "__main__":
     logger.info("--- Adaptive Neural Network for Cyber-Security Demo ---")
-    config = load_config()
+    config = load_global_config()
     layer_config = config.get('layers', [])  # Get layer architecture
 
     # 0. Synthetic Cyber-Security Dataset Generation (Simplified Intrusion Detection)
@@ -1179,7 +1160,7 @@ if __name__ == "__main__":
 
     # 1. Neural Network Configuration for Intrusion Detection
     # Input: 4 features. Output: 1 neuron (sigmoid for benign/malicious probability).
-    intrusion_detection_layer_config = [
+    layer_config = [
         {'neurons': 16, 'activation': 'relu', 'init': 'he_normal', 'dropout': 0.2, 'batch_norm': True},
         {'neurons': 8, 'activation': 'relu', 'init': 'he_normal', 'dropout': 0.1, 'batch_norm': True},
         {'neurons': 1, 'activation': 'sigmoid'} # Output layer for binary classification
@@ -1202,13 +1183,13 @@ if __name__ == "__main__":
     
     logger.info("\nInitializing Intrusion Detection Neural Network:")
     ids_nn = NeuralNetwork(
-            num_inputs=4,
-            layer_config=layer_config, # This 'layer_config' comes from config.get('layers', [])
-            loss_function_name='cross_entropy',
-            optimizer_name='adam',
-            problem_type='binary_classification',
-            config=config # This is the global config from load_config()
-        )
+        num_inputs=4,
+        layer_config=layer_config,
+        loss_function_name='cross_entropy',
+        optimizer_name='adam',
+        problem_type='binary_classification',
+        config=config
+    )
 
     # 2. Training the IDS Model (Adaptive Learning Phase)
     logger.info("\n--- Training Intrusion Detection Model ---")
