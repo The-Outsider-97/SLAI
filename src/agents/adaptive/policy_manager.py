@@ -4,38 +4,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.policy_network import PolicyNetwork
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from logs.logger import get_logger
 
 logger = get_logger("Parameter Tuner")
 
-CONFIG_PATH = "src/agents/adaptive/configs/adaptive_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 class PolicyManager:
-    def __init__(self, state_dim: int, action_dim: int, config=None):
-        if config is None:
-            config = load_config()
-        self.config = config
-        memory = MultiModalMemory(self.config)
+    def __init__(self, state_dim: int, action_dim: int):
+        self.config = load_global_config()
+        self.manager_config = get_config_section('policy_manager')
+        memory = MultiModalMemory()
         self.memory = memory
 
-        config = config.get('policy_manager', {})
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.hidden_layers = config.get('hidden_layers', [64, 32])
-        self.activation = config.get('activation', 'tanh')
+        self.hidden_layers = self.manager_config.get('hidden_layers', [64, 32])
+        self.activation = self.manager_config.get('activation', 'tanh')
         self.weights = self._initialize_weights()
         self.network = self._build_network()
         
@@ -131,7 +117,7 @@ if __name__ == "__main__":
     action_size = 2
     
     # Load configuration instead of using None
-    config = load_config()  # <-- Fix: Load default config
+    config = load_global_config()  # <-- Fix: Load default config
     
     policy_network = PolicyNetwork(
         config=config,  # Pass the loaded config
