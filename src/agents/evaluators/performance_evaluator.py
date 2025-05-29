@@ -140,6 +140,11 @@ class PerformanceEvaluator:
 
         return "\n".join(report)
 
+    def disable_temporarily(self):
+        """Temporarily disable performance testing during degraded mode"""
+        self.test_cases = []
+        logger.warning("Performance Evaluator temporarily disabled.")
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Performance Evaluator ===\n")
