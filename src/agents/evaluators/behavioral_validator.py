@@ -173,6 +173,11 @@ class BehavioralValidator:
         
         return "\n".join(report)
 
+    def disable_temporarily(self):
+        """Temporarily disable behavioral testing during degraded mode"""
+        self.test_cases = []
+        logger.warning("Behavioral Validator temporarily disabled.")
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Behavioral Validator ===\n")
