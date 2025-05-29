@@ -134,6 +134,7 @@ Note: If you see an error about execution policy:
    pip install resource
    pip install astor
    pip install z3
+   pip install python-whois
 
    python -m nltk.downloader punkt
    ```
