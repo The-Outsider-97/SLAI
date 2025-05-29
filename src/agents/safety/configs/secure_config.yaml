@@ -25,34 +25,33 @@ secure_memory:
     min_access_level: 2
 
 # General Neural Network Hyperparameters
-initialization_method_default: he_normal
-default_dropout_rate: 0.1
-default_use_batch_norm: true
-default_bn_momentum: 0.9
-default_bn_epsilon: 0.00001
-default_activation_alpha: 0.01
-adam_beta1: 0.9
-adam_beta2: 0.999
-adam_epsilon: 0.0000001
-weight_decay_lambda: 0.00001
-gradient_clip_value: 1.0
-momentum_coefficient: 0.9
-adagrad_epsilon: 0.0000001
-
-# Layer Architecture
-layers:
-  - neurons: 16
-    activation: relu
-    init: he_normal
-    dropout: 0.2
-    batch_norm: true
-  - neurons: 8
-    activation: relu
-    init: he_normal
-    dropout: 0.1
-    batch_norm: true
-  - neurons: 1
-    activation: sigmoid
+neural_network:
+  initialization_method_default: he_normal
+  default_dropout_rate: 0.1
+  default_use_batch_norm: true
+  default_bn_momentum: 0.9
+  default_bn_epsilon: 0.00001
+  default_activation_alpha: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 0.0000001
+  weight_decay_lambda: 0.00001
+  gradient_clip_value: 1.0
+  momentum_coefficient: 0.9
+  adagrad_epsilon: 0.0000001
+  layers: 
+    - neurons: 16
+      activation: relu
+      init: he_normal
+      dropout: 0.2
+      batch_norm: true
+    - neurons: 8
+      activation: relu
+      init: he_normal
+      dropout: 0.1
+      batch_norm: true
+    - neurons: 1
+      activation: sigmoid
 
 adaptive_security:
   rare_limit: 30
