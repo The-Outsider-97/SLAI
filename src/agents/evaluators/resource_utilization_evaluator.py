@@ -176,6 +176,11 @@ class ResourceUtilizationEvaluator:
         
         return "\n".join(report)
 
+    def disable_temporarily(self):
+        """Temporarily disable resource testing during degraded mode"""
+        self.test_cases = []
+        logger.warning("Resource Utilization Evaluator temporarily disabled.")
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Resource Utilization Evaluator ===\n")
