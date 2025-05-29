@@ -2,28 +2,14 @@ import importlib
 import pkgutil
 import inspect
 import time
-import yaml
 
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Type
+from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Agent Registry")
-
-CONFIG_PATH = "src/agents/collaborative/configs/collaborative_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 class AgentRegistry:
     """
@@ -34,14 +20,14 @@ class AgentRegistry:
     - Versioned registrations
     """
     def __init__(self, shared_memory: Optional[Any] = None):
-        self.config = load_config()
-        registry_config = self.config.get('registry', {})
-        agent_discovery_config = registry_config.get('agent_discovery', {})
+        self.config = load_global_config()
+        self.registry_config = get_config_section('registry')
+        agent_discovery_config =  self.registry_config.get('agent_discovery', {})
         
         self._agents: Dict[str, Dict] = {}
         self.shared_memory = shared_memory
-        self._version = 1.0
-        self._health_check_interval = registry_config.get('health_check_interval', 300)
+        self._version = 1.8
+        self._health_check_interval =  self.registry_config.get('health_check_interval', 300)
         self.default_package = agent_discovery_config.get('default_package', 'src.agents')
         self.excluded_modules = agent_discovery_config.get('excluded_modules', [])
         
