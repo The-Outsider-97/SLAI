@@ -21,7 +21,7 @@ from collections import namedtuple, defaultdict, deque
 
 from logs.logger import get_logger
 
-logger = get_logger("Collaboration Manager")
+logger = get_logger("Shared Memory")
 
 CONFIG_PATH = "src/agents/collaborative/configs/collaborative_config.yaml"
 
@@ -70,7 +70,7 @@ class SharedMemory:
         self.__initialized = True
         
         base_config = load_config()
-        merged_config = {**base_config.get('shared_memory', {}), **config}
+        merged_config = {**base_config.get('shared_memory', {}), **(config or {})}
 
         # Extract parameters from merged config
         self.max_memory = merged_config.get('max_memory_mb', 100) * 1024**2
@@ -87,8 +87,8 @@ class SharedMemory:
 
         self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
         self._expiration = {}  # key -> expiry time
-        self._expiration_heap = []
-        self._expiration_map = {}
+        # self._expiration_heap = []
+        # self._expiration_map = {}
         self.current_memory = 0  # Initialize memory usage counter
 
         self._access_log = OrderedDict()  # key -> last access time
@@ -107,65 +107,37 @@ class SharedMemory:
     def put(self, key, value, ttl=None, priority=None):
         """Stores a value with versioning and expiration."""
         self._simulate_network()
-        # Normalize timedelta to seconds
         current_time = time.time()
-        new_version = VersionedItem(timestamp=current_time, value=value)
-        self.current_memory += self._calculate_size(value)
-
-        if self.current_memory > self.max_memory:
-            self._evict_lru()
-
-        if isinstance(ttl, datetime.timedelta):
-            ttl = ttl.total_seconds()
-        if isinstance(self._default_ttl, datetime.timedelta):
-            self._default_ttl = self._default_ttl.total_seconds()
-
-        # Check TTL type
-        assert isinstance(ttl, (int, float, type(None)))
-
-        effective_ttl = ttl if ttl is not None else self._default_ttl
-        if effective_ttl is not None and effective_ttl <= 0:
-            expiry = current_time + effective_ttl
-            heapq.heappush(self._expiration_heap, (expiry, key))
-            self._expiration_map[key] = expiry
-            raise ValueError("TTL must be a positive number of seconds")
-
-        """
-        Stores or updates a value associated with a key.
-        """
+        
         with self._lock:
-            # Store the new version
+            # Create new version
             new_version = VersionedItem(timestamp=current_time, value=value)
-            self._data[key].append(new_version) # deque handles max_versions automatically
-
-            # Update access log
+            self.current_memory += self._calculate_size(value)
+            
+            # Handle memory eviction if needed
+            if self.current_memory > self.max_memory:
+                self._evict_lru()
+            
+            # Store the new version
+            self._data[key].append(new_version)
             self._access_log[key] = current_time
-
-            # Set or update expiration
+            
+            # Process TTL
             effective_ttl = ttl if ttl is not None else self._default_ttl
-            if isinstance(effective_ttl, datetime.timedelta):
-                effective_ttl = effective_ttl.total_seconds()
-
             if effective_ttl is not None:
                 if effective_ttl <= 0:
-                    # Expire immediately or remove existing expiration
-                    if key in self._expiration:
-                        del self._expiration[key]
-                    # If TTL is <=0 and key exists, remove it entirely
+                    # Remove immediately if TTL is zero or negative
                     self._remove_key(key)
-                    return current_time # Return timestamp even if immediately removed
                 else:
                     self._expiration[key] = current_time + effective_ttl
             elif key in self._expiration:
-                # If ttl is explicitly None, remove any existing expiration
+                # Remove existing expiration if TTL is explicitly None
                 del self._expiration[key]
-
-            # Add to priority queue if priority is given
+            
+            # Add to priority queue if needed
             if priority is not None:
-                # Use negative priority because heapq is a min-heap
-                # Include timestamp as tie-breaker (FIFO for same priority)
                 heapq.heappush(self._priority_queue, (-priority, current_time, key))
-
+                
             return current_time
 
     def get(self, key, version_timestamp=None, update_access=True, default=None):
@@ -205,22 +177,22 @@ class SharedMemory:
         """Set a value in shared memory with TTL and versioning"""
         self._simulate_network()
 
-        with self._lock:
-            version = self.data[key]['version'] + 1 if key in self.data else 1
-            expire_at = time.time() + ttl if ttl else None
-            self.data[key] = {'value': value, 'version': version, 'expire_at': expire_at}
-            new_version = VersionedItem(timestamp=time.time(), value=value)
-            self._data[key].append(new_version)
+        #with self._lock:
+        #    version = self.data[key]['version'] + 1 if key in self.data else 1
+        #    expire_at = time.time() + ttl if ttl else None
+        #    self.data[key] = {'value': value, 'version': version, 'expire_at': expire_at}
+        #    new_version = VersionedItem(timestamp=time.time(), value=value)
+        #    self._data[key].append(new_version)
 
-        if isinstance(ttl, datetime.timedelta):
-            ttl = ttl.total_seconds()
-        if ttl is not None:
-            try:
-                ttl = int(ttl)
-                self._expiration[key] = time.time() + ttl
-            except Exception as e:
-                logger.error(f"[SharedMemory] Invalid TTL passed: {ttl} ({e})")
-                return False  # <--- Stop execution if TTL is invalid
+        #if isinstance(ttl, datetime.timedelta):
+        #    ttl = ttl.total_seconds()
+        #if ttl is not None:
+        #    try:
+        #        ttl = int(ttl)
+        #        self._expiration[key] = time.time() + ttl
+        #    except Exception as e:
+        #        logger.error(f"[SharedMemory] Invalid TTL passed: {ttl} ({e})")
+        #        return False  # <--- Stop execution if TTL is invalid
 
         return self.put(key, value, ttl=ttl, **kwargs)
 
@@ -239,7 +211,6 @@ class SharedMemory:
         with self._lock:
             if key in self._data:
                 self._remove_key(key)
-                # Note: Items related to this key remain in the priority queue until popped and checked.
                 return True
             return False
 
@@ -374,9 +345,12 @@ class SharedMemory:
             while True:
                 time.sleep(self.ttl_check_interval)
                 current_time = time.time()
-                expired_keys = [k for k, v in self._expiration.items() if v < current_time]
-                for key in expired_keys:
-                    self._remove_key(key)
+                with self._lock:
+                    # Create a list of keys to avoid dictionary changed during iteration
+                    keys = list(self._expiration.keys())
+                    for key in keys:
+                        if self._is_expired(key, current_time):
+                            self._remove_key(key)
         thread = threading.Thread(target=cleaner, daemon=True)
         thread.start()
 
@@ -391,9 +365,7 @@ class SharedMemory:
 
     def _is_expired(self, key, current_time):
         """Checks if a key is expired without locking."""
-        if key not in self._expiration:
-            return False
-        return self._expiration[key] <= current_time
+        return key in self._expiration and self._expiration[key] <= current_time
 
 # ===================================
 #  6. Callbacks and Subscriptions
@@ -517,12 +489,12 @@ class SharedMemory:
             size = sum(self._calculate_size(v.value) for v in self._data[key])
             self.current_memory -= size
             del self._data[key]
+            
         if key in self._expiration:
             del self._expiration[key]
+            
         if key in self._access_log:
             del self._access_log[key]
-        # Note: Removing from priority queue efficiently is hard.
-        # We'll filter expired items when retrieving from the queue.
 
 # ===================================
 #  11. Miscellaneous Magic Methods
