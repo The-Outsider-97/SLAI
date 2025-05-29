@@ -13,23 +13,17 @@ from datetime import timedelta, datetime
 from typing import Dict, List, Callable, Union, Any
 
 from src.agents.evaluators.utils.report import get_visualizer
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger
 
 logger = get_logger("Security Compliance Checker")
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
 class ComplianceChecker:
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('complience_checker', {})
-        memory = SecureMemory(config)
+    def __init__(self):
+        self.config = load_global_config()
+        self.complience_config = get_config_section('complience_checker')
+        memory = SecureMemory()
         self.memory = memory
 
         self.compliance_framework = self._load_compliance_framework()
@@ -363,9 +357,8 @@ class ComplianceChecker:
 # Usage Example
 if __name__ == "__main__":
     print("\n=== Running Security Compliance Checker ===\n")
-    config = load_config()
     
-    checker = ComplianceChecker(config)
+    checker = ComplianceChecker()
     results = checker.evaluate_compliance()
     report = checker.generate_report(results)
     
