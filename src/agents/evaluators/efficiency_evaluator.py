@@ -539,6 +539,11 @@ class EfficiencyEvaluator:
         
         return "\n## Optimization Recommendations\n" + "\n".join(recommendations)
 
+    def disable_temporarily(self):
+        """Temporarily disable efficiency testing during degraded mode"""
+        self.test_cases = []
+        logger.warning("Efficiency Evaluator temporarily disabled.")
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Efficiency Evaluator ===\n")
