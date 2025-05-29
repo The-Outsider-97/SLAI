@@ -42,6 +42,20 @@ class AttentionMonitor(torch.nn.Module):
         logger.info("Attention Monitor initialized with entropy threshold: %.2f", 
                    self.entropy_threshold)
 
+    def get_anomaly_interpretation(self, analysis: Dict) -> str:
+        """Generate human-readable interpretation of attention anomalies"""
+        findings = []
+        
+        if analysis.get("anomaly", False):
+            if analysis["entropy"] < self.entropy_threshold * 0.7:
+                findings.append("Low attention entropy indicates potential over-focusing on specific tokens")
+            if analysis["uniformity"] > self.uniformity_threshold * 1.5:
+                findings.append("High attention variance suggests inconsistent pattern distribution")
+            if analysis["anomaly_score"] > 0.8:
+                findings.append("Severe attention anomaly detected - possible adversarial manipulation")
+        
+        return "; ".join(findings) if findings else "Normal attention patterns"
+
     def analyze_attention(self, attention_matrix: torch.Tensor, context: Dict = None) -> Dict:
         """Comprehensive attention pattern analysis with security insights"""
         # Basic metrics
@@ -195,7 +209,7 @@ class AttentionMonitor(torch.nn.Module):
         return {
             "secure": secure,
             "confidence": confidence,
-            "findings": "; ".join(findings) if findings else "Normal attention patterns"
+            "findings": self.get_anomaly_interpretation(metrics)  # Updated to use new method
         }
 
     def visualize_attention(self, matrix: torch.Tensor) -> str:
