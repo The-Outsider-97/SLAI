@@ -504,6 +504,31 @@ class SafetyGuard:
                 
         return False
 
+    def is_minimal_viable(self) -> bool:
+        """
+        Checks if SafetyGuard has the essential components required to enforce basic safety constraints.
+        Used by fallback systems to ensure degraded but functional safety.
+    
+        Minimal viability requires:
+        - Basic PII redaction patterns
+        - At least one toxicity pattern
+        - Valid differential privacy configuration
+        """
+        # 1. Check basic PII patterns
+        has_pii_protection = bool(self.redact_patterns)
+    
+        # 2. Check basic toxicity screening
+        has_toxicity_screening = bool(self.toxicity_patterns)
+    
+        # 3. Validate differential privacy configuration
+        try:
+            self._validate_privacy_params()
+            dp_valid = True
+        except ValueError:
+            dp_valid = False
+    
+        return has_pii_protection and has_toxicity_screening and dp_valid
+
 if __name__ == "__main__":
     print("\n=== Running Security Reward Model ===\n")
     config = load_config()
