@@ -1,58 +1,41 @@
 import numpy as np
-import yaml, json
 
-from typing import Deque, Optional
+from typing import Deque
 from collections import deque
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from src.tuning.tuner import HyperparamTuner
 from logs.logger import get_logger
 
 logger = get_logger("Parameter Tuner")
 
-CONFIG_PATH = "src/agents/adaptive/configs/adaptive_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 class LearningParameterTuner:
-    def __init__(self, config=None, initial_params: dict = None):
-        if config is None:
-            config = load_config()
-        self.config = config
-        memory = MultiModalMemory(self.config)
-        self.memory = memory
+    def __init__(self, initial_params: dict = None):
+        self.config = load_global_config()
+        self.tuner_config = get_config_section('parameter_tuner')
+        
+        # Create memory instance
+        self.memory = MultiModalMemory()
 
-        config = config.get('parameter_tuner', {})
-        memory_config = config.get('adaptive_memory', {})
-        
-        # Initialize memory with proper config section
-        # self.memory = MultiModalMemory(config=memory_config)
-        
         # Load bounds from config with float conversion
-        self._min_learning_rate = float(config.get('min_learning_rate', 1e-4))
-        self._max_learning_rate = float(config.get('max_learning_rate', 0.1))
-        self._min_exploration = float(config.get('min_exploration', 0.01))
+        self._min_learning_rate = float(self.tuner_config.get('min_learning_rate', 1e-4))
+        self._max_learning_rate = float(self.tuner_config.get('max_learning_rate', 0.1))
+        self._min_exploration = float(self.tuner_config.get('min_exploration', 0.01))
 
         # Load base parameters from config
         base_params = {
-            'learning_rate': float(config.get('base_learning_rate', 0.01)),
-            'exploration_rate': float(config.get('base_exploration_rate', 0.3)),
-            'discount_factor': float(config.get('base_discount_factor', 0.95)),
-            'temperature': float(config.get('base_temperature', 1.0))
+            'learning_rate': float(self.tuner_config.get('base_learning_rate', 0.01)),
+            'exploration_rate': float(self.tuner_config.get('base_exploration_rate', 0.3)),
+            'discount_factor': float(self.tuner_config.get('base_discount_factor', 0.95)),
+            'temperature': float(self.tuner_config.get('base_temperature', 1.0))
         }
-        
+
         # Merge with initial params
         self.params = {**base_params, **(initial_params or {})}
         self.performance_history: Deque[float] = deque(maxlen=100)
+
+        logger.info(f"Learning Parameter Tuner succesfully initialized with:\n {base_params}")
 
     def adapt(self, recent_rewards: list) -> None:
         """
@@ -62,7 +45,7 @@ class LearningParameterTuner:
         """
         if not recent_rewards:
             return
-            
+
         # Calculate performance volatility
         reward_var = np.var(recent_rewards)
         mean_reward = np.mean(recent_rewards)
@@ -74,7 +57,7 @@ class LearningParameterTuner:
         elif reward_var > 1.0:  # High volatility
             self.params['learning_rate'] *= 1.01
             logger.debug(f"Increasing learning rate to {self.params['learning_rate']:.4f}")
-            
+
         # Exploration rate adaptation
         if mean_reward < 0:
             self.params['exploration_rate'] = min(
@@ -82,7 +65,7 @@ class LearningParameterTuner:
                 0.5
             )
             logger.warning(f"Negative rewards detected. Boosting exploration to {self.params['exploration_rate']:.2f}")
-            
+
         self._apply_bounds()
 
         # Log to memory
