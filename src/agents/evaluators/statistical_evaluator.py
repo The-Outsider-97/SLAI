@@ -227,6 +227,11 @@ class StatisticalEvaluator:
         pooled_std = np.sqrt((np.std(sample_a, ddof=1)**2 + np.std(sample_b, ddof=1)**2) / 2)
         return 0.0 if pooled_std == 0 else (mean_a - mean_b) / pooled_std
 
+    def disable_temporarily(self):
+        """Temporarily disable statistical testing during degraded mode"""
+        self.test_cases = []
+        logger.warning("Statistical Evaluator temporarily disabled.")
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Statistical Evaluator ===\n")
