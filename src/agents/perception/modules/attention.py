@@ -32,8 +32,8 @@ class EfficientAttention(torch.nn.Module):
         self.num_heads = transformer_cfg['num_heads']
         self.head_dim = self.embed_dim // self.num_heads
         self.device = device
-        self.dropout_rate = cfg['dropout_rate']
-        self.initializer = cfg['initializer']
+        self.dropout_rate = cfg.get('dropout_rate', 0.1)
+        self.initializer = cfg.get('initializer', 'xavier_uniform')
         
         # Initialize parameters with proper scaling
         init_fn = getattr(TensorOps, self.initializer) # f"{self.initializer}_init")
