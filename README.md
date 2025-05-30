@@ -140,6 +140,7 @@ Note: If you see an error about execution policy:
    pip install mlxtend
    pip install cryptography
    pip install PyQt5
+   pip install pynvml
 
    python -m nltk.downloader punkt
    ```
