@@ -1,44 +1,21 @@
 
 import time, os
 import yaml, json
-import traceback
 
 from collections import defaultdict
 from typing import Dict, Union, Callable, Optional, List, Tuple
-from types import SimpleNamespace
 
+from src.knowledge.safety.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Rule Engine")
 
-CONFIG_PATH = "src/agents/knowledge/configs/knowledge_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
-
 class RuleEngine:
-    def __init__(self,
-                 config_section_name: str = "rule_engine",
-                 config_file_path: str = CONFIG_PATH
-                 ):
-        self.config = get_config_section(config_section_name, config_file_path)
-        if not hasattr(self.config, 'slow_rule_threshold'):
-            self.config.slow_rule_threshold = 0.5  # Default 500ms
+    def __init__(self):
+        self.config = load_global_config()
+        self.rule_config = get_config_section('rule_engine')
+        if 'slow_rule_threshold' not in self.rule_config:
+            self.rule_config['slow_rule_threshold'] = 0.5  # Default 500ms
         self.sector_rules = defaultdict(list)
         self.rules = []
         self.sector_rules = {
@@ -162,6 +139,9 @@ class RuleEngine:
 
         for rule in self.rules:
             start_time = time.perf_counter()
+            exec_time = time.perf_counter() - start_time
+            if exec_time > self.rule_config['slow_rule_threshold']:
+                logger.debug(f"Slow rule {rule['name']}: {exec_time:.2f}s")
             try:
                 results = rule["func"](knowledge_base)
                 exec_time = time.perf_counter() - start_time
