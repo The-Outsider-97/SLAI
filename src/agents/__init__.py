@@ -1,1 +1,1 @@
-from src.collaborative.shared_memory import SharedMemory
+from src.agents.collaborative.shared_memory import SharedMemory
