@@ -166,6 +166,8 @@ Note: If you see an error about execution policy:
    pip install flask>=2.0.0
    pip install django>=4.0
    pip install fastapi>=0.85
+   pip install gym
+   pip install gymnasium
    ```
 
 5. Run Model:
