@@ -152,6 +152,20 @@ Note: If you see an error about execution policy:
    pip install ply
    pip install tenacity
    pip install rollback
+   pip install evaluate
+   pip install bert-score
+   pip install rouge
+   pip install openai
+   pip install deepmerge
+   pip install sentencepiece
+   pip install Flask-Talisman==5.1.0
+   pip install Flask-Limiter==3.5.0
+   pip install bleach==6.0.0
+   pip install Werkzeug==2.3.7
+   pip install python-whois==0.9.0
+   pip install flask>=2.0.0
+   pip install django>=4.0
+   pip install fastapi>=0.85
    ```
 
 5. Run Model:
