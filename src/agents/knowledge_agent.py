@@ -46,7 +46,7 @@ def cosine_sim(v1, v2):
 
 
 class KnowledgeAgent(BaseAgent):
-    def __init__(self,
+    def __init__(self, shared_memory,
                  agent_factory,
                  config=None,
                  persist_file: str = None, args=(), kwargs={}):
@@ -56,10 +56,10 @@ class KnowledgeAgent(BaseAgent):
             config=config
         )
         self.knowledge_agent = []
-        self.embedding_fallback = None
-        self.stop_words = set()
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
+        self.embedding_fallback = None
+        self.stop_words = set()
         self.cache = KnowledgeCache() or {}
         self.memory = KnowledgeMemory() or defaultdict(dict)
         self.cache_size = 1000
@@ -114,10 +114,7 @@ class KnowledgeAgent(BaseAgent):
     def _initialize_governance(self):
         """Conditionally create governor based on config"""
         if self.config.get('governor.enabled', True):
-            governor = Governor(
-                knowledge_agent=self,
-                config_file_path=LOCAL_CONFIG_PATH
-            )
+            governor = Governor(knowledge_agent=self)  # Pass self reference
             logger.info("Governance subsystem initialized")
             return governor
         logger.info("Governance subsystem disabled")
@@ -620,7 +617,7 @@ if __name__ == "__main__":
 
     shared_memory = {}
     agent_factory = lambda: None
-    monitor = KnowledgeAgent(agent_factory=None)
+    monitor = KnowledgeAgent(shared_memory=shared_memory,agent_factory=None)
     print("")
     print("\n=== Successfully ran the Knowledge Agent ===\n")
 
@@ -649,6 +646,7 @@ if __name__ == "__main__":
     language_agent = LanguageAgent(agent_factory, shared_memory,config=config)
 
     agent = KnowledgeAgent(
+        shared_memory=shared_memory,
         agent_factory=agent_factory,
         config=config,
         persist_file=config["knowledge_memory"]["persist_file"]
