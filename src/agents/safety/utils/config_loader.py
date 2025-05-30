@@ -1,7 +1,7 @@
 import yaml
 from pathlib import Path
 
-CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
+CONFIG_PATH = "safety/configs/secure_config.yaml"
 
 _global_config = None
 
