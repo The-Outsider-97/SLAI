@@ -4,33 +4,13 @@ import yaml, json
 import numpy as np
 
 from difflib import SequenceMatcher
-from types import SimpleNamespace
 from collections import defaultdict, Counter
 from typing import Any, Optional, List, Dict, Union
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Knowledge Memory")
-
-CONFIG_PATH = "src/agents/knowledge/configs/knowledge_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
 
 class KnowledgeMemory:
     """
@@ -38,11 +18,9 @@ class KnowledgeMemory:
     Focuses on agent-local, context-aware, relevance-weighted memory entries.
     """
 
-    def __init__(self,
-                 config_section_name: str = "knowledge_memory",
-                 config_file_path: str = CONFIG_PATH
-                 ):
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
+        self.config = load_global_config()
+        self.memory_config = get_config_section('memory')
         self._store = defaultdict(dict)  # key -> {value, metadata}
     
     def update(self, key: str, value: Any, metadata: Optional[dict] = None,
