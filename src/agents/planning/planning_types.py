@@ -1,22 +1,57 @@
 import math
+import os
+import yaml, json
+
 from enum import Enum
-from typing import List, Dict, Optional, Callable, Tuple, Any, Set
+from typing import List, Dict, Optional, Callable, Tuple, Any, Union
+from types import SimpleNamespace
 
-class TaskStatus(Enum):
-    """Represents the execution status of a task."""
-    PENDING = 0
-    EXECUTING = 1
-    SUCCESS = 2
-    FAILED = 3
+from logs.logger import get_logger
 
-class TaskType(Enum):
-    """Differentiates between primitive actions and abstract goals."""
-    PRIMITIVE = 0
-    ABSTRACT = 1
+logger = get_logger("Planning Types")
+
+CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
+
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: Union[str, Dict], config_file_path: str):
+    if isinstance(section, dict):
+        return dict_to_namespace(section)
+    
+    with open(config_file_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class AcademicPlanningError(Exception):
-    """Custom exception for type violations and planning semantics."""
-    pass
+    """
+    Custom exception for type violations and planning semantics.
+    Loads additional structured error documentation from a JSON file.
+    """
+    _error_metadata_path = os.path.join(os.path.dirname(__file__),
+                                        'templates/academic_planning_error.json')
+    _metadata = None
+
+    @classmethod
+    def get_metadata(cls):
+        """Lazily load and return the JSON metadata for this error class."""
+        if cls._metadata is None:
+            try:
+                with open(cls._error_metadata_path, 'r', encoding='utf-8') as f:
+                    cls._metadata = json.load(f)
+            except Exception as e:
+                cls._metadata = {"error": f"Failed to load metadata: {e}"}
+        return cls._metadata
+
+    def __init__(self, message=None):
+        super().__init__(message or "An academic planning error occurred.")
 
 class Any:
     """
@@ -142,8 +177,19 @@ MethodSignature = Tuple[str, int]  # (task_name, method_index)
 TemporalRelation = Tuple['Task', 'Task', str]  # (task_a, task_b, relation type)
 MemoKey = Tuple[MethodSignature, WorldState]
 
+class TaskStatus(Enum):
+    """Represents the execution status of a task."""
+    PENDING = 0
+    EXECUTING = 1
+    SUCCESS = 2
+    FAILED = 3
 
-class Task:
+class TaskType(Enum):
+    """Differentiates between primitive actions and abstract goals."""
+    PRIMITIVE = 0
+    ABSTRACT = 1
+
+class Task(Any):
     """
     Represents a task in the planning hierarchy, either primitive or abstract.
     Includes decomposition methods, preconditions, and effects.
@@ -152,9 +198,12 @@ class Task:
                  methods: Optional[List[List['Task']]] = None,
                  preconditions: Optional[List[Callable[[Dict[str, Any]], bool]]] = None,
                  effects: Optional[List[Callable[[Dict[str, Any]], None]]] = None,
-                 cost: float = 1.0,
+                 cost: float = 1.0, agent=None,
                  start_time: Optional[float] = None,
+                 config_section_name: str = "planning_types",
+                 config_file_path: str = CONFIG_PATH,
                  end_time: Optional[float] = None):
+        super().__init__(value=None, constraints=())
         """
         Initializes a Task instance.
 
@@ -174,7 +223,9 @@ class Task:
             end_time (Optional[float]): The execution end time (for metrics).
         """
         self.name = name
-        self.type = task_type
+        self.agent = agent
+        self.config = get_config_section(config_section_name, config_file_path)
+        self.task_type = task_type
         # Ensure methods is a list of lists, even if empty or None
         self.methods = methods if methods is not None else ([[]] if task_type == TaskType.ABSTRACT else [])
         self.preconditions = preconditions or []
@@ -218,7 +269,7 @@ class Task:
                         Returns an empty list if the index is invalid, the task
                         is primitive, or has no methods.
         """
-        if self.type == TaskType.PRIMITIVE or not self.methods:
+        if self.task_type == TaskType.PRIMITIVE or not self.methods:
             return []
 
         idx_to_use = method_index if method_index is not None else self.selected_method
@@ -249,6 +300,142 @@ class Task:
 
     def __repr__(self):
         method_info = f", method:{self.selected_method}" if self.type == TaskType.ABSTRACT else ""
-        return f"Task(name='{self.name}', type={self.type.name}, status={self.status.name}{method_info})"
+        return f"Task(name='{self.name}', type={self.task_type.name} status={self.status.name}{method_info})"
 
 PlanStep = Tuple[int, Task, MethodSignature] # (step_id, task, method_used)
+
+if __name__ == "__main__":
+    print("")
+    print("\n=== Running Task Scheduler ===")
+    print("")
+    from unittest.mock import Mock
+    mock_agent = Mock()
+    mock_agent.shared_memory = {}
+    planning = Task(name=None, task_type=None, agent=mock_agent)
+    print("")
+    print("\n=== Successfully Ran Task Scheduler ===\n")
+
+if __name__ == "__main__":
+    print("\n=== Kitchen Planning Simulation ===")
+    
+    # Create world state with initial conditions
+    world_state = {
+        'vegetables_chopped': Any(False, (bool,)),
+        'stove_on': Any(False, (bool, lambda x: x in [True, False])),
+        'ingredients_available': Any(['tomato', 'onion', 'garlic'], (list,)),
+        'meal_cooked': Any('pending', (str,))
+    }
+
+    # ----- Create Primitive Tasks -----
+    def precondition_chop_vegetables(state):
+        return state['ingredients_available'].value  # At least 1 ingredient available
+    
+    def effect_chop_vegetables(state):
+        state['vegetables_chopped']._value = True
+        
+    chop_veggies = Task(
+        name="ChopVegetables",
+        task_type=TaskType.PRIMITIVE,
+        preconditions=[precondition_chop_vegetables],
+        effects=[effect_chop_vegetables],
+        cost=2.0
+    )
+
+    # ----- Create Abstract Task with Multiple Methods -----
+    def precondition_cook_meal(state):
+        return state['vegetables_chopped'].value
+    
+    def effect_cook_meal(state):
+        state['meal_cooked']._value = 'ready'
+        
+    # Method 1: Standard cooking flow
+    cook_stove = Task(
+        name="CookOnStove",
+        task_type=TaskType.PRIMITIVE,
+        preconditions=[lambda s: s['stove_on'].value],
+        effects=[lambda s: s.update({'stove_on': Any(False)})],
+        cost=3.0
+    )
+    
+    # Method 2: Alternative cooking method
+    microwave = Task(
+        name="UseMicrowave",
+        task_type=TaskType.PRIMITIVE,
+        preconditions=[lambda s: len(s['ingredients_available'].value) >= 2],
+        cost=2.5
+    )
+
+    cook_meal = Task(
+        name="CookMeal",
+        task_type=TaskType.ABSTRACT,
+        methods=[
+            [chop_veggies, cook_stove],  # Method 0
+            [chop_veggies, microwave]      # Method 1 (intentional typo to test error)
+        ],
+        preconditions=[precondition_cook_meal],
+        effects=[effect_cook_meal],
+        cost=5.0
+    )
+
+    # ----- Test Execution Flow -----
+    def print_state():
+        print("\nCurrent World State:")
+        for k, v in world_state.items():
+            print(f"- {k}: {v.value} (Type: {v.type.__name__})")
+
+    print("\n=== Initial State ===")
+    print_state()
+
+    # Test constraint validation
+    try:
+        invalid_task = Task(
+            name="InvalidTask",
+            task_type="invalid_type",  # Should be TaskType enum
+            agent=mock_agent
+        )
+    except Exception as e:
+        print(f"\nConstraint Validation Error: {e}")
+
+    # Test task decomposition
+    print("\nTesting Meal Preparation:")
+    try:
+        print(f"Main task: {cook_meal}")
+        print("Attempting method 0:")
+        subtasks = cook_meal.get_subtasks(method_index=0)
+        for i, task in enumerate(subtasks, 1):
+            print(f"Step {i}: {task.name}")
+            
+            if task.check_preconditions(world_state):
+                print("Preconditions met - executing...")
+                task.apply_effects(world_state)
+                task.status = TaskStatus.SUCCESS
+            else:
+                print(f"Preconditions failed for {task.name}")
+                
+        print_state()
+        
+    except AcademicPlanningError as e:
+        print(f"Planning Error: {e}")
+    except Exception as e:
+        print(f"General Error: {e}")
+
+    # Test JSON serialization/deserialization
+    print("\nTesting Any Serialization:")
+    try:
+        original = Any(42, (int, lambda x: x > 0))
+        json_data = original.to_json()
+        reconstructed = Any.from_json(json_data)
+        print(f"Original: {original} | Reconstructed: {reconstructed}")
+    except AcademicPlanningError as e:
+        print(f"Serialization Error: {e}")
+
+    # Test type mismatch error
+    print("\nTesting Type Safety:")
+    try:
+        num = Any(5, (int,))
+        text = Any("hello", (str,))
+        result = num + text  # Should raise AcademicPlanningError
+    except AcademicPlanningError as e:
+        print(f"Caught expected type error: {e}")
+
+    print("\n=== Simulation Complete ===")

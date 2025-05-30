@@ -2,15 +2,18 @@ import math
 import time
 import pynvml
 import psutil
-import logging
 import numpy as np
+import warnings
+
 from typing import Dict, Any
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
+from logs.logger import get_logger
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = get_logger("Optimizer")
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 class SystemOptimizer:
     """

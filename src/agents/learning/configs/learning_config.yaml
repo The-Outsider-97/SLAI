@@ -1,0 +1,124 @@
+dqn:
+  hidden_size: 128
+  gamma: 0.99
+  epsilon: 1.0
+  epsilon_min: 0.01
+  epsilon_decay: 0.995
+  learning_rate: 0.001
+  batch_size: 64
+  target_update_frequency: 100
+  buffer_size: 10000
+
+evolutionary:
+  population_size: 10
+  generations: 20
+  mutation_rate: 0.2
+  evaluation_episodes: 3
+  elite_ratio: 0.3
+
+unified:
+  validation_episodes: 5
+  early_stop_patience: 20
+
+maml:
+  hidden_size: 64
+  meta_lr: 0.001
+  inner_lr: 0.01
+  gamma: 0.99
+
+rl:
+  learning_rate: 0.1
+  discount_factor: 0.9
+  epsilon: 0.1
+  trace_decay: 0.7
+  state_dim: 128
+
+rsi:
+  gamma: 0.95               # discount rate
+  epsilon: 1.0              # exploration rate
+  epsilon_min: 0.01
+  epsilon_decay: 0.995
+  learning_rate: 0.001
+  baseline_performance: None
+  rsi_period: 14                   # Initial RSI period
+  improvement_interval: 100        # Episodes between self-improvement
+  performance_history: 50          # Track recent performance
+  param_mutation_rate: 0.1         # Exploration in parameter space
+  improvement_threshold: 0.05      # 5% minimum improvement
+  target_update_frequency: 100
+
+learning_memory:
+  max_size: 10000                   # Experience capacity
+  eviction_policy: 'LRU'            # Cache policy
+  checkpoint_dir: 'src/agents/learning/checkpoints/memory' # Save location
+  checkpoint_freq: 1000             # Auto-save frequency
+  auto_save: True                   # Auto-save toggle
+
+evolutionary:
+  population_size: 10
+  generations: 20
+  mutation_rate: 0.2              # Used by LearningFactory
+  top_k: 2                        # Number of top agents to select
+  evaluation_episodes: 3
+  elite_ratio: 0.3
+  creation_threshold: 0.4         # Below this score triggers new agent creation
+  promotion_threshold: 3          # Uses required for promotion
+  max_temporary_agents: 10        # Maximum concurrent temp agents
+  garbage_collect_interval: 1000  # Steps between cleanup
+
+neural_network:
+  layer_dims: [784, 128, 64, 10]  # Network architecture
+  hidden_activation: 'relu'        # Hidden layer activation
+  output_activation: 'linear'      # Output activation
+  loss_function: 'mse'   # Loss function type - or cross_entropy
+  optimizer: 'adam'                # Optimization algorithm
+  learning_rate: 0.001             # Base learning rate
+  momentum_beta: 0.9               # For momentum optimizer
+  adam_beta1: 0.9                  # Adam hyperparameter
+  adam_beta2: 0.999                # Adam hyperparameter
+  adam_epsilon: 1.0e-8             # Adam stability term
+  l1_lambda: 0.0                   # L1 regularization
+  l2_lambda: 0.0001                # L2 regularization
+
+policy_network:
+  hidden_size: 64
+  hidden_layer_sizes: [128, 64]    # List of hidden layer dimensions, e.g., [1st_hidden_size, 2nd_hidden_size]
+  hidden_activation: 'relu'        # 'relu', 'sigmoid', 'tanh'
+  output_activation: 'softmax'     # 'softmax' (discrete actions), 'tanh' (continuous actions), 'linear' (distribution parameters)
+  optimizer_config:                # Optimizer configuration
+    type: 'adam'                   #%20'sgd',%20'momentum',%20'adam'
+    learning_rate: 0.001
+    momentum_beta: 0.9
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+  l1_lambda: 0.0                   # L1 regularization strength
+  l2_lambda: 0.0                   # L2 regularization (weight decay) strength
+
+rl_engine:
+  state_processor:
+    tiling_resolution: 0.1
+    num_tilings: 8
+    feature_engineering: True
+  exploration_strategies:
+    strategy: "boltzmann"  # boltzmann|ucb|epsilon_greedy
+    temperature: 1.0
+    ucb_c: 2.0
+    epsilon_decay: 0.995
+    min_epsilon: 0.01
+  q_table_optimizer:
+    batch_size: 32
+    momentum: 0.9
+    compression: True
+    cache_size: 1000
+    default_value: 0.0
+    update_frequency: 100
+
+temporal_processing:
+  use_sequence_modeling: True
+  sequence_length: 10
+
+visual_processing:
+  use_visual_observations: True
+  encoder_type: "transformer"  # or "cnn"
+  pretrained_weights: "path/to/weights.pth" # not available yet

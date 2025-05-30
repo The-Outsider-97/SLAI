@@ -1,37 +1,124 @@
+__version__ = "1.8.0"
+
 import logging
 import os, sys
+import abc
 import time
 import json
 import torch
 import difflib
 import traceback
+import numpy as np
+
+from typing import Any
 from collections import OrderedDict, defaultdict, deque
 
-class BaseAgent:
+from src.agents.collaborative.shared_memory import SharedMemory
+from logs.logger import get_logger
+
+logger = get_logger("Base Agent")
+
+class BaseAgent(abc.ABC):
     def __init__(self, shared_memory, agent_factory, config=None):
-            self.shared_memory=shared_memory,
-            self.agent_factory=agent_factory,
+            self.logger = logging.getLogger(self.__class__.__name__)
+            self.name = self.__class__.__name__
+            
+            if shared_memory is None:
+                shared_memory = SharedMemory(config={})
+            self.shared_memory = shared_memory
+            self.agent_factory=agent_factory
             self.config=config or {
                 'defer_initialization': True,
                 'memory_profile': 'low',
-                'network_compression': True
+                'network_compression': True,
+                'max_error_log_size': 50,
+                'error_similarity_threshold': 0.75,
+                'max_task_retries': 0, 
+                'task_timeout_seconds': None 
             }
+            
+            # Configurable parameters for error handling and retries
+            self.max_error_log_size = self.config.get('max_error_log_size', 50)
+            self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
+            self.max_task_retries = self.config.get('max_task_retries', 0)
+            # task_timeout_seconds is available but robust timeout implementation is complex and
+            # often task-specific (IO vs CPU bound). Subclasses can implement it in perform_task.
+            self.task_timeout_seconds = self.config.get('task_timeout_seconds', None)
+
             # Initialize lazy components system
             self._component_initializers = {
                 'memory_view': lambda: self.SharedMemoryView(shared_memory),
-                'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
+                'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500)) # Maxlen for individual metric series
             }
-
             self._lazy_components = OrderedDict()
-            self.retraining_thresholds = {}
+
+            self.retraining_thresholds = {} # Populated by subclasses based on their specific metrics
             self.evaluation_log_dir = "evaluation_logs"
             os.makedirs(self.evaluation_log_dir, exist_ok=True)
+
+            # Known issue handlers registry
+            self._known_issue_handlers = {}
+            self.register_default_known_issue_handlers()
 
             # Initialize core components immediately
             self._init_core_components()
 
-            self.logger = logging.getLogger(self.__class__.__name__)
-            self.name = self.__class__.__name__
+
+    def register_default_known_issue_handlers(self):
+        """Registers common known issue handlers. Subclasses can add more."""
+        # Patterns should be specific enough to avoid false positives.
+        # These are examples; actual patterns would depend on common errors encountered.
+        self.register_known_issue_handler("emoji", self._handle_unicode_or_emoji_error) # General catch for "emoji" in message
+        self.register_known_issue_handler("UnicodeEncodeError", self._handle_unicode_or_emoji_error) # Specific error type
+        # Add more generic handlers here if applicable, e.g., for common network errors if relevant
+        # self.register_known_issue_handler("ConnectionError", self._handle_transient_network_error)
+
+
+    def _handle_unicode_or_emoji_error(self, task_data, error_info):
+        """
+        Handles errors suspected to be caused by emojis or non-ASCII characters,
+        often manifesting as UnicodeEncodeError or messages containing 'emoji'.
+        """
+        # Check if this handler is appropriate for the given error
+        is_unicode_error = error_info.get("error_type") == "UnicodeEncodeError"
+        mentions_emoji = "emoji" in error_info.get("error_message", "").lower()
+        
+        if not (is_unicode_error or mentions_emoji):
+            return {"status": "failed", "reason": "Error not identified as unicode/emoji issue by this handler."}
+
+        cleaned_input = None
+        input_changed = False
+
+        if isinstance(task_data, str):
+            cleaned_version = task_data.encode("ascii", "ignore").decode()
+            if cleaned_version != task_data:
+                cleaned_input = cleaned_version
+                input_changed = True
+        elif isinstance(task_data, dict):
+            temp_cleaned_data = task_data.copy() # Work on a copy
+            modified_in_dict = False
+            for key, val in temp_cleaned_data.items():
+                if isinstance(val, str):
+                    cleaned_val = val.encode("ascii", "ignore").decode()
+                    if cleaned_val != val:
+                        temp_cleaned_data[key] = cleaned_val
+                        modified_in_dict = True
+            if modified_in_dict:
+                cleaned_input = temp_cleaned_data
+                input_changed = True
+        
+        if input_changed and cleaned_input is not None:
+            self.logger.info(f"[{self.name}] Known issue handler '{self._handle_unicode_or_emoji_error.__name__}': Retrying with ASCII-cleaned input.")
+            try:
+                # Rerun perform_task with the cleaned input
+                return self.perform_task(cleaned_input)
+            except Exception as e_retry:
+                self.logger.warning(f"[{self.name}] Retry after unicode/emoji cleaning also failed: {e_retry}")
+                return {"status": "failed", "reason": f"Retry after unicode/emoji cleaning failed: {e_retry}"}
+        else:
+            # Handler was matched but no changes were made (e.g., input was already ASCII clean)
+            # or input type was not string/dict.
+            return {"status": "failed", "reason": f"Unicode/emoji handler: Input type '{type(task_data).__name__}' not handled or no changes made after cleaning."}
 
     def _init_core_components(self):
         """Initialize essential components first"""
@@ -55,158 +142,382 @@ class BaseAgent:
                 raise AttributeError(f"No initializer for lazy component: {name}")
         return self._lazy_components[name]
 
+    def _log_error_to_shared_memory(self, error_entry: dict):
+        """Logs an error entry to shared memory, managing log size."""
+        error_key = f"errors:{self.name}"
+        # Ensure shared_memory.get/set are thread-safe if shared_memory is used across threads
+        errors = self.shared_memory.get(error_key) or []
+        errors.append(error_entry)
+        if len(errors) > self.max_error_log_size:
+            errors = errors[-self.max_error_log_size:]
+        self.shared_memory.set(error_key, errors)
+
+    def _check_and_log_similar_errors(self, new_error_info: dict) -> bool:
+        """
+        Checks for and logs similarity with past errors from shared memory.
+        Returns True if a similar error was found, False otherwise.
+        """
+        error_key = f"errors:{self.name}"
+        # Fetch errors AFTER the current one has been logged to include it in the list for subsequent calls,
+        # but for current check, we compare against errors *before* the current one.
+        all_errors = self.shared_memory.get(error_key) or [] 
+        
+        # If all_errors includes the new_error_info already (it should if _log_error_to_shared_memory was called before this)
+        # then we compare against errors[:-1]. If not, then all_errors is the history.
+        # Assuming new_error_info is the LATEST error, so compare against history excluding it.
+        history_errors = [e for e in all_errors if e['timestamp'] < new_error_info['timestamp']]
+
+
+        new_error_msg = new_error_info.get("error_message", "")
+        new_error_type = new_error_info.get("error_type", "")
+
+        for past_error_info in reversed(history_errors): 
+            past_error_msg = past_error_info.get("error_message", "")
+            past_error_type = past_error_info.get("error_type", "")
+
+            if past_error_type == new_error_type: # First, match error type
+                similarity = difflib.SequenceMatcher(None, new_error_msg, past_error_msg).ratio()
+                if similarity >= self.error_similarity_threshold:
+                    self.logger.warning(
+                        f"[{self.name}] A similar {new_error_type} occurred previously "
+                        f"(message similarity: {similarity:.2f}). Current error: '{new_error_msg[:100]}...'"
+                    )
+                    return True # Found a similar error
+        return False # No significantly similar error found in history
+
     def execute(self, input_data):
-        try:
-            self.logger.info(f"[{self.name}] Executing task...")
-            result = self.perform_task(input_data)
-            if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
-                performance_metrics = self.extract_performance_metrics(result)
-                self.evaluate_performance(performance_metrics)
-            self.logger.info(f"[{self.name}] Task execution completed.")
+        """
+        Executes the agent's task with comprehensive error handling and recovery.
+        Flow:
+        1. Try `perform_task` (with retries if configured).
+        2. If error, log it and check for similarity with past errors.
+        3. Try `handle_known_issue` based on error information.
+        4. If still unresolved, try `alternative_execute`.
+        5. If all fail, log final failure.
+        """
+        retries_done = 0
+        last_exception_in_retry_loop = None
+
+        # --- STAGE 1: Perform Task (with retries) ---
+        while retries_done <= self.max_task_retries:
+            try:
+                self.logger.info(f"[{self.name}] Attempting task (attempt {retries_done + 1}/{self.max_task_retries + 1})...")
+                # Note: Robust timeout for self.perform_task is complex (threading, signals, or async).
+                # If self.task_timeout_seconds is set, subclasses might need to handle it internally
+                # or a more sophisticated execution wrapper would be needed here.
+                result = self.perform_task(input_data) # perform_task is now abstract
+
+                if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
+                    performance_data = self.extract_performance_metrics(result)
+                    if performance_data: # Only evaluate if metrics are meaningfully extracted
+                        self.evaluate_performance(performance_data)
+                
+                self.logger.info(f"[{self.name}] Task execution successful on attempt {retries_done + 1}.")
+                self.shared_memory.set(f"agent_stats:{self.name}", {
+                    "last_run": time.time(), "success": True, 
+                    "attempts": retries_done + 1,
+                    "result_summary": str(result)[:200]
+                })
+                return result
             
-            # Log successful stats
-            self.shared_memory.set(f"agent_stats:{self.name}", {
-                "last_run": time.time(),
-                "success": True,
-                "result_summary": str(result)[:200]
-            })
-            return result
+            except Exception as e:
+                last_exception_in_retry_loop = e
+                if retries_done < self.max_task_retries:
+                    retries_done += 1
+                    self.logger.warning(f"[{self.name}] Task attempt {retries_done} failed. Retrying... Error: {e}")
+                    time.sleep(min(retries_done * 0.5, 5)) # Simple backoff, capped at 5s
+                else: # Max retries reached
+                    self.logger.error(f"[{self.name}] Task failed after {retries_done + 1} attempts. Last error: {e}")
+                    break # Exit retry loop to proceed with further error handling stages
 
-        except Exception as e:
-            error_entry = {
-                "timestamp": time.time(),
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
+        # --- STAGE 2: Log Initial Error and Check Similarity ---
+        # This stage is reached only if all retries in Stage 1 failed.
+        error_info = {
+            "timestamp": time.time(),
+            "error_type": type(last_exception_in_retry_loop).__name__,
+            "error_message": str(last_exception_in_retry_loop),
+            "traceback": traceback.format_exc()
+        }
+        self._log_error_to_shared_memory(error_info) # Log the definitive error from perform_task attempts
+        _ = self._check_and_log_similar_errors(error_info) # Log if similar error found, result not critical for flow here
 
-            # Retrieve and trim old errors
-            error_key = f"errors:{self.name}"
-            MAX_ERRORS = 50
-            errors = self.shared_memory.get(error_key) or []
-            errors.append(error_entry)
-            if len(errors) > MAX_ERRORS:
-                errors = errors[-MAX_ERRORS:]
-            self.shared_memory.set(error_key, errors)
-
-            # Log failure stats
-            self.shared_memory.set(f"agent_stats:{self.name}", {
-                "last_run": time.time(),
-                "success": False,
-                "error": str(e)
-            })
-
-            self.logger.error(f"[{self.name}] Task failed with error: {e}")
-            self.logger.debug(traceback.format_exc())
-
-            # Match against recent errors for similarity
-            SIMILARITY_THRESHOLD = 0.75
-            new_error = str(e)
-            new_type = type(e).__name__
-
-            for past in reversed(errors[:-1]):
-                past_error = past.get("error", "")
-                past_type = past_error.split(":")[0] if ":" in past_error else ""
-
-                # Match exception type first (e.g., ValueError vs TypeError)
-                if past_type == new_type:
-                    # Check textual similarity
-                    similarity = difflib.SequenceMatcher(None, new_error, past_error).ratio()
-                    if similarity >= SIMILARITY_THRESHOLD:
-                        self.logger.warning(
-                            f"[{self.name}] A similar {new_type} occurred before "
-                            f"(similarity: {similarity:.2f})"
-                        )
-                        break
-
-            return {"status": "failed", "error": str(e)}
-    
-    def alternative_execute(self, task_data):
-        """
-        Fallback logic when normal execution fails or matches a known failure pattern.
-        Attempts to simplify, sanitize, or reroute the input for safer processing.
-        """
+        # --- STAGE 3: Handle Known Issue ---
         try:
-            # Step 1: Sanitize task data (remove noise, normalize casing, trim tokens)
-            if isinstance(task_data, str):
-                clean_data = task_data.strip().lower().replace('\n', ' ')
-            elif isinstance(task_data, dict) and "text" in task_data:
-                clean_data = task_data["text"].strip().lower()
+            self.logger.info(f"[{self.name}] Attempting to handle as known issue: {error_info['error_type']}...")
+            recovery_result = self.handle_known_issue(input_data, error_info) # Pass original input_data
+            
+            # Check if handler successfully resolved it (i.e., did not return a failure dict)
+            if not (isinstance(recovery_result, dict) and recovery_result.get("status") == "failed"):
+                self.logger.info(f"[{self.name}] Task recovered by 'handle_known_issue'.")
+                self.shared_memory.set(f"agent_stats:{self.name}", {
+                    "last_run": time.time(), "success": True, "recovered_by": "handle_known_issue",
+                    "attempts": retries_done + 1, "result_summary": str(recovery_result)[:200]
+                })
+                return recovery_result # Success via known issue handler
             else:
-                clean_data = str(task_data).strip()
+                self.logger.info(f"[{self.name}] 'handle_known_issue' did not resolve the issue: {recovery_result.get('reason')}")
+        except Exception as e_known_issue_handler_crash: # If handle_known_issue itself crashes
+            self.logger.error(f"[{self.name}] The 'handle_known_issue' method itself crashed: {e_known_issue_handler_crash}")
+            self.logger.debug(traceback.format_exc())
+            # Proceed to alternative_execute
 
-            # Step 2: Apply a safer, simplified prompt or fallback logic
-            fallback_prompt = f"Can you try again with simplified input:\n{clean_data}"
-            if hasattr(self, "llm") and callable(getattr(self.llm, "generate", None)):
-                return self.llm.generate(fallback_prompt)
+        # --- STAGE 4: Alternative Execution ---
+        try:
+            self.logger.info(f"[{self.name}] Attempting alternative execution strategy...")
+            alternative_result = self.alternative_execute(input_data, original_error=last_exception_in_retry_loop)
+            
+            # Check if alternative_execute signaled a failure (e.g., returned specific string or dict)
+            is_alt_exec_failure = False
+            if isinstance(alternative_result, str) and "[Fallback failure]" in alternative_result:
+                is_alt_exec_failure = True
+            elif isinstance(alternative_result, dict) and alternative_result.get("status") == "failed":
+                is_alt_exec_failure = True
 
-            # Step 3: If the agent wraps another processor (e.g. GrammarProcessor, LLM), reroute
-            if hasattr(self, "grammar") and callable(getattr(self.grammar, "compose_sentence", None)):
-                facts = {"event": "fallback", "value": clean_data}
-                return self.grammar.compose_sentence(facts)
+            if not is_alt_exec_failure:
+                self.logger.info(f"[{self.name}] Task processed by 'alternative_execute'.")
+                self.shared_memory.set(f"agent_stats:{self.name}", {
+                    "last_run": time.time(), "success": True, "recovered_by": "alternative_execute",
+                    "attempts": retries_done + 1, "result_summary": str(alternative_result)[:200]
+                })
+                return alternative_result # Success via alternative execution
+            else:
+                self.logger.warning(f"[{self.name}] 'alternative_execute' indicated failure or could not process.")
+        except Exception as e_alternative_handler_crash: # If alternative_execute itself crashes
+            self.logger.error(f"[{self.name}] The 'alternative_execute' method itself crashed: {e_alternative_handler_crash}")
+            self.logger.debug(traceback.format_exc())
+            # Proceed to final failure reporting
 
-            # Step 4: Otherwise just echo the cleaned input as confirmation
-            return f"[Fallback response] I rephrased your input: {clean_data}"
+        # --- STAGE 5: Final Failure ---
+        final_error_message = f"All task execution and recovery attempts failed. Original error after retries: {str(last_exception_in_retry_loop)}"
+        self.logger.error(f"[{self.name}] {final_error_message}")
+        self.shared_memory.set(f"agent_stats:{self.name}", {
+            "last_run": time.time(), "success": False, 
+            "error": str(last_exception_in_retry_loop), "recovery_failed": True,
+            "attempts": retries_done + 1
+        })
+        return {"status": "failed", "error": str(last_exception_in_retry_loop), "reason": "All recovery attempts failed."}
 
-        except Exception as e:
-            # Final fallback — very safe and generic
-            return "[Fallback failure] Unable to process your request at this time."
+    def register_known_issue_handler(self, issue_pattern_or_id: str, handler_func: callable):
+        """
+        Registers a handler for a known issue. 
+        The pattern can be a string to check in error messages/types.
+        """
+        if not callable(handler_func):
+            raise ValueError(f"Handler function for '{issue_pattern_or_id}' must be callable.")
+        self._known_issue_handlers[issue_pattern_or_id] = handler_func
+        self.logger.debug(f"[{self.name}] Registered known issue handler for '{issue_pattern_or_id}' using '{handler_func.__name__}'.")
+
+    def handle_known_issue(self, task_data, error_info: dict):
+        """
+        Attempts to recover from known failure patterns by dispatching to registered handlers.
+        Handlers should return the processed result upon success, or a dict with 
+        {"status": "failed", "reason": "..."} if they cannot handle this specific instance or their attempt fails.
+        If a handler itself raises an unhandled exception, it's caught here.
+        """
+        self.logger.debug(f"[{self.name}] Checking known issue handlers for error: type='{error_info.get('error_type')}', msg='{error_info.get('error_message', '')[:100]}...'")
+
+        error_message_lower = error_info.get("error_message", "").lower()
+        error_type_lower = error_info.get("error_type", "").lower()
+
+        for issue_id_pattern, handler_func in self._known_issue_handlers.items():
+            # Match if issue_id_pattern (case-insensitive) is in error message or type
+            pattern_lower = issue_id_pattern.lower()
+            if pattern_lower in error_message_lower or pattern_lower == error_type_lower: # Exact match for type, substring for message
+                self.logger.info(f"[{self.name}] Potential known issue match with pattern '{issue_id_pattern}'. Attempting handler '{handler_func.__name__}'.")
+                try:
+                    result = handler_func(task_data, error_info) # Handler attempts to resolve
+                    
+                    # If handler explicitly returns a dict with "status": "failed", it means it matched but couldn't fix THIS instance.
+                    if isinstance(result, dict) and result.get("status") == "failed":
+                        self.logger.info(f"[{self.name}] Handler '{handler_func.__name__}' for '{issue_id_pattern}' reported it could not resolve: {result.get('reason')}")
+                        # In this design, if a specific handler matches and explicitly fails, we stop and report this failure.
+                        # Alternative: `continue` to try other handlers if the match was weak or handler was too specific.
+                        return result 
+                    else: # Handler succeeded (returned something not a failure dict)
+                        self.logger.info(f"[{self.name}] Known issue '{issue_id_pattern}' handled successfully by '{handler_func.__name__}'.")
+                        return result 
+                except Exception as handler_ex: # Handler itself crashed
+                    self.logger.error(f"[{self.name}] Handler '{handler_func.__name__}' for known issue '{issue_id_pattern}' raised an exception: {handler_ex}")
+                    self.logger.debug(traceback.format_exc())
+                    return {"status": "failed", "reason": f"Handler for '{issue_id_pattern}' crashed: {handler_ex}"}
+        
+        self.logger.info(f"[{self.name}] No specific known issue handler matched or resolved the error.")
+        return {"status": "failed", "reason": "No applicable or successful known issue handler found."}
     
-    def is_similar(self, task_data, past_task_data):
+    def alternative_execute(self, task_data, original_error=None):
         """
-        Compares current task with past task to detect similarity.
-        Uses key overlap and value resemblance heuristics.
+        Fallback logic when normal execution and known issue handling fail.
+        It tries a series of increasingly general strategies to process the task_data.
+        Args:
+            task_data: The original input data.
+            original_error: The initial exception that triggered fallbacks. (Optional, for context)
         """
-        if type(task_data) != type(past_task_data):
+        self.logger.info(f"[{self.name}] Entering alternative execution for task (original error: {str(original_error)[:100]}...).")
+        
+        cleaned_input_str = ""
+        # Strategy 1: Generic Input Sanitization & Simplification to a string
+        try:
+            if isinstance(task_data, str):
+                cleaned_input_str = task_data.strip().lower().replace('\n', ' ').replace('\r', '')
+            elif isinstance(task_data, dict):
+                # Prioritize common text fields, then stringify if not found or not string
+                text_content = task_data.get("text", task_data.get("query", task_data.get("user_input", task_data.get("message"))))
+                if isinstance(text_content, str):
+                    cleaned_input_str = text_content.strip().lower().replace('\n', ' ').replace('\r', '')
+                else: # Fallback to stringifying the whole dict if no primary text field or it's not a string
+                    cleaned_input_str = json.dumps(task_data, ensure_ascii=False, default=str) # Robust stringification
+                    cleaned_input_str = cleaned_input_str.strip().lower().replace('\n', ' ').replace('\r', '')
+            else: # For lists, other objects
+                cleaned_input_str = str(task_data).strip().lower().replace('\n', ' ').replace('\r', '')
+            
+            # Truncate very long stringified complex objects to prevent overly long prompts/logs
+            if len(cleaned_input_str) > self.config.get('alt_exec_max_clean_len', 500): 
+                cleaned_input_str = cleaned_input_str[:self.config.get('alt_exec_max_clean_len', 500) -3] + "..."
+            
+            self.logger.debug(f"[{self.name}] Alt exec: Sanitized/simplified input string: '{cleaned_input_str[:100]}...'")
+        except Exception as e_sanitize:
+            self.logger.warning(f"[{self.name}] Alt exec: Sanitization/simplification step failed: {e_sanitize}. Using raw task_data as string for fallback.")
+            cleaned_input_str = str(task_data)[:self.config.get('alt_exec_max_clean_len', 500)] # Best effort if sanitization crashes
+
+        # Strategy 2: Try with a very generic LLM prompt if an LLM component is available
+        llm_component = getattr(self, "llm", None) # Safely get llm
+        if llm_component and callable(getattr(llm_component, "generate", None)):
+            fallback_prompt = (
+                f"The primary processing of an input failed with an error: '{str(original_error)[:150]}'. "
+                f"The (simplified) input that caused the failure was: '{cleaned_input_str}'. "
+                f"Please provide a safe, general-purpose response, summary, or interpretation based on this input and error context."
+            )
+            self.logger.info(f"[{self.name}] Alt exec: Trying LLM with generic fallback prompt.")
+            try:
+                llm_result = llm_component.generate(fallback_prompt)
+                response_text = None
+                if isinstance(llm_result, str): response_text = llm_result
+                elif isinstance(llm_result, dict): response_text = llm_result.get("text", llm_result.get("response", llm_result.get("completion")))
+                
+                if response_text and isinstance(response_text, str) and response_text.strip():
+                    return f"[Fallback LLM Response] {response_text.strip()}" # Success for this strategy
+            except Exception as e_llm:
+                self.logger.warning(f"[{self.name}] Alt exec: LLM fallback attempt failed: {e_llm}")
+                # Fall through to next strategy
+
+        # Strategy 3: Simplified Grammar Processor (if available and applicable for short inputs)
+        grammar_component = getattr(self, "grammar", None)
+        if grammar_component and callable(getattr(grammar_component, "compose_sentence", None)):
+            # Only attempt if cleaned_input_str is short and potentially structured
+            if cleaned_input_str and len(cleaned_input_str.split()) < 15: 
+                facts_for_grammar = {"event": "fallback_processing_attempt", "input_snippet": cleaned_input_str[:60]}
+                self.logger.info(f"[{self.name}] Alt exec: Trying GrammarProcessor with simple facts from input.")
+                try:
+                    grammar_result = grammar_component.compose_sentence(facts_for_grammar)
+                    if grammar_result and isinstance(grammar_result, str) and grammar_result.strip():
+                        return f"[Fallback Grammar Response] {grammar_result.strip()}" # Success
+                except Exception as e_grammar:
+                    self.logger.warning(f"[{self.name}] Alt exec: GrammarProcessor fallback attempt failed: {e_grammar}")
+                    # Fall through
+
+        # Strategy 4: Echo cleaned/simplified input as a last resort before total failure message
+        if cleaned_input_str: # If we have some form of simplified input
+            self.logger.info(f"[{self.name}] Alt exec: Echoing cleaned/simplified input string as final fallback response.")
+            return f"[Fallback Response] Input processed after error. Simplified input: {cleaned_input_str}"
+        else: # If even cleaning/simplification failed or produced nothing usable
+            self.logger.warning(f"[{self.name}] Alt exec: No usable cleaned input to echo. Returning total failure message.")
+            return "[Fallback failure] Unable to process your request via alternative methods, and input could not be simplified or interpreted."
+
+
+    def is_similar(self, task_data_1: Any, task_data_2: Any) -> bool:
+        """
+        Compares two task_data inputs for similarity.
+        Uses type checking, string equality (with fuzzy matching), and dictionary heuristics.
+        """
+        if type(task_data_1) != type(task_data_2):
             return False
-    
+
         # Handle simple text-based tasks
-        if isinstance(task_data, str) and isinstance(past_task_data, str):
-            return task_data.strip().lower() == past_task_data.strip().lower()
-    
+        if isinstance(task_data_1, str): # type(task_data_2) is also str due to above check
+            s1 = task_data_1.strip().lower()
+            s2 = task_data_2.strip().lower()
+            if not s1 and not s2: return True # Both empty strings are similar
+            if not s1 or not s2: return False # One empty, one not
+            # Using SequenceMatcher for string similarity, threshold can be configured
+            return difflib.SequenceMatcher(None, s1, s2).ratio() > self.config.get('task_similarity_str_threshold', 0.9)
+
         # Handle dict-based structured tasks
-        if isinstance(task_data, dict) and isinstance(past_task_data, dict):
-            shared_keys = set(task_data.keys()) & set(past_task_data.keys())
-            similarity_score = 0
+        if isinstance(task_data_1, dict): # task_data_2 is also dict
+            keys1 = set(task_data_1.keys())
+            keys2 = set(task_data_2.keys())
+            
+            if not keys1 and not keys2: return True # Both empty dicts
+            if not keys1 or not keys2: return False # One empty
+
+            # Jaccard similarity for keys
+            key_intersection = len(keys1.intersection(keys2))
+            key_union = len(keys1.union(keys2))
+            key_jaccard_sim = key_intersection / key_union if key_union > 0 else 0.0
+
+            # If key structure is too different, consider them not similar
+            if key_jaccard_sim < self.config.get('task_similarity_dict_key_jaccard_threshold', 0.5):
+                return False
+
+            shared_keys = keys1.intersection(keys2)
+            if not shared_keys: # No common keys, but Jaccard might be high if key sets are small subsets
+                 return key_jaccard_sim > self.config.get('task_similarity_dict_key_jaccard_min_for_no_shared', 0.7) 
+
+            value_similarity_scores = []
             for key in shared_keys:
-                if isinstance(task_data[key], str) and isinstance(past_task_data[key], str):
-                    if task_data[key].strip().lower() == past_task_data[key].strip().lower():
-                        similarity_score += 1
-            # Consider similar if 50% or more keys match closely
-            return similarity_score >= (len(shared_keys) / 2)
-    
-        return False
+                val1, val2 = task_data_1[key], task_data_2[key]
+                # Recursively call is_similar for nested structures, or direct comparison
+                if isinstance(val1, (dict, str, list, tuple)): # Types that is_similar handles well
+                    value_similarity_scores.append(1.0 if self.is_similar(val1, val2) else 0.0)
+                elif type(val1) == type(val2) and isinstance(val1, (int, float, bool)):
+                     value_similarity_scores.append(1.0 if val1 == val2 else 0.0) # Simple equality for primitives
+                else: # Different types or unhandled complex types for values
+                    value_similarity_scores.append(0.0) 
+            
+            if not value_similarity_scores: # Should not happen if shared_keys is non-empty
+                return key_jaccard_sim > self.config.get('task_similarity_dict_key_jaccard_min_for_no_shared', 0.7) 
 
-    def handle_known_issue(self, task_data, error):
+            avg_value_similarity = sum(value_similarity_scores) / len(value_similarity_scores)
+            
+            # Combine key similarity and value similarity
+            # Example: require high key similarity AND high average value similarity
+            return (key_jaccard_sim >= self.config.get('task_similarity_dict_final_key_threshold', 0.7) and 
+                    avg_value_similarity >= self.config.get('task_similarity_dict_final_value_threshold', 0.7))
+
+        # Handle list/tuple based tasks
+        if isinstance(task_data_1, (list, tuple)): # task_data_2 also same type
+            if len(task_data_1) != len(task_data_2): return False
+            if not task_data_1: return True # Both empty sequences
+
+            # Compare elements using is_similar for robustness
+            element_similarities = []
+            for item1, item2 in zip(task_data_1, task_data_2):
+                element_similarities.append(1.0 if self.is_similar(item1, item2) else 0.0)
+            
+            if not element_similarities: return True # Should not happen if len > 0
+            avg_element_similarity = sum(element_similarities) / len(element_similarities)
+            return avg_element_similarity >= self.config.get('task_similarity_seq_elem_threshold', 0.8)
+
+        # Fallback for other directly comparable types (bool, NoneType, numbers if not caught by dict logic)
+        return task_data_1 == task_data_2
+
+    def extract_performance_metrics(self, result: Any) -> dict:
         """
-        Attempt to recover from known failure patterns.
-        Could apply input transformation or fallback logic.
+        Base implementation. Subclasses should override this to extract
+        meaningful performance metrics from their specific `perform_task` result.
         """
-        self.logger.warning(f"Handling known issue from error: {error.get('error')}")
-    
-        # Fallback strategy #1: remove problematic characters
-        if isinstance(task_data, str):
-            cleaned = task_data.replace("🧠", "").replace("🔥", "")
-            self.logger.info(f"Retrying with cleaned input: {cleaned}")
-            return self.perform_task(cleaned)
+        metrics = {}
+        # Example: if result is a dict and contains common metric keys
+        if isinstance(result, dict):
+            for key in ['accuracy', 'precision', 'recall', 'f1_score', 'latency_ms', 'throughput']:
+                if key in result and isinstance(result[key], (int, float)):
+                    metrics[key] = result[key]
+        # This base version is very generic. Subclasses are expected to provide specific extraction.
+        if not metrics:
+            self.logger.debug(f"[{self.name}] No standard performance metrics extracted from result of type {type(result)}.")
+        return metrics
 
-        # Fallback strategy #2: modify specific fields in structured input
-        if isinstance(task_data, dict):
-            cleaned_data = task_data.copy()
-            for key, val in cleaned_data.items():
-                if isinstance(val, str) and "emoji" in error.get("error", ""):
-                    cleaned_data[key] = val.encode("ascii", "ignore").decode()
-            self.logger.info("Retrying task with cleaned structured data.")
-            return self.perform_task(cleaned_data)
-    
-        # Fallback strategy #3: return a graceful degradation response
-        self.logger.warning("Returning fallback response for unresolvable input.")
-        return {"status": "failed", "reason": "Repeated known issue", "fallback": True}
-
-    def extract_performance_metrics(self, result):
-        """Override to extract performance from result"""
-        return {}  # Subclasses should return a dict like {'accuracy': 0.93}
-
-    def perform_task(self, task_data):
+#    @abc.abstractmethod
+    def perform_task(self, task_data: Any) -> Any:
         """Handle query execution as the primary task"""
         self.logger.info(f"Executing task with data: {task_data}")
     
@@ -218,176 +529,547 @@ class BaseAgent:
             raise ValueError("Unsupported task format")
 
     def evaluate_performance(self, metrics: dict):
-        """Evaluate and log performance, and check if retraining is needed"""
-        self.performance_metrics.update(metrics)
-        self.log_evaluation_result(metrics)
+        """
+        Evaluates performance based on extracted metrics, logs them, and checks thresholds for retraining.
+        """
+        if not metrics or not isinstance(metrics, dict): 
+            self.logger.debug(f"[{self.name}] Skipping performance evaluation: No valid metrics provided.")
+            return
+
+        # Update rolling performance metrics (using the lazy property)
+        # Ensure performance_metrics component is initialized and is the expected defaultdict
+        perf_metrics_component = self.performance_metrics 
+        if not isinstance(perf_metrics_component, defaultdict):
+            self.logger.warning(f"[{self.name}] 'performance_metrics' component is not a defaultdict. Cannot update rolling metrics.")
+        else:
+            for key, value in metrics.items():
+                if isinstance(value, (int, float, bool)): # Only store simple numeric/boolean metrics in deques
+                    perf_metrics_component[key].append(value)
+                else:
+                    self.logger.debug(f"[{self.name}] Skipping rolling update for non-scalar metric '{key}'.")
+
+
+        self.log_evaluation_result(metrics) # Log current evaluation to file
     
-        for key, value in metrics.items():
-            threshold = self.retraining_thresholds.get(key)
-            if threshold is not None:
-                if isinstance(threshold, (int, float)):
-                    if value < threshold:
-                        self.logger.warning(f"[{self.name}] Metric '{key}' below threshold: {value} < {threshold}")
+        # Check retraining thresholds
+        for metric_key, current_value in metrics.items():
+            threshold_info = self.retraining_thresholds.get(metric_key) # Could be a value or a dict like {'value': X, 'condition': 'less_than'}
+            
+            if threshold_info is not None:
+                threshold_value = threshold_info
+                condition = 'less_than' # Default condition: trigger if current_value is less than threshold_value (lower is worse)
+
+                if isinstance(threshold_info, dict):
+                    threshold_value = threshold_info.get('value')
+                    condition = threshold_info.get('condition', 'less_than')
+
+                if threshold_value is None: continue
+
+                if isinstance(current_value, (int, float)) and isinstance(threshold_value, (int, float)):
+                    trigger_retraining = False
+                    if condition == 'less_than' and current_value < threshold_value:
+                        trigger_retraining = True
+                    elif condition == 'greater_than' and current_value > threshold_value: # e.g., error rate too high
+                        trigger_retraining = True
+                    
+                    if trigger_retraining:
+                        self.logger.warning(
+                            f"[{self.name}] Performance alert: Metric '{metric_key}' ({current_value}) "
+                            f"violated threshold (condition: {condition} {threshold_value})."
+                        )
                         self.flag_for_retraining()
+                else:
+                    self.logger.debug(f"[{self.name}] Metric '{metric_key}' or its threshold is not numeric. Skipping threshold check.")
+
 
     def flag_for_retraining(self):
-        """Request retraining for this agent"""
-        self.shared_memory.set(f"retraining_flag:{self.name}", True)
-        self.logger.info(f"[{self.name}] Flagged for retraining.")
+        """Sets a flag in shared memory indicating this agent needs retraining."""
+        flag_key = f"retraining_flag:{self.name}"
+        self.shared_memory.set(flag_key, True)
+        self.logger.info(f"[{self.name}] Agent flagged for retraining via key '{flag_key}'.")
 
     def log_evaluation_result(self, metrics: dict):
-        """Log the evaluation with timestamp and config to disk"""
+        """Logs the current evaluation metrics to a JSONL file."""
+        # Sanitize config for logging: avoid logging sensitive info or overly large structures
+        config_summary = {
+            k: v for k, v in self.config.items() 
+            if k not in ['defer_initialization', 'memory_profile', 'network_compression'] and not isinstance(v, (dict, list))
+        } # Log only simple config values, or define a specific subset
+
         log_entry = {
             "timestamp": time.time(),
-            "agent": self.name,
-            "config": self.config,
+            "agent_name": self.name,
+            "agent_config_summary": config_summary, 
             "metrics": metrics
         }
-        path = os.path.join(self.evaluation_log_dir, f"{self.name}.jsonl")
-        with open(path, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
+        path = os.path.join(self.evaluation_log_dir, f"{self.name}_eval.jsonl")
+        try:
+            with open(path, "a", encoding="utf-8") as f: # Specify encoding
+                f.write(json.dumps(log_entry, default=str) + "\n") # default=str for non-serializable
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Failed to write evaluation log to '{path}': {e}")
 
     class SharedMemoryView:
-        """Lightweight memory access with LRU caching"""
-        __slots__ = ['_source', '_cache', '_cache_size']
+        """Lightweight memory access view with its own small LRU cache for frequently accessed keys."""
+        __slots__ = ['_source_shared_memory', '_cache', '_cache_max_size'] # _cache_size renamed to _cache_max_size
         
-        def __init__(self, shared_memory):
-            self._source = shared_memory
+        def __init__(self, source_shared_memory_instance): 
+            if source_shared_memory_instance is None:
+                raise ValueError("SharedMemoryView requires a valid shared_memory instance.")
+            self._source_shared_memory = source_shared_memory_instance
             self._cache = OrderedDict()
-            self._cache_size = 100
+            # Attempt to get cache size from source config, otherwise use a small default
+            default_view_cache_size = 20 
+            if hasattr(self._source_shared_memory, 'config') and isinstance(self._source_shared_memory.config, dict):
+                self._cache_max_size = self._source_shared_memory.config.get('memory_view_cache_size', default_view_cache_size)
+            else:
+                self._cache_max_size = default_view_cache_size
             
-        def get(self, key):
+        def get(self, key: str, default: Any = None) -> Any:
+            """Gets a value from the cache or falls back to the source shared memory."""
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
-
-            # Fetch from source and cache    
-            value = self._source.get(key)
-            self._cache[key] = value
-
-            # Enforce cache size limit
-            if len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
-
+   
+            value = self._source_shared_memory.get(key, default) # Pass default to source
+            
+            # Only cache if the value is not the default (i.e., key was found in source)
+            # and if caching is enabled (cache_max_size > 0)
+            if value != default and self._cache_max_size > 0:
+                self._cache[key] = value
+                self._cache.move_to_end(key) # New/updated items go to the end (most recently used)
+                if len(self._cache) > self._cache_max_size:
+                    self._cache.popitem(last=False) # Evict least recently used
             return value
 
-        def set(self, key, value):
-            # Update both cache and source
-            self._source.set(key, value)
-            if key in self._cache:
+        def set(self, key: str, value: Any):
+            """Sets a value in the source shared memory and updates the local cache."""
+            self._source_shared_memory.set(key, value)
+            
+            if self._cache_max_size > 0: # Only update cache if enabled
                 self._cache[key] = value
+                self._cache.move_to_end(key)
+                if len(self._cache) > self._cache_max_size:
+                    self._cache.popitem(last=False)
 
-        def get_usage_stats(self):
+
+        def get_usage_stats(self) -> dict:
+            """Returns statistics about this memory view's cache."""
+            source_cache_hit_rate = 0.0 # Default if source doesn't provide it
+            if hasattr(self._source_shared_memory, 'get_usage_stats'): 
+                source_stats = self._source_shared_memory.get_usage_stats()
+                if isinstance(source_stats, dict):
+                    source_cache_hit_rate = source_stats.get('hit_rate', 0.0)
+            
             return {
-                'cache_size': len(self._cache),
-                'hit_rate': self._source.get('cache_hit_rate', 0)
+                'view_cache_current_size': len(self._cache),
+                'view_cache_max_size': self._cache_max_size,
+                'source_shared_memory_type': type(self._source_shared_memory).__name__,
+                'source_cache_hit_rate_estimate': source_cache_hit_rate 
             }
 
-    def optimized_step(self, state):
-        """Memory-aware step method template"""
-        if not hasattr(self, '_policy_net'):
-            self._policy_net = self.create_lightweight_network()
-        return self._policy_net.predict(state)
+    # --- Template methods for subclasses (intended to be overridden or used as examples) ---
 
-    # Template methods for subclasses
+    def optimized_step(self, state: Any) -> Any:
+        """
+        Template for a memory-aware step method, typically for reinforcement learning agents.
+        Subclasses should override this with their specific model and logic.
+        """
+        if not hasattr(self, '_policy_net_instance_cache'): # Use a more descriptive name
+            # Create and cache the network instance
+            # Dimensions should ideally come from agent's config or environment spec
+            self._policy_net_instance_cache = self.create_lightweight_network(input_dim=10, output_dim=2) # Example dims
+        return self._policy_net_instance_cache.predict(state)
+
     def _init_agent_specific_components(self):
-        """Initialize agent-specific tools, modules, or stateful processors."""
-        # Example: Load grammar model, setup vision encoders, or initialize embeddings
-        if hasattr(self, "grammar"):
-            self.grammar.load_rules()
-        if hasattr(self, "vision_model"):
-            self.vision_model.initialize()
-        self.logger.info(f"[{self.name}] Agent-specific components initialized.")
+        """
+        Template for subclasses to initialize their unique components (e.g., models, tools).
+        This method is intended to be called by the subclass's __init__ AFTER super().__init__().
+        """
+        self.logger.info(f"[{self.name}] Base `_init_agent_specific_components` called. Subclass should override if it has specific components to initialize.")
+        # Example:
+        # if self.config.get("use_vision_model"):
+        #     self.vision_model = self.agent_factory.create("VisionEncoder", self.config.get("vision_model_config"))
+        #     self.vision_model.initialize() # Assuming VisionEncoder has an initialize method
 
     def _warm_start_if_available(self):
-        """Restore from memory cache if recent session exists."""
-        warm_key = f"warm_state:{self.name}"
-        cached = self.shared_memory.get(warm_key)
-        if cached:
-            self.logger.info(f"[{self.name}] Warm-starting from cached memory state.")
-            try:
-                self.__dict__.update(cached)
-            except Exception as e:
-                self.logger.warning(f"[{self.name}] Warm-start failed: {str(e)}")
+        """
+        Template for subclasses to restore their state from shared memory if available.
+        Typically called by a subclass's __init__ method.
+        """
+        warm_start_key = f"warm_state:{self.name}"
+        cached_state_data = self.shared_memory.get(warm_start_key)
+        
+        if cached_state_data and isinstance(cached_state_data, dict):
+            self.logger.info(f"[{self.name}] Attempting warm-start from cached state found at key '{warm_start_key}'.")
+            # Define attributes that are safe and expected to be warm-started
+            # WARNING: Directly using self.__dict__.update(cached_state_data) is DANGEROUS 
+            # as it can overwrite methods or critical internal state.
+            expected_warm_attributes = getattr(self, "warm_start_attributes", []) # Subclass can define this list
+            
+            attributes_loaded = 0
+            for attr_name, attr_value in cached_state_data.items():
+                if attr_name in expected_warm_attributes:
+                    if hasattr(self, attr_name) and not callable(getattr(self, attr_name)): # Only update non-callable attributes
+                        setattr(self, attr_name, attr_value)
+                        attributes_loaded +=1
+                    else:
+                        self.logger.warning(f"[{self.name}] Warm-start: Skipping '{attr_name}', not a safe non-callable attribute or not in expected_warm_attributes.")
+            
+            if attributes_loaded > 0:
+                 self.logger.info(f"[{self.name}] Warm-start successful for {attributes_loaded} attribute(s).")
+            else:
+                 self.logger.info(f"[{self.name}] Warm-start: No matching attributes found in cached state or 'warm_start_attributes' not defined.")
 
-    def create_lightweight_network(self):
-        """Returns a basic shallow policy or prediction model stub."""
-        import numpy as np
+        else:
+            self.logger.info(f"[{self.name}] No valid warm-start state found at key '{warm_start_key}'. Proceeding with fresh initialization.")
+
+
+    def create_lightweight_network(self, input_dim: int = 10, output_dim: int = 2) -> object:
+        """
+        Returns a basic, shallow neural network-like structure for demonstration or simple tasks.
+        This is a placeholder; real agents would use more sophisticated models (e.g., PyTorch nn.Module).
+        """
+        
+
         class SimplePolicyNet:
-            def __init__(self):
-                self.weights = np.random.randn(10, 2) * 0.05
+            def __init__(self, input_dim: int, output_dim: int):
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                # Initialize weights and biases (e.g., Xavier/He initialization for small nets)
+                self.weights = np.random.randn(input_dim, output_dim).astype(np.float32) * np.sqrt(1.0 / input_dim)
+                self.bias = np.zeros(output_dim, dtype=np.float32)
+                logging.debug(f"SimplePolicyNet initialized with input_dim={input_dim}, output_dim={output_dim}")
 
-            def predict(self, state):
-                state_vec = np.array(state)
-                logits = np.dot(state_vec, self.weights)
-                return np.argmax(logits)
+            def predict(self, state: Any) -> Any:
+                # Ensure state is a 1D numpy array of the correct input dimension
+                try:
+                    state_vec = np.array(state, dtype=np.float32).flatten()
+                    if state_vec.shape[0] != self.input_dim:
+                        raise ValueError(f"Input state dimension {state_vec.shape[0]} "
+                                         f"does not match network input dimension {self.input_dim}")
+                except Exception as e:
+                    logging.error(f"SimplePolicyNet: Error processing input state: {e}")
+                    # Return a default action or raise, depending on desired behavior
+                    return np.random.randint(self.output_dim) # Example: random action on error
 
-        return SimplePolicyNet()
+                logits = np.dot(state_vec, self.weights) + self.bias
+                # For classification, typically argmax of logits or softmax for probabilities
+                return np.argmax(logits) 
+                # To return probabilities:
+                # exp_logits = np.exp(logits - np.max(logits)) # Stabilized softmax
+                # probs = exp_logits / np.sum(exp_logits)
+                # return probs
+        
+        return SimplePolicyNet(input_dim=input_dim, output_dim=output_dim)
     
-    def update_projection(self, reward_scores, lr):
-        """Update projection layer weights using policy gradient"""
-        # Convert rewards to tensor
-        rewards = torch.tensor(reward_scores, dtype=torch.float32)
-        
-        # Calculate gradient (maximize reward)
-        grad = torch.autograd.grad(
-            outputs=torch.sum(self.projection.data * rewards),
-            inputs=self.projection.data
-        )[0]
-        
-        # Update with momentum
-        self.projection.grad = grad
-        self.projection.data += lr * grad
-        
-        # Apply constraints
-        torch.nn.utils.clip_grad_norm_(self.projection.data, 1.0)
-        self.projection.data = torch.clamp(self.projection.data, -1.0, 1.0)
+    def update_projection(self, reward_scores: list, lr: float):
+        """
+        Placeholder/Template for updating a 'projection' attribute, possibly a torch.Tensor.
+        This method's logic is highly dependent on how `self.projection` is used in the agent's
+        architecture and the learning algorithm (e.g., policy gradients, value-based).
+        The current implementation is a HEURISTIC and not a standard gradient update.
+        It assumes `self.projection` is a `torch.Tensor` and requires gradients.
+        """
+        if not hasattr(self, 'projection') or not isinstance(getattr(self, 'projection', None), torch.Tensor):
+            self.logger.warning(f"[{self.name}] 'projection' attribute not found or is not a torch.Tensor. Skipping 'update_projection'.")
+            return
+
+        projection_tensor = self.projection
+
+        if not projection_tensor.requires_grad:
+            self.logger.warning(f"[{self.name}] 'projection' tensor does not require_grad. It might not be part of an optimizable model.")
+            # For this heuristic update, we might proceed even if requires_grad is False,
+            # but for actual backpropagation, it would need to be True and part of a graph.
+            # projection_tensor.requires_grad_(True) # This is generally not done here.
+
+        try:
+            rewards = torch.tensor(reward_scores, dtype=torch.float32, device=projection_tensor.device)
+            
+            # --- This is a HEURISTIC update rule ---
+            # It assumes a direct, positive correlation between the projection tensor's values
+            # and the rewards obtained. This is NOT a standard policy gradient update.
+            # A proper PG update would involve gradients of action log-probabilities w.r.t. model parameters.
+            
+            # Calculate a pseudo-gradient based on mean reward.
+            # If mean reward is positive, "reinforce" current projection values.
+            # If mean reward is negative, "discourage" (not implemented here to keep it simple).
+            mean_reward = rewards.mean()
+            
+            if mean_reward != 0: # Avoid division by zero or no change if reward is zero
+                # Heuristic: scale the projection by the mean reward.
+                # This is more like a scaling factor than a gradient.
+                # For an actual gradient, one would use projection_tensor.grad.
+                pseudo_gradient_direction = torch.sign(projection_tensor.data) * mean_reward # Scale by sign and reward
+                
+                # Apply update directly to data (if not using an optimizer for this tensor)
+                with torch.no_grad(): # Ensure this operation is not tracked for further gradients
+                    projection_tensor.data += lr * pseudo_gradient_direction
+                    
+                    # Optional: Apply constraints like clamping or normalization
+                    # projection_tensor.data = torch.clamp(projection_tensor.data, -1.0, 1.0)
+                    # projection_tensor.data /= torch.norm(projection_tensor.data) + 1e-6 # Normalize
+
+                self.logger.debug(f"[{self.name}] Heuristically updated 'projection' tensor with lr={lr}, mean_reward={mean_reward:.4f}.")
+            else:
+                self.logger.debug(f"[{self.name}] 'projection' tensor not updated as mean_reward is zero.")
+
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Error in 'update_projection': {e}")
+            self.logger.debug(traceback.format_exc())
+
 
 class LightMetricStore:
-    """Lightweight metric tracking for performance and memory"""
+    """Lightweight metric tracking for performance (timings) and memory usage changes."""
     def __init__(self):
         self.metrics = {
-            'timings': {},
-            'memory_usage': {}
+            'timings': defaultdict(list),      # category: {metric_name: [durations]}
+            'memory_deltas': defaultdict(list) # category: {metric_name: [memory_deltas_mb]}
         }
+        self._start_times = {} # (category, metric_name): start_time_perf_counter
+        self._start_memory_rss = {} # (category, metric_name): start_memory_rss_bytes
 
-    def start_tracking(self, metric_name: str):
-        """Start tracking a metric"""
-        self.metrics['timings'][metric_name] = time.time()
-        self.metrics['memory_usage'][metric_name] = self._get_current_memory()
+    def start_tracking(self, metric_name: str, category: str = "default"):
+        """Start tracking a specific operation under a category."""
+        key = (category, metric_name)
+        self._start_times[key] = time.perf_counter() 
+        try:
+            import psutil
+            self._start_memory_rss[key] = psutil.Process().memory_info().rss 
+        except ImportError:
+            if key not in self._start_memory_rss: # Log warning only once per metric start
+                 logging.debug("psutil not installed. Memory delta tracking will be zero for LightMetricStore.")
+            self._start_memory_rss[key] = 0 # psutil not available, store 0
 
-    def stop_tracking(self, metric_name: str):
-        """Stop tracking and calculate deltas"""
-        if metric_name in self.metrics['timings']:
-            self.metrics['timings'][metric_name] = time.time() - self.metrics['timings'][metric_name]
-        if metric_name in self.metrics['memory_usage']:
-            self.metrics['memory_usage'][metric_name] = self._get_current_memory() - self.metrics['memory_usage'][metric_name]
+    def stop_tracking(self, metric_name: str, category: str = "default"):
+        """Stop tracking and record the duration and memory delta."""
+        key = (category, metric_name)
+        
+        # Record timing
+        if key in self._start_times:
+            duration_s = time.perf_counter() - self._start_times.pop(key)
+            if category not in self.metrics['timings']: self.metrics['timings'][category] = defaultdict(list)
+            self.metrics['timings'][category][metric_name].append(duration_s)
+        else:
+            logging.warning(f"Metric ('{category}', '{metric_name}') timing was stopped without being started.")
 
-    def _get_current_memory(self) -> float:
-        """Get current process memory in MB"""
-        import psutil
-        return psutil.Process().memory_info().rss / 1024 ** 2
+        # Record memory usage delta
+        if key in self._start_memory_rss:
+            start_rss = self._start_memory_rss.pop(key)
+            mem_delta_mb = 0.0
+            if start_rss != 0: # Implies psutil was available at start
+                try:
+                    import psutil
+                    current_rss = psutil.Process().memory_info().rss
+                    mem_delta_mb = (current_rss - start_rss) / (1024 ** 2)
+                except ImportError:
+                    pass # Already logged, delta remains 0
+            
+            if category not in self.metrics['memory_deltas']: self.metrics['memory_deltas'][category] = defaultdict(list)
+            self.metrics['memory_deltas'][category][metric_name].append(mem_delta_mb)
+        else:
+            logging.warning(f"Metric ('{category}', '{metric_name}') memory tracking was stopped without being started.")
 
-    def get_metrics_report(self) -> str:
-        """Generate formatted metrics report"""
-        return json.dumps(self.metrics, indent=2)
+    def get_metrics_summary(self, category: str = "default") -> dict:
+        """Generate a summary (e.g., average) of metrics for a category."""
+        summary = {}
+        if category in self.metrics['timings']:
+            summary['timings_avg_s'] = {
+                name: sum(values)/len(values) if values else 0 
+                for name, values in self.metrics['timings'][category].items()
+            }
+        if category in self.metrics['memory_deltas']:
+            summary['memory_deltas_avg_mb'] = {
+                name: sum(values)/len(values) if values else 0 
+                for name, values in self.metrics['memory_deltas'][category].items()
+            }
+        return summary
+
+    def get_all_metrics_json(self, pretty: bool = True) -> str:
+        """Generate a JSON string of all raw recorded metrics."""
+        if pretty:
+            return json.dumps(self.metrics, indent=2, default=lambda o: str(o)) # Handle defaultdict
+        return json.dumps(self.metrics, default=lambda o: str(o))
+
 
 class LazyAgent:
     """
-    Wrapper for deferred initialization of learning sub-agents.
-    Executes creation only when first accessed.
+    Wrapper for deferred initialization of an object (often an agent).
+    The initialization function (`init_fn`) is called only when an attribute 
+    of the wrapped object is first accessed.
     """
-    def __init__(self, init_fn):
-        self._init_fn = init_fn
-        self._agent = None
+    _instance = None # Class variable to store the actual wrapped object instance
+    _initialized = False # Flag to track if _init_fn has been called
 
-    def __getattr__(self, item):
-        if self._agent is None:
-            self._agent = self._init_fn()
-        return getattr(self._agent, item)
+    def __init__(self, init_fn: callable): 
+        if not callable(init_fn):
+            raise ValueError("LazyAgent's init_fn must be a callable.")
+        self._init_fn = init_fn
+        # Note: _instance and _initialized are reset per instance by __getattr__ logic
+        # Making them instance variables for clarity if multiple LazyAgent instances are used for different objects
+        self._instance_local = None 
+        self._initialized_local = False
+        self.logger = logging.getLogger(f"{self.__class__.__name__}[{init_fn.__name__ if hasattr(init_fn, '__name__') else 'anonymous_fn'}]")
+
+
+    def _ensure_initialized(self):
+        """Internal helper to initialize the wrapped object if not already done."""
+        if not self._initialized_local:
+            self.logger.debug(f"Initializing wrapped object...")
+            try:
+                self._instance_local = self._init_fn()
+                if self._instance_local is None:
+                    self.logger.error("Initialization function returned None. Wrapped object cannot be used.")
+                    # Consider raising an error here if None is an invalid state
+                    # raise RuntimeError("LazyAgent's init_fn returned None.")
+                else:
+                    self.logger.debug(f"Wrapped object of type '{type(self._instance_local).__name__}' initialized successfully.")
+            except Exception as e:
+                self.logger.error(f"Error during lazy initialization of wrapped object: {e}")
+                self.logger.debug(traceback.format_exc())
+                # self._instance_local remains None, getattr will likely fail or an error should be raised
+                raise # Re-raise the exception to make the failure visible
+            finally:
+                self._initialized_local = True # Mark as initialized even if it failed, to prevent re-attempts
+
+
+    def __getattr__(self, name: str) -> Any:
+        """
+        Initializes the wrapped object if necessary, then delegates attribute access.
+        """
+        self._ensure_initialized() # Initialize if not already
+        
+        if self._instance_local is None: # If initialization failed or returned None
+            raise AttributeError(
+                f"Wrapped object in LazyAgent is None (likely due to initialization failure). "
+                f"Cannot access attribute '{name}'."
+            )
+            
+        try:
+            return getattr(self._instance_local, name)
+        except AttributeError:
+            # This provides a more informative error message if the attribute doesn't exist on the wrapped object
+            raise AttributeError(
+                f"Attribute '{name}' not found on the lazily initialized object "
+                f"of type '{type(self._instance_local).__name__}'."
+            )
+
+    def __repr__(self) -> str:
+        if self._initialized_local and self._instance_local is not None:
+            return f"<LazyAgent wrapping [{self._instance_local.__class__.__name__}] (initialized)>"
+        else:
+            func_name = self._init_fn.__name__ if hasattr(self._init_fn, '__name__') else 'anonymous_function'
+            status = "initialization_failed" if self._initialized_local and self._instance_local is None else "uninitialized"
+            return f"<LazyAgent for [{func_name}] ({status})>"
+
 
 class RetrainingManager:
-    def __init__(self, agent, shared_memory):
-        if shared_memory.get(f"retraining_flag:{agent.name}"):
-            agent.retrain()
-        pass
+    """
+    Manages the retraining process for an agent based on flags in shared memory
+    or other triggers (though currently only flag-based).
+    """
+    def __init__(self, agent: BaseAgent, shared_memory: Any): # Type hint for agent and shared_memory
+        if not isinstance(agent, BaseAgent): # Basic type check
+            raise TypeError("RetrainingManager requires an instance of BaseAgent or its subclass.")
+        if shared_memory is None: # Basic check
+            raise ValueError("RetrainingManager requires a valid shared_memory instance.")
+
+        self.agent = agent
+        self.shared_memory = shared_memory
+        self.logger = logging.getLogger(f"{self.__class__.__name__}[{self.agent.name}]")
+
+    def check_and_trigger_retraining(self):
+        """
+        Checks for a retraining flag in shared memory specific to the agent.
+        If the flag is True, attempts to call the agent's `retrain` method.
+        """
+        retraining_flag_key = f"retraining_flag:{self.agent.name}"
+        
+        try:
+            flag_value = self.shared_memory.get(retraining_flag_key)
+        except Exception as e:
+            self.logger.error(f"Error accessing shared memory for retraining flag '{retraining_flag_key}': {e}")
+            return # Cannot proceed if shared memory access fails
+
+        if flag_value: # Typically True if set
+            self.logger.info(f"Retraining flag is set for agent '{self.agent.name}'. Initiating retraining process.")
+            
+            if hasattr(self.agent, 'retrain') and callable(self.agent.retrain):
+                try:
+                    self.agent.retrain() # Call the agent's own retrain method
+                    self.logger.info(f"Retraining method called successfully for agent '{self.agent.name}'.")
+                    # Reset the flag in shared memory after a successful call to retrain()
+                    self.shared_memory.set(retraining_flag_key, False) 
+                    self.logger.debug(f"Retraining flag '{retraining_flag_key}' reset to False.")
+                except Exception as e_retrain:
+                    self.logger.error(f"Error during agent '{self.agent.name}' retraining method: {e_retrain}")
+                    self.logger.debug(traceback.format_exc())
+                    # Policy: Do not reset the flag if retraining itself fails, so it might be retried.
+                    # Or, implement a max_retrain_attempts mechanism.
+            else:
+                self.logger.warning(f"Agent '{self.agent.name}' is flagged for retraining but does not have a callable 'retrain' method.")
+                # Reset the flag as it cannot be actioned by this manager.
+                self.shared_memory.set(retraining_flag_key, False)
+                self.logger.debug(f"Retraining flag '{retraining_flag_key}' reset as agent has no retrain method.")
+        else:
+            self.logger.debug(f"No retraining flag set for agent '{self.agent.name}'.")
+
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Agent Meta Data ===\n")
+    config = None
+    shared_memory={}
+    agent_factory=None
+
+    class TempAgent(BaseAgent):
+        def __init__(self, shared_memory, agent_factory, config=None):
+            # Initialize logger FIRST
+            self.logger = logging.getLogger(self.__class__.__name__)
+            self.name = self.__class__.__name__
+            # Now call parent constructor
+            super().__init__(shared_memory, agent_factory, config)
+
+        def perform_task(self, task_data: Any) -> Any:
+            return {"status": "success"}
+
+    base1 = type('TempAgent', (BaseAgent,), {
+        'perform_task': lambda self, task_data: {"status": "success"}
+    })(shared_memory, agent_factory, config)
+
+    agent = TempAgent(shared_memory, agent_factory, config)
+
+    print(f"\n{base1}")
+    print(f"\n{agent}")
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+    reward_scores=None
+    lr=0.01
+
+    base2 = BaseAgent(shared_memory, agent_factory, config=None)
+
+    update = base2.update_projection(reward_scores, lr)
+
+    print(f"\n{base2}")
+    print(f"\n{update}")
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+    init_fn=callable
+    agent=None
+    class DummySharedMemory(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+        def set(self, key, value):
+            self[key] = value
+
+    shared_memory = DummySharedMemory()
+
+    store = LightMetricStore()
+    lazy = LazyAgent(init_fn)
+    agent = TempAgent(shared_memory, agent_factory, config)
+    manager = RetrainingManager(agent=agent, shared_memory=shared_memory)
+
+    print(f"\n{store}\n{lazy}\n{agent}\n{manager}")
+    print("\n* * * * * Phase 4 * * * * *\n")
+
+    print("\n=== Successfully Ran Agent Meta Data ===\n")

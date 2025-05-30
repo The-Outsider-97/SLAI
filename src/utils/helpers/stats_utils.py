@@ -25,6 +25,27 @@ class StatisticalAnalysis:
     """
     
     @staticmethod
+    def _variance(sample: Vector) -> float:
+        """Compute sample variance"""
+        n = len(sample)
+        mean = sum(sample) / n
+        return sum((x - mean) ** 2 for x in sample) / (n - 1)
+
+    @staticmethod
+    def _anova_group_stats(group: Vector) -> Tuple[float, float, int]:
+        """Returns sum, sum of squares, and count of a group"""
+        return sum(group), sum(x**2 for x in group), len(group)
+
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def _f_cdf(f: float, dfn: int, dfd: int) -> float:
+        """Cumulative distribution function for the F-distribution"""
+        if f <= 0:
+            return 0.0
+        x = (dfn * f) / (dfn * f + dfd)
+        return StatisticalAnalysis._beta_cdf(x, dfn / 2, dfd / 2)
+
+    @staticmethod
     def independent_t_test(
         sample1: Vector,
         sample2: Vector,
@@ -54,7 +75,7 @@ class StatisticalAnalysis:
         """One-way ANOVA with parallel processing"""
         with ProcessPoolExecutor() as executor:
             results = list(executor.map(
-                lambda g: (sum(g), sum(x**2 for x in g), len(g)),
+                StatisticalAnalysis._anova_group_stats,
                 groups
             ))
         

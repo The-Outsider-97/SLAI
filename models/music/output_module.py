@@ -1,6 +1,6 @@
 import time
 import logging
-import numpy as np
+import torch
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Union, Optional, Tuple
@@ -91,7 +91,7 @@ class OutputModule:
 
     def generate_audio_output(
         self,
-        audio_data: np.ndarray,
+        audio_data: torch.Tensor,
         filename: Optional[str] = None,
         format: Optional[str] = None
     ) -> Path:
@@ -162,7 +162,7 @@ class OutputModule:
 
     def visualize_musical_data(
         self,
-        data: Union[np.ndarray, music21.stream.Stream, mido.MidiFile],
+        data: Union[torch.Tensor, music21.stream.Stream, mido.MidiFile],
         visualization_type: str = 'spectrogram',
         figsize: Tuple[int, int] = (12, 6),
         **kwargs
@@ -180,7 +180,7 @@ class OutputModule:
         """
         plt.figure(figsize=figsize, dpi=self.config['visualization_dpi'])
         
-        if isinstance(data, np.ndarray):
+        if isinstance(data, torch.Tensor):
             self._visualize_audio(data, visualization_type, **kwargs)
         elif isinstance(data, music21.stream.Stream):
             self._visualize_notation(data, **kwargs)
@@ -192,12 +192,12 @@ class OutputModule:
         plt.tight_layout()
         return plt.gcf()
 
-    def _visualize_audio(self, waveform: np.ndarray, vis_type: str = 'spectrogram', **kwargs):
+    def _visualize_audio(self, waveform: torch.Tensor, vis_type: str = 'spectrogram', **kwargs):
         """Core audio visualization engine"""
         if vis_type == 'spectrogram':
             S = librosa.amplitude_to_db(
-                np.abs(librosa.stft(waveform)),
-                ref=np.max
+                torch.abs(librosa.stft(waveform)),
+                ref=torch.max
             )
             librosa.display.specshow(
                 S, 
@@ -242,10 +242,10 @@ class OutputModule:
 
     def convert_format(
         self,
-        input_data: Union[str, Path, np.ndarray, music21.stream.Stream],
+        input_data: Union[str, Path, torch.Tensor, music21.stream.Stream],
         target_format: str,
         **kwargs
-    ) -> Union[Path, np.ndarray]:
+    ) -> Union[Path, torch.Tensor]:
         """
         Advanced format conversion system with neural transcoding support
         
@@ -308,11 +308,11 @@ class OutputModule:
                 return 'musicxml'
             elif ext in {'wav', 'mp3'}:
                 return 'audio'
-        elif isinstance(input_data, np.ndarray):
+        elif isinstance(input_data, torch.Tensor):
             return 'audio'
         raise ValueError("Unrecognized input type")
     
-    def _audio_to_midi(self, audio_data: np.ndarray, **kwargs) -> Path:
+    def _audio_to_midi(self, audio_data: torch.Tensor, **kwargs) -> Path:
         """
         Neural audio transcription using PerceptionAgent's architecture
         Integrates with AudioEncoder's signal processing
@@ -402,7 +402,7 @@ class OutputModule:
         if not weights_path.exists():
             raise FileNotFoundError(f"Missing conversion weights: {conversion_type}")
 
-        return np.load(weights_path, allow_pickle=True)
+        return torch.load(weights_path, allow_pickle=True)
 
     def batch_process(self, input_list: list, processing_func: callable, **kwargs) -> list:
         """

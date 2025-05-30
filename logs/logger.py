@@ -8,6 +8,8 @@ import psutil
 import hashlib
 import zlib
 import statistics
+import atexit
+import shutil
 
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -21,6 +23,58 @@ log_queue = queue.Queue()
 
 # Global flag to track initialization
 _logger_initialized = False
+
+class ColorFormatter(logging.Formatter):
+    COLOR_CODES = {
+        'RESET': "\033[0m",
+        'BLUE': "\033[94m",
+        'GREEN': "\033[92m",
+        'YELLOW': "\033[93m",
+        'RED': "\033[91m",
+        'magenta': '\033[35m',
+        'cyan': '\033[36m',
+        'white': '\033[37m',
+        'black': '\033[30m',
+    }
+    STYLES = {
+        'reset': '\033[0m',
+        'bold': '\033[1m',
+        'dim': '\033[2m',
+        'italic': '\033[3m',
+        'underline': '\033[4m',
+        'blink': '\033[5m',
+        'inverse': '\033[7m',
+        'hidden': '\033[8m',
+        'strike': '\033[9m',
+
+        'bg_black': '\033[40m',
+        'bg_red': '\033[41m',
+        'bg_green': '\033[42m',
+        'bg_yellow': '\033[43m',
+        'bg_blue': '\033[44m',
+        'bg_magenta': '\033[45m',
+        'bg_cyan': '\033[46m',
+        'bg_white': '\033[47m',
+    }
+    def format(self, record):
+        if not sys.stdout.isatty():
+            return super().format(record)
+        level = record.levelname
+        message = record.getMessage()
+
+        if "initializ" in message.lower():
+            color = self.COLOR_CODES['BLUE']
+        elif "load" in message.lower() and record.levelno < logging.WARNING:
+            color = self.COLOR_CODES['GREEN']
+        elif record.levelno >= logging.CRITICAL:
+            color = self.COLOR_CODES['RED']
+        elif record.levelno >= logging.WARNING:
+            color = self.COLOR_CODES['YELLOW']
+        else:
+            color = self.COLOR_CODES['RESET']
+
+        formatted = f"{record.levelname}:{record.name}:{message}"
+        return f"{color}{formatted}{self.COLOR_CODES['RESET']}"
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, q: queue.Queue, batch_size: int = 10, flush_interval: int = 5) -> None:
@@ -53,64 +107,42 @@ class QueueLogHandler(logging.Handler):
         self.last_flush = time.time()
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Retrieves or creates a logger with the given name, ensuring only one instance exists.
-    """
     global _logger_initialized, log_queue
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)  # Set default level
-
-    if not _logger_initialized:
-        # Only initialize once
-        _logger_initialized = True
-        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
-        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-
-    #if not logger.handlers:
-    #    os.makedirs(os.path.join(log_dir, "sessions"), exist_ok=True)
-    #    session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    #    logger.anomaly_detector = AnomalyDetector(window_size=200, sigma=2.5)
-
-        # Rotating app-wide log
-    #    rotating_handler = RotatingHandler(os.path.join(log_dir, "app.log"), maxBytes=5_000_000, backupCount=2)
-    #    rotating_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    rotating_handler.setLevel(file_level)
-    #    logger.addHandler(rotating_handler)
-
-        # Per-session log
-    #    session_handler = logging.FileHandler(os.path.join(log_dir, "sessions", f"session_{session_id}.log"))
-    #    session_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    session_handler.setLevel(file_level)
-    #    logger.addHandler(session_handler)
-
-        # Console stream
-    #    console_handler = logging.StreamHandler(sys.stdout)
-    #    console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #    console_handler.setLevel(console_level)
-    #    logger.addHandler(console_handler)
-
-        # Real-time Queue handler (optional for GUI)
-    #    if enable_queue:
-    #        queue_handler = QueueLogHandler(log_queue)
-    #        queue_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-    #        queue_handler.setLevel(console_level)
-    #        logger.addHandler(queue_handler)
-
-    #    original_handle = logger.handle
-
-    #    def wrapped_handle(record):
-    #        if logger.anomaly_detector.analyze(record):
-    #            logger.warning("Anomalous error pattern detected!", extra={'origin': 'security'})
-    #        return original_handle(record)
-        
-    #    logger.handle = wrapped_handle
-
-        file_handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
     
+    if not _logger_initialized:
+        _logger_initialized = True
+        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+
+        # Initialize root logger first
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+
+        # Remove any existing handlers
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+        # File handler
+        file_handler = RotatingHandler(
+            'logs/app.log', 
+            maxBytes=1000000, 
+            backupCount=5, 
+            delay=True  # Defer file opening until first log
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.DEBUG)
+        root_logger.addHandler(file_handler)
+
+        # Console handler with colors
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s'))
+        root_logger.addHandler(console_handler)
+
+        # Queue handler
+        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
     return logger
 
 def get_log_queue():
@@ -128,6 +160,11 @@ def cleanup_logger(name):
         handler.close()
         logger.removeHandler(handler)
 
+def exit_handler():
+    cleanup_logger(None)  # Cleanup root logger
+
+atexit.register(exit_handler)
+
 class RotatingHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -135,19 +172,52 @@ class RotatingHandler(RotatingFileHandler):
         self.compress_threshold = 2  # Number of backups before compression
 
     def doRollover(self):
-        super().doRollover()
-        self._compress_queue.append(self.baseFilename + ".1")
+        if self.stream:
+            try:
+                self.stream.flush()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+    
+        dfn = self.rotation_filename(self.baseFilename + ".1")
+    
+        try:
+            if os.path.exists(dfn):
+                os.remove(dfn)
+            os.rename(self.baseFilename, dfn)
+        except PermissionError:
+            # Graceful fallback: copy+remove, tolerate failure silently            
+            try:
+                shutil.copyfile(self.baseFilename, dfn)
+                os.remove(self.baseFilename)
+            except Exception:
+                # Last resort: log but suppress crash
+                if self._compress_queue and self._compress_queue[-1] != self.baseFilename:
+                    print(f"[LOGGER] Log rotation skipped (still locked): {self.baseFilename}", file=sys.stderr)
+                return  # Prevent further attempts this cycle
+    
+        if not self.delay:
+            try:
+                self.stream = self._open()
+            except Exception:
+                self.stream = None
+    
+        self._compress_queue.append(dfn)
         self._manage_compression()
 
     def _manage_compression(self):
-        # Apply Huffman coding principles via zlib
         while len(self._compress_queue) > self.compress_threshold:
             old_log = self._compress_queue.popleft()
-            with open(old_log, 'rb') as f:
-                data = zlib.compress(f.read(), level=9)
-            with open(old_log + '.z', 'wb') as f:
-                f.write(data)
-            os.remove(old_log)
+            try:
+                # Read and compress with context managers
+                with open(old_log, 'rb') as f:
+                    data = zlib.compress(f.read(), level=9)
+                with open(old_log + '.z', 'wb') as f:
+                    f.write(data)
+                os.remove(old_log)
+            except PermissionError as e:
+                logging.error(f"Failed to compress {old_log}: {e}")
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):
@@ -227,3 +297,86 @@ class AnomalyDetector:
         latest_interval = self.error_counts[-1] - self.error_counts[-2]
         z_score = (latest_interval - self.mean) / self.std
         return abs(z_score) > self.sigma
+
+class PrettyPrinter:
+
+    @classmethod
+    def _style(cls, text, *styles):
+        codes = ''.join([cls.STYLES[style] for style in styles])
+        return f"{codes}{text}{cls.STYLES['reset']}"
+
+    @classmethod
+    def table(cls, headers, rows, title=None):
+        # Create formatted table with borders
+        col_width = [max(len(str(item)) for item in col) for col in zip(headers, *rows)]
+        
+        if title:
+            total_width = sum(col_width) + 3*(len(headers)-1)
+            print(cls._style(f"╒{'═'*(total_width)}╕", 'bold', 'blue'))
+            print(cls._style(f"│ {title.center(total_width)} │", 'bold', 'blue'))
+            print(cls._style(f"╞{'╪'.join('═'*w for w in col_width)}╡", 'bold', 'blue'))
+        
+        # Header
+        header = cls._style("│ ", 'blue') + cls._style(" │ ", 'blue').join(
+            cls._style(str(h).ljust(w), 'bold', 'white', 'bg_blue') 
+            for h, w in zip(headers, col_width)
+        ) + cls._style(" │", 'blue')
+        print(header)
+        
+        # Separator
+        print(cls._style(f"├{'┼'.join('─'*w for w in col_width)}┤", 'blue'))
+        
+        # Rows
+        for row in rows:
+            cells = []
+            for item, w in zip(row, col_width):
+                cell = cls._style(str(item).ljust(w), 'cyan')
+                cells.append(cell)
+            print(cls._style("│ ", 'blue') + cls._style(" │ ", 'blue').join(cells) + cls._style(" │", 'blue'))
+        
+        # Footer
+        print(cls._style(f"╘{'╧'.join('═'*w for w in col_width)}╛", 'bold', 'blue'))
+
+    @classmethod
+    def _truncate_text(cls, text, max_length):
+        """Truncate text with ellipsis if it exceeds max_length"""
+        if len(text) <= max_length:
+            return text
+        # If we need to truncate, add an ellipsis
+        if max_length > 3:
+            return text[:max_length-3] + "..."
+        return text[:max_length]
+
+    @classmethod
+    def section_header(cls, text):
+        print("\n" + cls._style("╒═══════════════════════════════", 'bold', 'magenta'))
+        print(cls._style(f"│ {text.upper()}", 'bold', 'magenta', 'italic'))
+        print(cls._style("╘═══════════════════════════════", 'bold', 'magenta'))
+
+    @classmethod
+    def status(cls, label, message, status="info"):
+        status_colors = {
+            'info': ('blue', 'ℹ'),
+            'success': ('green', '✔'),
+            'warning': ('yellow', '⚠'),
+            'error': ('red', '✖')
+        }
+        color, icon = status_colors.get(status, ('white', '○'))
+        label_text = cls._style(f"[{label}]", 'bold', color)
+        print(f"{cls._style(icon, color)} {label_text} {message}")
+
+    @classmethod
+    def code_block(cls, code, language="python"):
+        print(cls._style(f"┏ {' ' + language + ' ':-^76} ┓", 'bold', 'white'))
+        for line in code.split('\n'):
+            print(cls._style("┃ ", 'white') + cls._style(f"{line:76}", 'cyan') + cls._style(" ┃", 'white'))
+        print(cls._style(f"┗ {'':-^78} ┛", 'bold', 'white'))
+
+    @classmethod
+    def progress_bar(cls, current, total, label="Progress"):
+        width = 50
+        progress = current / total
+        filled = int(width * progress)
+        bar = cls._style("█" * filled, 'green') + cls._style("░" * (width - filled), 'dim')
+        percent = cls._style(f"{progress:.0%}", 'bold', 'yellow')
+        print(f"{label}: [{bar}] {percent} ({current}/{total})")

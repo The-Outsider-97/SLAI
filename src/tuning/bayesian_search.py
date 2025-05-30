@@ -3,22 +3,33 @@ Bayesian Hyperparameter Optimization with Integrated Reasoning Agent
 Combines features from both implementations with improved integration
 """
 
-import logging
-import json
-import yaml
+
+import yaml, json
 import numpy as np
 import matplotlib.pyplot as plt
+
 from pathlib import Path
 from skopt import gp_minimize
 from skopt.space import Real, Integer, Categorical
-from skopt.utils import use_named_args
-from typing import Dict, List, Tuple, Callable, Any, Union
+from skopt.utils import use_named_args, OptimizeResult
+from typing import Dict, List, Tuple, Callable, Any, Union, Optional
 
-from src.agents.reasoning_agent import ReasoningAgent
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger("BayesianSearch")
+
+CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
+
+def load_config(config_path=CONFIG_PATH):
+    with open(config_path, "r", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def get_merged_config(user_config=None):
+    base_config = load_config()
+    if user_config:
+        base_config.update(user_config)
+    return base_config
 
 class BayesianSearch:
     """
@@ -31,239 +42,320 @@ class BayesianSearch:
     - Enhanced visualization and result tracking
     """
     
-    def __init__(self, 
-                 config_file: Union[str, Path],
-                 evaluation_function: Callable[[Dict], float],
-                 n_calls: int = 20,
-                 n_random_starts: int = 5,
-                 reasoning_agent: ReasoningAgent = None):
+    def __init__(self, config,
+                 evaluation_function: Callable[[Dict[str, Any]], float],
+                 output_dir_name: str = "bayesian_search"):
         """
-        Initialize Bayesian search with integrated reasoning agent
-        
-        Args:
-            config_file: Path to YAML/JSON config file
-            evaluation_function: Function that evaluates hyperparameters
-            n_calls: Total optimization iterations
-            n_random_starts: Random exploration steps
-            reasoning_agent: Pre-initialized ReasoningAgent instance
-        """
-        self.config_file = Path(config_file)
-        self.evaluation_function = evaluation_function
-        self.n_calls = n_calls
-        self.n_random_starts = n_random_starts
-        self.reasoning_agent = reasoning_agent or ReasoningAgent()
-        
-        # Initialize search space
-        self.hyperparam_space, self.dimensions = self._load_search_space()
-        self.param_names = [dim.name for dim in self.dimensions]
-        
-        # Optimization tracking
-        self.optimization_history = []
-        self.best_score = -np.inf
-        self.best_params = None
-        self.rewards = []
-        
-        # Create output directory
-        self.output_dir = Path("report/tuning_results")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        Initialize the BayesianSearch instance.
 
-    def _load_search_space(self) -> Tuple[List[Dict], List]:
-        """Load and validate search space configuration"""
-        if not self.config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_file}")
-            
-        logger.info(f"Loading search space from: {self.config_file}")
+        Args:
+            config (Union[str, Path]): Path to the YAML or JSON configuration file 
+                                            defining the hyperparameter search space.
+            evaluation_function (Callable[[Dict[str, Any]], float]): 
+                The function to be minimized. It takes a dictionary of 
+                hyperparameters as input and returns a single float score.
+                Note: Bayesian optimization typically minimizes the objective, 
+                so if your function returns a score where higher is better, 
+                you should return its negative.
+            n_calls (int): Total number of evaluations (calls to the evaluation_function).
+                           This includes `n_initial_points`.
+            n_initial_points (int): Number of evaluations of `evaluation_function` with
+                                   randomly D-chosen points before Gaussian Process fitting.
+            random_state (Optional[int]): Seed for reproducible results.
+            output_dir_name (str): Name of the directory to save reports and plots.
+                                   Will be created under a 'reports' parent directory.
+        """
+        config = load_config() or {}
+        self.config_path = Path(CONFIG_PATH)
+        self.config = config
+
+        # Extract bayesian_search parameters with fallbacks
+        bayesian_config = self.config.get('bayesian_search', {})
+        self.n_calls = bayesian_config.get('n_calls', 20)
+        self.n_initial_points = bayesian_config.get('n_initial_points', 5)
+        self.random_state = bayesian_config.get('random_state', 42)
         
-        with open(self.config_file, 'r') as f:
-            if self.config_file.suffix == '.yaml':
-                config = yaml.safe_load(f)
-            else:
-                config = json.load(f)
-                
-        if 'hyperparameters' not in config:
-            raise ValueError("Config must contain 'hyperparameters' section")
-            
-        space = []
-        dimensions = []
+        self.evaluation_function = evaluation_function
+        self.search_space_config, self.dimensions = self._load_search_space()
+        self.param_names: List[str] = [dim.name for dim in self.dimensions]
         
-        for param in config['hyperparameters']:
-            if not all(k in param for k in ['name', 'type']):
-                raise ValueError("Each parameter must have 'name' and 'type'")
+        self.optimization_history: List[Dict[str, Any]] = []
+        self.best_score_so_far: float = np.inf # Assuming minimization; use -np.inf for maximization
+        self.best_params_so_far: Optional[Dict[str, Any]] = None
+        
+        self.output_dir = Path("src/tuning/reports") / output_dir_name # Standardize reports location
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"BayesianSearch initialized. Results will be saved to: {self.output_dir.resolve()}")
+
+    def _load_search_space(self) -> Tuple[List[Dict[str, Any]], List[Union[Real, Integer, Categorical]]]:
+        logger.info("Loading search space from config")
+        
+        if 'hyperparameters' not in self.config:
+            raise ValueError("Config missing 'hyperparameters' section")
+        
+        config_data = self.config
+        param_configs = config_data['hyperparameters']
+        
+        space_definitions = []
+        skopt_dimensions = []
+        
+        for param_spec in param_configs:
+            if not isinstance(param_spec, dict) or 'name' not in param_spec or 'type' not in param_spec:
+                raise ValueError("Invalid parameter specification")
                 
-            name = param['name']
-            param_type = param['type']
+            name = param_spec['name']
+            param_type = param_spec['type'].lower()
+            
+            # Map grid-style types to Bayesian-compatible types
+            if param_type == 'float': param_type = 'real'
+            if param_type == 'int': param_type = 'integer'
             
             try:
-                if param_type == 'int':
-                    dim = Integer(param['min'], param['max'], name=name)
-                elif param_type == 'float':
-                    prior = param.get('prior', 'uniform')
-                    dim = Real(param['min'], param['max'], prior=prior, name=name)
-                elif param_type == 'categorical':
-                    dim = Categorical(param['choices'], name=name)
-                else:
-                    raise ValueError(f"Unknown parameter type: {param_type}")
-                    
-                dimensions.append(dim)
-                space.append({
-                    'name': name,
-                    'type': param_type,
-                    'specs': param
-                })
-                
-            except KeyError as e:
-                raise ValueError(f"Missing required field for {name}: {e}")
-                
-        logger.info(f"Loaded {len(space)} hyperparameters")
-        return space, dimensions
-
-    def _register_trial_with_agent(self, params: Dict) -> None:
-        """Record trial parameters with ReasoningAgent"""
-        structured_facts = [(k, 'has_value', str(v)) for k, v in params.items()]
-        for fact in structured_facts:
-            self.reasoning_agent.add_fact(fact, confidence=0.85)
-
-    def _analyze_trial_with_agent(self, params: Dict, score: float) -> None:
-        """Update ReasoningAgent with trial results"""
-        feedback = {
-            tuple([k, 'has_value', str(v)]): score > self.best_score
-            for k, v in params.items()
-        }
-        self.reasoning_agent.learn_from_interaction(feedback)
-
-    def _ask_reasoning_agent(self, current_params: Dict) -> Dict:
-        """Get parameter suggestions from ReasoningAgent"""
-        try:
-            # Convert parameters to semantic query
-            param_facts = [f"{k} is {v}" for k, v in current_params.items()]
-            query = "Suggest improvements for: " + ", ".join(param_facts)
-            
-            # Get recommendations from agent
-            recommendations = self.reasoning_agent.react_loop(query, max_steps=3)
-            
-            # Convert recommendations to parameter adjustments
-            adjustments = {}
-            for k, v in recommendations.items():
-                if k in current_params:
-                    # Convert suggested values to appropriate types
-                    current_type = type(current_params[k])
-                    try:
-                        adjustments[k] = current_type(v)
-                    except ValueError:
-                        logger.warning(f"Couldn't convert {v} to {current_type}")
-            return adjustments
-            
-        except Exception as e:
-            logger.warning(f"Reasoning agent query failed: {e}")
-            return {}
-
-    def _log_iteration(self, params: Dict, score: float) -> None:
-        """Record optimization progress"""
-        self.optimization_history.append({
-            'params': params,
-            'score': score
-        })
-        self.rewards.append(score)
-        
-        if score > self.best_score:
-            self.best_score = score
-            self.best_params = params
-            logger.info(f"New best score: {score:.4f} with params: {params}")
-
-    def run_search(self) -> Tuple[Dict, float, Any]:
-        """Execute Bayesian optimization with integrated reasoning"""
-        logger.info("Starting Bayesian optimization with ReasoningAgent...")
-        
-        @use_named_args(self.dimensions)
-        def objective(**params):
-            # Register parameters with ReasoningAgent
-            self._register_trial_with_agent(params)
-            
-            # Get reasoning agent suggestions
-            suggestions = self._ask_reasoning_agent(params)
-            
-            # Blend suggestions with current parameters
-            if suggestions:
-                logger.debug(f"Applying suggestions: {suggestions}")
-                for k, v in suggestions.items():
-                    if isinstance(params[k], (int, float)):
-                        # Weighted average for numerical parameters
-                        params[k] = 0.7 * params[k] + 0.3 * v
+                if param_type == 'integer':
+                    # Get values from list if no explicit min/max
+                    if 'values' in param_spec:
+                        vals = [v for v in param_spec['values'] if v is not None]  # Filter out None
+                        if not vals:
+                            raise ValueError(f"Parameter {name} has no valid integer values after removing None.")
+                        param_min, param_max = min(vals), max(vals)
                     else:
-                        # Direct replacement for categoricals
-                        params[k] = v
-            
-            # Evaluate parameters
-            score = self.evaluation_function(params)
-            self._log_iteration(params, score)
-            self._analyze_trial_with_agent(params, score)
-            
-            return -score  # Minimize negative score
-
-        # Run optimization
-        result = gp_minimize(
-            func=objective,
-            dimensions=self.dimensions,
-            n_calls=self.n_calls,
-            n_random_starts=self.n_random_starts,
-            random_state=42,
-            verbose=True
-        )
-
-        # Process results
-        best_params = dict(zip(self.param_names, result.x))
-        best_score = -result.fun
+                        param_min = param_spec['min']
+                        param_max = param_spec['max']
+                    skopt_dimensions.append(Integer(param_min, param_max, name=name))
+                    
+                elif param_type == 'real':
+                    # Handle log-uniform prior for learning rates
+                    prior = param_spec.get('prior', 'uniform').lower()
+                    if 'values' in param_spec:
+                        vals = param_spec['values']
+                        param_min, param_max = min(vals), max(vals)
+                    else:
+                        param_min = param_spec['min']
+                        param_max = param_spec['max']
+                    skopt_dimensions.append(Real(param_min, param_max, prior=prior, name=name))
+                    
+                elif param_type == 'categorical':
+                    # Directly use values list as categories
+                    choices = param_spec['values']
+                    skopt_dimensions.append(Categorical(choices, name=name))
+                    
+                else:
+                    raise ValueError(f"Unsupported type: {param_type}")
+                    
+                space_definitions.append(param_spec)
+                
+            except Exception as e:
+                raise ValueError(f"Error processing {name}: {str(e)}")
         
-        # Save and visualize results
-        self._save_results(best_params, best_score, result)
-        self._plot_rewards()
-        
-        return best_params, best_score, result
+        return space_definitions, skopt_dimensions
 
-    def _save_results(self, 
-                     best_params: Dict, 
-                     best_score: float,
-                     result: Any) -> None:
-        """Save optimization results to files"""
-        best_output = {
-            'best_parameters': best_params,
-            'best_score': best_score,
-            'config_file': str(self.config_file)
+    def _log_iteration_progress(self, params: Dict[str, Any], score: float, iteration: int) -> None:
+        """
+        Record the parameters and score for the current optimization iteration.
+        Updates the best score and parameters if the current score is an improvement.
+        (Assumes minimization, so a lower score is better).
+        """
+        self.optimization_history.append({
+            'iteration': iteration,
+            'parameters': params,
+            'score': score  # This is the value returned by evaluation_function (to be minimized)
+        })
+        
+        # gp_minimize minimizes the function, so lower score is better.
+        if score < self.best_score_so_far:
+            self.best_score_so_far = score
+            self.best_params_so_far = params
+            logger.info(f"Iteration {iteration}: New best score: {score:.6f} with params: {params}")
+        else:
+            logger.info(f"Iteration {iteration}: Score: {score:.6f} with params: {params}")
+
+    def run_search(self) -> Tuple[Optional[Dict[str, Any]], float, OptimizeResult]:
+        """
+        Execute the Bayesian optimization process.
+
+        Returns:
+            Tuple[Optional[Dict[str, Any]], float, OptimizeResult]:
+                - best_parameters (Dict): The best set of hyperparameters found.
+                - best_score (float): The score achieved by the best parameters.
+                                      (This is the minimized value from the objective function).
+                - result (OptimizeResult): The full result object from `skopt.gp_minimize`.
+        """
+        logger.info(f"Starting Bayesian optimization: {self.n_calls} total calls, "
+                    f"{self.n_initial_points} initial random points.")
+        
+        iteration_count = 0
+
+        # The objective function to be minimized by gp_minimize
+        @use_named_args(self.dimensions)
+        def objective_function(**params: Any) -> float:
+            nonlocal iteration_count
+            iteration_count += 1
+            
+            # Ensure correct types from skopt (e.g., numpy int to python int)
+            processed_params = {name: params[name] for name in self.param_names}
+            
+            current_score = self.evaluation_function(processed_params)
+            
+            if not isinstance(current_score, (int, float)) or np.isnan(current_score) or np.isinf(current_score):
+                logger.warning(f"Evaluation function for params {processed_params} returned non-finite "
+                               f"score: {current_score}. Assigning a high penalty.")
+                # Assign a high penalty for bad evaluations to guide optimizer away
+                current_score = float(np.finfo(np.float64).max / (self.n_calls * 10)) # Large but finite penalty
+            
+            self._log_iteration_progress(processed_params, current_score, iteration_count)
+            
+            # gp_minimize aims to minimize this returned value
+            return current_score 
+
+        # Execute the Gaussian Process minimization
+        try:
+            result: OptimizeResult = gp_minimize(
+                func=objective_function,
+                dimensions=self.dimensions,
+                n_calls=self.n_calls,
+                n_initial_points=self.n_initial_points,
+                random_state=self.random_state,
+                verbose=False # We handle logging per iteration
+            )
+        except Exception as e:
+            logger.error(f"Bayesian optimization failed: {e}", exc_info=True)
+            # In case of failure, we might not have a proper result.
+            # Return current best if any, or None.
+            self._save_results_to_file(self.best_params_so_far, self.best_score_so_far, None)
+            self._plot_optimization_progress()
+            return self.best_params_so_far, self.best_score_so_far, None
+
+
+        # The best parameters are in result.x, and the best score (minimized value) is result.fun
+        final_best_params = dict(zip(self.param_names, result.x))
+        final_best_score = float(result.fun) # This is the minimized value.
+        
+        logger.info(f"Bayesian optimization completed.")
+        logger.info(f"Best parameters found: {final_best_params}")
+        logger.info(f"Best score (minimized objective): {final_best_score:.6f}")
+        
+        self._save_results_to_file(final_best_params, final_best_score, result)
+        self._plot_optimization_progress()
+        
+        return final_best_params, final_best_score, result
+
+    def _save_results_to_file(self, best_params, best_score, skopt_result):
+        """Save comprehensive optimization results to JSON files."""
+        
+        output_summary = {
+            'search_configuration': {
+                'config_file': str(self.config_path.resolve()),
+                'n_calls': self.n_calls,
+                'n_initial_points': self.n_initial_points,
+                'random_state': self.random_state,
+                'search_space_definition': self.search_space_config
+            },
+            'best_result_found': {
+                'parameters': best_params,
+                'minimized_score': best_score # Explicitly state it's the minimized score
+            },
+            'optimization_history': self.optimization_history
         }
+        stem = self.config_path.stem
+        summary_file_path = self.output_dir / f"bayesian_search_summary_{stem}.json"
         
-        best_file = self.output_dir / f"best_{self.config_file.stem}.json"
-        with open(best_file, 'w') as f:
-            json.dump(self._make_json_serializable(best_output), f, indent=2)
-            
-        history_file = self.output_dir / f"history_{self.config_file.stem}.json"
-        with open(history_file, 'w') as f:
-            json.dump(self._make_json_serializable({
-                'history': self.optimization_history,
-                'config': self.hyperparam_space
-            }), f, indent=2)
-            
-        logger.info(f"Results saved to {best_file} and {history_file}")
+        # If skopt_result is available, add more details if serializable
+        if skopt_result:
+            # Storing the entire OptimizeResult can be large and complex.
+            # Extract key, serializable information.
+            output_summary['skopt_summary'] = {
+                'x_iters': skopt_result.x_iters, # List of parameter points evaluated
+                'func_vals': skopt_result.func_vals.tolist(), # List of objective values
+                'space_details': str(skopt_result.space) # String representation of the space
+            }
 
-    def _plot_rewards(self):
-        """Visualize optimization progress"""
-        plt.figure(figsize=(8, 4))
-        plt.plot(self.rewards, marker='o', color='#2c7bb6')
-        plt.title("Bayesian Optimization Progress with Reasoning Agent")
-        plt.xlabel("Iteration")
-        plt.ylabel("Score")
-        plt.grid(True, alpha=0.3)
+        # Ensure all parts of the output are JSON serializable
+        serializable_output = self._make_dict_json_serializable(output_summary)
+        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.config_path.stem}.json"
+        try:
+            with open(summary_file_path, 'w') as f:
+                json.dump(serializable_output, f, indent=2)
+            logger.info(f"Optimization summary saved to: {summary_file_path.resolve()}")
+        except Exception as e:
+            logger.error(f"Failed to save summary to {summary_file_path.resolve()}: {e}", exc_info=True)
+
+    def _plot_optimization_progress(self) -> None:
+        """Visualize the scores obtained at each iteration of the optimization."""
+        if not self.optimization_history:
+            logger.info("No optimization history to plot.")
+            return
+
+        iterations = [item['iteration'] for item in self.optimization_history]
+        scores = [item['score'] for item in self.optimization_history] # These are the raw scores (to be minimized)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(iterations, scores, marker='o', linestyle='-', color='#2c7bb6', markersize=5, label="Objective Score per Iteration")
+        
+        # Plot a running minimum to show convergence
+        running_min_scores = np.minimum.accumulate(scores)
+        plt.plot(iterations, running_min_scores, marker='.', linestyle='--', color='#d7191c', label="Best Score So Far")
+
+        plt.title(f"Bayesian Optimization Progress ({self.config_path.stem})\nObjective: Minimize Score")
+        plt.xlabel("Iteration Number")
+        plt.ylabel("Objective Function Score")
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.7)
         plt.tight_layout()
-        
-        plot_path = self.output_dir / "optimization_progress.png"
-        plt.savefig(plot_path)
-        logger.info(f"Progress plot saved to {plot_path}")
 
-    def _make_json_serializable(self, data: Any) -> Any:
-        """Convert numpy types to native Python types"""
-        if isinstance(data, (np.integer, np.floating)):
-            return int(data) if isinstance(data, np.integer) else float(data)
-        elif isinstance(data, dict):
-            return {k: self._make_json_serializable(v) for k, v in data.items()}
+        plot_file_path = self.output_dir / f"bayesian_optimization_progress_{self.config_path.stem}.png"
+        try:
+            plt.savefig(plot_file_path)
+            logger.info(f"Optimization progress plot saved to: {plot_file_path.resolve()}")
+        except Exception as e:
+            logger.error(f"Failed to save plot to {plot_file_path.resolve()}: {e}", exc_info=True)
+        finally:
+            plt.close() # Close the figure to free memory
+
+    def _convert_numpy_types(self, obj: Any) -> Any:
+        """Recursively convert numpy types to native Python types."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        return obj
+
+    def _make_dict_json_serializable(self, data: Any) -> Dict:
+        """
+        Recursively process data to convert numpy types to native Python types.
+        Handles dictionaries, lists, and nested structures.
+        """
+        if isinstance(data, dict):
+            return {key: self._make_dict_json_serializable(value) for key, value in data.items()}
         elif isinstance(data, list):
-            return [self._make_json_serializable(i) for i in data]
-        return data
+            return [self._make_dict_json_serializable(item) for item in data]
+        else:
+            return self._convert_numpy_types(data)
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Bayesian Search ===\n")
+    config = load_config()
+    evaluation_function=None
+    output_dir_name = "bayesian_search"
+    
+    search1 = BayesianSearch(config, evaluation_function, output_dir_name)
+
+    print(f"{search1}")
+
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    def evaluation(params: Dict) -> float:
+        print(f"Evaluating parameters: {params}")
+        return np.random.rand()  # Example score
+    
+    search2 = BayesianSearch(config, evaluation)
+    best_params, best_score, _ = search2.run_search()
+
+    print(f"Best params: {best_params}")
+    print(f"Best score: {best_score:.4f}")
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+
+    print("\n=== Successfully Ran Bayesian Search ===\n")

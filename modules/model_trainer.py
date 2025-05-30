@@ -1,4 +1,5 @@
-import logging
+
+# import resource
 import os, sys
 import joblib
 import io
@@ -14,19 +15,20 @@ from queue import Queue
 from hashlib import sha256
 from threading import Thread
 from PyQt5.QtWidgets import QLabel
-from typing import Dict
 from collections import defaultdict
 from PyQt5.QtCore import pyqtSignal, QObject
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from modules.deployment.model_registry import register_model
+# from modules.deployment.model_registry import register_model
 
-logger = logging.getLogger('SafeAI.ModelTrainer')
-logger.setLevel(logging.INFO)
+from src.agents.collaborative.shared_memory import SharedMemory
+from logs.logger import get_logger
+
+logger = get_logger('SafeAI.ModelTrainer')
 
 matplotlib.use("Qt5Agg")
 
@@ -37,8 +39,8 @@ class MonitorSignal(QObject):
 class ModelTrainer:
     """Enhanced model trainer with memory-aware training and diagnostic capabilities"""
     
-    def __init__(self, shared_memory=None, output_dir="models/"):
-        self.shared_memory = shared_memory
+    def __init__(self, output_dir="models/", config=None):
+        self.shared_memory = SharedMemory(config)
         self.output_dir = output_dir
         self._training_history = []
         self._feature_importance = {}
@@ -177,8 +179,9 @@ class ModelTrainer:
         return model_path
 
     def _get_memory_usage(self):
-        """Get process memory usage in MB (Unix systems)"""
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        """Cross-platform memory usage in MB"""
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / (1024 ** 2)
 
     def _dataset_fingerprint(self, X, y):
         """Create dataset hash fingerprint for versioning"""
@@ -236,8 +239,8 @@ class ModelTrainer:
         logger.info(f"Training session recorded: {metadata['data_hash']}")
 
 class ModelTrainingPipeline:
-    def __init__(self, shared_memory=None, output_dir="models/", dashboard_widget=None):
-        self.trainer = ModelTrainer(shared_memory, output_dir)
+    def __init__(self, output_dir="models/", dashboard_widget=None):
+        self.trainer = ModelTrainer(output_dir, config=None)
         self.task_queue = Queue()
         self.monitor_data = []
         self.monitoring = True
@@ -260,22 +263,6 @@ class ModelTrainingPipeline:
         X = df.drop(columns=[target_column])
         y = df[target_column]
         return X, y
-
-    def configure_model(self, params: Dict):
-        """Apply hyperparameters to the model"""
-        # Example implementation:
-        self.model.set_learning_rate(params.get('learning_rate', 0.001))
-        self.model.set_batch_size(params.get('batch_size', 32))
-        self.optimizer = self._create_optimizer(params.get('optimizer', 'adam'))
-        
-    def run_training_cycle(self) -> Dict:
-        """Run training and return metrics"""
-        # Your existing training logic
-        return {
-            "loss": 0.12,
-            "training_time": 45.2,
-            "steps": 1000
-        }
 
     def _process_tasks(self):
         model, metrics = None, None
@@ -316,3 +303,31 @@ class ModelTrainingPipeline:
         for i in reversed(range(self.dashboard_widget.layout().count())):
             self.dashboard_widget.layout().itemAt(i).widget().setParent(None)
         self.dashboard_widget.layout().addWidget(canvas)
+
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Model Trainer ===\n")
+    output_dir = "models/"
+    config = None
+
+    trainer = ModelTrainer(output_dir=output_dir, config=config)
+    logger.info(f"{trainer}")
+
+    import glob
+    model_files = glob.glob(os.path.join(output_dir, "*.joblib"))
+    if not model_files:
+        print("No model files found. Exiting.")
+        sys.exit(1)
+
+    latest_model = max(model_files, key=os.path.getctime)
+    model = trainer.load_model(model_path=latest_model)
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    output_dir="modules/"
+    dashboard_widget=None
+
+    pipeline = ModelTrainingPipeline(output_dir=output_dir, dashboard_widget=dashboard_widget)
+    logger.info(f"{pipeline}")
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+
+    print("\n=== Successfully Ran Model Trainer ===\n")

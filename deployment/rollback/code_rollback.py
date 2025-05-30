@@ -74,35 +74,35 @@ def get_sorted_tags() -> list:
         reverse=True
     )
 
-def rollback_to_previous_tag():
-    """Rolls back using version selection heuristics from Mens (2004)"""
-    tags = get_sorted_tags()
-    
-    if len(tags) < 2:
-        logger.warning("Insufficient version history for rollback")
+def rollforward_to_next_tag():
+    """Rolls forward to the next chronological tag using version navigation"""
+    try:
+        # Get current tag
+        current_tag = subprocess.check_output(
+            ['git', 'describe', '--tags', '--abbrev=0'], 
+            stderr=subprocess.STDOUT
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        logger.error("Current commit is not tagged. Cannot determine rollforward target.")
         return False
 
-    latest_tag, latest_ts = tags[0]
-    previous_tag, previous_ts = tags[1]
-
-    logger.info(f"Rolling back from {latest_tag} ({latest_ts}) to {previous_tag} ({previous_ts})")
-    """
-    Rolls back to the Git tag immediately before the most recent one.
-    """
-    result = subprocess.run(['git', 'tag', '--sort=-creatordate'], stdout=subprocess.PIPE, check=True)
-    tags = result.stdout.decode().splitlines()
+    tags = get_sorted_tags()  # Returns tags sorted newest-first
     
-    if len(tags) < 2:
-        logger.warning("Not enough tags to perform rollback.")
+    # Find current tag's position in the list
+    tag_names = [t[0] for t in tags]
+    try:
+        current_idx = tag_names.index(current_tag)
+    except ValueError:
+        logger.error(f"Tag {current_tag} not found in version history")
         return False
 
-    latest_tag = tags[0]
-    previous_tag = tags[1]
+    if current_idx == 0:
+        logger.warning("Already at the newest tag. Rollforward not possible.")
+        return False
 
-    prev_commit = subprocess.run(['git', 'rev-list', '-n', '1', previous_tag], stdout=subprocess.PIPE, check=True)
-    prev_commit_hash = prev_commit.stdout.decode().strip()
-
-    logger.info(f"Rolling back to tag {previous_tag} at commit {prev_commit_hash}")
-    reset_to_commit(prev_commit_hash)
-    delete_tag(latest_tag)
+    # Get the next newer tag (one position higher in the list)
+    target_tag, target_ts = tags[current_idx - 1]
+    
+    logger.info(f"Rolling forward from {current_tag} to {target_tag} ({target_ts})")
+    reset_to_commit(target_tag)
     return True

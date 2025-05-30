@@ -1,0 +1,182 @@
+[
+    {
+      "name": "Primum Non Nocere (First, Do No Harm)",
+      "description": "A fundamental medical principle to avoid causing harm to the patient. Interventions should be weighed for benefits versus potential risks.",
+      "type": "ethical_heuristic",
+      "tags": ["medical", "ethics", "patient_safety", "hippocratic_oath"],
+      "source": "Hippocratic Tradition",
+      "formula": "N/A",
+      "implementation": "if kb.get('proposed_treatment_risk_high', False) and kb.get('proposed_treatment_benefit_low', False):\n    inferred['consider_alternative_treatment'] = 0.95"
+    },
+    {
+      "name": "Informed Consent for Treatment",
+      "description": "Patients must be provided with adequate information about their medical condition, proposed treatments, risks, benefits, and alternatives to make a voluntary decision.",
+      "type": "deductive",
+      "tags": ["medical", "ethics", "patient_rights", "legal_requirement"],
+      "source": "Medical Ethics and Law",
+      "formula": "N/A",
+      "implementation": "if kb.get('medical_procedure_planned', False) and not kb.get('patient_informed_consent_obtained', False):\n    inferred['halt_procedure_pending_consent'] = 1.0"
+    },
+    {
+      "name": "Patient Confidentiality",
+      "description": "Healthcare providers must protect the privacy of patient's personal and medical information, disclosing it only with consent or when legally required.",
+      "type": "deductive",
+      "tags": ["medical", "ethics", "privacy", "legal_requirement", "hipaa"],
+      "source": "Medical Ethics and Law (e.g., HIPAA)",
+      "formula": "N/A",
+      "implementation": "if kb.get('patient_information_access_request', False) and not kb.get('patient_consent_for_disclosure', False) and not kb.get('legal_mandate_for_disclosure', False):\n    inferred['disclosure_prohibited'] = 0.98"
+    },
+    {
+      "name": "Differential Diagnosis Principle",
+      "description": "When a patient presents with symptoms, clinicians should consider multiple possible diagnoses and systematically rule them out based on evidence.",
+      "type": "heuristic",
+      "tags": ["medical", "diagnosis", "clinical_reasoning"],
+      "source": "Medical Practice",
+      "formula": "N/A",
+      "implementation": "if kb.get('symptoms_present', False) and kb.get('initial_diagnosis_count', 0) < 2:\n    inferred['consider_differential_diagnoses'] = 0.8"
+    },
+    {
+      "name": "Evidence-Based Medicine",
+      "description": "Clinical decisions should be based on the best available scientific evidence, typically from well-designed clinical research.",
+      "type": "heuristic",
+      "tags": ["medical", "clinical_practice", "research", "decision_making"],
+      "source": "Modern Medical Paradigm",
+      "formula": "N/A",
+      "implementation": "if kb.get('treatment_decision_pending', False) and not kb.get('supporting_evidence_reviewed', False):\n    inferred['seek_evidence_for_treatment'] = 0.85"
+    },
+    {
+      "name": "Standard Precautions (Infection Control)",
+      "description": "A set of infection control practices used to prevent transmission of diseases that can be acquired by contact with blood, body fluids, non-intact skin, and mucous membranes.",
+      "type": "deductive",
+      "tags": ["medical", "infection_control", "public_health", "patient_safety"],
+      "source": "Healthcare Guidelines (e.g., CDC)",
+      "formula": "N/A",
+      "implementation": "if kb.get('patient_interaction_imminent', False):\n    inferred['apply_standard_precautions'] = 0.95"
+    },
+    {
+      "name": "Triage Priority in Emergencies",
+      "description": "In mass casualty incidents or emergencies, patients are prioritized for treatment based on the urgency and severity of their condition and likelihood of benefit from immediate care.",
+      "type": "heuristic",
+      "tags": ["medical", "emergency_medicine", "ethics", "resource_allocation"],
+      "source": "Emergency Medical Protocols",
+      "formula": "N/A",
+      "implementation": "if kb.get('mass_casualty_event', False) and kb.get('patient_condition_critical', False):\n    inferred['assign_high_triage_priority'] = 0.9\nelif kb.get('mass_casualty_event', False) and kb.get('patient_condition_minor', False):\n    inferred['assign_low_triage_priority'] = 0.8"
+    },
+    {
+      "name": "Importance of Medical History",
+      "description": "A thorough patient medical history (including past illnesses, family history, medications, allergies) is crucial for accurate diagnosis and safe treatment.",
+      "type": "heuristic",
+      "tags": ["medical", "diagnosis", "clinical_assessment", "patient_information"],
+      "source": "Fundamental Clinical Practice",
+      "formula": "N/A",
+      "implementation": "if kb.get('new_patient_encounter', False) or kb.get('diagnostic_uncertainty', False):\n    inferred['obtain_detailed_medical_history'] = 0.9"
+    },
+    {
+      "name": "Symptom-Disease Correlation",
+      "description": "Specific patterns of symptoms often correlate with particular diseases or conditions, guiding diagnostic investigation.",
+      "type": "probabilistic",
+      "tags": ["medical", "diagnosis", "symptomatology", "clinical_reasoning"],
+      "source": "Medical Knowledge",
+      "formula": "P(Disease | Symptoms)",
+      "implementation": "if 'fever' in kb.get('symptoms', []) and 'cough' in kb.get('symptoms', []):\n    inferred['possible_respiratory_infection'] = 0.7"
+    },
+    {
+      "name": "Drug Interaction Warning",
+      "description": "Prescribing or administering multiple medications requires checking for potential adverse interactions between them.",
+      "type": "deductive",
+      "tags": ["medical", "pharmacology", "patient_safety", "medication_management"],
+      "source": "Pharmacological Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('new_medication_prescribed', False) and kb.get('current_medications_count', 0) > 0:\n    inferred['check_drug_interactions'] = 0.98"
+    },
+    {
+      "name": "Prophylactic Treatment Principle",
+      "description": "Preventive medical treatment administered to individuals at high risk of developing a specific disease.",
+      "type": "heuristic",
+      "tags": ["medical", "prevention", "public_health", "risk_management"],
+      "source": "Preventive Medicine",
+      "formula": "N/A",
+      "implementation": "if kb.get('high_risk_for_disease_X', False) and kb.get('prophylaxis_available_for_X', False):\n    inferred['consider_prophylactic_treatment_for_X'] = 0.8"
+    },
+    {
+      "name": "Palliative Care Goals",
+      "description": "Focuses on providing relief from the symptoms and stress of a serious illness, aiming to improve quality of life for both the patient and the family.",
+      "type": "heuristic",
+      "tags": ["medical", "end_of_life_care", "quality_of_life", "symptom_management"],
+      "source": "Specialized Medical Care",
+      "formula": "N/A",
+      "implementation": "if kb.get('serious_illness_advanced_stage', False) and kb.get('curative_options_limited', True):\n    inferred['palliative_care_consult_recommended'] = 0.85"
+    },
+    {
+      "name": "Holistic Patient Assessment",
+      "description": "Considers all aspects of a patient's health, including physical, psychological, social, and spiritual factors, not just the presenting symptoms.",
+      "type": "heuristic",
+      "tags": ["medical", "patient_centered_care", "comprehensive_care", "assessment"],
+      "source": "Modern Healthcare Philosophy",
+      "formula": "N/A",
+      "implementation": "if kb.get('complex_patient_case', False):\n    inferred['perform_holistic_assessment'] = 0.8"
+    },
+    {
+      "name": "Public Health Reporting Duty",
+      "description": "Healthcare providers may have a legal and ethical duty to report certain communicable diseases or public health threats to relevant authorities.",
+      "type": "deductive",
+      "tags": ["medical", "public_health", "legal_requirement", "epidemiology"],
+      "source": "Public Health Law",
+      "formula": "N/A",
+      "implementation": "if kb.get('diagnosed_notifiable_disease', False):\n    inferred['report_to_public_health_authority'] = 0.95"
+    },
+    {
+      "name": "Medical Error Disclosure",
+      "description": "Ethical practice and often legal requirements mandate disclosure of medical errors that cause harm to patients.",
+      "type": "ethical_heuristic",
+      "tags": ["medical", "ethics", "patient_safety", "transparency"],
+      "source": "Medical Ethics Guidelines",
+      "formula": "N/A",
+      "implementation": "if kb.get('medical_error_occurred', False) and kb.get('patient_harm_resulted', False):\n    inferred['disclose_error_to_patient'] = 0.9"
+    },
+    {
+      "name": "Value of Second Opinion",
+      "description": "Seeking a second medical opinion can be valuable for confirming a diagnosis, exploring treatment options, especially for serious conditions.",
+      "type": "heuristic",
+      "tags": ["medical", "patient_empowerment", "decision_making", "diagnosis"],
+      "source": "Patient Advocacy",
+      "formula": "N/A",
+      "implementation": "if kb.get('serious_diagnosis_received', False) or kb.get('high_risk_treatment_proposed', False):\n    inferred['consider_second_opinion'] = 0.75"
+    },
+    {
+      "name": "Lifestyle Modification Impact",
+      "description": "Changes in diet, exercise, smoking habits, and stress management can significantly impact health outcomes and disease prevention/management.",
+      "type": "probabilistic",
+      "tags": ["medical", "preventive_care", "health_promotion", "chronic_disease"],
+      "source": "Medical Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('lifestyle_risk_factors_present', ['sedentary', 'poor_diet']):\n    inferred['lifestyle_modification_beneficial'] = 0.85"
+    },
+    {
+      "name": "Vaccination for Herd Immunity",
+      "description": "High vaccination rates within a population can protect vulnerable individuals (who cannot be vaccinated) by reducing overall disease transmission.",
+      "type": "deductive",
+      "tags": ["medical", "public_health", "immunization", "epidemiology", "prevention"],
+      "source": "Immunology Principle",
+      "formula": "N/A",
+      "implementation": "if kb.get('population_vaccination_rate_high', False):\n    inferred['herd_immunity_effect_likely'] = 0.8"
+    },
+    {
+      "name": "Genetic Predisposition Consideration",
+      "description": "Family medical history and genetic testing can reveal predispositions to certain diseases, informing screening and preventive strategies.",
+      "type": "probabilistic",
+      "tags": ["medical", "genetics", "preventive_care", "risk_assessment", "personalized_medicine"],
+      "source": "Genetic Medicine",
+      "formula": "N/A",
+      "implementation": "if kb.get('family_history_of_disease_Y', True):\n    inferred['increased_genetic_risk_for_Y'] = 0.75\n    inferred['consider_genetic_counseling_for_Y'] = 0.7"
+    },
+    {
+      "name": "Timeliness of Intervention",
+      "description": "For many medical conditions, particularly acute ones, the timeliness of diagnosis and intervention significantly affects prognosis.",
+      "type": "heuristic",
+      "tags": ["medical", "emergency_medicine", "prognosis", "treatment_outcome"],
+      "source": "Clinical Experience and Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('acute_condition_suspected', ['stroke', 'heart_attack']) and kb.get('time_since_onset_short', True):\n    inferred['urgent_intervention_critical'] = 0.95"
+    }
+  ]

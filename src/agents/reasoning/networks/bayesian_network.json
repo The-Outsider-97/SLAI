@@ -1,0 +1,79 @@
+{
+    "nodes": ["A", "B", "C", "D", "E", "F", "G", "H"],
+    "edges": [
+        ["A", "B"],
+        ["A", "C"],
+        ["B", "D"],
+        ["C", "D"],
+        ["D", "E"],
+        ["D", "F"],
+        ["E", "G"],
+        ["F", "G"],
+        ["G", "H"],
+        ["C", "H"]
+    ],
+    "cpt": {
+        "A": {
+            "prior": 0.4
+        },
+        "B": {
+            "True": {"True": 0.9, "False": 0.1},
+            "False": {"True": 0.2, "False": 0.8}
+        },
+        "C": {
+            "True": {"True": 0.7, "False": 0.3},
+            "False": {"True": 0.1, "False": 0.9}
+        },
+        "D": {
+            "True,True": {"True": 0.99, "False": 0.01},
+            "True,False": {"True": 0.6, "False": 0.4},
+            "False,True": {"True": 0.8, "False": 0.2},
+            "False,False": {"True": 0.05, "False": 0.95}
+        },
+        "E": {
+            "True": {"True": 0.85, "False": 0.15},
+            "False": {"True": 0.3, "False": 0.7}
+        },
+        "F": {
+            "True": {"True": 0.75, "False": 0.25},
+            "False": {"True": 0.1, "False": 0.9}
+        },
+        "G": {
+            "True,True": {"True": 0.95, "False": 0.05},
+            "True,False": {"True": 0.6, "False": 0.4},
+            "False,True": {"True": 0.7, "False": 0.3},
+            "False,False": {"True": 0.01, "False": 0.99}
+        },
+        "H": {
+            "True,True": {"True": 0.99, "False": 0.01},
+            "True,False": {"True": 0.4, "False": 0.6},
+            "False,True": {"True": 0.65, "False": 0.35},
+            "False,False": {"True": 0.1, "False": 0.9}
+        }
+    },
+    "description": "Complex Bayesian network with 8 nodes featuring multiple dependency types:",
+    "metadata": {
+        "node_descriptions": {
+            "A": "Root cause/factor",
+            "B": "Primary mechanism",
+            "C": "Secondary mechanism",
+            "D": "System state",
+            "E": "Performance metric 1",
+            "F": "Performance metric 2",
+            "G": "Overall output",
+            "H": "Final outcome"
+        },
+        "dependency_types": {
+            "conjunctive": ["D", "G"],
+            "disjunctive": ["H"],
+            "mediated": ["A→B→D", "A→C→D"],
+            "feedback": ["C→H", "G→H"]
+        },
+        "complexity_factors": [
+            "Multiple parent nodes (D has 2, G has 2, H has 2)",
+            "Hierarchical structure with 4 layers",
+            "Combined AND/OR relationships",
+            "Non-linear probability distributions"
+        ]
+    }
+}

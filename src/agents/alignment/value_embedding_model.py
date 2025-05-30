@@ -7,30 +7,42 @@ Implements:
 - Human preference modeling (Christiano et al., 2017)
 """
 
-import logging
+import json, yaml
 import torch
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+
+from types import SimpleNamespace
+from typing import Dict, List
+
 from models.slai_lm import SLAILM, get_shared_slailm
+from logs.logger import get_logger
 
+logger = get_logger("Value Embedding Model")
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+UDHR_JSON_PATH = "src/agents/alignment/templates/un_human_rights.json"
+with open(UDHR_JSON_PATH, "r", encoding="utf-8") as f:
+    udhr_data = json.load(f)
+NUM_ETHICAL_PRINCIPLES = len(udhr_data["articles"])
 
-@dataclass
-class ValueConfig:
-    """Configuration for ethical value embedding model"""
-    embedding_dim: int = 512
-    num_cultural_dimensions: int = 6  # Hofstede's 6 dimensions
-    num_ethical_principles: int = 12   # UN Declaration of Human Rights
-    temperature: float = 0.07
-    dropout: float = 0.1
-    margin: float = 0.2  # Margin for triplet loss
-    max_seq_length: int = 128
+CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
+
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class ValueEmbeddingModel(nn.Module):
     """
@@ -47,42 +59,45 @@ class ValueEmbeddingModel(nn.Module):
     4. Alignment Scorer: Cross-attention value-policy matching
     """
 
-    def __init__(self, config, slai_lm=None):
+    def __init__(self,
+                 config_section_name: str = "value_embedding",
+                 config_file_path: str = CONFIG_PATH,
+                 slai_lm=None):
         super().__init__()
-        self.config = config
+        self.config = get_config_section(config_section_name, config_file_path)
         self.slai_lm = slai_lm
-        self.value_proj = nn.Linear(768, config.embedding_dim)
+        self.value_proj = nn.Linear(768, self.config.embedding_dim)  # Fixed
         
         # Cultural context adaptor
         self.cultural_adaptor = nn.Sequential(
-            nn.Linear(config.num_cultural_dimensions, 256),
+            nn.Linear(self.config.num_cultural_dimensions, 256),  # Fixed
             nn.ReLU(),
-            nn.Linear(256, config.embedding_dim)
+            nn.Linear(256, self.config.embedding_dim)  # Fixed
         )
         
         # Policy encoder
         self.policy_encoder = nn.Sequential(
-            nn.Linear(4096, 2048),  # Assumes policy params as input
+            nn.Linear(4096, 2048),
             nn.GELU(),
             nn.LayerNorm(2048),
-            nn.Linear(2048, config.embedding_dim)
+            nn.Linear(2048, self.config.embedding_dim)  # Fixed
         )
         
         # Alignment scoring
         self.alignment_scorer = nn.Sequential(
-            nn.Linear(3*config.embedding_dim, 512),
+            nn.Linear(3 * self.config.embedding_dim, 512),  # Fixed
             nn.ReLU(),
             nn.Linear(512, 1)
         )
         
         # Human preference predictor
         self.preference_head = nn.Sequential(
-            nn.Linear(2*config.embedding_dim, 256),
+            nn.Linear(2 * self.config.embedding_dim, 256),  # Fixed
             nn.ReLU(),
             nn.Linear(256, 1)
         )
         
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = nn.Dropout(self.config.dropout)  # Fixed
         self._init_weights()
 
     def _init_weights(self):
@@ -141,6 +156,17 @@ class ValueEmbeddingModel(nn.Module):
             torch.abs(value_emb - policy_emb)
         ], dim=-1)
         return torch.sigmoid(self.alignment_scorer(combined))
+
+    def predict(self, data: pd.DataFrame) -> np.ndarray:
+        """Ethical alignment prediction for counterfactual audit"""
+        policy_emb = self.encode_policy(
+            torch.tensor(data['policy_features'].values.tolist()).float()
+        )
+        value_emb = self.encode_value(
+            data['ethical_guidelines'].tolist(),
+            torch.tensor(data['cultural_features'].values.tolist()).float()
+        )
+        return self.calculate_alignment(value_emb, policy_emb).detach().numpy()
 
     def predict_preference(self, value_emb: torch.Tensor,
                          policy_emb: torch.Tensor) -> torch.Tensor:
@@ -245,11 +271,43 @@ class ValueTrainer:
         return total_loss / len(self.train_loader)
     
     def _create_labels(self, batch: Dict) -> Dict:
-        """Create training labels for triplet loss"""
-        # Implementation of hard negative mining
+        human_pref = batch["human_preference"].squeeze()
+        batch_size = human_pref.size(0)
+    
+        # Initialize indices
+        positive_idx = torch.zeros(batch_size, dtype=torch.long)
+        negative_idx = torch.zeros(batch_size, dtype=torch.long)
+    
+        # Get available positives/negatives
+        pos_mask = human_pref == 1
+        neg_mask = ~pos_mask
+        pos_indices = torch.where(pos_mask)[0]
+        neg_indices = torch.where(neg_mask)[0]
+    
+        # Handle edge cases
+        if len(pos_indices) == 0 or len(neg_indices) == 0:
+            return {
+                "positive_idx": torch.tensor([], dtype=torch.long),
+                "negative_idx": torch.tensor([], dtype=torch.long),
+                "human_preference": batch["human_preference"]
+            }
+    
+        # Compute policy embeddings once for efficiency
+        policy_emb = self.model.policy_encoder(batch["policy_params"])
+    
+        for i in range(batch_size):
+            if human_pref[i] == 1:
+                neg_dists = F.pairwise_distance(policy_emb[i].unsqueeze(0), policy_emb[neg_mask])
+                negative_idx[i] = neg_indices[torch.argmax(neg_dists)]
+                positive_idx[i] = i
+            else:
+                pos_dists = F.pairwise_distance(policy_emb[i].unsqueeze(0), policy_emb[pos_mask])
+                positive_idx[i] = pos_indices[torch.argmin(pos_dists)]
+                negative_idx[i] = i
+    
         return {
-            "positive_idx": ...,
-            "negative_idx": ...,
+            "positive_idx": positive_idx,
+            "negative_idx": negative_idx,
             "human_preference": batch["human_preference"]
         }
     
@@ -291,13 +349,134 @@ class ValueAuditor:
         }
     
     def _intrinsic_dim(self, emb: torch.Tensor) -> float:
-        """Estimate intrinsic dimensionality (Facco et al., 2017)"""
-        return 0.0
+        """Estimate intrinsic dimensionality using TWO-NN method (Facco et al., 2017)"""
+        if emb.size(0) < 3:  # Need at least 3 points for neighbors
+            return 0.0
+        
+        # Compute pairwise distances
+        dists = torch.cdist(emb, emb)
+        dists.fill_diagonal_(float('inf'))
+        
+        # Get first and second nearest neighbors
+        top2_dists, _ = torch.topk(dists, k=2, dim=1, largest=False)
+        mu = top2_dists[:, 1] / (top2_dists[:, 0] + 1e-12)
+        
+        valid = (top2_dists[:, 0] > 1e-12) & (mu > 1.0)
+        if valid.sum() < 10:  # Minimum valid samples required
+            return 0.0
+        
+        log_mu = torch.log(mu[valid])
+        d = 1 / log_mu.mean()
+        return d.item()
     
     def _cluster_metrics(self, emb: torch.Tensor) -> Dict:
-        """Calculate clustering metrics"""
-        return {}
+        """Calculate clustering metrics using geometric approximations"""
+        if emb.size(0) < 5:
+            return {"num_clusters": 0, "silhouette_score": 0.0, "cohesion_separation_ratio": 0.0}
+        
+        # Fast geometric clustering approximation
+        centroid = emb.mean(dim=0)
+        dists_to_center = torch.norm(emb - centroid, dim=1)
+        cohesion = dists_to_center.mean().item()
+        
+        # Estimate separation using pairwise distances
+        random_sample = emb[torch.randperm(emb.size(0))[:5]]
+        separation = torch.pdist(random_sample).mean().item()
+        
+        return {
+            "num_clusters": 1 if cohesion < 0.5 else 2,
+            "silhouette_score": max(0, separation - cohesion),
+            "cohesion_separation_ratio": separation / (cohesion + 1e-12)
+        }
     
     def _coverage_metric(self, emb: torch.Tensor) -> float:
-        """Value space coverage metric"""
-        return 0.0
+        """Value space coverage metric using hypersphere volume estimation"""
+        if emb.size(0) < 2:
+            return 0.0
+        
+        # Compute effective volume using pairwise distances
+        max_dists, _ = torch.max(torch.cdist(emb, emb), dim=1)
+        mean_radius = max_dists.mean().item()
+        return mean_radius * emb.size(1)  # Approximate dimensional scaling
+    
+if __name__ == "__main__":
+    with open(UDHR_JSON_PATH, "r") as f:
+        udhr_data = json.load(f)
+
+    num_ethical_principles = len(udhr_data["articles"])
+
+    # Mock SLAI language model
+    class MockSLM:
+        def process_input(self, prompt, text):
+            return {"tokens": ["mock"] * 20}
+    
+    mock_slm = MockSLM()
+    
+    model = ValueEmbeddingModel(
+        config_section_name="value_embedding",
+        config_file_path=CONFIG_PATH,
+        slai_lm=mock_slm
+    )
+
+    # Create synthetic test data
+    def generate_test_data(num_samples=100):
+        ethical_texts = ["Respect human dignity"] * num_samples
+        cultural_features = torch.randn(num_samples, model.config.num_cultural_dimensions)
+        policy_parameters = torch.randn(num_samples, 4096)
+        human_preferences = torch.randint(0, 2, (num_samples, 1))
+        return ethical_texts, cultural_features, policy_parameters, human_preferences
+    
+    # Prepare datasets
+    train_texts, train_cult, train_pol, train_pref = generate_test_data(200)
+    val_texts, val_cult, val_pol, val_pref = generate_test_data(50)
+    
+    train_dataset = ValueDataset(train_texts, train_cult.tolist(), train_pol.tolist(), train_pref.tolist())
+    val_dataset = ValueDataset(val_texts, val_cult.tolist(), val_pol.tolist(), val_pref.tolist())
+    
+    # Test training pipeline
+    trainer = ValueTrainer(model, train_dataset, val_dataset)
+    print("Starting training test...")
+    for epoch in range(3):  # Short test run
+        loss = trainer.train_epoch()
+        print(f"Epoch {epoch+1} - Loss: {loss:.4f}")
+    
+    # Test evaluation
+    metrics = trainer.evaluate()
+    print("\nValidation Metrics:")
+    for k, v in metrics.items():
+        print(f"{k}: {v:.4f}")
+    
+    # Test auditing functionality
+    auditor = ValueAuditor(model)
+    
+    # Get embeddings for auditing
+    with torch.no_grad():
+        test_emb = model.encode_value(["Test value"], torch.randn(1, model.config.num_cultural_dimensions))
+        policy_embs = model.encode_policy(torch.randn(5, 4096))
+    
+    # Run audits
+    policy_comparison = auditor.compare_policies(policy_embs, test_emb)
+    print("\nPolicy Comparison Results:")
+    for k, v in policy_comparison.items():
+        print(f"{k}: {v:.4f}")
+    
+    distribution_analysis = auditor.analyze_distribution(policy_embs)
+    print("\nEmbedding Space Analysis:")
+    for k, v in distribution_analysis.items():
+        if isinstance(v, dict):
+            print(f"{k}:")
+            for sk, sv in v.items():
+                print(f"  {sk}: {sv:.4f}")
+        else:
+            print(f"{k}: {v:.4f}")
+    
+    # Test trajectory scoring
+    test_df = pd.DataFrame({
+        'policy_features': [torch.randn(4096).tolist() for _ in range(10)],
+        'ethical_guidelines': ["Fair treatment"] * 10,
+        'cultural_features': [torch.randn(6).tolist() for _ in range(10)]
+    })
+    trajectory_score = model.score_trajectory(test_df)
+    print(f"\nTrajectory Alignment Score: {trajectory_score:.4f}")
+    
+    print("\nAll functionality tests completed successfully!")

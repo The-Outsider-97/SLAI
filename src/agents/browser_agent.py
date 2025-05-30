@@ -2,7 +2,7 @@ import os
 import time
 import random
 # import pytesseract
-import numpy as np
+import torch
 
 from PIL import Image
 from selenium import webdriver
@@ -11,16 +11,16 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
+from src.agents.browser.functions.do_click import DoClick
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.language_agent import LanguageAgent, DialogueContext
 from src.agents.learning_agent import LearningAgent
-from src.agents.base_agent import BaseAgent
 from src.agents.browser.security import SecurityFeatures, exponential_backoff
 from src.agents.browser.workflow import WorkFlow
 from src.agents.browser.utils import Utility
+from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
-
-logger = get_logger(__name__)
+logger = get_logger("Browser")
 
 # --------------------------
 # Core Configuration
@@ -28,8 +28,8 @@ logger = get_logger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SEARCH_DELAY = (0.1, 0.02)
 WINDOW_SIZE = (random.randint(1200, 1400), random.randint(800, 1000))
-SNAPSHOT_DIR = os.path.join("debug", "dom_snapshots")
-CAPTCHA_LOG_DIR = os.path.join("debug", "captcha_logs")
+SNAPSHOT_DIR = "logs/debug/dom_snapshots"
+CAPTCHA_LOG_DIR = "logs/debug/captcha_logs"
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(CAPTCHA_LOG_DIR, exist_ok=True)
 
@@ -46,6 +46,7 @@ class BrowserAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.driver = self._init_browser()
+        self.do_click_helper = DoClick(self.driver)
         self.robots_parser = RobotExclusionRulesParser()
 
         # Initialize integrated agents
@@ -53,9 +54,25 @@ class BrowserAgent(BaseAgent):
         self.agent_factory.shared_resources["llm"] = shared_llm
         self._init_agents()
         AGENT_CONFIGS = {
-            "reasoning": {"init_args": {"llm": shared_llm}},
-            "language": {},
-            "learning": {}
+            "reasoning": {
+                "init_args": {
+                    "llm": shared_llm,
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            },
+            "language": {
+                "init_args": {
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            },
+            "learning": {
+                "init_args": {
+                    "shared_memory": self.shared_memory,
+                    "agent_factory": self.agent_factory
+                }
+            }
         }
         for agent_name, cfg in AGENT_CONFIGS.items():
             setattr(self, agent_name, self.agent_factory.create(agent_name, config=cfg))
@@ -83,9 +100,13 @@ class BrowserAgent(BaseAgent):
     def do_scroll(self, pixels):
         self.driver.execute_script(f"window.scrollBy(0, {pixels});")
     
-    def do_click(self, selector):
-        element = self.driver.find_element(By.CSS_SELECTOR, selector)
-        ActionChains(self.driver).click(element).perform()
+    def do_click(self, selector, wait_before_execution=0.0):
+        result = self.do_click_helper._perform_click(selector, wait_before_execution)
+        if result["status"] != "success":
+            self.logger.error(f"Click failed: {result['message']}")
+        else:
+            self.logger.info(f"Click succeeded: {result['message']}")
+        return result
 
     def _init_browser(self):
         options = webdriver.ChromeOptions()
@@ -160,13 +181,22 @@ class BrowserAgent(BaseAgent):
 
     # Agent Integration Helpers -------------------------------------
     def _init_agents(self):
+        from src.agents.language.grammar_processor import GrammarProcessor
+        from src.agents.perception.encoders.text_encoder import TextEncoder
+        from models.slai_lm import get_shared_slailm
         """Initialize all integrated agents in proper order"""
         shared_llm = self.agent_factory.shared_resources["llm"]
         
         self.reasoning = self.agent_factory.create('reasoning', config={
             "init_args": {"llm": shared_llm}
         })
-        self.nlp_processor = self.agent_factory.create('language', config={})
+        self.nlp_processor = self.agent_factory.create('language', config={
+            "init_args": {
+                "grammar": GrammarProcessor(),
+                "context": DialogueContext(encoder=TextEncoder()),
+                "slai_lm": get_shared_slailm(self.shared_memory, self.agent_factory)
+            }
+        })
         self.learner = self.agent_factory.create('learning', config={})
 
     def _content_to_facts(self, content):

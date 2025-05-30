@@ -1,4 +1,4 @@
-Core ML & DL
+
 numpy>=1.23.0
 matplotlib>=3.7.0
 pyyaml>=6.0
@@ -11,29 +11,29 @@ scipy
 pillow
 pytesseract
 
-Gym Environments for RL
+# Gym Environments for RL
 gymnasium>=0.28.1
 gym
 
-Evolutionary Algorithms
+# Evolutionary Algorithms
 deap>=1.3.3
 
-Hyperparameter Optimization
+# Hyperparameter Optimization
 optuna>=3.1.0
 ray[tune]>=2.2.0
 scikit-optimize
 
-Code Generation & Recursive Self-Improvement
+# Code Generation & Recursive Self-Improvement
 transformers>=4.31.0
 accelerate>=0.21.0
 sentencepiece
 sentence-transformers
 
-Sandbox / Safe Execution (optional for RSI)
+# Sandbox / Safe Execution (optional for RSI)
 docker>=6.1.3
 restrictedpython
 
-Testing & Dev Tools
+# Testing & Dev Tools
 pytest>=7.3.0
 jupyterlab>=4.0.5
 pylint
@@ -48,7 +48,7 @@ flask
 graphviz
 gradio
 
-Additional Runtime Utilities
+# Additional Runtime Utilities
 psutil
 gputil
 PyQt5
@@ -61,14 +61,14 @@ robotexclusionrulesparser
 sounddevice
 cryptography
 
-Statistical Visualization
+# Statistical Visualization
 seaborn
 plotly
 statsmodels
 reportlab
 shap
 
-Text Processing
+# Text Processing
 textstat
 ply
 nltk
@@ -76,21 +76,30 @@ spacy
 tenacity
 rollback
 
-Machine Learning Utilities
+# Machine Learning Utilities
 scikit-learn
 pandas
 langchain
 pydantic
 mlxtend
 
-Evaluation & NLP Metrics
+# Evaluation & NLP Metrics
 evaluate
 bert-score
 rouge
 
-OpenAI Integration
+# OpenAI Integration
 openai
 
-Misc Utilities
+# Misc Utilities
 deepmerge
 sentencepiece
+
+Flask-Talisman==5.1.0
+Flask-Limiter==3.5.0
+bleach==6.0.0
+Werkzeug==2.3.7
+python-whois==0.9.0
+flask>=2.0.0
+django>=4.0
+fastapi>=0.85

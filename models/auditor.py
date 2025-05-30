@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from PyQt5.QtCore import pyqtSignal, QObject
 from src.agents.evaluation_agent import EvaluationAgent
-from logs.logger import get_log_queue, get_logger
+from logs.logger import get_logger#, get_log_queue
 
 logger = get_logger("SLAI.IdleAuditor")
 

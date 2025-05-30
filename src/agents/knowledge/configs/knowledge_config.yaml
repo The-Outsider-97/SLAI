@@ -1,0 +1,140 @@
+relevance_weights:
+  semantic: 0.4
+  contextual: 0.3
+  temporal: 0.2
+  structural: 0.1
+
+temporal_decay:
+  half_life_days: 30  # How fast relevance decays over time
+
+knowledge_memory:
+  # Storage & Capacity
+  max_entries: 10000            # Maximum number of memory entries
+  cache_size: 1000              # Size of local retrieval cache
+
+  # Relevance & Retrieval
+  relevance_mode: "hybrid"      # Options: tfidf, embedding, hybrid
+  similarity_threshold: 0.2     # Cosine similarity threshold for retrieval
+  decay_factor: 0.8             # Contextual search decay for older entries
+  context_window: 3             # Number of past contexts to include
+
+  # Inference & Ontology
+  enable_ontology_expansion: true
+  enable_rule_engine: true
+  auto_discover_rules: true
+  min_rule_support: 0.1         # For ML-based rule discovery (Apriori)
+
+  # Semantic Embeddings
+  use_embedding_fallback: true
+  embedding_model: "all-MiniLM-L6-v2"
+
+  # Persistence
+  persist_file: "src/agents/knowledge/data/knowledge_memory.json"
+  knowledge_dir: "src/agents/knowledge/data/knowledge_docs/"
+  autoload_on_startup: true
+
+  # Logging & Monitoring
+  log_retrieval_hits: true
+  log_context_updates: true
+  log_inference_events: true
+
+rule_engine:
+  enabled: true
+  verbose_logging: true
+  auto_discover: true
+  min_rule_confidence: 0.6
+  slow_rule_threshold: 0.5
+  rule_sources:
+    - "rules/physics_rules.yaml"
+    - "rules/logic_rules.json"
+  save_inferred: true
+  max_facts_per_rule: 10
+
+governor:
+  enabled: true
+  audit_interval: 300             # Seconds between full system audits
+  realtime_monitoring: true       # Monitor shared memory continuously
+  guideline_paths:
+    - "src/agents/safety/guidelines/ai_ethics.yaml"
+    - "src/agents/safety/guidelines/safety_protocols.json"
+  violation_thresholds:
+    unethical: 0.65
+    similarity: 0.85              # Min match similarity for guideline detection
+    consecutive_errors: 5         # Max allowed consecutive errors before intervention
+  freshness_threshold: 720        # 30 days in hours
+  enforcement_mode: "log"         # Options: log, alert, restrict
+  max_audit_history: 100          # Max stored audit records
+  memory_thresholds:
+    warning: 2048                 # Memory warning threshold in MB
+    critical: 3072  
+
+perform_action:
+  enabled: true                   # Global toggle for action execution
+  allowed_action_types: ["http", "database", "shell"]  # Permitted action categories
+  retry_attempts: 3               # Max retries on transient failures
+  retry_delay: 2.0                # Seconds between retry attempts
+  timeout: 30                     # Max seconds per action execution
+  max_concurrent_actions: 5       # Simultaneous action limit
+  allowed_domains:                # Whitelist for HTTP calls
+    - "https://scholar.google.com/"
+    - "internal-service.net"
+  enable_sandbox: true            # Restrict shell/database access
+  log_level: "detailed"           # Options: minimal, detailed, debug
+  confirmation_required: false    # Require human approval for高危actions
+
+knowledge_cache:
+  max_size: 1000                  # Max items in cache (LRU enforced)
+  enable_encryption: true         # Encrypt cached data
+  hashing_method: "simhash"       # Options: md5, simhash
+  simhash_bits: 64                # Bit-length for SimHash
+  tokenizer: "word"               # Tokenizer for semantic hashing (word/char)
+
+knowledge_monitor:
+  enabled: true                  # Master switch for monitoring system
+  check_interval: 3600          # Seconds between checks (1 hour)
+  allowed_academic_domains:     # Approved academic domains
+    - "arxiv.org"
+    - "springer.com"
+    - "ieee.org"
+    - "sciencedirect.com"
+    - "nature.com"
+    - "jstor.org"
+  academic_source_paths:        # Paths to academic source databases
+    - "data/academic_sources.yaml"
+    - "data/approved_datasets.json"
+  max_source_age: 5             # Maximum allowed age of sources (years)
+  enable_data_integrity_checks: true
+  violation_policy: "alert"       # Options: log, quarantine, alert
+  auto_flush_on_alert: true       # Automatic cache cleanup during critical alerts
+  severity_thresholds:
+    critical: 3                   # Severity level for emergency response
+    high: 2
+    medium: 1
+  cross_component_validation: true
+  system_impact_analysis: true
+  verification_level: "strict"  # strict/moderate/lenient
+  crossref_checking: true        # Enable DOI validation via CrossRef API
+  plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
+  auto_archive_outdated: false  # Automatically archive outdated sources
+
+knowledge_sync:
+  auto_sync:
+    enabled: true
+    interval: 3600  # Seconds between syncs
+  conflict_resolution:
+    strategy: "semantic"  # Options: timestamp, confidence, semantic, governance
+    similarity_threshold: 0.85
+    auto_quarantine: true
+  versioning:
+    enabled: true
+    max_versions: 10
+  external_sources:
+    - data/external_knowledge_1.yaml
+    - data/external_knowledge_2.json
+    - type: "api"
+      endpoint: "https://api.knowledgebase/v1/updates"
+      auth_type: "bearer_token"
+      update_interval: 86400
+    - type: "database"
+      connection_string: "postgresql://user:pass@knowledge-db:5432/main"
+      tables: ["public.research_papers", "public.datasets"]

@@ -1,0 +1,46 @@
+semantic_frames_path: "src/agents/reasoning/templates/semantic_rules.json"
+
+inference:
+  default_chain_length: 5         # Max steps in chain-of-thought reasoning
+  neuro_symbolic_weight: 0.4      # Weight for neural vs symbolic reasoning (0.0-1.0)
+  max_hypotheses: 100             # Cap on number of hypotheses retained
+  exploration_rate: 0.1           # Probability to trigger rule discovery
+  llm_fallback:
+    enable: true
+    temperature: 0.3
+    max_tokens: 100
+  markov_logic_weight: 0.7
+  knowledge_base_weight: 0.3
+
+rules:
+  enable_learning: true           # Enable adaptive rule discovery
+  min_support: 0.3                # Minimum support threshold for discovered rules
+  min_confidence: 0.7             # Minimum confidence threshold for valid rules
+  auto_weight_adjustment: true    # Allow reinforcement learning on rule weights
+  max_circular_depth: 3           # Limit for detecting rule circularity
+  max_utterance_length: 50
+  discourse_markers_path: "src/agents/language/resources/discourse_markers.json"
+  politeness_strategies_path: "src/agents/language/resources/politeness_strategies.yaml"
+
+validation:
+  enable: true
+  max_circular_depth: 3
+  min_soundness_score: 0.7
+  contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
+  redundancy_margin: 0.05
+  max_validation_attempts: 5
+  validation_timeout: 1
+  enable_semantic_redundancy: false  # or true, depending on your needs
+  mln_rule_confidence_threshold: 0.7
+
+nlp:
+  sentence_transformer: "src/agents/perception/modules/transformer.py"
+  tokenizer: "src/agents/perception/modules/tokenizer.py"
+  enable_pragmatic_heuristics: true
+  use_semantic_frames: true
+
+storage:
+  knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
+  rule_backup: "src/agents/knowledge/discovered_rules.json"
+  lexicon_path: "src/agents/language/templates/sentiment_lexicon.json"
+  bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"

@@ -1,0 +1,154 @@
+[
+  {
+    "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+    "replacement": "[REDACTED_SSN]"
+  },
+  {
+    "pattern": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,7}\\b",
+    "replacement": "[REDACTED_EMAIL]"
+  },
+  {
+    "pattern": "(\\+\\d{1,4}[\\s-]?|\\(\\d{1,5}\\)[\\s-]?|)(\\d[\\d\\s-]{5,}\\d)",
+    "replacement": "\\1[REDACTED_PHONE]"
+  },
+  {
+    "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
+    "replacement": "[REDACTED_IP_ADDRESS]"
+  },
+  {
+    "pattern": "\\b(?:credit card|debit card|visa|mastercard|amex|discover|cc number|card number|payment card|cc#)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_CC]"
+  },
+  {
+    "pattern": "\\b(?:password|passwd|secret|credential|pass phrase|pin code)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_PASSWORD]"
+  },
+  {
+    "pattern": "\\b(?:address|street|city|state|province|zip code|postal code|postcode|po box|mailing address|physical address)\\b",
+    "replacement": "[REDACTED_PII_KEYWORD_ADDRESS]"
+  },
+  {
+    "pattern": "\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+    "replacement": "[REDACTED_CC_NUMBER_GENERIC]"
+  },
+  {
+    "pattern": "\\b\\d{4}[\\s-]?\\d{6}[\\s-]?\\d{5}\\b",
+    "replacement": "[REDACTED_CC_AMEX]"
+  },
+  {
+    "pattern": "\\b(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{2,4})\\b",
+    "replacement": "[REDACTED_DATE_OF_BIRTH]"
+  },
+  {
+    "pattern": "\\b[A-Z]{1,3}\\d{6,9}[A-Z]?\\b",
+    "replacement": "[REDACTED_PASSPORT_NUMBER_GENERIC]"
+  },
+  {
+    "pattern": "\\b(?:[A-Z]{1,2}\\d{5,12}|\\d{3,4}[A-Z]{2}\\d{2,6})\\b",
+    "replacement": "[REDACTED_LICENSE_NUMBER_GENERIC]"
+  },
+  {
+    "pattern": "\\b(?:bank account|account number|iban|swift code|bic code|routing number|aba number|acct no|account #)[\\s:]*([A-Z0-9\\s-]{5,34})\\b",
+    "replacement": "[REDACTED_BANK_ACCOUNT_DETAILS]"
+  },
+  {
+    "pattern": "\\b(?:mrn|medical record number|patient id|health id|health insurance claim number|hicn)[\\s:#]*[A-Za-z0-9-]{4,20}\\b",
+    "replacement": "[REDACTED_MEDICAL_RECORD_IDENTIFIER]"
+  },
+  {
+    "pattern": "\\b(?:sk_live_[A-Za-z0-9]{20,}|pk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|sk_test_[A-Za-z0-9]{20,}|pk_test_[A-Za-z0-9]{20,}|rk_test_[A-Za-z0-9]{20,})\\b",
+    "replacement": "[REDACTED_STRIPE_API_KEY]"
+  },
+  {
+    "pattern": "\\b(?:api_key|apikey|secret_key|secretkey|auth_token|authtoken|access_token|accesstoken|client_secret|clientsecret|bearer_token|bearertoken)[\\s:=]+([A-Za-z0-9_\\-/+.]{20,})\\b",
+    "replacement": "[REDACTED_GENERIC_SECRET_TOKEN]"
+  },
+  {
+    "pattern": "(https?://)[^\\s:@/]+:[^\\s:@/]+@",
+    "replacement": "$1[REDACTED_USER_PASSWORD_IN_URL]@"
+  },
+  {
+    "pattern": "\\b(?:[A-Z][a-z'-]+(?:\\s+(?:[A-Z][a-z'-]+|[A-Z]\\.)){1,3})\\s+(?:born on|DOB:)\\s",
+    "replacement": "[REDACTED_FULL_NAME_DOB_CONTEXT] "
+  },
+  {
+    "pattern": "\\b(?:SSN|Social Security Number|Social Security #)[:\\s]*\\d{3}-\\d{2}-\\d{4}\\b",
+    "replacement": "[REDACTED_SSN_CONTEXT]"
+  },
+  {
+    "pattern": "([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})",
+    "replacement": "[REDACTED_MAC_ADDRESS]"
+  },
+  {
+    "pattern": "\\b\\d{15}\\b",
+    "replacement": "[REDACTED_IMEI_MEID]"
+  },
+  {
+    "pattern": "\\b[A-HJ-NPR-Z0-9]{17}\\b",
+    "replacement": "[REDACTED_VIN]"
+  },
+  {
+    "pattern": "[-+]?([1-8]?\\d(\\.\\d+)?|90(\\.0+)?),\\s*[-+]?(180(\\.0+)?|((1[0-7]\\d)|([1-9]?\\d))(\\.\\d+)?)",
+    "replacement": "[REDACTED_GPS_COORDINATES]"
+  },
+  {
+    "pattern": "\\b(1[3456789][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[ac-hj-np-z02-9]{11,71}|(0x)?[0-9a-fA-F]{40})\\b",
+    "replacement": "[REDACTED_CRYPTO_ADDRESS]"
+  },
+  {
+    "pattern": "\\b(?:GitHub|gitlab|slack|twitter|aws|azure|gcp)_pat_[A-Za-z0-9_\\-]{20,}\\b",
+    "replacement": "[REDACTED_PLATFORM_PAT_TOKEN]"
+  },
+  {
+    "pattern": "secret\\s*=\\s*['\"]([0-9a-fA-F]{32,}|[A-Za-z0-9/+]{22,}={0,2})['\"]",
+    "replacement": "[REDACTED_GENERIC_HEX_OR_BASE64_SECRET]"
+  },
+  {
+    "pattern": "\\b\\d{5}(?:[-\\s]\\d{4})?\\b",
+    "replacement": "[REDACTED_US_ZIP_CODE]"
+  },
+  {
+    "pattern": "\\b[A-PR-UWYZ][A-HK-Y0-9][A-HJKS-UW0-9]?[A-HJKS-UW0-9]?\\s?[0-9][ABD-HJLNP-UW-Z]{2}\\b",
+    "replacement": "[REDACTED_UK_POSTCODE]"
+  },
+  {
+    "pattern": "\\b(?:username|user_id|login_id|uid|user name|handle)\\s*[:=]\\s*['\"]?([A-Za-z0-9_.-]{3,30})['\"]?",
+    "replacement": "[REDACTED_USERNAME_CONTEXT]"
+  },
+  {
+    "pattern": "\\b(?:driving license|driver's license|id card|identity card|passport scan|tax document|w2 form|1099 form)\\b",
+    "replacement": "[REDACTED_SENSITIVE_DOCUMENT_KEYWORD]"
+  },
+  {
+    "pattern": "\\b(?:National ID|NIN|Tax ID|TIN|Social Insurance Number|SIN)[:\\s#]*([A-Za-z0-9\\s-]{5,20})\\b",
+    "replacement": "[REDACTED_NATIONAL_OR_TAX_ID]"
+  },
+  {
+    "pattern": "\\b[A-Za-z0-9+/]{40,}\\b",
+    "replacement": "[REDACTED_GENERIC_LONG_BASE64_STRING]"
+  },
+  {
+    "pattern": "(?:\\?|&)(?:email|mail|user_email|e-mail)=([^&\\s]+@[^&\\s]+\\.[^&\\s]+)",
+    "replacement": "?email=[REDACTED_EMAIL_IN_URL]"
+  },
+  {
+    "pattern": "(?:\\?|&)(?:ssn|social_security_number)=([^&\\s]+)",
+    "replacement": "?ssn=[REDACTED_SSN_IN_URL]"
+  },
+  {
+    "pattern": "(?:\\?|&)(?:phone|tel|mobile|contact_no)=([^&\\s]+)",
+    "replacement": "?phone=[REDACTED_PHONE_IN_URL]"
+  },
+  {
+    "pattern": "(?:\\?|&)(?:credit_card|cc_num|card_number)=([^&\\s]+)",
+    "replacement": "?credit_card=[REDACTED_CC_IN_URL]"
+  },
+  {
+    "pattern": "(?:\\?|&)(?:password|passwd|pwd|secret)=([^&\\s]+)",
+    "replacement": "?password=[REDACTED_PASSWORD_IN_URL]"
+  },
+  {
+    "pattern": "\\b(?:date of birth|dob|birthdate|born on)[:\\s]*(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{2,4})\\b",
+    "replacement": "[REDACTED_DOB_CONTEXT]"
+  }
+]

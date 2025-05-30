@@ -1,0 +1,469 @@
+{
+  "documentInfo": {
+    "documentType": "AI Safety Agent - Security Compliance Document",
+    "version": "1.0",
+    "lastUpdated": "YYYY-MM-DD",
+    "preparedFor": "[Your Organization/Project Name]",
+    "aiSystemName": "Adaptive Security Agent (ASA)"
+  },
+  "sections": [
+    {
+      "sectionId": "1",
+      "title": "Introduction and Purpose",
+      "subsections": [
+        {
+          "subsectionId": "1.1",
+          "title": "Scope of Compliance",
+          "content": "This document outlines the security controls and compliance measures implemented for the AI Safety Agent (ASA), including its models, data pipelines, APIs, and supporting infrastructure.",
+          "inScope": ["email_nn", "url_nn", "data ingestion for training", "prediction APIs", "adaptive_security.py core logic", "configuration files", "model storage", "log storage"],
+          "outOfScope": ["underlying cloud provider infrastructure physical security if using a major CSP", "user endpoint security"]
+        },
+        {
+          "subsectionId": "1.2",
+          "title": "AI System Overview",
+          "description": "A comprehensive cybersecurity system focused on phishing detection (email and URL) and threat prevention (supply chain checks, traffic monitoring). Combines neural networks with heuristic rules for multi-layered protection.",
+          "keyFunctionalities": ["Email analysis", "URL analysis", "Supply chain integrity checks", "rate limiting", "anomaly detection"],
+          "primaryUsers": "Security operations team, end-users (indirectly through protection)"
+        },
+        {
+          "subsectionId": "1.3",
+          "title": "Applicable Standards and Regulations",
+          "externalStandards": ["ISO 27001 (if applicable)", "NIST Cybersecurity Framework (if applicable)", "SOC 2 (if applicable)"],
+          "privacyRegulations": ["GDPR (if applicable)", "CCPA (if applicable)", "HIPAA (if applicable)"],
+          "internalPolicies": ["[Your Organization's Information Security Policy]"]
+        },
+        {
+          "subsectionId": "1.4",
+          "title": "Document Ownership and Review Cycle",
+          "owner": "[e.g., Lead Security Engineer, AI Safety Officer]",
+          "reviewFrequency": "Annually, or upon significant system changes or security incidents."
+        }
+      ]
+    },
+    {
+      "sectionId": "2",
+      "title": "Data Security and Privacy",
+      "controls": [
+        {
+          "controlId": "DP-001",
+          "objective": "Data Classification",
+          "description": "Classify all data processed by ASA (e.g., email content, URLs, IP addresses, training datasets) based on sensitivity.",
+          "implementationDetails": "Data Classification Policy; Data inventory mapping classifications (e.g., email.body=Confidential, training_features_url=Restricted).",
+          "status": "Placeholder",
+          "owner": "Data Protection Team"
+        },
+        {
+          "controlId": "DP-002",
+          "objective": "Data Collection & Consent",
+          "description": "Ensure lawful basis for collecting and processing data, especially PII for training and analysis. Obtain consent where required.",
+          "implementationDetails": "Privacy Policy; Consent mechanisms (if applicable); Data Processing Agreements (DPAs) with data sources.",
+          "status": "Placeholder",
+          "owner": "Legal / DPO"
+        },
+        {
+          "controlId": "DP-003",
+          "objective": "Data Minimization",
+          "description": "Collect and retain only the data necessary for the ASA's defined security functions.",
+          "implementationDetails": "Data flow diagrams showing data points; Justification for each data element collected for feature extraction (_extract_email_features, _extract_url_features).",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "DP-004",
+          "objective": "Data Storage & Encryption (At Rest)",
+          "description": "Securely store all sensitive data, including models and training datasets. Encrypt data at rest.",
+          "implementationDetails": "Encryption standards policy; Use of AES-256 or equivalent for storage (e.g., encrypted S3 buckets, database encryption); Key management procedures.",
+          "status": "Placeholder",
+          "owner": "Infrastructure Team"
+        },
+        {
+          "controlId": "DP-005",
+          "objective": "Data Encryption (In Transit)",
+          "description": "Encrypt all data in transit, especially over public networks (e.g., API calls, data transfers).",
+          "implementationDetails": "Use of TLS 1.2+ for all external communications; Internal network traffic encryption where appropriate.",
+          "status": "Placeholder",
+          "owner": "Infrastructure Team"
+        },
+        {
+          "controlId": "DP-006",
+          "objective": "Data Access Control",
+          "description": "Implement role-based access control (RBAC) and principle of least privilege for data, models, and system configurations.",
+          "implementationDetails": "Access Control Policy; IAM roles and policies; Audit trails for data access; Regular access reviews.",
+          "status": "Placeholder",
+          "owner": "Security Admin"
+        },
+        {
+          "controlId": "DP-007",
+          "objective": "Data Retention & Disposal",
+          "description": "Define and implement data retention policies. Securely dispose of data when no longer needed.",
+          "implementationDetails": "Data Retention Policy; Automated data deletion scripts/processes; Proof of secure disposal (e.g., cryptographic shredding logs).",
+          "status": "Placeholder",
+          "owner": "Data Protection Team"
+        },
+        {
+          "controlId": "DP-008",
+          "objective": "Anonymization/ Pseudonymization",
+          "description": "Anonymize or pseudonymize PII in training data where feasible to reduce privacy risks while maintaining model utility.",
+          "implementationDetails": "Anonymization techniques documented (e.g., k-anonymity, differential privacy considerations); Process for creating sanitized training sets.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "DP-009",
+          "objective": "Data Breach Response Plan for AI-specific data",
+          "description": "Specific procedures for handling breaches involving training data, models, or sensitive data processed by the AI.",
+          "implementationDetails": "Addendum to main Incident Response Plan addressing AI-specific data types and model compromise scenarios.",
+          "status": "Placeholder",
+          "owner": "Security Team"
+        },
+        {
+          "controlId": "DP-010",
+          "objective": "Trusted Hashes Storage",
+          "description": "Secure storage and access control for trusted_hashes.json.",
+          "implementationDetails": "File permissions restricted to authorized personnel/processes; Version control with audit trail for changes to the trusted hashes file.",
+          "status": "Placeholder",
+          "owner": "Security Admin"
+        }
+      ]
+    },
+    {
+      "sectionId": "3",
+      "title": "Model Security",
+      "controls": [
+        {
+          "controlId": "MS-001",
+          "objective": "Model Integrity & Authenticity",
+          "description": "Ensure models (phishing_model.json, etc.) are not tampered with during storage, transit, and deployment.",
+          "implementationDetails": "Cryptographic hashing (e.g., SHA256) of model files; Digital signatures for model artifacts; Secure model registry. NeuralNetwork.save_model and load_model path integrity.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "MS-002",
+          "objective": "Protection Against Model Theft/Extraction",
+          "description": "Implement measures to prevent unauthorized copying or reverse-engineering of the model's architecture and weights.",
+          "implementationDetails": "Access controls on model storage; Obfuscation (if practical); Monitoring for unusual model query patterns that might indicate extraction attempts.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "MS-003",
+          "objective": "Adversarial Attack Robustness",
+          "description": "Assess and mitigate risks from adversarial attacks (evasion, poisoning, model inversion, membership inference).",
+          "implementationDetails": "Adversarial training (if applicable); Input validation and sanitization (see AP-002); Output quantization; Monitoring for anomalous inputs/outputs; Research into relevant defenses for MLP architectures.",
+          "status": "Placeholder",
+          "owner": "AI Research"
+        },
+        {
+          "controlId": "MS-004",
+          "objective": "Model Explainability (Security Context)",
+          "description": "For critical security decisions, provide mechanisms to understand why a model made a particular prediction (e.g., why an email was flagged).",
+          "implementationDetails": "Feature importance analysis (e.g., LIME, SHAP adapted for the custom NN); Heuristic rule transparency (_determine_threat_type).",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "MS-005",
+          "objective": "Bias Detection & Mitigation (Security Impact)",
+          "description": "Regularly audit models for biases that could lead to unfair or discriminatory security outcomes (e.g., disproportionately flagging certain senders).",
+          "implementationDetails": "Bias detection tools/methodologies; Diverse and representative training data; Regular re-evaluation of model performance across different data segments.",
+          "status": "Placeholder",
+          "owner": "AI Ethics Team"
+        },
+        {
+          "controlId": "MS-006",
+          "objective": "Model Versioning & Rollback",
+          "description": "Maintain versions of trained models and have a process to roll back to a previous stable version if issues arise.",
+          "implementationDetails": "Model registry with versioning (e.g., Git LFS, MLflow); Documented rollback procedure. email_phishing_model.json, url_phishing_model.json naming reflects versions or stored in versioned system.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "MS-007",
+          "objective": "Secure Model Training Environment",
+          "description": "Isolate training environments from production. Secure access to training data and training infrastructure.",
+          "implementationDetails": "Segregated networks/VPCs; Strict access controls to training clusters and data; Secure handling of training scripts and hyperparameters.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "MS-008",
+          "objective": "Secure Model Deployment",
+          "description": "Secure process for deploying new or updated models to production.",
+          "implementationDetails": "CI/CD pipeline with security checks for model deployment; Staged rollouts (canary, blue/green); Post-deployment monitoring.",
+          "status": "Placeholder",
+          "owner": "DevOps / SRE"
+        },
+        {
+          "controlId": "MS-009",
+          "objective": "Monitoring Model Performance & Drift",
+          "description": "Continuously monitor model performance (accuracy, precision, recall, F1) and detect concept drift or degradation.",
+          "implementationDetails": "Monitoring dashboards; Alerting on performance drops; Regular retraining schedule (train_phishing_model); Feedback loop for misclassifications. AdaptiveSecurity.evaluate() metrics.",
+          "status": "Placeholder",
+          "owner": "AI Ops"
+        },
+        {
+          "controlId": "MS-010",
+          "objective": "Model Configuration Security",
+          "description": "Secure storage and management of model configurations (e.g., secure_config.yaml, model-specific JSONs like phishing_model.json).",
+          "implementationDetails": "Restricted access to config files; Version control; Audit trails for changes; No hardcoded secrets in configs. Sensitive parts of config_used in model JSONs considered.",
+          "status": "Placeholder",
+          "owner": "Security Admin"
+        }
+      ]
+    },
+    {
+      "sectionId": "4",
+      "title": "Application and Infrastructure Security",
+      "controls": [
+        {
+          "controlId": "AP-001",
+          "objective": "Secure Software Development Lifecycle (SSDLC)",
+          "description": "Integrate security practices throughout the development lifecycle of the ASA.",
+          "implementationDetails": "SSDLC Policy; Security requirements definition; Secure code training for developers; Code reviews (manual & automated SAST/DAST); Threat modeling for new features.",
+          "status": "Placeholder",
+          "owner": "Dev Team Lead"
+        },
+        {
+          "controlId": "AP-002",
+          "objective": "Input Validation & Sanitization",
+          "description": "Validate and sanitize all inputs to the ASA (e.g., email content, URLs, API parameters) to prevent injection attacks and malformed data issues.",
+          "implementationDetails": "Input validation libraries/routines in _extract_email_features, _extract_url_features, API endpoints; Regular expression validation; Contextual output encoding.",
+          "status": "Placeholder",
+          "owner": "AI Engineering"
+        },
+        {
+          "controlId": "AP-003",
+          "objective": "API Security",
+          "description": "Secure all APIs exposed by the ASA (e.g., for submitting emails/URLs for analysis).",
+          "implementationDetails": "API authentication (e.g., API keys, OAuth2); Authorization; Rate limiting (_check_input_overload); Input validation; HTTPS for all API traffic.",
+          "status": "Placeholder",
+          "owner": "API Dev Team"
+        },
+        {
+          "controlId": "AP-004",
+          "objective": "Authentication & Authorization",
+          "description": "Strong authentication for all users and systems accessing ASA components. Authorization based on roles and least privilege.",
+          "implementationDetails": "Multi-Factor Authentication (MFA) for admin access; Service account credentials managed securely (e.g., secrets manager).",
+          "status": "Placeholder",
+          "owner": "Security Admin"
+        },
+        {
+          "controlId": "AP-005",
+          "objective": "Logging & Monitoring",
+          "description": "Comprehensive logging of system events, security events, API calls, and model predictions. Centralized log management and monitoring.",
+          "implementationDetails": "Logging Policy; logger usage throughout adaptive_security.py and neural_network.py; SIEM integration; Alerts for suspicious activities (e.g., excessive failed logins, rate limit breaches).",
+          "status": "Placeholder",
+          "owner": "Security Ops"
+        },
+        {
+          "controlId": "AP-006",
+          "objective": "Vulnerability Management & Patching",
+          "description": "Regularly scan for and remediate vulnerabilities in the ASA application, underlying OS, and third-party libraries.",
+          "implementationDetails": "Vulnerability Scanning Policy; Patch Management Policy; SAST/DAST tool reports; Dependency scanning (e.g., pip-audit, Snyk); Patch deployment records.",
+          "status": "Placeholder",
+          "owner": "Infrastructure Team"
+        },
+        {
+          "controlId": "AP-007",
+          "objective": "Secure Configuration Management",
+          "description": "Maintain secure baseline configurations for all system components. Track changes to configurations.",
+          "implementationDetails": "Configuration Management Policy; Infrastructure-as-Code (IaC) tools (e.g., Terraform, Ansible) with versioned configs; Regular configuration audits. secure_config.yaml managed under version control.",
+          "status": "Placeholder",
+          "owner": "Infrastructure Team"
+        },
+        {
+          "controlId": "AP-008",
+          "objective": "Third-Party Component Security",
+          "description": "Manage security risks associated with third-party libraries and components (e.g., numpy, yaml).",
+          "implementationDetails": "Policy for using open-source software; Regular updates and patching of dependencies; Monitoring for vulnerabilities in used libraries.",
+          "status": "Placeholder",
+          "owner": "Dev Team"
+        },
+        {
+          "controlId": "AP-009",
+          "objective": "Denial of Service (DoS/DDoS) Protection",
+          "description": "Implement measures to protect against DoS/DDoS attacks.",
+          "implementationDetails": "Rate limiting (request_tracker); Web Application Firewall (WAF); Cloud provider DDoS mitigation services; Input size limits (input_size_limit).",
+          "status": "Placeholder",
+          "owner": "Network Team"
+        },
+        {
+          "controlId": "AP-010",
+          "objective": "Network Security",
+          "description": "Segment networks; Implement firewalls and Intrusion Detection/Prevention Systems (IDS/IPS).",
+          "implementationDetails": "Network diagrams; Firewall rulesets; IDS/IPS logs and alerts; Regular network security assessments.",
+          "status": "Placeholder",
+          "owner": "Network Team"
+        }
+      ]
+    },
+    {
+      "sectionId": "5",
+      "title": "Operational Security",
+      "controls": [
+        {
+          "controlId": "OS-001",
+          "objective": "Change Management",
+          "description": "Formal process for managing changes to the ASA system, including code, configuration, and models.",
+          "implementationDetails": "Change Management Policy; Change request forms/ticketing system; Approval workflows; Testing and rollback plans for changes.",
+          "status": "Placeholder",
+          "owner": "Ops Manager"
+        },
+        {
+          "controlId": "OS-002",
+          "objective": "Incident Response Plan (IRP)",
+          "description": "Documented plan for responding to security incidents, including those specific to AI systems (e.g., model compromise, adversarial attacks).",
+          "implementationDetails": "Incident Response Plan; Regular IRP testing and tabletop exercises; Defined roles and responsibilities. Integration with DP-009.",
+          "status": "Placeholder",
+          "owner": "Security Team"
+        },
+        {
+          "controlId": "OS-003",
+          "objective": "Business Continuity & Disaster Recovery (BCDR)",
+          "description": "Plan to ensure continued operation of critical ASA functions or rapid recovery in case of a major disruption.",
+          "implementationDetails": "BCDR Plan; Regular backups of data and models; Redundant infrastructure components (if applicable); Documented recovery procedures; RTO/RPO targets defined.",
+          "status": "Placeholder",
+          "owner": "Ops Manager"
+        },
+        {
+          "controlId": "OS-004",
+          "objective": "Security Awareness & Training",
+          "description": "Provide regular security awareness training to personnel involved in developing, operating, or managing the ASA.",
+          "implementationDetails": "Training materials; Attendance records; Phishing simulation exercises; Training on AI-specific security risks.",
+          "status": "Placeholder",
+          "owner": "HR / Security"
+        },
+        {
+          "controlId": "OS-005",
+          "objective": "Supply Chain Security (Software & Hardware)",
+          "description": "Mitigate risks from compromised software dependencies or hardware components.",
+          "implementationDetails": "Use of trusted software repositories; Software Bill of Materials (SBOM); Vendor security assessments; check_supply_chain functionality for internal packages.",
+          "status": "Placeholder",
+          "owner": "Security Team"
+        }
+      ]
+    },
+    {
+      "sectionId": "6",
+      "title": "Ethical AI and Responsible Use",
+      "controls": [
+        {
+          "controlId": "ET-001",
+          "objective": "Transparency & Accountability",
+          "description": "Maintain transparency about how the ASA makes decisions, especially for security-critical actions. Establish accountability for system behavior.",
+          "implementationDetails": "Documentation on model architecture and decision logic (including heuristics); Audit logs for decisions and actions; Defined points of contact for AI system oversight. Explainability efforts (MS-004).",
+          "status": "Placeholder",
+          "owner": "AI Ethics Team"
+        },
+        {
+          "controlId": "ET-002",
+          "objective": "Fairness & Non-Discrimination",
+          "description": "Ensure the ASA does not exhibit unfair bias in its security assessments that disproportionately affects specific groups.",
+          "implementationDetails": "Bias testing methodologies (MS-005); Regular review of model outputs for fairness metrics; Diverse datasets for training and testing.",
+          "status": "Placeholder",
+          "owner": "AI Ethics Team"
+        },
+        {
+          "controlId": "ET-003",
+          "objective": "Human Oversight & Intervention",
+          "description": "Implement mechanisms for human review and override of critical AI-driven security decisions (e.g., blocking an IP, classifying a critical email).",
+          "implementationDetails": "Workflow for escalating high-confidence or high-impact AI decisions for human review; Manual override capabilities; Clear criteria for intervention.",
+          "status": "Placeholder",
+          "owner": "Security Ops"
+        },
+        {
+          "controlId": "ET-004",
+          "objective": "Purpose Limitation",
+          "description": "Ensure the ASA and its data are used only for the defined cybersecurity purposes.",
+          "implementationDetails": "Clear statement of purpose in system documentation; Technical controls to prevent misuse of data or models for unintended functions.",
+          "status": "Placeholder",
+          "owner": "Legal / DPO"
+        },
+        {
+          "controlId": "ET-005",
+          "objective": "Safety & Reliability Testing",
+          "description": "Rigorous testing beyond standard functional testing to ensure the AI system behaves safely and reliably under various conditions, including edge cases.",
+          "implementationDetails": "Test plans including stress tests, adversarial input tests (basic), and failure mode analysis; Monitoring for unexpected behavior in production.",
+          "status": "Placeholder",
+          "owner": "QA / AI Eng."
+        }
+      ]
+    },
+    {
+      "sectionId": "7",
+      "title": "Compliance Monitoring and Auditing",
+      "controls": [
+        {
+          "controlId": "AU-001",
+          "objective": "Internal Audits",
+          "description": "Conduct regular internal audits of the ASA's security controls against this compliance document and applicable policies.",
+          "implementationDetails": "Internal Audit Plan and Schedule; Audit reports and findings; Remediation tracking for audit findings.",
+          "status": "Placeholder",
+          "owner": "Internal Audit"
+        },
+        {
+          "controlId": "AU-002",
+          "objective": "External Audits / Certifications",
+          "description": "(If applicable) Engage third-party auditors for independent assessments or certifications (e.g., ISO 27001, SOC 2).",
+          "implementationDetails": "Audit engagement letters; Third-party audit reports; Certification documents.",
+          "status": "Placeholder",
+          "owner": "Mgmt"
+        },
+        {
+          "controlId": "AU-003",
+          "objective": "Penetration Testing & Security Assessments",
+          "description": "Conduct regular penetration tests and security assessments targeting the ASA, its APIs, and infrastructure.",
+          "implementationDetails": "Penetration Test reports; Vulnerability assessment reports; Remediation plans for identified vulnerabilities.",
+          "status": "Placeholder",
+          "owner": "Security Team"
+        },
+        {
+          "controlId": "AU-004",
+          "objective": "Continuous Monitoring & Alerting",
+          "description": "Implement continuous monitoring of security logs, system performance, and model behavior to detect and respond to anomalies and threats quickly.",
+          "implementationDetails": "SIEM dashboards and alerts; Model performance monitoring tools (MS-009); Automated security checks in CI/CD pipeline.",
+          "status": "Placeholder",
+          "owner": "Security Ops"
+        }
+      ]
+    },
+    {
+      "sectionId": "8",
+      "title": "Appendix",
+      "subsections": [
+        {
+          "subsectionId": "8.1",
+          "title": "Glossary of Terms",
+          "terms": [
+            {"term": "ASA", "definition": "AI Safety Agent"},
+            {"term": "PII", "definition": "Personally Identifiable Information"},
+            {"term": "IDS/IPS", "definition": "Intrusion Detection System / Intrusion Prevention System"},
+            {"term": "SIEM", "definition": "Security Information and Event Management"},
+            {"term": "SAST/DAST", "definition": "Static/Dynamic Application Security Testing"}
+          ]
+        },
+        {
+          "subsectionId": "8.2",
+          "title": "Referenced Documents",
+          "documents": [
+            "Information Security Policy",
+            "Data Classification Policy",
+            "Data Retention Policy",
+            "Incident Response Plan",
+            "Change Management Policy"
+          ]
+        },
+        {
+          "subsectionId": "8.3",
+          "title": "Contact Information",
+          "contacts": [
+            {"role": "AI System Owner", "name": "[Name]", "email": "[Email]", "phone": "[Phone]"},
+            {"role": "Security Lead", "name": "[Name]", "email": "[Email]", "phone": "[Phone]"},
+            {"role": "Data Protection Officer (if applicable)", "name": "[Name]", "email": "[Email]", "phone": "[Phone]"}
+          ]
+        }
+      ]
+    }
+  ]
+}

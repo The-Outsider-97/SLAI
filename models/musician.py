@@ -4,14 +4,13 @@ import mido
 import random
 import re
 import time
-import math
 import json
-import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
 from pathlib import Path
 from collections import defaultdict, deque
+from PyQt5 import QtWidgets
 from PyQt5.QtCore import QObject, QPropertyAnimation, QSize, Qt, pyqtSlot
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QLabel, QWidget, QApplication, QVBoxLayout, QHBoxLayout
@@ -26,7 +25,11 @@ from src.agents.perception.modules.transformer import Transformer
 from src.agents.qnn_agent import QNNAgent
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger('Mucician Model')
+
+MUSIC_ONTOLOGY = "models/music/data/music_ontology.json"
+MUSIC_THEORY = "models/music/data/music_theory_data.json"
+MUSIC_STYLES = "models/music/data/styles_data.json"
 
 class KnowledgeBase(KnowledgeAgent): # Defined within musician.py in the provided code
     """ Specialized KnowledgeAgent for music-related information. """
@@ -43,7 +46,7 @@ class KnowledgeBase(KnowledgeAgent): # Defined within musician.py in the provide
 
     def _load_ontology(self):
         try:
-            with open('models/music/data/music_ontology.json', 'r') as f:
+            with open(MUSIC_ONTOLOGY, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             logger.error("Ontology file missing! Using minimal fallback.")
@@ -59,7 +62,7 @@ class KnowledgeBase(KnowledgeAgent): # Defined within musician.py in the provide
 
     def _load_music_theory_data(self):
         try:
-            with open('models/music/data/music_theory_data.json', 'r', encoding='utf-8') as f:
+            with open(MUSIC_THEORY, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             logger.warning("Music theory data not found. Using defaults.")
@@ -69,7 +72,7 @@ class KnowledgeBase(KnowledgeAgent): # Defined within musician.py in the provide
 
     def _load_style_data(self):
         try:
-            with open('models/music/data/styles_data.json', 'r', encoding='utf-8') as f:
+            with open(MUSIC_STYLES, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             logger.warning("Musical styles data not found. Using defaults.")
@@ -364,7 +367,7 @@ class Musician(QObject):
                 # Load related concepts
                 related_terms = []
                 try:
-                    with open('models/music/data/music_onthology.json', 'r', encoding='utf-8') as f:
+                    with open(MUSIC_ONTOLOGY, 'r', encoding='utf-8') as f:
                         ontology_data = json.load(f)
                     related_terms = ontology_data.get('nodes', {}).get('music_theory', {}).get(concept_query, {}).get('related_to', [])
                 except Exception as e:

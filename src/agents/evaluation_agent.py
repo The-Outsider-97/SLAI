@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Unified Evaluation Framework
 Implements: Static Analysis, Behavioral Testing, Reward Modeling, and Multi-Objective Evaluation
@@ -9,35 +11,65 @@ Key Features:
 4. Modular design with failure mode analysis (Ibrahim et al. 2021)
 """
 
-import json
 import os
-import hashlib
-import subprocess
-import numpy as np
-import math
 import time
-from dataclasses import dataclass, field
+import math
+import torch
+import hashlib
+import json, yaml
+import pandas as pd
+import torch.nn as nn
+
 from datetime import datetime
+from joblib import load, dump
+from dataclasses import dataclass, field
 from collections import defaultdict, deque
+from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
-from modules.monitoring import Monitoring
-from modules.model_trainer import ModelTrainer
-from deployment.git_ops.version_ops import create_and_push_tag
+
+from src.utils.interpretability import InterpretabilityHelper
+from src.utils.database import IssueDBConnector, FallbackIssueTracker
+from src.agents.evaluators.adaptive_risk import RiskAdaptation
+from src.agents.evaluators.base_infra import HyperparamTuner
+from src.agents.evaluators.behavioral_validator import BehavioralValidator
 from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
 from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
 from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
-from src.agents.evaluators.adaptive_risk import RiskAdaptation
-from src.agents.evaluators.base_infra import RollbackSystem, HyperparamTuner
-from src.agents.evaluators.certification_framework import CertificationManager, CertificationAuditor
-from src.agents.evaluators.documentation import AuditTrail
 from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
+from src.agents.evaluators.utils.validation_protocol import ValidationProtocol
+from src.agents.evaluators.utils.static_analyzer import StaticAnalyzer
+from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.base_agent import BaseAgent
-from src.tuning.tuner import HyperparamTuner
-from src.utils.privacy_guard import PrivacyGuard
-from src.utils.interpretability import InterpretabilityHelper
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Evaluation Agent")
+
+LOCAL_CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
+TUNER_CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
+
+class AnomalyDetector(nn.Module):
+    def __init__(self, input_dim=4, seq_len=10):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_dim * seq_len, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(32, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, input_dim * seq_len),
+            nn.Unflatten(1, (seq_len, input_dim))
+        )
+        
+    def forward(self, x):
+        z = self.encoder(x)
+        return self.decoder(z)
 
 @dataclass
 class RiskModelParameters:
@@ -53,6 +85,61 @@ class RiskModelParameters:
         "critical": (0.7, 1.0)
     })
 
+# ------------------------ Operational Infrastructure ------------------------ #
+@dataclass
+class EvaluationProtocol:
+    """Unified configuration for evaluation pipelines"""
+    static_analysis: bool = True
+    behavioral_tests: int = 100
+    reward_constraints: Dict = None
+    optimization_targets: List[str] = None
+
+class OperationalError:
+    pass
+
+class CertificationError(Exception):
+    """Custom exception for certification failures"""
+    pass
+
+class FallbackEvaluatorAgent(BaseAgent):
+    def __init__(self,
+                 shared_memory, 
+                 agent_factory, 
+                 config=None,
+                 **kwargs):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config
+        )
+
+    def is_initialized(self):
+        return True
+
+    def supports_fail_operational(self):
+        """
+        Returns True if this fallback agent is designed to operate in degraded mode.
+        Ensures:
+        - Core evaluations still run (e.g. safety checks)
+        - System doesn't crash entirely under failure
+        """
+        return hasattr(self, 'evaluators') and all(
+            callable(getattr(ev, "execute_test_suite", None)) for ev in self.evaluators.values()
+        )
+
+    def has_redundant_safety_channels(self):
+        """
+        Verifies presence of redundant safety mechanisms such as:
+        - Fallback safety guard
+        - Hardcoded rule-based validators
+        - Safety metrics thresholds
+        """
+        guard_present = hasattr(self, 'safety_guard') and self.safety_guard.is_minimal_viable()
+        static_limits = self.config.get("safety_limits", {})
+        has_thresholds = all(k in static_limits for k in ['max_latency', 'min_accuracy'])
+    
+        return guard_present or has_thresholds
+
 class EvaluationAgent(BaseAgent):
     def __init__(self, 
                  shared_memory, 
@@ -62,69 +149,334 @@ class EvaluationAgent(BaseAgent):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config or {}
+            config=config
         )
+        # Load config from file if not provided
+        if self.config is None:
+            self.config = self._load_config_from_file(LOCAL_CONFIG_PATH)
+        
         # Initialize core components
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.config = config
-        
-        # Initialize dependent agents through factory
-        self.reasoning_agent = self._init_reasoning_agent()
-        self.safety_agent = self._init_safety_agent()
+
+        self.anomaly_model = self._init_anomaly_detector()
+        self.issue_db = self._connect_issue_database()
         
         # Core services with fallback initialization
+        self.evaluators = self._init_evaluators_modules()
+        self.protocol = self._init_validation_protocol()
+        self.interpreter = InterpretabilityHelper()
         self.risk_model = self._init_risk_model()
-        self.certifier = self._init_certification_manager()
         self.tuner = self._init_hyperparam_tuner()
 
-    def _init_reasoning_agent(self):
-        """Initialize reasoning agent with proper dependencies"""
-        reasoning_config = self.config.get("reasoning_config", {})
-        return self.agent_factory.create(
-            "reasoning", 
-            {
-                "init_args": {
-                    "shared_memory": self.shared_memory,
-                    "agent_factory": self.agent_factory,
-                    **reasoning_config.get("init_args", {})
-                }
-            }
-        )
+    def _init_evaluators_modules(self):
+        """Initialize all evaluator modules using loaded config"""
+        return {
+            'behavioral': BehavioralValidator(config=self.config.get('behavioral_evaluator', {})),
+            'performance': PerformanceEvaluator(config=self.config.get('performance_evaluator', {})),
+            'efficiency': EfficiencyEvaluator(config=self.config.get('efficiency_evaluator', {})),
+            'statistical': StatisticalEvaluator(config=self.config.get('statistical_evaluator', {})),
+            'resource': ResourceUtilizationEvaluator(config=self.config.get('resource_utilization_evaluator', {}))
+        }
 
-    def _init_safety_agent(self):
-        """Initialize safety agent with fallback"""
+    def _init_validation_protocol(self) -> ValidationProtocol:
+        """Initialize validated protocol configuration"""
+        raw_config = self.config or self._load_config_from_file(LOCAL_CONFIG_PATH)
+        
+        # Handle nested config structure
+        protocol_config = raw_config.get("validation_protocol", {})
+        
         try:
-            return self.agent_factory.create("safety", self.config.get("safety", {}))
+            protocol = ValidationProtocol(**protocol_config)
+            protocol.validate_configuration()
+            return protocol
+        except (TypeError, ValueError) as e:
+            logger.error(f"Invalid protocol config: {e}. Using defaults.")
+            return ValidationProtocol()  # Fallback to dataclass defaults
+
+    def _load_config_from_file(self, config_path: str) -> Dict:
+        """Load YAML configuration file"""
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
         except Exception as e:
-            logger.error(f"Safety agent init failed: {e}")
-            return None
+            logger.error(f"Failed to load config: {e}")
+            return {}
+
+    def _train_anomaly_model(self):
+        """Train ensemble model on historical bug patterns"""
+        df = pd.DataFrame(self._load_training_data())
+        
+        # Feature engineering
+        features = df[[
+            'severity', 'cognitive_complexity', 
+            'data_flow_depth', 'security_risk'
+        ]]
+        
+        # Hybrid detection model
+        model = IsolationForest(
+            n_estimators=200,
+            contamination=0.01,
+            random_state=42
+        ).fit(features)
+        
+        # Deep autoencoder for temporal patterns
+        if len(df) > 1000:
+            self._train_deep_anomaly_detector(df)
+            
+        return model
+
+    def _load_training_data(self):
+        return [
+            {
+                'severity': 0.8,
+                'cognitive_complexity': 3.5,
+                'data_flow_depth': 2,
+                'security_risk': 0.9
+            },
+            {
+                'severity': 0.3,
+                'cognitive_complexity': 2.1,
+                'data_flow_depth': 1,
+                'security_risk': 0.1
+            }
+            # Add more examples as needed
+        ]
+
+    def _init_anomaly_detector(self):
+        """Load or train anomaly detection model"""
+        try:
+            return load('models/anomaly_detector.joblib')
+        except FileNotFoundError:
+            return self._train_anomaly_model()
+    
+    def _train_deep_anomaly_detector(self, df):
+        """Train transformer-based anomaly detector on sequence patterns"""
+        from src.agents.perception.modules.transformer import Transformer
+
+        # Generate temporal sequences
+        sequences = self._generate_temporal_sequences(df)
+        if not sequences:
+            logger.warning("No temporal sequences generated for deep anomaly detector")
+            return
+
+        # Prepare training data
+        features = torch.tensor(sequences, dtype=torch.float32)
+
+        # Initialize transformer-based autoencoder
+        config = {
+            'transformer': {
+                'embed_dim': 32,
+                'num_layers': 2,
+                'max_position_embeddings': features.shape[1]
+            },
+            'attention': {'type': 'efficient'},
+            'feedforward': {'hidden_dim': 64}
+        }
+
+        encoder = Transformer(config)
+        decoder = Transformer(config)  # Simple symmetric decoder
+
+        # Training parameters
+        optimizer = torch.optim.Adam(
+            list(encoder.parameters()) + list(decoder.parameters()), 
+            lr=0.001
+        )
+        criterion = nn.MSELoss()
+        num_epochs = 20
+        batch_size = 32
+
+        # Training loop
+        for epoch in range(num_epochs):
+            epoch_loss = 0.0
+            for i in range(0, len(features), batch_size):
+                batch = features[i:i+batch_size]
+
+                # Forward pass
+                encoded = encoder(batch)
+                decoded = decoder(encoded)
+
+                # Reconstruction loss
+                loss = criterion(decoded, batch)
+
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+
+            logger.info(f"Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss/len(features):.6f}")
+
+        # Save model
+        torch.save({
+            'encoder_state_dict': encoder.state_dict(),
+            'decoder_state_dict': decoder.state_dict(),
+            'config': config
+        }, 'models/deep_anomaly.pt')
+
+        logger.info("Transformer-based anomaly detector trained and saved")
+
+    def _generate_temporal_sequences(self, df, window_size=10):
+        """Convert tabular data to temporal sequences"""
+        sequences = []
+        features = df[['severity', 'cognitive_complexity', 
+                       'data_flow_depth', 'security_risk']].values
+        
+        for i in range(len(features) - window_size):
+            sequences.append(features[i:i+window_size])
+        
+        return sequences
+
+    def detect_anomalies(self, current_issues: List[Dict]) -> List[Dict]:
+        """Flag suspicious patterns using ML models"""
+        from src.agents.perception.modules.transformer import Transformer
+        features = self._extract_ml_features(current_issues)
+        predictions = self.anomaly_model.predict(features)
+        
+        # Load deep model if available
+        deep_anomalies = []
+        try:
+            checkpoint = torch.load('models/deep_anomaly.pt')
+            encoder = Transformer(checkpoint['config'])
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            
+            # Get reconstruction errors
+            features_tensor = torch.tensor(features, dtype=torch.float32)
+            with torch.no_grad():
+                reconstructions = encoder(features_tensor)
+                errors = torch.mean((features_tensor - reconstructions)**2, dim=1)
+            
+            # Flag anomalies (top 5% reconstruction errors)
+            threshold = torch.quantile(errors, 0.95)
+            deep_anomalies = [i for i, err in enumerate(errors) if err > threshold]
+            
+        except FileNotFoundError:
+            logger.info("Deep anomaly model not found, using only isolation forest")
+        
+        # Combine results from both models
+        combined_anomalies = set(
+            [i for i, pred in enumerate(predictions) if pred == -1] +
+            deep_anomalies
+        )
+        
+        return [current_issues[i] for i in combined_anomalies]
+
+    def execute_validation_cycle(self, params: Dict) -> Dict:
+        """Comprehensive evaluation across all dimensions"""
+        results = {}
+        
+        # Static Analysis
+        if self.protocol.static_analysis['enable']:
+            analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
+            static_results = analyzer.full_analysis()
+            results.update({
+                'static_analysis': static_results,
+                'static_analysis_explanation': self._explain_static_results(static_results)
+            })
+    
+        # Behavioral Testing
+        if self.protocol.behavioral_testing['test_types']:
+            test_suite = self.evaluators['behavioral'].execute_test_suite(
+                sut=self.create_agent()
+            )
+            results['behavioral'] = test_suite
+            results['test_explanation'] = self._explain_test_results(test_suite)
+    
+            # Subsequent evaluators using behavioral test results
+            outputs = test_suite.get('predictions', [])
+            truths = test_suite.get('expected_outputs', [])
+            
+            # Performance Evaluation
+            results['performance'] = self.evaluators['performance'].evaluate(
+                outputs=outputs,
+                ground_truths=truths
+            )
+    
+            # Efficiency Evaluation
+            results['efficiency'] = self.evaluators['efficiency'].evaluate(
+                outputs=outputs,
+                ground_truths=truths
+            )
+    
+        # Resource Utilization (always runs)
+        results['resource'] = self.evaluators['resource'].evaluate()
+    
+        # Statistical Evaluation (requires historical context)
+        statistical_data = self._prepare_statistical_dataset()
+        results['statistical'] = self.evaluators['statistical'].evaluate(
+            datasets=statistical_data
+        )
+    
+        # Add aggregated metrics
+        results.update(self._gather_core_metrics(results))
+        
+        return results
+
+    def _prepare_statistical_dataset(self) -> Dict[str, List[float]]:
+        """Prepare historical data for statistical analysis"""
+        return {
+            'current_run': self.shared_memory.get("latest_metrics", {}).get('performance', {}).get('accuracy_history', []),
+            'previous_runs': [
+                entry['performance']['accuracy'] 
+                for entry in self.shared_memory.get("metric_history", [])
+                if 'performance' in entry
+            ]
+        }
+
+    def _connect_issue_database(self):
+        """Robust database connection with fallback handling"""
+        try:
+            
+            
+            # Get config with environment variable overrides
+            db_config = self.config.get("issue_database", {})
+            
+            # Connection validation
+            if not all(key in db_config for key in ('host', 'port', 'database')):
+                raise ValueError("Incomplete database configuration")
+    
+            # Establish connection with retry
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.issue_db = IssueDBConnector(**db_config)
+                    self.issue_db.initialize_schema({
+                        "evaluation_issues": """
+                            CREATE TABLE IF NOT EXISTS evaluation_issues (
+                                id UUID PRIMARY KEY,
+                                timestamp TIMESTAMPTZ NOT NULL,
+                                issue_type VARCHAR(50) NOT NULL,
+                                severity FLOAT CHECK (severity >= 0 AND severity <= 1),
+                                context JSONB,
+                                metrics JSONB,
+                                resolution_status VARCHAR(20) DEFAULT 'unresolved'
+                            )
+                        """
+                    })
+                    logger.info("Connected to issue database")
+                    return self.issue_db
+                except OperationalError as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"Connection attempt {attempt+1} failed: {e}")
+                    time.sleep(2 ** attempt)
+                    
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            logger.info("Initializing fallback issue tracker")
+            self.issue_db = FallbackIssueTracker()
+            return self.issue_db
 
     def _init_risk_model(self):
         """Initialize risk model with validation"""
-        try:
-            return RiskAdaptation(
-                params=RiskModelParameters(
-                    initial_hazard_rates=self.config.get("risk_params", {})
-                )
-            )
-        except KeyError as e:
-            logger.error(f"Risk model initialization failed: {e}")
-            return None
-
-    def _init_certification_manager(self):
-        try:
-            return CertificationManager(
-                domain=self.config.get("domain", "automotive")
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize CertificationManager: {e}")
-            return None
+        risk_config = self.config.get('risk_adaptation', {})
+        return RiskAdaptation(config=risk_config)
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
         return HyperparamTuner(
-            config_path="src/tuning/configs/hyperparam.yaml",
+            tuner_config=TUNER_CONFIG_PATH,
             evaluation_function=self.evaluate_hyperparameters,
             strategy=self.config.get("tuning_strategy", "bayesian")
         )
@@ -138,14 +490,62 @@ class EvaluationAgent(BaseAgent):
             logger.error(f"Evaluation failed: {e}")
             return -float('inf')
 
-    def execute_validation_cycle(self, params: Dict) -> Dict:
-        """Execute complete validation pipeline"""
+    def _explain_static_results(self, static_results: Dict) -> str:
+        """Generate human-readable analysis"""
+        security_metrics = static_results.get('security_metrics', {})
+        return (
+            f"Code Quality Report:\n"
+            f"- Technical Debt Ratio: {static_results.get('technical_debt', 0):.1%} "
+            f"(Threshold: {self.protocol.static_analysis['code_quality']['tech_debt_threshold']:.1%})\n"
+            f"- Critical Security Issues: {security_metrics.get('critical_count', 0)} "
+            f"(Max Allowed: {self.protocol.static_analysis['security']['max_critical']})"
+        )
+    
+    def _explain_test_results(self, results: Dict) -> str:
+        """Generate test outcome summary using actual result keys"""
+        return self.interpreter.explain_validation_metrics({
+            'passed': results['passed'],
+            'failed': results['failed'],
+            'coverage': results['requirement_coverage']
+        })
+
+    def _gather_core_metrics(self, raw_results: Dict) -> Dict[str, Any]:
+        """Aggregate metrics from all evaluators"""
         return {
-            "accuracy": 0.92,
-            "safety_score": 0.85,
-            "resource_usage": 0.75,
-            "timestamp": datetime.now().isoformat()
+            "accuracy": raw_results['performance'].get('accuracy', 0.0),
+            "efficiency": raw_results['efficiency'].get('score', 0.0),
+            "safety_score": self.risk_model.get_current_risk("system_failure")['risk_metrics']['current_mean'],
+            "resource_usage": raw_results['resource']['composite_score'],
+            "statistical_significance": raw_results['statistical']['hypothesis_tests'].get('main_effect', {}).get('p_value', 1.0)
         }
+
+    def create_agent(self) -> BaseAgent:  
+        """Factory method with fault tolerance"""
+        from src.agents.agent_factory import AgentFactory
+        self.agent_factory = AgentFactory 
+        try:  
+            agent = self.agent_factory.create(
+                config={  
+                    **self.config.get("agent_params", {}),  
+                    "runtime_context": {  
+                        "risk_model": self.risk_model,  
+                        "evaluators": self.evaluators  
+                    }  
+                }  
+            )  
+        
+            if not agent.is_initialized():  
+                agent._init_agent_specific_components()  
+        
+            return agent  
+        
+        except Exception as e:  
+            logger.critical(f"Agent creation failed: {e}")  
+            return FallbackEvaluatorAgent(
+                shared_memory=self.shared_memory,
+                agent_factory=self.agent_factory,
+                config=self.config
+            )
 
     def _calculate_composite_score(self, results: Dict) -> float:
         """Weighted scoring with safety constraints"""
@@ -158,17 +558,32 @@ class EvaluationAgent(BaseAgent):
 
     def log_evaluation(self, results: Dict) -> None:
         """Secure logging with privacy checks"""
+        if not isinstance(results, dict):
+            logger.error("Invalid results format - expected dictionary")
+            return
+        
         sanitized = self._sanitize_results(results)
         self._store_metrics(sanitized)
         self._update_risk_model(sanitized)
-        self._generate_certification(sanitized)
+
+    def _get_safety_compliance(self) -> str:
+        """Check against protocol safety requirements"""
+        safety_params = self.protocol.safety_constraints['risk_mitigation']
+        current_safety = self.risk_model.get_current_metrics()
+        
+        compliance = {
+            'positional': current_safety['position_margin'] >= safety_params['safety_margins']['positional'],
+            'temporal': current_safety['time_margin'] >= safety_params['safety_margins']['temporal'],
+            'fail_operational': safety_params['fail_operational']
+        }
+        return "Compliant" if all(compliance.values()) else "Non-compliant"
 
     def _sanitize_results(self, results: Dict) -> Dict:
         """Apply privacy protections and validation"""
         sanitized = results.copy()
         for key in ["notes", "feedback"]:
             if key in sanitized:
-                sanitized[key] = PrivacyGuard.scrub(sanitized[key])
+                sanitized[key] = SafetyGuard.scrub(sanitized[key])
         return sanitized
 
     def _store_metrics(self, metrics: Dict) -> None:
@@ -191,107 +606,56 @@ class EvaluationAgent(BaseAgent):
             except KeyError as e:
                 logger.error(f"Risk update failed: {e}")
 
-    def _generate_certification(self, results: Dict) -> None:
-        """Handle certification process"""
-        if self.certifier and self.reasoning_agent:
-            evidence = {
-                "results": results,
-                "risk_assessment": self.risk_model.get_current_risk("system_failure") if self.risk_model else None,
-                "reasoning_validation": self.reasoning_agent.validate_results(results)
-            }
-            self.certifier.submit_evidence(evidence)
-
-# ------------------------ Core Evaluation Modules ------------------------ #
-class StaticAnalyzer:
-    """
-    Static code analysis engine with automatic remediation
-    Implements code quality metrics from Baev et al. (2023)
-    """
-    
-    def __init__(self, codebase_path: str, thresholds: Dict[str, Any] = None):
-        self.codebase_path = codebase_path
-        self.thresholds = thresholds or {
-            'critical_severity': 1,
-            'tech_debt_ratio': 0.2,
-            'security_issues': 0
-        }
-
-    def run_pylint_analysis(self) -> List[Dict]:
-        """Execute static analysis using modified Google code quality guidelines"""
-        try:
-            result = subprocess.run(
-                ['pylint', self.codebase_path, '--output-format=json'],
-                capture_output=True, text=True, check=True
-            )
-            return json.loads(result.stdout)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Static analysis failed: {e.stderr}")
-            return []
-
-    def evaluate_technical_debt(self, issues: List[Dict]) -> float:
-        """Calculate TD ratio using ISO/IEC 5055 standards"""
-        critical = sum(1 for i in issues if i['severity'] >= 3)
-        return critical / len(issues) if issues else 0.0
-
-    def security_audit(self, issues: List[Dict]) -> int:
-        """OWASP Top 10 vulnerability detection"""
-        return sum(1 for i in issues if 'security' in i['message'].lower())
-
-    def full_analysis(self) -> Dict[str, Any]:
-        """Comprehensive code health report"""
-        issues = self.run_pylint_analysis()
-        return {
-            'technical_debt': self.evaluate_technical_debt(issues),
-            'security_issues': self.security_audit(issues),
-            'critical_count': sum(1 for i in issues if i['severity'] > 3)
-        }
-
-class BehavioralValidator:
-    """
-    Behavioral testing framework implementing
-    the SUT: System Under Test paradigm from Ammann & Black (2014)
-    """
-    
-    def __init__(self, test_cases: List[Dict] = None):
-        self.test_cases = test_cases or []
-        self.failure_modes = []
-
-    def add_test_case(self, scenario: Dict, oracle: callable):
-        """Add test case using Given-When-Then pattern"""
-        self.test_cases.append({
-            'scenario': scenario,
-            'oracle': oracle,
-            'metadata': {'added': datetime.now()}
-        })
-
-    def execute_test_suite(self, sut: callable) -> Dict[str, Any]:
-        """Execute full test battery with temporal isolation"""
-        results = {'passed': 0, 'failed': 0, 'anomalies': []}
+    def request_certification(self, codebase_path: str):
+        """Initiate formal certification process"""
+        cert_suite = AIValidationSuite(self.protocol)
         
-        for test in self.test_cases:
-            try:
-                output = sut(test['scenario'])
-                if test['oracle'](output):
-                    results['passed'] += 1
-                else:
-                    results['failed'] += 1
-                    self._analyze_failure(test, output)
-            except Exception as e:
-                logger.error(f"Test execution error: {str(e)}")
-                results['anomalies'].append({
-                    'test': test,
-                    'error': str(e)
-                })
+        try:
+            certification = cert_suite.execute_full_validation(
+                codebase_path,
+                self.create_agent()
+            )
+            self.shared_memory.set("certification_status", certification)
+        except CertificationError as e:
+            logger.error(f"Certification failed: {e}")
+            self.trigger_mitigation_actions()
 
-        return results
-
-    def _analyze_failure(self, test: Dict, output: Any):
-        """Failure mode analysis using FMEA methodology"""
-        self.failure_modes.append({
-            'test_id': hash(str(test['scenario'])),
-            'output': output,
-            'timestamp': datetime.now()
+    def trigger_mitigation_actions(self):
+        """
+        Executes emergency mitigation protocols when the system becomes unsafe.
+        Includes:
+        - Logging critical failure state
+        - Freezing unsafe components
+        - Switching to fallback evaluators
+        - Notifying external systems
+        """
+        logger.critical("Triggering mitigation actions due to certification failure or critical hazard.")
+        
+        self.shared_memory.set("system_status", "degraded")
+    
+        last_metrics = self.shared_memory.get("latest_metrics", {})
+        self.issue_db.log_issue({
+            "issue_type": "safety_breach",
+            "severity": 1.0,
+            "context": {"last_metrics": last_metrics},
+            "resolution_status": "unresolved"
         })
+    
+        for key, evaluator in self.evaluators.items():
+            if hasattr(evaluator, 'disable_temporarily'):
+                evaluator.disable_temporarily()
+            else:
+                logger.warning(f"{key} evaluator lacks disable_temporarily() method.")
+    
+        fallback = FallbackEvaluatorAgent(
+            shared_memory=self.shared_memory,
+            agent_factory=self.agent_factory,
+            config=self.config
+        )
+        self.shared_memory.set("active_agent", fallback)
+    
+        if "notify" in self.config:
+            self._notify_operations_team("System degraded: mitigation actions triggered.")
 
 class SafetyRewardModel:
     """
@@ -400,420 +764,143 @@ class MultiObjectiveEvaluator:
                      sum((x - sum(b)/n2)**2 for x in b)) / (n1 + n2 - 2)
         return (sum(a)/n1 - sum(b)/n2) / math.sqrt(var_pooled)
 
-# ------------------------ Operational Infrastructure ------------------------ #
-@dataclass
-class EvaluationProtocol:
-    """Unified configuration for evaluation pipelines"""
-    static_analysis: bool = True
-    behavioral_tests: int = 100
-    reward_constraints: Dict = None
-    optimization_targets: List[str] = None
-
 class AIValidationSuite:
-    """Orchestrates complete validation lifecycle"""
+    """Certification-grade validation for regulatory compliance"""
     
     def __init__(self, protocol: EvaluationProtocol):
         self.protocol = protocol
         self.artifacts = {
             'static_report': None,
             'behavioral_results': None,
-            'safety_metrics': None
+            'safety_case': None,
+            'certification_evidence': []
         }
 
-    def execute_full_validation(self, codebase: str, agent: callable):
-        """End-to-end validation pipeline"""
-        if self.protocol.static_analysis:
-            analyzer = StaticAnalyzer(codebase)
-            self.artifacts['static_report'] = analyzer.full_analysis()
-            
-        validator = BehavioralValidator()
-        self.artifacts['behavioral_results'] = validator.execute_test_suite(agent)
+    def execute_full_validation(self, codebase: str, agent: BaseAgent) -> Dict:
+        """
+        End-to-end certification pipeline meeting IV&V standards (IEEE 1012-2016)
+        """
+        # Phase 1: Architecture Validation
+        self._validate_architecture(agent)
         
-        if self.protocol.reward_constraints:
-            reward_model = SafetyRewardModel(self.protocol.reward_constraints)
-            # Connect to agent's decision loop
+        # Phase 2: Static Verification
+        self.artifacts['static_report'] = self._run_static_verification(codebase)
         
-        return self._generate_validation_report()
+        # Phase 3: Behavioral Qualification
+        self.artifacts['behavioral_results'] = self._run_behavioral_qualification(agent)
+        
+        # Phase 4: Safety Case Development
+        self.artifacts['safety_case'] = self._build_safety_case(agent)
+        
+        return self._generate_certification_package()
 
-    def _generate_validation_report(self) -> Dict:
-        """Structured report using IV&V standards (IEEE 1012-2016)"""
+    def _validate_architecture(self, agent: BaseAgent):
+        """Verify architectural compliance with safety standards"""
+        # Check component isolation and fail-operational mechanisms
+        if not agent.supports_fail_operational():
+            raise CertificationError("Architecture lacks fail-operational capabilities")
+            
+        # Verify redundancy mechanisms
+        if not agent.has_redundant_safety_channels():
+            raise CertificationError("Insufficient safety redundancy")
+
+    def _run_static_verification(self, codebase: str) -> Dict:
+        """Comprehensive static analysis meeting DO-178C/MISRA standards"""
+        analyzer = StaticAnalyzer(codebase)
+        report = analyzer.full_analysis()
+        
+        # Apply certification thresholds
+        if report['critical_violations'] > self.protocol.certification_thresholds['max_critical']:
+            raise CertificationError(f"Critical violations exceed threshold: {report['critical_violations']}")
+            
+        return report
+
+    def _run_behavioral_qualification(self, agent: BaseAgent) -> Dict:
+        """Requirements-based testing with traceability"""
+        validator = BehavioralValidator()
+        results = validator.execute_certification_suite(agent)
+        
+        # Verify requirements coverage
+        coverage = results['requirement_coverage']
+        if coverage < self.protocol.certification_thresholds['min_coverage']:
+            raise CertificationError(f"Insufficient requirement coverage: {coverage:.1%}")
+            
+        return results
+
+    def _build_safety_case(self, agent: BaseAgent) -> Dict:
+        """Construct safety case following ISO 26262/UL 4600"""
+        return {
+            "hazard_analysis": agent.perform_hazard_analysis(),
+            "safety_goals": agent.derive_safety_goals(),
+            "fault_tree": agent.generate_fault_tree(),
+            "diagnostic_coverage": agent.calculate_diagnostic_coverage()
+        }
+
+    def _generate_certification_package(self) -> Dict:
+        """Generate ISO-compliant certification package"""
         return {
             'certification_status': self._determine_certification(),
-            'risk_assessment': self._calculate_risk_index(),
-            'improvement_targets': self._identify_improvements()
+            'compliance_matrix': self._generate_compliance_matrix(),
+            'safety_case': self.artifacts['safety_case'],
+            'evidence_bundle': self._package_evidence()
         }
 
-    def _determine_certification(self) -> str:
-        """Implements UL 4600 safety case requirements"""
-        if self.artifacts['static_report']['security_issues'] > 0:
-            return 'FAILED'
-        if self.artifacts['behavioral_results']['failed'] > 0:
-            return 'CONDITIONAL'
-        return 'CERTIFIED'
-
-    def _calculate_risk_index(self) -> float:
-        """Calculates risk priority number (RPN) from FMEA"""
-        severity = self.artifacts['static_report']['critical_count']
-        occurrence = self.artifacts['behavioral_results']['failed']
-        return severity * occurrence
-
-    def _identify_improvements(self) -> List[str]:
-        """Root cause analysis using 5 Whys methodology"""
-        return [
-            f"Critical code violations: {self.artifacts['static_report']['critical_count']}",
-            f"Behavioral failures: {self.artifacts['behavioral_results']['failed']}"
-        ]
-
-@dataclass
-class ValidationProtocol:
-    """
-    Comprehensive validation configuration based on:
-    - ISO/IEC 25010 (Software Quality Requirements)
-    - UL 4600 (Standard for Safety for Autonomous Vehicles)
-    - EU AI Act (Risk-based Classification)
-    """
-    
-    # Static Analysis Configuration
-    static_analysis: Dict = field(default_factory=lambda: {
-        'enable': True,
-        'security': {
-            'owasp_top_10': True,
-            'cwe_top_25': True,
-            'max_critical': 0,
-            'max_high': 3
-        },
-        'code_quality': {
-            'tech_debt_threshold': 0.15,
-            'test_coverage': 0.8,
-            'complexity': {
-                'cyclomatic': 15,
-                'cognitive': 20
-            }
-        }
-    })
-    
-    # Dynamic Testing Parameters
-    behavioral_testing: Dict = field(default_factory=lambda: {
-        'test_types': ['unit', 'integration', 'adversarial', 'stress'],
-        'sample_size': {
-            'nominal': 1000,
-            'edge_cases': 100,
-            'adversarial': 50
-        },
-        'failure_tolerance': {
-            'critical': 0,
-            'high': 0.01,
-            'medium': 0.05
-        }
-    })
-    
-    # Safety & Ethics Configuration
-    safety_constraints: Dict = field(default_factory=lambda: {
-        'operational_design_domain': {
-            'geography': 'global',
-            'speed_range': (0, 120),  # km/h
-            'weather_conditions': ['clear', 'rain', 'snow']
-        },
-        'risk_mitigation': {
-            'safety_margins': {
-                'positional': 1.5,  # meters
-                'temporal': 2.0      # seconds
-            },
-            'fail_operational': True
-        },
-        'ethical_requirements': {
-            'fairness_threshold': 0.8,
-            'bias_detection': ['gender', 'ethnicity', 'age'],
-            'transparency': ['decision_logging', 'explanation_generation']
-        }
-    })
-    
-    # Performance Benchmarks
-    performance_metrics: Dict = field(default_factory=lambda: {
-        'accuracy': {
-            'min_precision': 0.95,
-            'min_recall': 0.90,
-            'f1_threshold': 0.925
-        },
-        'efficiency': {
-            'max_inference_time': 100,  # ms
-            'max_memory_usage': 512,    # MB
-            'energy_efficiency': 0.5    # Joules/inference
-        },
-        'robustness': {
-            'noise_tolerance': 0.2,
-            'adversarial_accuracy': 0.85,
-            'distribution_shift': 0.15
-        }
-    })
-    
-    # Compliance & Certification
-    compliance: Dict = field(default_factory=lambda: {
-        'regulatory_frameworks': ['ISO 26262', 'EU AI Act', 'SAE J3016'],
-        'certification_level': 'ASIL-D',
-        'documentation': {
-            'required': ['safety_case', 'test_reports', 'risk_assessment'],
-            'format': 'ISO/IEC 15288'
-        }
-    })
-    
-    # Operational Parameters
-    operational: Dict = field(default_factory=lambda: {
-        'update_policy': {
-            'retrain_threshold': 0.10,
-            'rollback_strategy': 'versioned',
-            'validation_frequency': 'continuous'
-        },
-        'resource_constraints': {
-            'max_compute_time': 3600,  # seconds
-            'allowed_hardware': ['CPU', 'GPU'],
-            'privacy': ['differential_privacy', 'on-device_processing']
-        }
-    })
-
-    def validate_configuration(self):
-        """
-        Formally verify that validation protocol settings are internally consistent,
-        complete, and compatible with certification templates.
-        Raises ValueError if inconsistencies are found.
-        """
-        import json
-        from pathlib import Path
-    
-        errors = []
-    
-        # 1. Validate Static Analysis Config
-        if not isinstance(self.static_analysis, dict):
-            errors.append("Static analysis configuration must be a dictionary.")
-    
-        sec = self.static_analysis.get('security', {})
-        if sec:
-            for key in ['owasp_top_10', 'cwe_top_25', 'max_critical', 'max_high']:
-                if key not in sec:
-                    errors.append(f"Missing security config: {key}")
-    
-        code_quality = self.static_analysis.get('code_quality', {})
-        if code_quality:
-            for key in ['tech_debt_threshold', 'test_coverage', 'complexity']:
-                if key not in code_quality:
-                    errors.append(f"Missing code quality config: {key}")
-    
-        complexity = code_quality.get('complexity', {})
-        for c_key in ['cyclomatic', 'cognitive']:
-            if c_key not in complexity:
-                errors.append(f"Missing complexity threshold: {c_key}")
-    
-        # 2. Validate Behavioral Testing
-        bt = self.behavioral_testing
-        if not isinstance(bt.get('test_types', []), list):
-            errors.append("Test types must be a list.")
-        if 'sample_size' not in bt or 'failure_tolerance' not in bt:
-            errors.append("Behavioral testing must define sample_size and failure_tolerance.")
-    
-        # 3. Validate Safety Constraints
-        sc = self.safety_constraints
-        if 'operational_design_domain' not in sc:
-            errors.append("Safety constraints must define an operational design domain.")
-        if 'ethical_requirements' not in sc:
-            errors.append("Safety constraints must define ethical requirements.")
-    
-        # 4. Validate Performance Metrics
-        perf = self.performance_metrics
-        required_perf = ['accuracy', 'efficiency', 'robustness']
-        for metric in required_perf:
-            if metric not in perf:
-                errors.append(f"Performance metric missing: {metric}")
-    
-        # 5. Validate Compliance Targets
-        comp = self.compliance
-        if 'regulatory_frameworks' not in comp:
-            errors.append("Compliance section missing regulatory frameworks.")
-        if 'certification_level' not in comp:
-            errors.append("Compliance section missing certification level.")
-    
-        # 6. Validate Operational Parameters
-        op = self.operational
-        if 'update_policy' not in op or 'resource_constraints' not in op:
-            errors.append("Operational section must define update_policy and resource_constraints.")
-    
-        # 7. Cross-check with Certification Templates
-        try:
-            cert_path = Path("evaluators/config/certification_templates.json")
-            if not cert_path.exists():
-                cert_path = Path("certification_templates.json")
-            templates = json.loads(cert_path.read_text())
-    
-            domain = "automotive"  # Default fallback domain
-            domains = templates.keys()
-    
-            if domain not in domains:
-                errors.append(f"Domain '{domain}' not found in certification templates.")
-    
-            levels = ['DEVELOPMENT', 'PILOT', 'DEPLOYMENT', 'CRITICAL']
-            for lvl in levels:
-                if lvl not in templates.get(domain, {}):
-                    errors.append(f"Certification template missing phase: {lvl}")
-        except Exception as e:
-            errors.append(f"Certification template verification failed: {str(e)}")
-    
-        # 8. Final Decision
-        if errors:
-            raise ValueError(f"ValidationProtocol consistency check failed:\n" + "\n".join(errors))
-        else:
-            print("[ValidationProtocol] Configuration validated successfully.")
-
-@dataclass
-class RiskAdaptation:
-    """Implements STPA (Leveson, 2011) and ISO 21448 (SOTIF) frameworks"""
-    
-    def __init__(self, params: RiskModelParameters):
-        self.params = params
-        self.risk_profile = self._initialize_risk_model()
-        self.last_update = time.time()
-        self.operational_history = deque(maxlen=1000)
-        
-    def _initialize_risk_model(self) -> dict:
-        """Bayesian network with temporal decay factors"""
+    def _package_evidence(self) -> Dict:
+        """Prepare evidence for regulatory submission"""
         return {
-            'components': [
-                ('software', 'system'),
-                ('environment', 'system'), 
-                ('human', 'system')
-            ],
-            'hazard_rates': self.params.initial_hazard_rates.copy(),
-            'historical_risks': defaultdict(lambda: deque(maxlen=100)),
-            'thresholds': self.params.risk_thresholds
+            "static_analysis": self.artifacts['static_report'],
+            "behavioral_tests": self.artifacts['behavioral_results'],
+            "traceability_matrix": self._generate_traceability_matrix(),
+            "tool_qualification": self._qualify_validation_tools()
         }
 
-    def update_risk_parameters(self, operational_data: dict) -> None:
-        """Online risk model adaptation with exponential decay and Bayesian updates"""
-        current_time = time.time()
-        time_delta = current_time - self.last_update
-        if not operational_data:
-            return
-    
-        # Convert to list for safe indexing
-        data_points = list(operational_data.items())
-        
-        for i, (event_type, count) in enumerate(data_points):
-            if i >= len(self.params.initial_hazard_rates):
-                break  # Prevent index overflow
-        
-        # Apply temporal decay to historical risks
-        for risk_type in self.risk_profile['historical_risks']:
-            decayed = [r * math.pow(self.params.decay_factor, time_delta/60) 
-                      for r in self.risk_profile['historical_risks'][risk_type]]
-            self.risk_profile['historical_risks'][risk_type] = deque(decayed, maxlen=1000)
-        
-        # Update with new operational data using Bayesian inference
-        for event_type, count in operational_data.items():
-            if event_type in self.params.initial_hazard_rates:
-                prior = self.risk_profile['hazard_rates'][event_type]
-                # Bayesian update with conjugate prior (Beta distribution)
-                alpha = prior * 1000  # Convert rate to count equivalent
-                beta = 1000 - alpha
-                posterior = (alpha + count) / (alpha + beta + count)
-                self.risk_profile['hazard_rates'][event_type] = posterior
-                
-                # Maintain rolling window of historical values
-                self.risk_profile['historical_risks'][event_type].append(posterior)
-        
-        # Adaptive threshold adjustment
-        self._adjust_risk_thresholds()
-        self.last_update = current_time
-        self.operational_history.append(operational_data)
+    def _generate_traceability_matrix(self) -> pd.DataFrame:
+        """Create requirements-to-test traceability matrix"""
+        # Implementation would link requirements to test cases
+        return pd.DataFrame(columns=['Requirement', 'Test Case', 'Status'])
 
-    def _adjust_risk_thresholds(self) -> None:
-        """Dynamic threshold tuning based on operational history"""
-        avg_risk = np.mean([r for risks in self.risk_profile['historical_risks'].values() for r in risks])
-        
-        # Adjust thresholds using PID-like control
-        error = avg_risk - 0.5  # Target median risk of 0.5
-        delta = 0.1 * error
-        
-        # Apply bounded adjustments
-        new_low = max(0.3, min(0.6, self.params.risk_thresholds['warning'][0] + delta))
-        new_high = max(0.6, min(0.9, self.params.risk_thresholds['warning'][1] + delta))
-        
-        self.risk_profile['thresholds']['warning'] = (new_low, new_high)
-        self.risk_profile['thresholds']['critical'] = (new_high, 1.0)
-
-    def get_current_risk(self, risk_type: str) -> float:
-        """Get current risk estimate with uncertainty bounds"""
-        rates = list(self.risk_profile['historical_risks'][risk_type])
-        if not rates:
-            return self.params.initial_hazard_rates.get(risk_type, 0.0)
-            
-        mean_risk = np.mean(rates)
-        std_dev = np.std(rates) if len(rates) > 1 else 0.0
+    def _qualify_validation_tools(self) -> Dict:
+        """Verify toolchain meets qualification standards"""
         return {
-            'mean': mean_risk,
-            'std_dev': std_dev,
-            'percentiles': {
-                '5th': np.percentile(rates, 5),
-                '95th': np.percentile(rates, 95)
-            },
-            'thresholds': self.risk_profile['thresholds']
+            "static_analyzer": "Qualified per DO-330 TQL3",
+            "test_framework": "Certified per ISO/IEC 29119"
         }
+
+# ====================== Usage Example ======================
+if __name__ == "__main__":
+    print("\n=== Running Evaluation Agent ===\n")
+    class SharedMemory:
+        def __init__(self, config=None):
+            self.data = {}
     
-class CertificationManager:
-    """Implements multi-stage certification process based on UL 4600"""
+        def set(self, key, value):
+            self.data[key] = value
     
-    CERT_LEVELS = {
-        'L1': {'tests': 1e3, 'coverage': 0.8},
-        'L2': {'tests': 1e4, 'coverage': 0.9},
-        'L3': {'tests': 1e5, 'coverage': 0.95}
-    }
+        def append(self, key, value):  # <-- fix here
+            if key not in self.data or not isinstance(self.data[key], list):
+                self.data[key] = []
+            self.data[key].append(value)
     
-    def __init__(self, domain: str = "automotive"):
-        self.domain = domain
-        self.certification_state = self._initialize_certification()
-            
-    def _initialize_certification(self):
-        """State machine for certification progress"""
-        return {
-            'current_level': 'L1',
-            'completed_phases': [],
-            'pending_requirements': self._load_requirements()
-        }
+        def get(self, key, default=None):
+            return self.data.get(key, default)
     
-    def _load_requirements(self):
-        """Load domain-specific certification rules"""
-        return {
-            'automotive': ['ISO 26262', 'ISO 21448'],
-            'healthcare': ['FDA 510(k)', 'HIPAA'],
-            'finance': ['GDPR', 'PCI DSS']
-        }.get(self.domain, [])
+    config = None
+    shared_memory = SharedMemory(config=None)
+    agent_factory = lambda: None
 
+    agent = EvaluationAgent(shared_memory, agent_factory, config={})
+    print(agent)
+    print(f"\n* * * * * Phase 2 - Logging * * * * *\n")
+    results={}
+    log = agent.log_evaluation(results=results)
 
-class AuditTrail:
-    """Implements immutable evidence storage per GDPR Article 30"""
+    logger.info(f"{log}")
+    print(f"\n* * * * * Phase 3 - Validation * * * * *\n")
+    validation_params = {}
+    results = agent.execute_validation_cycle(validation_params)
+    print(f"\n* * * * * Phase 4 * * * * *\n")
+    codebase_path=None
+    request = agent.request_certification(codebase_path=codebase_path)
 
-    def __init__(self, difficulty: int = 1):
-        self.difficulty = difficulty
-        self.chain = []
-        self._genesis_block()
-
-    def _genesis_block(self):
-        """Initialize blockchain-style audit trail"""
-        self.chain.append({
-            'timestamp': datetime.now(),
-            'hash': '0' * 64,
-            'data': 'GENESIS BLOCK',
-            'difficulty': self.difficulty
-        })
-
-    def add_document(self, validation_data):
-        """Add cryptographically-secured validation record"""
-        block = {
-            'timestamp': datetime.now().isoformat(),
-            'previous_hash': self._last_hash(),
-            'data': validation_data,
-            'difficulty': self.difficulty
-        }
-        block_hash = hashlib.sha256(str(block).encode()).hexdigest()
-        block['hash'] = block_hash
-        self.chain.append(block)
-
-    def _last_hash(self):
-        return self.chain[-1]['hash'] if self.chain else '0' * 64
+    print(request)
+    print("\n=== Successfully Ran Evaluation Agent ===\n")

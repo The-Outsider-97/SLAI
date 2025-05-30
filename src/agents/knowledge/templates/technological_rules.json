@@ -1,0 +1,182 @@
+[
+    {
+      "name": "Garbage In, Garbage Out (GIGO)",
+      "description": "The quality of output is determined by the quality of the input. Flawed input data will produce flawed output or 'garbage' in AI and computing systems.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "data_quality", "machine_learning", "computing_principle"],
+      "source": "Early Computing Axiom",
+      "formula": "N/A",
+      "implementation": "if kb.get('input_data_quality_low', True):\n    inferred['model_output_quality_likely_low'] = 0.9\n    inferred['model_performance_compromised'] = 0.85"
+    },
+    {
+      "name": "No Free Lunch Theorem (Machine Learning)",
+      "description": "No single machine learning algorithm is universally the best-performing for all problems. Algorithm choice depends on the specific dataset and task.",
+      "type": "deductive",
+      "tags": ["technological", "ai", "machine_learning", "algorithm_selection", "optimization"],
+      "source": "David Wolpert",
+      "formula": "N/A",
+      "implementation": "if kb.get('new_ml_problem_defined', True):\n    inferred['multiple_algorithms_should_be_evaluated'] = 0.85\n    inferred['no_single_best_algorithm_assumed'] = 0.9"
+    },
+    {
+      "name": "Bias in AI Models",
+      "description": "AI models can inherit and amplify biases present in their training data or algorithm design, leading to unfair or discriminatory outcomes.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "ethics", "fairness", "machine_learning", "data_bias"],
+      "source": "AI Ethics Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('training_data_source_biased', True):\n    inferred['model_at_risk_of_bias'] = 0.9\nif kb.get('model_performance_unequal_across_groups', True):\n    inferred['model_bias_likely_present'] = 0.85"
+    },
+    {
+      "name": "Explainable AI (XAI) Principle",
+      "description": "AI systems, especially those making critical decisions, should be able to explain their reasoning and how they arrived at a particular output in a human-understandable way.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "ethics", "transparency", "interpretability", "machine_learning"],
+      "source": "AI Research and Policy",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_model_makes_critical_decisions', True) and not kb.get('model_is_explainable', False):\n    inferred['xai_methods_should_be_implemented'] = 0.85"
+    },
+    {
+      "name": "Iterative Development Cycle",
+      "description": "Software and AI systems are often best developed through repeated cycles of design, implementation, testing, and refinement (e.g., Agile, Scrum).",
+      "type": "heuristic",
+      "tags": ["technological", "software_engineering", "ai_development", "project_management", "agile"],
+      "source": "Software Development Best Practice",
+      "formula": "N/A",
+      "implementation": "if kb.get('complex_tech_project_underway', True):\n    inferred['iterative_development_approach_recommended'] = 0.8"
+    },
+    {
+      "name": "Data Privacy in AI Systems",
+      "description": "Personal data used in AI systems must be handled securely and ethically, respecting privacy regulations (e.g., GDPR, CCPA) and individual rights.",
+      "type": "deductive",
+      "tags": ["technological", "ai", "ethics", "data_security", "privacy_enhancing_technologies", "compliance"],
+      "source": "Data Protection Regulations and Ethics",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_system_processes_personal_data', True):\n    inferred['data_privacy_measures_mandatory'] = 0.95\n    inferred['compliance_with_privacy_laws_required'] = 1.0"
+    },
+    {
+      "name": "Robustness and Adversarial Attacks",
+      "description": "AI models should be robust against small, intentionally crafted perturbations to their inputs (adversarial attacks) that can cause misclassification.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "security", "machine_learning", "ai_safety"],
+      "source": "AI Security Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_model_deployed_in_sensitive_application', True):\n    inferred['assess_model_robustness_to_adversarial_attacks'] = 0.85"
+    },
+    {
+      "name": "Scalability of AI Solutions",
+      "description": "AI systems should be designed to handle increasing amounts of data, users, or computational load efficiently.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "system_design", "performance", "cloud_computing"],
+      "source": "Software Engineering Principles",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_solution_expected_growth_high', True):\n    inferred['scalability_is_key_design_concern'] = 0.9"
+    },
+    {
+      "name": "Human-in-the-Loop (HITL) Principle",
+      "description": "Incorporating human oversight, intervention, or collaboration within AI systems, especially for complex, high-stakes, or ambiguous tasks.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "human_computer_interaction", "ai_safety", "decision_support"],
+      "source": "AI System Design",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_task_has_high_error_cost', True) or kb.get('ai_task_involves_ambiguity', True):\n    inferred['human_in_the_loop_system_advisable'] = 0.8"
+    },
+    {
+      "name": "Model Interpretability",
+      "description": "The degree to which a human can understand the cause of a decision made by an AI model. Distinct from, but related to, explainability.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "machine_learning", "xai", "transparency"],
+      "source": "AI Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('need_to_debug_ai_model_decisions', True) or kb.get('need_to_build_trust_in_ai_model', True):\n    inferred['model_interpretability_is_important'] = 0.85"
+    },
+    {
+      "name": "Fair AI / Algorithmic Fairness",
+      "description": "Ensuring that AI systems do not perpetuate or exacerbate existing societal biases, and treat individuals and groups equitably.",
+      "type": "ethical_heuristic",
+      "tags": ["technological", "ai", "ethics", "bias_mitigation", "social_impact"],
+      "source": "AI Ethics Research and Guidelines",
+      "formula": "Various fairness metrics exist (e.g., demographic parity, equalized odds)",
+      "implementation": "if kb.get('ai_system_impacts_diverse_populations', True):\n    inferred['algorithmic_fairness_assessment_crucial'] = 0.9"
+    },
+    {
+      "name": "AI Safety and Alignment",
+      "description": "Designing AI systems whose goals are aligned with human values and intentions, and which operate safely and predictably, especially for advanced AI.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "ethics", "long_term_safety", "agi", "value_alignment"],
+      "source": "AI Safety Research",
+      "formula": "N/A",
+      "implementation": "if kb.get('developing_highly_autonomous_ai', True) or kb.get('ai_has_potential_for_large_scale_impact', True):\n    inferred['ai_safety_and_alignment_are_primary_concerns'] = 0.95"
+    },
+    {
+      "name": "Continuous Monitoring of AI Models",
+      "description": "Deployed AI models require ongoing monitoring for performance degradation, concept drift, data drift, and unexpected behavior.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "mlops", "model_lifecycle_management", "operations"],
+      "source": "AI Operations Best Practice",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_model_is_in_production', True):\n    inferred['continuous_monitoring_and_maintenance_required'] = 0.9"
+    },
+    {
+      "name": "Overfitting and Underfitting Avoidance",
+      "description": "Overfitting occurs when a model learns training data too well, including noise, performing poorly on new data. Underfitting occurs when a model is too simple to capture underlying patterns.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "machine_learning", "model_training", "generalization"],
+      "source": "Statistical Learning Theory",
+      "formula": "N/A",
+      "implementation": "if kb.get('model_training_accuracy_high', False) and kb.get('model_validation_accuracy_low', False):\n    inferred['overfitting_suspected'] = 0.85\nif kb.get('model_training_accuracy_low', False) and kb.get('model_validation_accuracy_low', False):\n    inferred['underfitting_suspected'] = 0.85"
+    },
+    {
+      "name": "Transfer Learning Efficacy",
+      "description": "Leveraging knowledge (features, weights) from a pre-trained model on a source task to improve performance on a related target task, especially with limited target data.",
+      "type": "heuristic",
+      "tags": ["technological", "ai", "machine_learning", "deep_learning", "data_efficiency"],
+      "source": "Machine Learning Technique",
+      "formula": "N/A",
+      "implementation": "if kb.get('target_task_has_limited_data', True) and kb.get('related_source_task_with_large_data_exists', True):\n    inferred['transfer_learning_may_be_effective'] = 0.8"
+    },
+    {
+      "name": "Reinforcement Learning Exploration-Exploitation Tradeoff",
+      "description": "In reinforcement learning, an agent must balance exploring new actions to discover better rewards versus exploiting known actions that yield good rewards.",
+      "type": "deductive",
+      "tags": ["technological", "ai", "machine_learning", "reinforcement_learning", "decision_making"],
+      "source": "Reinforcement Learning Theory",
+      "formula": "N/A",
+      "implementation": "if kb.get('reinforcement_learning_agent_active', True):\n    inferred['exploration_exploitation_balance_is_critical'] = 0.9"
+    },
+    {
+      "name": "Importance of Validation Sets",
+      "description": "A separate validation dataset is crucial for tuning model hyperparameters and evaluating model generalization ability during development, distinct from the final test set.",
+      "type": "deductive",
+      "tags": ["technological", "ai", "machine_learning", "model_evaluation", "best_practice"],
+      "source": "Machine Learning Methodology",
+      "formula": "N/A",
+      "implementation": "if kb.get('ml_model_development_in_progress', True) and not kb.get('validation_set_used_for_tuning', False):\n    inferred['model_hyperparameter_tuning_may_be_suboptimal'] = 0.8\n    inferred['risk_of_overfitting_to_test_set_if_used_for_tuning'] = 0.7"
+    },
+    {
+      "name": "Modularity in System Design",
+      "description": "Designing technological systems as a collection of independent, interchangeable modules. This improves maintainability, scalability, and allows parallel development.",
+      "type": "heuristic",
+      "tags": ["technological", "software_engineering", "system_architecture", "ai_systems"],
+      "source": "Software Design Principles",
+      "formula": "N/A",
+      "implementation": "if kb.get('developing_large_complex_system', True):\n    inferred['modular_design_approach_highly_recommended'] = 0.9"
+    },
+    {
+      "name": "AI for Augmentation, Not Just Automation",
+      "description": "AI technology can be more effectively and ethically deployed to augment human capabilities and decision-making, rather than solely replacing human roles.",
+      "type": "ethical_heuristic",
+      "tags": ["technological", "ai", "ethics", "human_computer_interaction", "future_of_work", "ai_strategy"],
+      "source": "AI Ethics and Strategy Discussions",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_system_deployment_planned', True) and kb.get('task_involves_complex_human_judgment', True):\n    inferred['consider_ai_for_augmentation_role'] = 0.8"
+    },
+    {
+      "name": "Ethical Impact Assessment for AI",
+      "description": "Before deploying AI systems, particularly those with significant societal impact, a thorough assessment of potential ethical risks and harms should be conducted.",
+      "type": "ethical_heuristic",
+      "tags": ["technological", "ai", "ethics", "risk_management", "governance", "responsible_ai"],
+      "source": "Responsible AI Frameworks",
+      "formula": "N/A",
+      "implementation": "if kb.get('ai_system_has_high_societal_impact_potential', True) and not kb.get('ethical_impact_assessment_done', False):\n    inferred['perform_ethical_impact_assessment_urgently'] = 0.95"
+    }
+]

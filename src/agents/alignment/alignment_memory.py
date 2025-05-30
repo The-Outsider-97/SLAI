@@ -6,27 +6,37 @@ Implements:
 - Concept drift detection
 - Intervention effect tracking
 """
-
-import logging
+import yaml
 import hashlib
 import numpy as np
 import pandas as pd
+
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from scipy.stats import pearsonr, entropy
-from sklearn.covariance import EmpiricalCovariance
+# rom sklearn.covariance import EmpiricalCovariance # if self.causal_model = EmpiricalCovariance()
+from sklearn.linear_model import SGDRegressor
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from logs.logger import get_logger
 
-@dataclass
-class MemoryConfig:
-    """Configuration for alignment memory management"""
-    replay_buffer_size: int = 10_000
-    causal_window: int = 1000  # Interactions for causal analysis
-    drift_threshold: float = 0.25
-    retention_period: int = 365  # Days to keep records
+logger = get_logger("Alignment Memory")
+
+def dict_to_namespace(d):
+    """Recursively convert dicts to SimpleNamespace for dot-access."""
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(i) for i in d]
+    return d
+
+def get_config_section(section: str, config_file_path: str):
+    with open(config_file_path, "r") as f:
+        config = yaml.safe_load(f)
+    if section not in config:
+        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
+    return dict_to_namespace(config[section])
 
 class AlignmentMemory:
     """
@@ -43,8 +53,14 @@ class AlignmentMemory:
     4. Causal Model: Learned relationships between actions/outcomes
     """
 
-    def __init__(self, config: Optional[MemoryConfig] = None):
-        self.config = config or MemoryConfig()
+    def __init__(self,
+                 config_section_name: str = "alignment_memory",
+                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml",
+                 config: Optional[Dict] = None):
+        if config is not None:
+            self.config = dict_to_namespace(config)
+        else:
+            self.config = get_config_section(config_section_name, config_file_path)
         
         # Core memory stores
         self.alignment_logs = pd.DataFrame(columns=[
@@ -54,7 +70,8 @@ class AlignmentMemory:
             'context_hash', 'bias_rate', 'ethics_violations', 'last_updated'
         ])
         self.intervention_graph = []
-        self.causal_model = EmpiricalCovariance()
+        # self.causal_model = EmpiricalCovariance()
+        self.causal_model = SGDRegressor(eta0=0.01, learning_rate='constant')
         
         # State tracking
         self.concept_drift_scores = []
@@ -124,16 +141,15 @@ class AlignmentMemory:
         X = np.array([self._encode_intervention(i) for i in recent])
         y = np.array([i['post_state']['alignment_score'] for i in recent])
         
-        # Learn causal relationships
-        self.causal_model.fit(X, y)
+        # Calculate intervention impacts using model coefficients
+        impacts = X @ self.causal_model.coef_
         
-        # Store causal impacts
         for i, intervention in enumerate(recent):
-            intervention['causal_impact'] = self.causal_model.mahalanobis(X[i])
+            intervention['causal_impact'] = impacts[i]
             
         return {
-            'max_impact': np.max(self.causal_model.mahalanobis(X)),
-            'min_impact': np.min(self.causal_model.mahalanobis(X)),
+            'max_impact': np.max(impacts),
+            'min_impact': np.min(impacts),
             'mean_effect': np.mean(y - [i['pre_state']['alignment_score'] for i in recent])
         }
 
@@ -202,13 +218,14 @@ class AlignmentMemory:
         ])
 
     def _update_causal_model(self, intervention: Dict, effect: Dict):
-        """Incrementally update causal relationships"""
+        """Incrementally update causal relationships with online learning"""
         X = self._encode_intervention(intervention).reshape(1, -1)
         y = np.array([effect['alignment_score']])
-        try:
+        
+        if not hasattr(self.causal_model, 'coef_'):  # Initial fit
             self.causal_model.partial_fit(X, y)
-        except ValueError:
-            self.causal_model.fit(X, y)
+        else:
+            self.causal_model.partial_fit(X, y)
 
     def _temporal_analysis(self) -> Dict:
         """Analyze alignment metrics over time"""
@@ -231,3 +248,127 @@ class AlignmentMemory:
             'causal_impact': ['mean', 'std'],
             'magnitude': 'median'
         }).to_dict()
+
+# Added to alignment_memory.py
+
+if __name__ == "__main__":
+    from faker import Faker
+    import random
+    from scipy.stats import norm
+    
+    fake = Faker()
+    
+    def generate_context() -> Dict:
+        """Generate synthetic context with common patterns"""
+        return {
+            'domain': random.choice(['medical', 'legal', 'finance', 'education']),
+            'user': {
+                'id': fake.uuid4(),
+                'sensitive_attrs': {
+                    'age': random.randint(18, 80),
+                    'gender': random.choice(['M', 'F', 'X']),
+                    'location': fake.country_code()
+                }
+            },
+            'task_type': random.choice(['classification', 'generation', 'prediction'])
+        }
+
+    # Initialize memory system with test configuration
+    #test_config = MemoryConfig(
+    #    replay_buffer_size=500,
+    #    causal_window=50,
+    #    drift_threshold=0.3,
+    #    retention_period=30
+    #)
+    memory = AlignmentMemory(
+        config_section_name="alignment_memory",
+        config_file_path="src/agents/alignment/configs/alignment_config.yaml",
+        config = None
+    )
+    
+    # Phase 1: Baseline behavior logging
+    print("\n=== Phase 1: Baseline Logging (100 events) ===")
+    for _ in range(100):
+        context = generate_context()
+        metric = random.choice(['toxicity', 'factuality', 'fairness'])
+        value = np.clip(norm.rvs(loc=0.2, scale=0.1), 0, 1)
+        threshold = 0.3
+        
+        memory.log_evaluation(
+            metric=metric,
+            value=value,
+            threshold=threshold,
+            context=context
+        )
+        
+        # Record synthetic outcomes
+        if random.random() < 0.3:
+            outcome = {
+                'bias_rate': random.betavariate(2, 5),
+                'ethics_violations': random.randint(0, 2)
+            }
+            memory.record_outcome(context, outcome)
+
+    # Phase 2: Introduce interventions
+    print("\n=== Phase 2: Intervention Testing ===")
+    for _ in range(20):
+        correction = {
+            'type': random.choice(['reinforcement', 'constraint', 'reweighting']),
+            'magnitude': random.uniform(0.1, 1.0),
+            'target': random.sample(['toxicity', 'fairness', 'factuality'], k=1)
+        }
+        
+        # Simulate intervention effect
+        effect = {
+            'alignment_score': memory._get_current_state()['alignment_score'] + 
+                             random.uniform(-0.1, 0.2),
+            'violation_rate': max(0, memory._get_current_state()['violation_rate'] - 
+                             random.uniform(0, 0.1))
+        }
+        
+        memory.apply_correction(correction, effect)
+        print(f"Applied {correction['type']} intervention. New alignment score: {effect['alignment_score']:.2f}")
+
+    # Phase 3: Concept drift simulation
+    print("\n=== Phase 3: Concept Drift Simulation ===")
+    for _ in range(100):
+        context = generate_context()
+        metric = random.choice(['toxicity', 'factuality', 'fairness'])
+        value = np.clip(norm.rvs(loc=0.4, scale=0.2), 0, 1)  # Higher values
+        threshold = 0.3
+        
+        memory.log_evaluation(
+            metric=metric,
+            value=value,
+            threshold=threshold,
+            context=context
+        )
+
+    # Analysis and reporting
+    print("\n=== System Analysis ===")
+    print("\nCausal Analysis Results:")
+    print(memory.analyze_causes(window_size=20))
+    
+    print("\nConcept Drift Detection:")
+    print(f"Drift detected: {memory.detect_drift()}")
+    
+    print("\nMemory Report Summary:")
+    report = memory.get_memory_report()
+    print(f"Temporal Summary: {report['temporal_summary']}")
+    print(f"Active Contexts: {len(memory.context_registry)}")
+    print(f"Intervention Types: {pd.DataFrame(memory.intervention_graph)['type'].value_counts().to_dict()}")
+    
+    # Added visualization method for testing
+    def visualize_memory(memory: AlignmentMemory):
+        """Test visualization of memory components"""
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=(12, 6))
+        memory.alignment_logs.groupby('metric')['value'].plot.kde(
+            title='Metric Distributions',
+            legend=True
+        )
+        plt.axvline(0.3, color='red', linestyle='--', label='Threshold')
+        plt.show()
+    
+    visualize_memory(memory)

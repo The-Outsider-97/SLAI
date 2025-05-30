@@ -1,0 +1,22 @@
+[
+    "\\b(kill|harm|attack|suicide|murder|torture|assault|slaughter|massacre|execute|assassinate)\\b",
+    "(racial|ethnic|religious|gender|sex[ua]*l orientation|disability|national origin)\\s+(slur|hate|bigotry|discrimination|derogatory|offensive term)",
+    "\\b(n[i!1l@][gq]+[e3a]*r|k[i!1l@]ke|ch[i!1l@]nk|g[o0@]+k|w[o0@]p|f[a@4]g+[o0@]*t|d[i!1l@]ke|tr[a@4]nny|r[e3]t[a@4]rd[e3d]*|c[o0@]+n|jap|paki)\\b",
+    "\\b(hate speech|genocide|terroris[mt]|bombing|extremis[mt]|radicalization|heil hitler|sieg heil|white power|kkk|aryan nation|nazi|jihad|caliphate|martyrdom)\\b",
+    "\\b(abuse|harass|threaten|stalk|bully|intimidate|doxxing|doxx|cyberbully|molest|rape)\\b",
+    "\\b(self-harm|self harm|cutting myself|suicidal ideation|want to die|end my life|anorexia|bulimia|eating disorder|proana|promia)\\b",
+    "\\b(f[u*@c][k*@c]+|sh[i!1l@*]t|b[i!1l@*]tch|c[u*@][n*@]+t|asshole|bastard|motherfucker|pussy|dick|cock|slut|whore|damn|hell|crap|bollocks|bugger)\\b",
+    "(i am going to|i will|i'm gonna|let's|we should) (find you|get you|hurt you|kill you|rape you|stalk you|dox you|visit you)",
+    "(you should|go|why don't you) (die|kill yourself|hang yourself|jump off a bridge)",
+    "\\b(child porn|cp|csam|child abuse|pedophile|pedo|grooming|lolicon|shota|cub|sex with minor|underage sex)\\b",
+    "(glorify violence|celebrate death|praise attacker[s]?|idolize killer[s]?|violence is the answer)",
+    "\\b(buy (cocaine|heroin|meth|lsd|ecstasy|fentanyl)|sell (cocaine|heroin|meth|lsd|ecstasy|fentanyl)|(meth|cocaine|heroin|crack) recipe|how to make (lsd|meth|bomb|pipe bomb|pressure cooker bomb))\\b",
+    "(you are|you're so) (worthless|useless|stupid|ugly|fat|pathetic|a loser|a disgrace|a burden|nobody likes you|everyone hates you)",
+    "\\b(revenge porn|nonconsensual (images|video|media)|upskirt|downblouse|deepfake porn|sexual assault)\\b",
+    "\\b(fuck you|go fuck yourself|eat shit|piss off)\\b",
+    "promoting (anorexia|bulimia|self-harm|suicide)",
+    "instructions for (making bomb|committing terror|illegal activities|drug synthesis)",
+    "incitement to (violence|hatred|discrimination|riot|terrorism)",
+    "\\b(sex slave|human trafficking|forced prostitution)\\b",
+    "\\b(bestiality|zoophilia|sex with animals)\\b"
+  ]

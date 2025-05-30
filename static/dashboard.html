@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+<head>
+<title>Desearch Miner Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+h2 { text-align: center; color: #2c3e50; }
+.chart-container { display: flex; flex-wrap: wrap; justify-content: space-around; }
+.chart-item { background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 10px; padding: 15px; width: 45%; min-width: 300px; }
+canvas { max-width: 100%; }
+.status-info { margin-top: 20px; padding: 15px; background-color: #eaf2f8; border-left: 5px solid #3498db; }
+.status-info p { margin: 5px 0; }
+</style>
+</head>
+<body>
+<h2>Desearch Miner Orchestrator Dashboard</h2>
+<div class="status-info">
+<p><strong>Orchestrator Status:</strong> <span id="orchestratorStatus">Initializing...</span></p>
+<p><strong>Total Documents Processed (Session):</strong> <span id="totalDocs">0</span></p>
+<p><strong>Total Rewards (Session):</strong> <span id="totalRewards">0.00</span></p>
+<p><strong>Knowledge Base Size:</strong> <span id="kbSize">0</span></p>
+
+<h3>Safety & Security</h3>
+<p><strong>Blocked Documents:</strong> <span id="blockedDocs">0</span></p>
+<p><strong>Last Block Reason:</strong> <span id="lastBlockReason">N/A</span></p>
+
+<h3>Learning Activity</h3>
+<p><strong>Observations Logged:</strong> <span id="obsCount">0</span></p>
+<p><strong>Training Runs:</strong> <span id="trainingRuns">0</span></p>
+<p><strong>Buffer Size:</strong> <span id="bufferSize">0</span></p>
+
+<h3>Evaluation Agent</h3>
+<p><strong>Eval Score Avg:</strong> <span id="evalAvg">0.0</span></p>
+<p><strong>Risk Incidents:</strong> <span id="riskIncidents">0</span></p>
+<p><strong>Anomalies Flagged:</strong> <span id="anomalyCount">0</span></p>
+
+</div>
+<div class="chart-container">
+<div class="chart-item"><canvas id="rewardChart"></canvas></div>
+<div class="chart-item"><canvas id="evalScoreChart"></canvas></div>
+<div class="chart-item"><canvas id="throughputChart"></canvas></div>
+<div class="chart-item"><canvas id="cyberRiskChart"></canvas></div>
+</div>
+<script>
+let rewardChart, evalScoreChart, throughputChart, cyberRiskChart;
+let chartData = {
+rewards: [],
+eval_scores: [],
+throughput: [],
+risk_scores: [],
+labels: []
+};
+const MAX_POINTS = 50;
+
+function updateChart(chart, newData, newLabels) {
+if (!chart) return;
+chart.data.labels = newLabels;
+chart.data.datasets[0].data = newData;
+chart.update();
+}
+
+function createChart(ctx, label, data, color = 'blue', type = 'line') {
+return new Chart(ctx, {
+type: type,
+data: {
+labels: chartData.labels,
+datasets: [{
+label: label,
+data: data,
+borderColor: color,
+backgroundColor: color.replace(')', ', 0.2)').replace('rgb', 'rgba'),
+fill: type === 'line' ? false : true,
+tension: 0.1
+}]
+},
+options: {
+responsive: true,
+maintainAspectRatio: true, // Allow charts to take natural aspect ratio
+scales: { y: { beginAtZero: true } }
+}
+});
+}
+
+async function fetchDataAndUpdateCharts() {
+try {
+const res = await fetch('/metrics');
+const data = await res.json();
+
+// Update general status
+document.getElementById('orchestratorStatus').textContent = data.orchestrator_status || 'Unknown';
+document.getElementById('totalDocs').textContent = data.total_docs_processed_session || '0';
+document.getElementById('totalRewards').textContent = (data.total_rewards_session || 0).toFixed(2);
+document.getElementById('kbSize').textContent = data.knowledge_base_size || '0';
+
+// Update chart data (append new, keep last MAX_POINTS)
+const currentTime = new Date().toLocaleTimeString();
+chartData.labels.push(currentTime);
+chartData.rewards.push(data.current_reward_avg);
+chartData.eval_scores.push(data.current_eval_score_avg);
+chartData.throughput.push(data.current_throughput);
+chartData.risk_scores.push(data.current_cyber_risk_avg);
+
+if (chartData.labels.length > MAX_POINTS) {
+chartData.labels.shift();
+chartData.rewards.shift();
+chartData.eval_scores.shift();
+chartData.throughput.shift();
+chartData.risk_scores.shift();
+}
+
+if (!rewardChart) { // Initialize charts on first data fetch
+rewardChart = createChart(document.getElementById('rewardChart').getContext('2d'), 'Average Reward', chartData.rewards, 'rgb(75, 192, 192)');
+evalScoreChart = createChart(document.getElementById('evalScoreChart').getContext('2d'), 'Average Evaluation Score', chartData.eval_scores, 'rgb(255, 159, 64)');
+throughputChart = createChart(document.getElementById('throughputChart').getContext('2d'), 'Documents Processed (Cycle)', chartData.throughput, 'rgb(54, 162, 235)', 'bar');
+cyberRiskChart = createChart(document.getElementById('cyberRiskChart').getContext('2d'), 'Average Cyber Risk', chartData.risk_scores, 'rgb(255, 99, 132)');
+} else {
+updateChart(rewardChart, chartData.rewards, chartData.labels);
+updateChart(evalScoreChart, chartData.eval_scores, chartData.labels);
+updateChart(throughputChart, chartData.throughput, chartData.labels);
+updateChart(cyberRiskChart, chartData.risk_scores, chartData.labels);
+}
+} catch (error) {
+console.error("Error fetching or updating dashboard data:", error);
+document.getElementById('orchestratorStatus').textContent = 'Error fetching data';
+}
+}
+
+// Initial fetch and then set interval
+fetchDataAndUpdateCharts();
+setInterval(fetchDataAndUpdateCharts, 5000); // Refresh every 5 seconds
+</script>
+</body>
+</html>

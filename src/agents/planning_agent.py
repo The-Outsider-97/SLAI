@@ -1,3 +1,5 @@
+__version__ = "1.8.0"
+
 """
 Planning Agent with Alternative Method Search Strategies
 Implements grid search and Bayesian-inspired decomposition selection
@@ -26,20 +28,25 @@ import random
 import numpy as np
 
 from enum import Enum
-from typing import List, Dict, Optional, Callable, Tuple, Any, Set
+from typing import List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
 from src.agents.base_agent import BaseAgent
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
 from src.agents.planning.planning_metrics import PlanningMetrics
+from src.agents.planning.planning_memory import PlanningMemory
+from src.agents.planning.planning_monitor import PlanningMonitor
+from src.agents.planning.safety_planning import SafetyPlanning, SafetyMarginError, TemporalViolation, ResourceViolation
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
 from src.tuning.tuner import HyperparamTuner
 from logs.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("Planning Agent")
 
+CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
 
 CostProfile = Tuple[float, float]
 StateTuple = Tuple[Tuple[str, Any], ...]
@@ -55,17 +62,13 @@ class PlanningAgent(BaseAgent):
             agent_factory=agent_factory,
             config=base_config
         )
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
+        self.memory = PlanningMemory(agent=self, config_file_path=CONFIG_PATH)
         self.decision_tree_heuristic = DecisionTreeHeuristic()
         self.gb_heuristic = GradientBoostingHeuristic()
+        self.monitor = PlanningMonitor(agent=self)
+        self.safety_planner = SafetyPlanning(config=config.get('safety_margins', CONFIG_PATH))
+        self.safety_planner.resource_monitor._service_discovery_config = (config.get('service_discovery', CONFIG_PATH))
         self.plan_history = deque(maxlen=1000)
-        self.task_library: Dict[str, Task] = {}
-        self.current_plan: List[Task] = []
-        self.world_state: Dict[str, any] = {}
-        self.execution_history = []
-        self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0})
-
         self.shared_memory = self.shared_memory[0] if isinstance(self.shared_memory, tuple) else self.shared_memory
         self.agent_factory = self.agent_factory[0] if isinstance(self.agent_factory, tuple) else self.agent_factory
 
@@ -80,10 +83,27 @@ class PlanningAgent(BaseAgent):
         self._planning_end_time: Optional[float] = None
 
         config=config or {}
+        self.memo_table = {}
         self.scheduler = DeadlineAwareScheduler(risk_threshold=config.get('risk_threshold', 0.7))
         self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
-        logger.info(f"PlanningAgent initialized. World state: {self.world_state}")
+        logger.info(f"PlanningAgent succesfully initialized")
+
+        # Task head registry
+        self.task_heads = {
+            'classification': ClassificationHead,
+            'regression': RegressionHead,
+            'seq2seq': Seq2SeqHead
+        }
+
+    def configure_task_head(self, task_type: str, **kwargs):
+        """Dynamically attach task heads based on current plan"""
+        if task_type not in self.task_heads:
+            raise ValueError(f"Unsupported task type: {task_type}")
+            
+        # Get transformer instance from text encoder
+        transformer = self.shared_memory['text_encoder'].transformer
+        return self.task_heads[task_type](transformer, **kwargs)
 
     def log_plan_outcome(self, task, success):
         """Store plan features and outcome for training"""
@@ -150,11 +170,6 @@ class PlanningAgent(BaseAgent):
         """Recursive decomposition with method selection tracking"""
         logger.debug(f"Decomposing task: {task_to_decompose.name}")
 
-        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
-        if memo_key in self.memo_table:
-            logger.debug(f"Memo hit for {memo_key}")
-            return self.memo_table[memo_key]
-
         # Base case: If the task is primitive, it's already decomposed.
         if task_to_decompose.type == TaskType.PRIMITIVE:
             if task_to_decompose.check_preconditions(self.world_state):
@@ -179,9 +194,19 @@ class PlanningAgent(BaseAgent):
             score = self._heuristic(task_to_decompose)
             scores.append((i, score))
         
+        if not scores:
+            logger.error(f"No methods available for task '{task_to_decompose.name}'.")
+            task_to_decompose.status = TaskStatus.FAILED
+            return None
+        
         # Select method with highest predicted success
         method_index_to_try = max(scores, key=lambda x: x[1])[0]
         task_to_decompose.selected_method = method_index_to_try
+
+        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
+        if memo_key in self.memo_table:
+            logger.debug(f"Memo hit for {memo_key}")
+            return self.memo_table[memo_key]
 
         if not (0 <= method_index_to_try < len(library_task.methods)):
              logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
@@ -479,33 +504,12 @@ class PlanningAgent(BaseAgent):
         
         return True
 
-    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
-        """Decomposes the goal task into a plan of primitive tasks."""
-        raw_plan = super().generate_plan(goal_task)
-        if not raw_plan:
-            return None
-        self._planning_start_time = time.time()
-        plan = self.decompose_task(goal_task)
-        self._planning_end_time = time.time()
-        scheduled_tasks = self._convert_to_schedule_format(raw_plan)
-        risk_assessor = self.shared_memory.get('risk_assessor')
-
-        # Execute scheduling
-        schedule = self.scheduler.schedule(
-            tasks=scheduled_tasks,
-            agents=self._get_available_agents(),
-            risk_assessor=risk_assessor,
-            state=self.world_state
-        )
-
-        if plan is None:
-            goal_task.status = TaskStatus.FAILED
-            logger.error("Failed to generate plan.")
-            return None
-
-        logger.info(f"Plan generated with {len(plan)} steps.")
-        self.current_plan = plan
-        return plan(schedule)
+    def copy(self):
+        new_task = Task(name=self.name, type=self.type)
+        # Copy other attributes like preconditions, effects, etc.
+        new_task.preconditions = self.preconditions.copy()
+        new_task.effects = self.effects.copy()
+        return new_task
 
     def _convert_to_schedule_format(self, plan):
         """Map plan tasks to scheduler format"""
@@ -525,43 +529,108 @@ class PlanningAgent(BaseAgent):
         """Get agent capabilities from collaborative agent's registry"""
         return self.shared_memory.get('agent_registry', {})
 
+    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
+        """Decomposes the goal task into a plan of primitive tasks."""
+        self._planning_start_time = time.time()
+        plan = self.decompose_task(goal_task)
+        # Integrated safety check
+        try:
+            if not self.safety_planner.safety_check(plan):
+                raise AcademicPlanningError("Plan failed initial safety validation")
+        except (ResourceViolation, TemporalViolation) as e:
+            logger.error(f"Safety violation in generated plan: {str(e)}")
+            return self._handle_safety_violation(goal_task, e)
+        self._planning_end_time = time.time()
+    
+        if plan is None:
+            goal_task.status = TaskStatus.FAILED
+            logger.error("Failed to generate plan.")
+            return None
+    
+        # Execute scheduling
+        scheduled_tasks = self._convert_to_schedule_format(plan)
+        risk_assessor = self.shared_memory.get('risk_assessor')
+    
+        schedule = self.scheduler.schedule(
+            tasks=scheduled_tasks,
+            agents=self._get_available_agents(),
+            risk_assessor=risk_assessor,
+            state=self.world_state
+        )
+    
+        logger.info(f"Plan generated with {len(plan)} steps.")
+        self.current_plan = plan
+        return self._convert_to_plan(schedule)
+
     def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
         """Executes a plan of primitive tasks. Tracks success, updates statistics, and handles failures."""
+        for idx, task in enumerate(plan):
+            try:
+                # Pre-execution safety check
+                self.safety_planner._validate_equipment_constraints(task)
+                self.safety_planner._validate_temporal_constraints(task)
+                
+                # Execute task
+                self._execute_action(task)
+                
+                # Update resource monitor
+                self.safety_planner.resource_monitor.update_allocations(
+                    task.resource_requirements
+                )
+                
+            except SafetyMarginError as e:
+                logger.warning(f"Safety margin exceeded: {str(e)}")
+                recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
+                if recovery_plan:
+                    return self.execute_plan(recovery_plan, goal_task)
+                else:
+                    task.status = TaskStatus.FAILED
+                    break
+
         self.current_plan = plan
         executed_successfully = True
         plan_idx = 0
-    
+
+        # Track plan start
+        plan_meta = self.monitor.track_plan_start(plan)
+
         task_hierarchy = []
         current_parent = None
-    
+
         while plan_idx < len(plan):
             task = plan[plan_idx]
-    
+
             if task.parent != current_parent:
                 if current_parent is not None:
                     self._update_task_success(current_parent, task_hierarchy)
                 current_parent = task.parent
                 task_hierarchy = []
-    
+
             task.status = TaskStatus.EXECUTING
             self._execute_action(task)
             task_hierarchy.append(task)
             self.execution_history.append(task)
-    
+
             if task.status == TaskStatus.FAILED:
                 executed_successfully = False
                 if goal_task:
                     goal_task.status = TaskStatus.FAILED
+                # Trigger health check immediately
+                self.monitor._perform_interval_checks()
                 break
-    
+
             plan_idx += 1
-    
+
         if current_parent is not None:
             self._update_task_success(current_parent, task_hierarchy)
-    
+
         if executed_successfully and goal_task:
             goal_task.status = TaskStatus.SUCCESS
-    
+
+        # Track plan completion
+        final_status = goal_task.status if goal_task else (TaskStatus.SUCCESS if executed_successfully else TaskStatus.FAILED)
+        self.monitor.track_plan_completion(plan_meta, final_status)
+
         return {
             "status": goal_task.status.name if goal_task else ("SUCCESS" if executed_successfully else "FAILED"),
             "world_state": self.world_state
@@ -1085,12 +1154,51 @@ class ExplanatoryPlanner(PlanningAgent):
         """Memoization cache for common decompositions (Markovitch & Scott 1988)"""
         self.decomposition_cache = {}
 
-    def decompose_task(self, task: Task) -> Optional[List[Task]]:
-        """Memoized version of decomposition"""
-        cache_key = (task.name, task.selected_method, frozenset(self.world_state.items()))
-        if cache_key in self.decomposition_cache:
-            return self.decomposition_cache[cache_key]
+    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
+        """Augmented decomposition with safety-aware distribution"""
+        try:
+            # Attempt distributed decomposition first
+            return self.safety_planner.distributed_decomposition(task_to_decompose)
+        except ResourceViolation:
+            logger.info("Falling back to local decomposition")
+            return self._local_decomposition(task_to_decompose)
 
-        result = super().decompose_task(task)
-        self.decomposition_cache[cache_key] = result
-        return result
+    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
+        """Integrated safety violation recovery"""
+        logger.warning(f"Initial plan failed safety checks. Attempting repair...")
+        
+        # Get safety-aware repair candidates
+        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
+        
+        # Validate and select best candidate
+        for candidate in candidates:
+            if self.safety_planner.safety_check(candidate):
+                logger.info("Found valid safety-compliant alternative plan")
+                return candidate
+                
+        logger.error("No safe alternatives found")
+        return None
+
+    def interactive_adjustment(self, adjustment: dict):
+        """Expose safety planner's adjustment interface"""
+        self.safety_planner.interactive_adjustment_handler(adjustment)
+        self.current_plan = self.safety_planner.current_plan
+
+if __name__ == "__main__":
+    print("\n=== Running Planning Agent Demo ===")
+
+    # Mock environment setup
+    from unittest.mock import Mock
+    mock_agent = Mock()
+    mock_agent.shared_memory = {
+        'text_encoder': Mock(),
+        'risk_assessor': lambda x: 0.3,
+        'agent_registry': {'chef_agent': {'capabilities': ['food_prep']}}
+    }
+
+    planner = PlanningAgent(
+        shared_memory=mock_agent.shared_memory,
+        agent_factory=None,
+        config={'risk_threshold': 0.4}
+    )
+    print("\n=== Demo Completed ===\n")

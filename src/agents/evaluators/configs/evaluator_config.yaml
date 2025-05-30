@@ -1,0 +1,231 @@
+
+baselines:
+  time_per_output: 0.5    # Seconds per output
+  time_baseline: 2.0      # OR: Total seconds for batch
+  
+  memory_baseline: 1024   # Default bytes per output
+  memory_per_type:        # Type-specific baselines
+    text: 512
+    image: 4096
+    structured: 1024
+    default: 768
+
+evaluators_memory:
+  max_size: 5000
+  eviction_policy: 'LRU'          # LRU or FIFO
+  checkpoint_dir: 'src/agents/evaluators/checkpoints'
+  checkpoint_freq: 500
+  auto_save: True
+  tag_retention: 7                # Days to keep tagged entries
+  priority_levels: 3              # Low, Medium, High
+  access_count: 0
+
+issue_database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  database: safety_issues
+  user: ${DB_USER:admin}
+  password: ${DB_PASSWORD:securepassword}
+  pool_size: 5
+  timeout: 5.0
+
+validation_protocol:
+  static_analysis:
+    enable: true
+    security:
+      max_critical: 0
+  behavioral_testing:
+    test_types: ["safety", "performance", "edge_cases"]
+    test_count: 100
+  full_evaluation_flow:
+    enable_performance: true
+    enable_efficiency: true
+    enable_statistical: true
+    enable_resource: true
+
+automated_reporting:
+  interval_hours: 24
+  retention_days: 30
+
+risk_adaptation:
+  learning_rate: 0.05
+  uncertainty_window: 1000
+  initial_hazard_rates:
+    system_failure: 0.000001
+    sensor_failure: 0.00001
+    unexpected_behavior: 0.0001
+
+certification_manager:
+  system: 'AI Agent'
+  template_path: 'evaluators/templates/certification_templates.json'
+  reliability:
+    mtbf_threshold: 1000  # Mean Time Between Failures (hours)
+    error_rate: 0.0001     # Maximum allowed error rate
+  performance:
+    max_response_time: 1.0  # Seconds
+    throughput: 1000        # Requests/second
+  maintainability:
+    max_tech_debt: 0.2
+    cicd_coverage: 90       # % of CI/CD pipeline coverage
+  security:
+    max_vulnerabilities: 5
+    pentest_required: true
+    encryption_standard: 'AES-256'
+
+documentation:
+  audit_trail:
+    difficulty: 4
+    hash_algorithm: "sha256"
+  export:
+    formats: ["json", "yaml"]
+    default_format: "json"
+  validation:
+    schema_path: "agents/evaluators/templates/audit_schema.json"
+  versioning:
+    max_versions: 7
+
+performance_visualizer:
+  max_points: 100
+  colors:
+    pass_rate: [100, 149, 237]  # Cornflower blue
+    background: [30, 30, 30]    # Dark gray
+    text: [255, 255, 255]       # White
+    reward_line: [0, 191, 99]   # Green
+    risk_line: [255, 144, 0]    # Orange
+    success: [0, 191, 99]       # Green
+    failure: [231, 76, 60]      # Red
+  chart_dimensions:
+    tradeoff: [800, 600]
+    temporal: [600, 400]
+  font:
+    family: "Arial"
+    size: 10
+    title_size: 12
+  line_styles:
+    thickness: 2
+    grid_style: "dot"
+  grid:
+    x_divisions: 10
+    y_divisions: 10
+    label_precision: 1
+  initial_metrics:
+    successes: 0
+    failures: 0
+    hazard_rates: []
+    operational_times: []
+
+efficiency_evaluator:
+  baselines:
+    flops: 1.2e6
+    energy_usage: 150  # watts
+    memory_threshold: 2048  # MB
+  operational_modes:
+    real_time:
+      weights: {temporal: 0.6, spatial: 0.2, computational: 0.2}
+    batch_processing:
+      weights: {spatial: 0.5, computational: 0.4, token: 0.1}
+  energy_model: "src/agents/evaluators/models/energy_predictor.onnx"
+  report_template: "src/agents/evaluators/templates/efficiency_report.json"
+  complexity_metrics: True
+  current_flops: 1.2e6
+  efficiency_weights:
+    temporal: 0.4
+    spatial: 0.3
+    computational: 0.3
+  linguistic_weights:
+    syntactic_complexity: 0.15
+    semantic_density: 0.1
+    structural_variety: 0.05
+  nlp_components:
+    tokenizer_config: "src/agents/perception/configs/perception_config.yaml"
+    nlp_engine_config: "src/agents/language/configs/language_config.yaml"
+
+performance_evaluator:
+  classes: [0, 1]
+  weights:
+    accuracy: 0.4
+    precision: 0.3
+    recall: 0.3
+  average: macro
+  enable_composite_score: True
+  store_results: True
+
+statistical_evaluator:
+  alpha: 0.05
+  confidence_level: 0.95
+  min_sample_size: 10
+
+resource_utilization_evaluator:
+  thresholds:
+    cpu: 85.0
+    memory: 80.0
+    disk: 90.0
+    network: 100.0  # Mbps
+  weights:
+    cpu: 0.5
+    memory: 0.3
+    disk: 0.15
+    network: 0.05
+  monitor_duration: 3
+  enable_historical: true
+  store_results: true
+
+behavioral_evaluator:
+  thresholds:
+    pass_rate: 0.95
+    failure_tolerance: 0.05
+  weights:
+    test_coverage: 0.4
+    pass_rate: 0.3
+    requirement_coverage: 0.3
+  enable_historical: true
+  store_results: true
+  mutation_testing: false
+  max_failure_modes: 10
+  requirement_tags: []
+
+infrastructure_manager:
+  tuning_strategy: bayesian
+  n_calls: 20
+  n_random_starts: 5
+  rollback_config:
+    backup_dir: "models/backups/"
+    model_dir: "models/"
+
+ml_anomaly_detection:
+  training_interval: 24  # Hours
+  feature_weights:
+    severity: 0.4
+    complexity: 0.3
+    data_flow: 0.2
+    security: 0.5
+  model_params:
+    contamination: 0.01
+    n_estimators: 200
+  deep_model:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+
+data_flow_analysis:
+  max_call_depth: 10
+  track_types: True
+  analyze_taint: True
+  vulnerability_patterns:
+    - "sql_injection"
+    - "xss"
+    - "path_traversal"
+
+static_analysis:
+  enable: true
+  security:
+    owasp_top_10: true
+    cwe_top_25: true
+    max_critical: 0
+    max_high: 3
+  code_quality:
+    tech_debt_threshold: 0.15
+    test_coverage: 0.8
+    complexity:
+      cyclomatic: 15
+      cognitive: 20

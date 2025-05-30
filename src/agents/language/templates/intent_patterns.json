@@ -1,0 +1,132 @@
+{
+    "greetings": [
+      "hello",
+      "hi",
+      "hey there",
+      "good morning",
+      "good afternoon",
+      "good evening",
+      "what's up",
+      "howdy"
+    ],
+    "farewell": [
+      "bye",
+      "goodbye",
+      "see you later",
+      "talk to you later",
+      "farewell",
+      "take care",
+      "have a good day"
+    ],
+    "affirm": [
+      "yes",
+      "yep",
+      "yeah",
+      "sure",
+      "okay",
+      "sounds good",
+      "alright",
+      "confirm",
+      "indeed",
+      "absolutely"
+    ],
+    "deny": [
+      "no",
+      "nope",
+      "nah",
+      "not really",
+      "negative",
+      "I don't think so",
+      "cancel"
+    ],
+    "gratitude": [
+      "thanks",
+      "thank you",
+      "much appreciated",
+      "thanks a lot",
+      "cheers"
+    ],
+    "weather_inquiry": [
+      "what's the weather like",
+      "how is the weather in {LOCATION}",
+      "weather forecast for {LOCATION}",
+      "is it going to rain in {LOCATION} {DATE_TIME}",
+      "temperature in {LOCATION}",
+      "tell me the weather",
+      "weather in {LOCATION} for {DATE_TIME}"
+    ],
+    "play_music": [
+      "play {SONG_NAME}",
+      "play some music by {ARTIST_NAME}",
+      "play the album {ALBUM_NAME} by {ARTIST_NAME}",
+      "I want to listen to {GENRE} music",
+      "put on {SONG_NAME}",
+      "play something"
+    ],
+    "set_timer": [
+      "set a timer for {DURATION}",
+      "timer for {NUMBER} {TIME_UNIT}",
+      "set an alarm for {TIME}",
+      "wake me up at {TIME}",
+      "remind me in {DURATION}"
+    ],
+    "get_time": [
+      "what time is it",
+      "current time please",
+      "do you have the time",
+      "tell me the time"
+    ],
+    "get_date": [
+      "what's the date today",
+      "what is today's date",
+      "current date",
+      "what day is it"
+    ],
+    "ask_definition": [
+      "what is {TERM}",
+      "define {TERM}",
+      "what does {TERM} mean",
+      "tell me about {TERM}"
+    ],
+    "find_restaurant": [
+      "find a {CUISINE_TYPE} restaurant near me",
+      "restaurants in {LOCATION}",
+      "I'm hungry for {FOOD_TYPE}",
+      "where can I eat {CUISINE_TYPE} in {LOCATION}"
+    ],
+    "bot_challenge": [
+      "are you a bot",
+      "are you human",
+      "what are you",
+      "who made you"
+    ],
+    "ask_capability": [
+      "what can you do",
+      "what are your capabilities",
+      "tell me what you can do",
+      "how can you help me"
+    ],
+    "stop_action": [
+      "stop",
+      "halt",
+      "cancel that",
+      "nevermind",
+      "that's enough"
+    ],
+    "request_help": [
+      "help",
+      "I need help",
+      "can you help me",
+      "assist me"
+    ],
+    "time_request": {
+      "patterns": [
+        "(what|current).{0,3}time",
+        "what.time.is.it",
+        "how.late.is.it",
+        "what.time.is.it.now",
+        "current.time.now",
+        "tell.me.the.current.time"
+      ]
+    }
+  }
