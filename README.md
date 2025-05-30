@@ -135,6 +135,9 @@ Note: If you see an error about execution policy:
    pip install astor
    pip install z3
    pip install python-whois
+   pip install psutils
+   pip install pandas
+   pip install mlxtend
 
    python -m nltk.downloader punkt
    ```
