@@ -25,7 +25,7 @@ import numpy as np
 
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 from src.agents.safety.reward_model import RewardModel
 from src.agents.safety.secure_memory import SecureMemory
@@ -66,6 +66,7 @@ class SafetyAgentConfig:
     audit_level: int = 2
     collect_feedback: bool = True
     enable_learnable_aggregation: bool = False
+    secure_memory: Dict[str, Any] = field(default_factory=lambda: {"default_ttl_seconds": 3600})
 
 class SafetyAgent(BaseAgent):
     """
@@ -83,7 +84,9 @@ class SafetyAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         if isinstance(config, dict):
-            config = SafetyAgentConfig(**config)
+            valid_fields = {f.name for f in fields(SafetyAgentConfig)}
+            filtered_config = {k: v for k, v in config.items() if k in valid_fields}
+            config = SafetyAgentConfig(**filtered_config)
         
         self.config = config
         self.risk_threshold = self.config.risk_thresholds.get("safety", 0.01)
