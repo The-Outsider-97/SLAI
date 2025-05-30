@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from collections import defaultdict, Counter
 from typing import Any, Optional, List, Dict, Union
 
-from src.agents.safety.utils.config_loader import load_global_config, get_config_section
+from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Knowledge Memory")
