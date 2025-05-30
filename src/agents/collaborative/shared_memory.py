@@ -12,7 +12,6 @@ import datetime
 import threading
 
 from pympler import asizeof
-from bisect import bisect_right
 from typing import Any, OrderedDict
 from collections import namedtuple, defaultdict, deque
 
@@ -67,8 +66,6 @@ class SharedMemory:
 
         self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
         self._expiration = {}  # key -> expiry time
-        # self._expiration_heap = []
-        # self._expiration_map = {}
         self.current_memory = 0  # Initialize memory usage counter
 
         self._access_log = OrderedDict()  # key -> last access time
@@ -76,6 +73,9 @@ class SharedMemory:
 
         # Start background cleanup thread
         self._start_expiration_cleaner()
+
+        logger.info(f"Shared Memory succesfully initialized with:")
+        logger.info(f"\nCounter: {self.current_memory}\nExperation: {self._expiration}\nSubscribers: {self.subscribers}\n")
 
 # ==============================
 #  2. Core Public API
@@ -92,7 +92,8 @@ class SharedMemory:
         with self._lock:
             # Create new version
             new_version = VersionedItem(timestamp=current_time, value=value)
-            self.current_memory += self._calculate_size(value)
+            size = self._calculate_size(value)
+            self.current_memory += size
             
             # Handle memory eviction if needed
             if self.current_memory > self.max_memory:
@@ -120,61 +121,52 @@ class SharedMemory:
                 
             return current_time
 
+    def set(self, key, value, *, ttl=None, **kwargs):
+        """Set a value in shared memory with TTL and versioning"""
+        self._simulate_network()
+        return self.put(key, value, ttl=ttl, **kwargs)
+
     def get(self, key, version_timestamp=None, update_access=True, default=None):
         self._simulate_network()
-        if version_timestamp is not None:
-            timestamps = [v.timestamp for v in versions]
-            idx = bisect_right(timestamps, version_timestamp) - 1
-            return versions[idx].value if idx >= 0 else None
         with self._lock:
-            # your normal get logic here
             current_time = time.time()
             if key not in self._data or self._is_expired(key, current_time):
                 if key in self._data:
                     self._remove_key(key)
-                return None
+                return default
     
             if update_access:
-                self._access_log.move_to_end(key)
+                if key in self._access_log:
+                    self._access_log.move_to_end(key)
+                else:
+                    self._access_log[key] = current_time
     
             versions = self._data[key]
             if not versions:
-                return None
+                return default
     
             if version_timestamp is None:
                 return versions[-1].value
             else:
+                # Convert version_timestamp to float if possible
+                try:
+                    version_ts = float(version_timestamp)
+                except (TypeError, ValueError):
+                    version_ts = version_timestamp
+                    
+                # Find the version with the largest timestamp <= version_timestamp
                 found_version = None
                 for version in reversed(versions):
-                    if version.timestamp <= version_timestamp:
-                        found_version = version
-                        break
-                return found_version.value if found_version else None
+                    try:
+                        if version.timestamp <= version_ts:
+                            found_version = version
+                            break
+                    except TypeError:
+                        # Handle type mismatch by skipping comparison
+                        continue
+                return found_version.value if found_version else default
             
-        return default
-
-    def set(self, key, value, *, ttl=None, **kwargs):
-        """Set a value in shared memory with TTL and versioning"""
-        self._simulate_network()
-
-        #with self._lock:
-        #    version = self.data[key]['version'] + 1 if key in self.data else 1
-        #    expire_at = time.time() + ttl if ttl else None
-        #    self.data[key] = {'value': value, 'version': version, 'expire_at': expire_at}
-        #    new_version = VersionedItem(timestamp=time.time(), value=value)
-        #    self._data[key].append(new_version)
-
-        #if isinstance(ttl, datetime.timedelta):
-        #    ttl = ttl.total_seconds()
-        #if ttl is not None:
-        #    try:
-        #        ttl = int(ttl)
-        #        self._expiration[key] = time.time() + ttl
-        #    except Exception as e:
-        #        logger.error(f"[SharedMemory] Invalid TTL passed: {ttl} ({e})")
-        #        return False  # <--- Stop execution if TTL is invalid
-
-        return self.put(key, value, ttl=ttl, **kwargs)
+        #return default
 
     def save_to_file(self, filename):
         with open(filename, 'wb') as f:
