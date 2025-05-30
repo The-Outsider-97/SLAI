@@ -4,24 +4,12 @@ import torch.nn as nn
 import yaml, json
 import torch.optim as optim
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
 from logs.logger import get_logger
 
 logger = get_logger("Policy Network")
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-\
 class Softmax(Activation):
     """Softmax activation."""
     def forward(self, z):
@@ -165,19 +153,23 @@ class PolicyNetwork(nn.Module):
     Outputs action probabilities (e.g., via Softmax) or action parameters (e.g., via Tanh/Linear).
     Backpropagation is driven by gradients from an RL algorithm (e.g., REINFORCE, A2C, PPO).
     """
-    def __init__(self, config, state_size, action_size):
+    def __init__(self, state_size, action_size):
         super().__init__()
+        self.config = load_global_config()
+        self.pn_config = get_config_section('policy_network')
+        if not self.pn_config:
+            self.pn_config = self.config.get('neural_network', {})
+            logger.info("Using neural_network config for PolicyNetwork")
+        
+        if not self.pn_config:
+            logger.warning("PolicyNetwork configuration not found. Using defaults.")    
 
-        self.config = config.get('policy_network', {})
-        if not self.config:
-            logger.warning("PolicyNetwork configuration not found in config. Using defaults.")
-
-        hidden_layer_sizes = self.config.get('hidden_layer_sizes', [128, 64]) # Default architecture
+        hidden_layer_sizes = self.pn_config.get('hidden_layer_sizes', [128, 64]) # Default architecture
         self.layer_dims = [state_size] + hidden_layer_sizes + [action_size]
         self.num_layers = len(self.layer_dims) - 1
 
-        self.l1_lambda = self.config.get('l1_lambda', 0.0)
-        self.l2_lambda = self.config.get('l2_lambda', 0.0)
+        self.l1_lambda = self.pn_config.get('l1_lambda', 0.0)
+        self.l2_lambda = self.pn_config.get('l2_lambda', 0.0)
 
         self._init_activation_functions()
         self._initialize_weights()
@@ -197,8 +189,8 @@ class PolicyNetwork(nn.Module):
         raise ValueError(f"Unknown activation function: {name_str}")
 
     def _init_activation_functions(self):
-        hidden_act_str = self.config.get('hidden_activation', 'relu')
-        output_act_str = self.config.get('output_activation', 'softmax') # Softmax common for discrete policies
+        hidden_act_str = self.pn_config.get('hidden_activation', 'relu')
+        output_act_str = self.pn_config.get('output_activation', 'softmax') # Softmax common for discrete policies
 
         self.hidden_activations = []
         if self.num_layers > 1: # If there are hidden layers
@@ -364,8 +356,7 @@ if __name__ == '__main__':
     action_dim = 2 # E.g., CartPole actions (left, right)
 
     # 3. Instantiate the PolicyNetwork
-    policy_net = PolicyNetwork(config=sample_global_config, 
-                               state_size=state_dim, 
+    policy_net = PolicyNetwork(state_size=state_dim, 
                                action_size=action_dim)
     logger.info("PolicyNetwork initialized.")
 
@@ -410,8 +401,7 @@ if __name__ == '__main__':
     logger.info(f"Number of weight tensors: {len(weights['Ws'])}, bias tensors: {len(weights['bs'])}")
     
     # Create a new network and set weights (e.g., for loading a model)
-    new_policy_net = PolicyNetwork(config=sample_global_config, 
-                                   state_size=state_dim, 
+    new_policy_net = PolicyNetwork(state_size=state_dim, 
                                    action_size=action_dim)
     new_policy_net.set_weights(weights)
     logger.info("Weights set to a new network instance.")
