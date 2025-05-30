@@ -2,23 +2,14 @@
 import numpy as np
 import random
 import math
-import yaml
 
 from typing import Any, Tuple, Dict, OrderedDict, List
 from collections import defaultdict
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger
 
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+logger = get_logger("Recursive Learning Engine")
 
 class StateProcessor:
     """
@@ -30,16 +21,18 @@ class StateProcessor:
     """
     
     def __init__(self, state_size):
-        base_config = load_config()
-        self.config = get_merged_config().get('rl_engine', {})
+        self.config = load_global_config()
+        self.rle_config = get_config_section('rl_engine')
         self.state_size = state_size
         
         # Get config values directly from loaded config
-        state_processor_config = base_config.get('state_processor', {})
+        state_processor_config = self.rle_config.get('state_processor', {})
         self.tiling_resolution = state_processor_config.get('tiling_resolution', 0.1)
         self.num_tilings = state_processor_config.get('num_tilings', 8)
         self.feature_engineering = state_processor_config.get('feature_engineering', True)
         self.feature_weights = np.random.randn(state_size)
+
+        logger.info(f"Recursive Learning Engine Activated!")
     
     def discretize(self, continuous_state: np.ndarray, num_tilings: int = 8) -> tuple:
         """
