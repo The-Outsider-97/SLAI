@@ -148,6 +148,7 @@ Note: If you see an error about execution policy:
    pip install statsmodels
    pip install SpellChecker
    pip install pyspellchecker
+   pip install textstat
    ```
 
 5. Run Model:
