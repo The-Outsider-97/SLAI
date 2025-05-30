@@ -143,8 +143,7 @@ Note: If you see an error about execution policy:
    pip install pynvml
    pip install sentence_transformers
    pip install tf-keras
-
-   python -m nltk.downloader punkt
+   pip install psycopg2-binary
    ```
 
 5. Run Model:
