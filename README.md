@@ -144,6 +144,10 @@ Note: If you see an error about execution policy:
    pip install sentence_transformers
    pip install tf-keras
    pip install psycopg2-binary
+   pip install scikit-optimize
+   pip install statsmodels
+   pip install SpellChecker
+   pip install pyspellchecker
    ```
 
 5. Run Model:
