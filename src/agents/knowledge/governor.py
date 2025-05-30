@@ -5,7 +5,6 @@ import re
 from typing import Dict, Union, List
 from difflib import SequenceMatcher
 from collections import deque, defaultdict
-from types import SimpleNamespace
 
 from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
 from src.agents.knowledge.knowledge_memory import KnowledgeMemory
@@ -13,11 +12,25 @@ from logs.logger import get_logger
 
 logger = get_logger("Governor")
 
+class DotDict(dict):
+    """Dictionary with dot access (safe SimpleNamespace replacement)."""
+    def __getattr__(self, key):
+        return self[key]
+    def __setattr__(self, key, value):
+        self[key] = value
+    def __delattr__(self, key):
+        del self[key]
+
 class Governor:
     def __init__(self, knowledge_agent=None):
-        self.knowledge_agent = knowledge_agent if knowledge_agent is not None else []
+        self.knowledge_agent = knowledge_agent
         self.config = load_global_config()
         self.governor_config = get_config_section('governor')
+        if isinstance(self.governor_config.get("violation_thresholds"), dict):
+            self.governor_config["violation_thresholds"] = DotDict(self.governor_config["violation_thresholds"])
+        
+        if isinstance(self.governor_config.get("memory_thresholds"), dict):
+            self.governor_config["memory_thresholds"] = DotDict(self.governor_config["memory_thresholds"])
         self.guidelines = self._load_guidelines()
         
         # Initialize rule engine
@@ -55,25 +68,29 @@ class Governor:
     def _load_enforcement_rules(self):
         """Load dynamic enforcement rules based on guidelines"""
         for restriction in self.guidelines.get("restrictions", []): 
-            self.rule_engine.add_rule(
-                name=f"Restriction/{restriction['id']}",
-                rule_func=self._create_restriction_func(restriction),
-                weight=1.0,
-                tags=["governance"],
-                metadata={"type": "hard_restriction", "severity": restriction["severity"]}
-            )
+            if 'id' in restriction and 'patterns' in restriction and 'severity' in restriction: # Ensure keys exist
+                self.rule_engine.add_rule(
+                    name=f"Restriction/{restriction['id']}",
+                    rule_func=self._create_restriction_func(restriction),
+                    weight=1.0,
+                    tags=["governance"],
+                    metadata={"type": "hard_restriction", "severity": restriction["severity"]}
+                )
+            else:
+                logger.warning(f"Skipping malformed restriction: {restriction}")
+
 
     def _create_restriction_func(self, restriction: dict):
         """Generate rule function from restriction definition"""
         def check_restriction(knowledge_graph: dict):
             inferred = {}
+            similarity_threshold = getattr(self.governor_config.violation_thresholds, 'similarity', 0.85)
             for key, value in knowledge_graph.items():
                 if self._matches_pattern(key, restriction.get("patterns", [])): 
-                    # Access similarity threshold from dictionary
-                    similarity_threshold = self.governor_config.get('violation_thresholds', {}).get('similarity', 0.85)
-                    similarity = SequenceMatcher(None, str(value), restriction.get("forbidden_content","")).ratio()
+                    similarity = SequenceMatcher(
+                        None, str(value), restriction.get("forbidden_content","")).ratio()
                     
-                    if similarity > similarity_threshold:
+                    if similarity > similarity_threshold: # Use the fetched threshold
                         inferred[f"VIOLATION/{restriction['id']}"] = similarity
             return inferred
         return check_restriction
@@ -114,7 +131,7 @@ class Governor:
         try:
             violations = self.rule_engine.apply(current_memory_store)
         except Exception as e:
-            logger.error(f"Error applying rules during full audit: {e}")
+            logger.error(f"Error applying rules during full audit: {e}", exc_info=True)
             violations = {}
     
         for fact, confidence in violations.items():
@@ -137,10 +154,9 @@ class Governor:
             "bias_detected": defaultdict(int),
             "context": context
         }
-        
-        # Safely access violation_thresholds and freshness_threshold from governor_config
-        unethical_threshold = getattr(self.governor_config.violation_thresholds, 'unethical', 0.65)
-        freshness_thresh_hours = getattr(self.governor_config, 'freshness_threshold', 720)
+
+        unethical_threshold = self.governor_config.get('violation_thresholds', {}).get('unethical', 0.65)
+        freshness_thresh_hours = self.governor_config.get('freshness_threshold', 720)
 
         for score, doc in results:
             if isinstance(doc, dict):
@@ -161,7 +177,7 @@ class Governor:
                     if count > 0:
                         audit_entry["bias_detected"][category] += count
 
-                if metadata.get('timestamp'):
+                if metadata.get('timestamp') and isinstance(metadata['timestamp'], (int, float)):
                     age_hours = (time.time() - metadata['timestamp']) / 3600
                     if age_hours > freshness_thresh_hours:
                         audit_entry["violations"].append({
@@ -169,18 +185,24 @@ class Governor:
                             "age_hours": round(age_hours, 1),
                             "threshold": freshness_thresh_hours
                         })
+                elif metadata.get('timestamp'):
+                    logger.warning(f"Invalid timestamp format in metadata for doc: {text[:50]}...")
 
         if audit_entry["violations"]:
             knowledge_graph_for_rules = {f"doc_{i}": res_doc.get('text', '') for i, (_, res_doc) in enumerate(results) if isinstance(res_doc, dict)}
             knowledge_graph_for_rules["query"] = query
-            violations_from_rules = self.rule_engine.apply(knowledge_graph_for_rules)
-            audit_entry["rule_violations"] = violations_from_rules
+            try:
+                violations_from_rules = self.rule_engine.apply(knowledge_graph_for_rules)
+                audit_entry["rule_violations"] = violations_from_rules
+            except Exception as e:
+                logger.error(f"Error applying rules during audit retrieval: {e}", exc_info=True)
+                audit_entry["rule_violations"] = {}
 
         self.audit_history.append(audit_entry)
 
-        critical_threshold = getattr(self.governor_config.violation_thresholds, 'critical', 0.8)
-        critical_violations = [v for v in audit_entry["violations"] 
-                              if v.get('score', 0) > critical_threshold]
+        critical_threshold = self.governor_config.get('violation_thresholds', {}).get('critical', 0.8)
+        critical_violations = [v for v in audit_entry["violations"]
+                               if isinstance(v,dict) and v.get('score', 0) > critical_threshold]
         if critical_violations:
             logger.warning(f"Critical retrieval violations detected: {len(critical_violations)}")
 
@@ -196,9 +218,10 @@ class Governor:
         if num_principles == 0: return 0.0
 
         for principle in self.guidelines["principles"]:
-            if principle.get("type") == "prohibition": 
-                for pattern in principle.get("patterns", []): 
-                    matches += len(re.findall(pattern, text, re.IGNORECASE))
+            if isinstance(principle, dict) and principle.get("type") == "prohibition": 
+                for pattern in principle.get("patterns", []):
+                    if isinstance(pattern, str):
+                        matches += len(re.findall(pattern, text, re.IGNORECASE))
                 
         return matches / num_principles 
 
@@ -230,8 +253,9 @@ class Governor:
     
         shared_mem = getattr(self.knowledge_agent, "shared_memory", None) 
         agent_name = getattr(self.knowledge_agent, "name", "unknown_knowledge_agent")
-        perf_metrics = getattr(self.knowledge_agent, "performance_metrics", {}) 
-    
+        perf_metrics_dd = getattr(self.knowledge_agent, "performance_metrics", defaultdict(lambda: deque()))
+        perf_metrics_dict = {k: list(v) for k, v in perf_metrics_dd.items()}
+
         recent_errors_list = []
         if shared_mem and hasattr(shared_mem, 'get'):
             recent_errors_list = shared_mem.get(f"errors:{agent_name}", [])[-10:] 
@@ -249,7 +273,7 @@ class Governor:
         return {
             "recent_errors": recent_errors_list,
             "retraining_flags": retraining_flag_val,
-            "performance_metrics": dict(perf_metrics) if isinstance(perf_metrics, defaultdict) else perf_metrics,
+            "performance_metrics": perf_metrics_dict,
             "error_diversity": error_diversity_val,
             "status": "Behavior audit complete."
         }
@@ -266,15 +290,15 @@ class Governor:
 
     def _check_agent_health(self):
         """Real-time health checks. Now references self.knowledge_agent."""
-        if not hasattr(self, 'knowledge_agent') or self.knowledge_agent is None or not hasattr(self.knowledge_agent, "name"):
-            logger.warning("Knowledge agent not available for Governor health checks")
+        if not self.knowledge_agent or not hasattr(self.knowledge_agent, "name"):
+            logger.warning("Knowledge agent not available for Governor health checks.")
             return
 
         agent_name = getattr(self.knowledge_agent, "name", "unknown_knowledge_agent")
         shared_mem = getattr(self.knowledge_agent, "shared_memory", None)
 
         if not shared_mem or not hasattr(shared_mem, 'get') or not hasattr(shared_mem, 'set'):
-            logger.warning(f"Shared memory not properly configured for agent {agent_name} in Governor health check.")
+            logger.warning(f"Shared memory not properly configured for {agent_name} in Governor health check.")
             return
 
         consecutive_errors_threshold = getattr(self.governor_config.violation_thresholds, 'consecutive_errors', 5)
@@ -290,9 +314,12 @@ class Governor:
         
     def record_violations(self, violations: List[Dict]): 
         """Records violations, possibly from other components."""
-        for v_item in violations: # Renamed v to v_item
-            self.audit_history.append(v_item) 
-            logger.warning(f"External violation recorded by Governor: {v_item.get('type', 'Unknown Type')} - {v_item.get('entry', '')}")
+        for v_item in violations: 
+            if isinstance(v_item, dict):
+                self.audit_history.append(v_item) 
+                logger.warning(f"External violation recorded by Governor: {v_item.get('type', 'Unknown Type')} - {v_item.get('entry', '')}")
+            else:
+                logger.warning(f"Attempted to record non-dict violation: {v_item}")
 
     def handle_emergency_alert(self, alert_report: Dict): 
         """Handles an emergency alert."""
@@ -393,16 +420,6 @@ if __name__ == "__main__":
     governor.governor_config['enforcement_mode'] = "alert"
     governor.governor_config['freshness_threshold'] = 48
     governor.governor_config['guideline_paths'] = []
-    governor.governor_config.memory_thresholds = SimpleNamespace( # Corrected to SimpleNamespace
-        warning=500,
-        critical=3072 # Added critical as per knowledge_config.yaml
-    )
-    governor.governor_config.bias_detection_categories = { 
-        "gender": ["he", "she"], "race": ["white", "black"]
-    }
-    governor.governor_config.enforcement_mode = "alert"
-    governor.governor_config.freshness_threshold = 48  # in hours
-    governor.governor_config.guideline_paths = [] # Ensures _load_guidelines doesn't try to read files
 
     # Inject dummy ethical principles directly as guideline_paths is empty
     governor.guidelines["principles"] = [
