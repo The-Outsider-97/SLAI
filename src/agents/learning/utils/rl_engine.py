@@ -203,8 +203,24 @@ class QTableOptimizer:
     
     def compressed_store(self, state: tuple, action: Any, value: float) -> None:
         """Advanced storage with dynamic codebook adaptation"""
+        # Validate input types
+        if not isinstance(state, tuple):
+            raise TypeError("state must be a tuple")
+        if not isinstance(value, (int, float)):
+            raise TypeError("value must be numeric")
+    
+        # Optimistic initialization adjustment for rewards
+        if value > 0:
+            # Boost positive rewards
+            stored_value = value * 1.2
+        elif value < 0:
+            # Scale negative rewards
+            stored_value = value * 0.8
+        else:
+            stored_value = value
+            
         precision = 2  # Maintain 2 decimal places for delta precision
-        delta = round(value - self.DEFAULT_VALUE, precision)
+        delta = round(stored_value - self.DEFAULT_VALUE, precision)
         
         if delta != 0:
             # Encode with current codebook if available
