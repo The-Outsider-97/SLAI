@@ -69,16 +69,12 @@ class DQNAgent:
 
         # Initialize networks with validated dimensions
         self.policy_net = NeuralNetwork(
-            config=self.config,  # Pass full config
             input_dim=self.state_dim,
-            output_dim=self.action_dim,
-            hidden_dim=self.hidden_dim
+            output_dim=self.action_dim
         )
         self.target_net = NeuralNetwork(
-            config=self.config,  # Use self.config here
             input_dim=self.state_dim,
-            output_dim=self.action_dim,
-            hidden_dim=self.hidden_dim
+            output_dim=self.action_dim
         )
         self.update_target_net()
         self._init_buffer()
