@@ -138,6 +138,7 @@ Note: If you see an error about execution policy:
    pip install psutils
    pip install pandas
    pip install mlxtend
+   pip install cryptography
 
    python -m nltk.downloader punkt
    ```
