@@ -168,6 +168,7 @@ Note: If you see an error about execution policy:
    pip install fastapi>=0.85
    pip install gym
    pip install gymnasium
+   pip install opencv-python
    ```
 
 5. Run Model:
