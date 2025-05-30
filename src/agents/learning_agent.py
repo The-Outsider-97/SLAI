@@ -140,6 +140,8 @@ class LearningAgent(BaseAgent):
             config=self.config.get('evolutionary', {})
         )
 
+        self.observation_count = 0
+
         logger.info(f"Learning Agent has succesfully initialized")
 
     @property
@@ -304,7 +306,7 @@ class LearningAgent(BaseAgent):
         if embedding_with_label is None:
             logger.warning("[observe] Received None as input. Skipping.")
             return
-    
+
         # Process valid input
         if isinstance(embedding_with_label, np.ndarray):
             embedding_with_label = torch.tensor(embedding_with_label, dtype=torch.float32)
@@ -316,6 +318,7 @@ class LearningAgent(BaseAgent):
         label = embedding_with_label[-1].long()  # last value as integer label (0 or 1)
         
         self.embedding_buffer.append((embedding, label))
+        self.observation_count += 1
     
     def train_from_embeddings(self):
         """Train a small supervised task on buffered embeddings."""
