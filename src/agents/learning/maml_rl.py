@@ -19,40 +19,25 @@ import numpy as np
 
 from collections import namedtuple, defaultdict
 
+from src.agents.safety.utils.config_loader import load_global_config
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.learning.utils.policy_network import PolicyNetwork, NoveltyDetector
 from logs.logger import get_logger
 
 logger = get_logger("Model-Agnostic Meta-Learning")
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 Transition = namedtuple('Transition', ['state', 'action', 'reward', 'log_prob', 'message'])
 
 class MAMLAgent:
-    def __init__(self, agent_id, config, state_size, action_size):
+    def __init__(self, agent_id, state_size, action_size):
+        self.config = load_global_config()
+
         self.agent_id = agent_id
-        base_config = load_config()
-        self.config = {
-            'maml': config.get('maml', {}),
-            'policy_network': base_config.get('policy_network', {})
-        }
         self.state_size = state_size
         self.action_size = action_size
 
         # Retrieve MAML-specific parameters
-        maml_config = self.config['maml']
+        maml_config = self.config.get('maml', {})
         self.max_trajectory_steps = maml_config.get('max_trajectory_steps', 100)  # Default 100 steps
         self.gamma = maml_config.get('gamma', 0.99)
         self.meta_lr = maml_config.get('meta_lr', 0.001)
@@ -60,14 +45,12 @@ class MAMLAgent:
 
         # Initialize PolicyNetwork with merged config
         self.policy = PolicyNetwork(
-            config=self.config,
             state_size=self.state_size,
             action_size=self.action_size
         )
         self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=self.meta_lr)
 
-        learning_memory_config = base_config.get('learning_memory', {})
-        self.learning_memory = LearningMemory(config=learning_memory_config)
+        self.learning_memory = LearningMemory
         self.model_id = "MAML_Agent"
         self._init_nlp(action_size)
 
@@ -79,7 +62,7 @@ class MAMLAgent:
             NLP_ENGINE_AVAILABLE = True
         except ImportError:
             NLP_ENGINE_AVAILABLE = False
-        maml_config = self.config['maml']  # Correct variable name
+        maml_config = self.config.get('maml', {})
         self.vocab_size = maml_config.get('vocab_size', 50)
         self.max_message_length = maml_config.get('max_message_length', 10)
 
@@ -88,7 +71,7 @@ class MAMLAgent:
         if NLP_ENGINE_AVAILABLE:
             nlp_config_path = maml_config.get('nlp_engine_config_path', "src/agents/language/configs/language_config.yaml")
             try:
-                nlp_config_data = load_config(nlp_config_path)
+                nlp_config_data = load_global_config(nlp_config_path)
                 if nlp_config_data: # Ensure config was loaded
                     self.nlp_engine = NLPEngine(config=nlp_config_data)
                     logger.info(f"Agent {self.agent_id}: NLPEngine initialized from {nlp_config_path}")
@@ -108,7 +91,6 @@ class MAMLAgent:
             policy_to_clone = self.policy
         
         cloned_policy = PolicyNetwork(
-            config={'policy_network': self.config.get('policy_network', {})},
             state_size=self.state_size,
             action_size=self.action_size
         )
@@ -528,7 +510,7 @@ class DecentralizedMAMLFleet:
     def __init__(self, num_agents, global_config, env_creator_fn, state_size, action_size):
         self.num_agents = num_agents
         self.global_config = global_config
-        self.agents = [MAMLAgent(i, global_config, state_size, action_size) for i in range(num_agents)]
+        self.agents = [MAMLAgent(i, state_size, action_size) for i in range(num_agents)]
         self.env_creator_fn = env_creator_fn # Function to create/sample environments/tasks
 
         maml_config = global_config.get('maml', {})
@@ -670,13 +652,12 @@ class DecentralizedMAMLFleet:
 if __name__ == "__main__":
     print("\n=== Running Model-Agnostic Meta-Learning ===\n")
 
-    config = load_config()
+    config = load_global_config()
     agent_id = None
 
     agent = MAMLAgent(
-        state_size=4, 
-        action_size=2, 
-        config=config,
+        state_size=4,
+        action_size=2,
         agent_id=agent_id
     )
     training_metrics = agent.train(num_meta_epochs=20)
@@ -711,7 +692,7 @@ if __name__ == "__main__":
         return env, task_info
 
     # Load main configuration
-    config = load_config(CONFIG_PATH)
+    config = load_global_config()
 
     # MAML specific parameters from config
     maml_config = config.get('maml', {})
