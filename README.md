@@ -149,6 +149,9 @@ Note: If you see an error about execution policy:
    pip install SpellChecker
    pip install pyspellchecker
    pip install textstat
+   pip install ply
+   pip install tenacity
+   pip install rollback
    ```
 
 5. Run Model:
