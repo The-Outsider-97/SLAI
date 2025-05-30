@@ -141,6 +141,8 @@ Note: If you see an error about execution policy:
    pip install cryptography
    pip install PyQt5
    pip install pynvml
+   pip install sentence_transformers
+   pip install tf-keras
 
    python -m nltk.downloader punkt
    ```
