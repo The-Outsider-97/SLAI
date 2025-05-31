@@ -2,6 +2,7 @@
 import os
 import yaml
 import torch
+import random
 import numpy as np
 
 from collections import defaultdict, deque
@@ -175,7 +176,7 @@ class LearningFactory:
     def _get_checkpoint_quality(self, agent_name):
         """Evaluate checkpoint reliability"""
         checkpoint_path = os.path.join(
-            self.config['learning_memory']['checkpoint_dir'],
+            self.config.get('learning_memory', {}).get('checkpoint_dir', ''),
             f"{agent_name}_checkpoint.pt"
         )
         if not os.path.exists(checkpoint_path):
@@ -467,6 +468,60 @@ class LearningFactory:
                 hybrid_params[param] = self.param_bounds[agent_id2][param][1]
         return hybrid_params
 
+    def _replay_historical_data(self):
+        """Experience replay with prioritized historical sampling"""
+        # Retrieve historical data from learning memory
+        historical_data = self.learning_memory.get_by_tag('historical_episodes') or []
+        if not historical_data:
+            return
+
+        # Hybrid replay sampling
+        replay_strategy = 'prioritized' if len(historical_data) > 100 else 'uniform'
+        
+        if replay_strategy == 'prioritized':
+            # Simple temporal prioritization (recent experiences first)
+            replay_data = sorted(historical_data, 
+                            key=lambda x: x['timestamp'], 
+                            reverse=True)[:100]
+        else:
+            replay_data = random.sample(historical_data, 
+                                    min(len(historical_data), 100))
+
+        # Batch replay training
+        for episode in replay_data:
+            # Convert stored data to training format
+            states = episode.get('states', [])
+            actions = episode.get('actions', [])
+            rewards = episode.get('rewards', [])
+            
+            if len(states) < 2:
+                continue
+
+            # Train each agent with historical data
+            for agent_id, agent in self.agents.items():
+                if agent_id == 'dqn' and hasattr(agent, 'store_transition'):
+                    # Convert to DQN's transition format
+                    for i in range(len(states)-1):
+                        agent.store_transition(
+                            states[i], actions[i], rewards[i], 
+                            states[i+1], False
+                        )
+                    if len(agent.learning_memory) > agent.batch_size:
+                        agent.train()
+                        
+                elif agent_id == 'rl' and hasattr(agent, 'learn'):
+                    # Update Q-values directly from historical traces
+                    for i in range(len(states)-1):
+                        current_state = tuple(states[i])
+                        next_state = tuple(states[i+1])
+                        agent.learn(next_state, rewards[i], False)
+
+                # Additional agent-specific replay logic can be added here
+
+        # Clear old memories to prevent overfitting
+        if len(historical_data) > 1000:
+            self.learning_memory.set('historical_episodes', historical_data[-1000:])
+
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Learning Factory ===\n")
@@ -521,6 +576,8 @@ if __name__ == "__main__":
     print("\n* * * * * Phase 4 * * * * *\n")
     monitor = factory.monitor_architecture()
     print(f"\n{monitor}")
+
+    print(factory._replay_historical_data())
 
     print("\n* * * * * Phase 5: Hybrid Agent Test * * * * *\n")
     # Create a complex task signature that requires a hybrid agent
