@@ -7,6 +7,7 @@ import numpy as np
 from collections import defaultdict, deque
 from typing import Counter
 
+from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.dqn import DQNAgent
 from src.agents.learning.maml_rl import MAMLAgent
 from src.agents.learning.rsi import RSIAgent
@@ -16,35 +17,22 @@ from logs.logger import get_logger
 
 logger = get_logger("Leaning Factory")
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 class LearningFactory:
     """Evolutionary strategy optimization factory with parameter mutation"""
     
-    def __init__(self, env, performance_metrics=None, config=None):
+    def __init__(self, env, performance_metrics=None):
         if env is None or not hasattr(env, 'observation_space') or not hasattr(env, 'action_space'):
             raise ValueError("LearningFactory requires valid environment with observation_space and action_space")
         self.env = env
         self.performance = performance_metrics or {}
-        base_config = load_config() if config is None else config
-        self.config = base_config.get('evolutionary', {})
+        self.config = load_global_config()
+        self.factory_config = get_config_section('evolutionary')
         
         # Load parameters from config
-        self.mutation_rate = self.config.get('mutation_rate')
-        self.top_k = self.config.get('top_k')
+        self.mutation_rate = self.factory_config.get('mutation_rate')
+        self.top_k = self.factory_config.get('top_k')
 
-        self.learning_memory = LearningMemory(config=base_config.get('learning_memory', {}))
+        self.learning_memory = LearningMemory()
         self.model_id = "Learning_Factory"
         self.memory = deque(maxlen=10000)
 
@@ -72,7 +60,7 @@ class LearningFactory:
             }
         }
 
-        self._init_component(config)
+        self._init_component()
 
         self.temporary_agents = {}  # Format: {agent_hash: {'agent': obj, 'use_count': int}}
         self.permanent_agents = ['dqn', 'maml', 'rsi', 'rl']
@@ -88,8 +76,7 @@ class LearningFactory:
 
         logger.info("Learning Factory has successfully initialized")
 
-    def _init_component(self, config):
-        # Get state/action dimensions from environment
+    def _init_component(self):
         if not hasattr(self.env, 'observation_space') or not hasattr(self.env, 'action_space'):
             raise RuntimeError("Environment missing required attributes for agent initialization")
         state_dim = self.env.observation_space.shape[0]
@@ -97,10 +84,6 @@ class LearningFactory:
         state_size = state_dim
         action_size = action_dim
     
-        # Load configurations
-        base_config = get_merged_config(config)
-        self.base_config = base_config
-
         # Initialize sub-agents with proper parameters
         self.dqn = DQNAgent(
             state_dim=state_dim,
@@ -112,31 +95,27 @@ class LearningFactory:
             state_size=state_size,
             action_size=action_size,
             agent_id="maml_agent",
-            config=base_config.get('maml', {})
         )
     
         self.rsi = RSIAgent(
             state_size=state_size,
             action_size=action_size,
             agent_id="rsi_agent",
-            config=base_config.get('rsi', {})
         )
     
         self.rl = RLAgent(
             possible_actions=list(range(action_dim)),
             state_size=state_size,
             agent_id="rl_agent",
-            config=base_config.get('rl', {})
         )
 
-        # Load checkpoints if available
-        checkpoint_dir = base_config.get('learning_memory', {}).get('checkpoint_dir')
+        checkpoint_dir = self.config.get('learning_memory', {}).get('checkpoint_dir')
         if checkpoint_dir:
             for agent_name in ['dqn', 'maml', 'rsi', 'rl']:
                 checkpoint_path = os.path.join(checkpoint_dir, f"{agent_name}_checkpoint.pt")
                 if os.path.exists(checkpoint_path):
                     getattr(self, agent_name).load_checkpoint(checkpoint_path)
-
+    
         # Initialize monitoring system
         self.performance_tracker = {
             'dqn': deque(maxlen=100),
@@ -144,7 +123,7 @@ class LearningFactory:
             'rsi': deque(maxlen=100),
             'rl': deque(maxlen=100)
         }
-
+    
         logger.info("Sub-agents initialized with state_dim:%s, action_dim:%s", state_dim, action_dim)
 
     def select_agent(self, task_metadata):
@@ -208,9 +187,12 @@ class LearningFactory:
         except:
             return 0
 
+    def _classify_task(self, task_metadata):
+        return task_metadata
+
     def monitor_architecture(self):
         """Track agent architecture details for NeuralNetwork-based agents"""
-        for agent_name in ['dqn', 'maml', 'rsi']:
+        for agent_name in ['dqn', 'maml', 'rsi', 'rl']:
             agent = getattr(self, agent_name)
             if hasattr(agent, 'policy_net'):
                 # Assume policy_net is a NeuralNetwork instance
@@ -264,20 +246,88 @@ class LearningFactory:
         return optimized_agents
 
     def _mutate_parameters(self, agent_id):
-        """Apply Gaussian mutation to parameters within defined bounds"""
+        """Apply q-Gaussian mutation with self-adaptation to parameters within defined bounds."""
         params = {}
         for param, (min_val, max_val) in self.param_bounds[agent_id].items():
-            # Get base value from current best parameters
-            base_val = (max_val + min_val)/2  # In real implementation, use actual current values
-            # Apply mutation
-            mutated = base_val * (1 + self.mutation_rate * np.random.randn())
-            params[param] = np.clip(mutated, min_val, max_val)
+            # Get current value (midpoint if no agent-specific value exists)
+            base_val = (min_val + max_val) / 2
             
-            # Round integer parameters
+            # Self-adapting q-value (initialize at Gaussian)
+            q = self.agent_pool[agent_id].get('q_value', 1.0)
+            
+            # Generate q-Gaussian noise using Box-Muller method
+            u1 = np.random.uniform(0, 1)
+            u2 = np.random.uniform(0, 1)
+            
+            if q == 1:  # Standard Gaussian
+                noise = np.sqrt(-2 * np.log(u1)) * np.cos(2 * np.pi * u2)
+            else:
+                # Generalized Box-Muller for q-Gaussian
+                beta = 1 / (3 - q) if q < 3 else 0.5  # Scale parameter
+                noise = np.sqrt(-beta * np.log(1 - u1)) * np.cos(2 * np.pi * u2)
+            
+            # Apply mutation with scaled step size
+            param_range = max_val - min_val
+            step_size = self.mutation_rate * param_range
+            mutated = base_val + step_size * noise
+            
+            # Adaptive q-value update (Eq 2 from Tinos & Yang)
+            tau_alpha = 1 / np.sqrt(len(self.param_bounds[agent_id]))
+            q = q * np.exp(tau_alpha * np.random.randn())
+            q = np.clip(q, 0.9, 2.5)  # Constrain q-value
+            
+            # Update parameters
+            params[param] = np.clip(mutated, min_val, max_val)
+            params['q_value'] = q  # Store for next mutation
+            
+            # Handle integer parameters
             if param in ['hidden_size', 'batch_size', 'memory_size', 'adaptation_steps']:
                 params[param] = int(params[param])
                 
         return params
+
+    def _determine_agent_architecture(self, task_signature):
+        """Determine agent type based on task signature characteristics"""
+        if task_signature is None:
+            return 'dqn_hybrid'  # Default
+        
+        # Extract task characteristics (example metrics - would come from task_signature)
+        novelty = task_signature.get('novelty', 0.5)        # 0-1 scale (1 = completely new)
+        complexity = task_signature.get('complexity', 0.5)   # 0-1 scale (1 = highly complex)
+        volatility = task_signature.get('volatility', 0.5)   # 0-1 scale (1 = highly dynamic)
+        compute_budget = task_signature.get('compute_budget', 0.5)  # 0-1 scale (1 = high compute)
+        
+        # Agent selection matrix
+        if novelty > 0.8 and compute_budget > 0.7:    # High novelty + high compute = MAML hybrid (meta-learning)
+            return 'maml_hybrid'
+        
+        elif volatility > 0.7 and complexity > 0.6:    # High volatility + complexity = RSI hybrid (self-improving)
+            return 'rsi_hybrid'
+        
+        elif complexity < 0.4 and compute_budget < 0.6:    # Low complexity + low compute = RL hybrid (efficient)
+            return 'rl_hybrid'
+        
+        elif complexity > 0.7 and compute_budget > 0.6:    # High complexity + high compute = DQN hybrid (deep learning)
+            return 'dqn_hybrid'
+        
+        elif novelty > 0.6:    # Novel tasks benefit from MAML's adaptation capabilities
+            return 'maml_hybrid'
+        
+        elif volatility > 0.6:    # Volatile environments need RSI's self-optimization
+            return 'rsi_hybrid'
+        
+        # Hybrid combinations for specialized cases
+        if complexity > 0.7 and volatility > 0.6:    # Complex volatile environments = DQN+RSI hybrid
+            return 'dqn_rsi_hybrid'
+        
+        elif novelty > 0.7 and volatility > 0.6:    # Novel volatile environments = MAML+RSI hybrid
+            return 'maml_rsi_hybrid'
+        
+        elif complexity < 0.3 and novelty > 0.6:    # Simple but novel tasks = RL+MAML hybrid
+            return 'rl_maml_hybrid'
+        
+        # Default to DQN hybrid
+        return 'dqn_hybrid'
 
     def _create_agent(self, task_signature):
         # Check for existing temporary agent
@@ -301,15 +351,10 @@ class LearningFactory:
         
         return new_agent
     
-    def _determine_agent_architecture(self, task_signature):
-        """Determine agent type based on task signature or default to DQN hybrid."""
-        if task_signature is None:
-            return 'dqn_hybrid'  # Default to DQN hybrid
-        # Add logic to map task_signature to agent_type here
-        # Example: return 'maml_hybrid' for meta-learning tasks
-        return 'dqn_hybrid'  # Default fallback
-
     def _evolve_new_agent(self, agent_type, task_signature):
+        state_dim = self.env.observation_space.shape[0]
+        action_size = self.env.action_space.n
+        
         # Hybrid configuration using best-performing agents
         base_config = self._get_base_config(agent_type)
         evolved_params = {
@@ -321,24 +366,70 @@ class LearningFactory:
         # Create agent based on type
         if agent_type == 'dqn_hybrid':
             return DQNAgent(
-                state_dim=self.env.observation_space.shape[0],
-                action_dim=self.env.action_space.n,
-                config={'dqn': evolved_params},
+                state_dim=state_dim,
+                action_dim=action_size,
                 agent_id=f"temp_dqn_{task_signature}"
             )
+        
         elif agent_type == 'maml_hybrid':
             return MAMLAgent(
-                state_size=self.env.observation_space.shape[0],
-                action_size=self.env.action_space.n,
-                config={'maml': evolved_params},
+                state_size=state_dim,
+                action_size=action_size,
                 agent_id=f"temp_maml_{task_signature}"
             )
+        
+        elif agent_type == 'rsi_hybrid':
+            return RSIAgent(
+                state_size=state_dim,
+                action_size=action_size,
+                agent_id=f"temp_rsi_{task_signature}"
+            )
+        
+        elif agent_type == 'rl_hybrid':
+            return RLAgent(
+                possible_actions=list(range(action_size)),
+                state_size=state_dim,
+                agent_id=f"temp_rl_{task_signature}"
+            )
+        
+        # Hybrid combinations
+        elif agent_type == 'dqn_rsi_hybrid':
+            # Would be a custom combination of DQN and RSI
+            # Placeholder - actual implementation would combine components
+            return DQNAgent(
+                state_dim=state_dim,
+                action_dim=action_size,
+                agent_id=f"temp_dqn_rsi_{task_signature}"
+            )
+        
+        elif agent_type == 'maml_rsi_hybrid':
+            # Placeholder for MAML+RSI combination
+            return MAMLAgent(
+                state_size=state_dim,
+                action_size=action_size,
+                agent_id=f"temp_maml_rsi_{task_signature}"
+            )
+        
+        elif agent_type == 'rl_maml_hybrid':
+            # Placeholder for RL+MAML combination
+            return RLAgent(
+                possible_actions=list(range(action_size)),
+                state_size=state_dim,
+                agent_id=f"temp_rl_maml_{task_signature}"
+            )
+        
+        # Fallback to DQN hybrid
+        return DQNAgent(
+            state_dim=state_dim,
+            action_dim=action_size,
+            agent_id=f"temp_dqn_{task_signature}"
+        )
 
     def _get_base_config(self, agent_type):
         """Retrieve the base configuration for the given agent type."""
         # Extract base agent name (e.g., 'dqn' from 'dqn_hybrid')
         base_agent = agent_type.split('_')[0]
-        return self.base_config.get(base_agent, {})    
+        return self.factory_config.get(base_agent, {})    
 
     def _promote_agent(self, agent_hash, agent):
         # Generate unique name based on task signature
@@ -385,8 +476,30 @@ if __name__ == "__main__":
         def __init__(self):
             self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(4,))
             self.action_space = gym.spaces.Discrete(2)
+            self.width = 84  # Add needed properties for visualization
+            self.height = 84
+    
+        # Add reset method
+        def reset(self):
+            return self.observation_space.sample(), {}  # Return state and empty info dict
+    
+        # Add step method with proper return signature
+        def step(self, action):
+            return (
+                self.observation_space.sample(),  # next_state
+                np.random.rand(),                 # reward
+                np.random.choice([True, False]),  # terminated
+                False,                            # truncated
+                {}                                # info
+            )
+        
+        # Add render method for visualization
+        def render(self):
+            # Create dummy image (gray with random noise)
+            img = np.random.randint(0, 256, (self.height, self.width, 3), dtype=np.uint8)
+            return img
 
-    config = load_config()
+    config = load_global_config()
     performance_metrics = {}
     env = MockEnv()
 
@@ -408,5 +521,47 @@ if __name__ == "__main__":
     print("\n* * * * * Phase 4 * * * * *\n")
     monitor = factory.monitor_architecture()
     print(f"\n{monitor}")
+
+    print("\n* * * * * Phase 5: Hybrid Agent Test * * * * *\n")
+    # Create a complex task signature that requires a hybrid agent
+    task_signature = {
+        'novelty': 0.85,    # Highly novel task
+        'complexity': 0.75,  # Complex environment
+        'volatility': 0.8,   # Highly dynamic
+        'compute_budget': 0.9 # Sufficient compute resources
+    }
+
+    # Create a hybrid agent for this task
+    hybrid_agent = factory._create_agent(task_signature)
+    print(f"Created hybrid agent of type: {type(hybrid_agent).__name__}")
+
+    # Test the hybrid agent in the environment
+    state = env.reset()
+    print(f"\nInitial state: {state}")
+
+    # Get an action from the hybrid agent
+    try:
+        # Try different agent interfaces
+        if hasattr(hybrid_agent, 'select_action'):
+            action = hybrid_agent.select_action(state)
+        elif hasattr(hybrid_agent, 'get_action'):
+            action, _, _ = hybrid_agent.get_action(state)
+        elif hasattr(hybrid_agent, 'act'):
+            action = hybrid_agent.act(state)
+        elif hasattr(hybrid_agent, 'choose_action'):
+            action = hybrid_agent.choose_action(state)
+        else:
+            action = hybrid_agent.get_action(state)[0]  # Default to MAML interface
+        
+        print(f"Hybrid agent selected action: {action}")
+        
+        # Take a step in the environment
+        next_state, reward, done, _ = env.step(action)
+        print(f"Next state: {next_state}, Reward: {reward}, Done: {done}")
+        
+    except Exception as e:
+        print(f"Error testing hybrid agent: {str(e)}")
+
+    print("\n=== Hybrid Agent Test Completed ===")
 
     print("\n=== Successfully Ran Learning Factory ===\n")
