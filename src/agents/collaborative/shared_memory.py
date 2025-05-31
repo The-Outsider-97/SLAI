@@ -67,15 +67,117 @@ class SharedMemory:
         self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
         self._expiration = {}  # key -> expiry time
         self.current_memory = 0  # Initialize memory usage counter
-
         self._access_log = OrderedDict()  # key -> last access time
         self._priority_queue = []
+        self._last_cleanup_time = None
+        self._last_cleanup_count = 0
 
         # Start background cleanup thread
         self._start_expiration_cleaner()
 
         logger.info(f"Shared Memory succesfully initialized with:")
         logger.info(f"\nCounter: {self.current_memory}\nExperation: {self._expiration}\nSubscribers: {self.subscribers}\n")
+
+    def get_usage_stats(self) -> dict:
+        """Returns detailed statistics about memory usage and system performance."""
+        with self._lock:
+            # Calculate memory usage percentages
+            memory_usage_pct = (self.current_memory / self.max_memory) * 100 if self.max_memory > 0 else 0
+            available_memory_mb = (self.max_memory - self.current_memory) / (1024 ** 2)
+            
+            # Count expired but not yet cleaned items
+            current_time = time.time()
+            pending_expiration_count = sum(
+                1 for expiry in self._expiration.values() 
+                if expiry <= current_time
+            )
+            
+            # Calculate average item size
+            total_items = len(self._data)
+            avg_item_size = self.current_memory / total_items if total_items > 0 else 0
+            
+            return {
+                # Memory capacity information
+                'current_memory_mb': self.current_memory / (1024 ** 2),
+                'max_memory_mb': self.max_memory / (1024 ** 2),
+                'available_memory_mb': available_memory_mb,
+                'memory_usage_percentage': round(memory_usage_pct, 2),
+                
+                # Item statistics
+                'item_count': total_items,
+                'avg_item_size_kb': round(avg_item_size / 1024, 2),
+                'max_versions_per_item': self._max_versions,
+                
+                # Expiration information
+                'expiration_count': len(self._expiration),
+                'pending_expiration_cleanup': pending_expiration_count,
+                'default_ttl_seconds': self._default_ttl,
+                
+                # System performance metrics
+                'access_log_size': len(self._access_log),
+                'priority_queue_size': len(self._priority_queue),
+                'subscription_count': sum(len(callbacks) for callbacks in self.subscribers.values()),
+                'callback_count': sum(len(callbacks) for callbacks in self.callbacks.values()),
+                
+                # Background cleaner information
+                'ttl_check_interval': self.ttl_check_interval,
+                'last_cleanup': getattr(self, '_last_cleanup_time', None),
+            }
+
+    def metrics(self) -> dict:
+        """Returns operational metrics and usage patterns of the shared memory."""
+        with self._lock:
+            current_time = time.time()
+            
+            # Calculate access pattern metrics
+            access_times = list(self._access_log.values())
+            time_since_last_access = current_time - max(access_times) if access_times else 0
+            
+            # Calculate expiration metrics
+            time_to_expiry = [
+                expiry - current_time 
+                for expiry in self._expiration.values()
+                if expiry > current_time
+            ]
+            avg_time_to_expiry = sum(time_to_expiry) / len(time_to_expiry) if time_to_expiry else 0
+            
+            return {
+                # Access pattern analysis
+                'access_count': len(self._access_log),
+                'time_since_last_access_seconds': round(time_since_last_access, 2),
+                'access_pattern': {
+                    'min_access_time': min(access_times) if access_times else 0,
+                    'max_access_time': max(access_times) if access_times else 0,
+                    'avg_access_time': sum(access_times) / len(access_times) if access_times else 0
+                },
+                
+                # Expiration analysis
+                'expiration_metrics': {
+                    'earliest_expiry_seconds': min(time_to_expiry) if time_to_expiry else 0,
+                    'latest_expiry_seconds': max(time_to_expiry) if time_to_expiry else 0,
+                    'avg_expiry_seconds': round(avg_time_to_expiry, 2),
+                    'expired_items_pending': sum(
+                        1 for expiry in self._expiration.values() 
+                        if expiry <= current_time
+                    )
+                },
+                
+                # Priority queue metrics
+                'priority_queue_metrics': {
+                    'highest_priority': -self._priority_queue[0][0] if self._priority_queue else 0,
+                    'lowest_priority': -self._priority_queue[-1][0] if self._priority_queue else 0,
+                    'avg_priority': (
+                        sum(-priority for priority, _, _ in self._priority_queue) / 
+                        len(self._priority_queue)
+                    ) if self._priority_queue else 0
+                },
+                
+                # System health metrics
+                'cleanup_metrics': {
+                    'last_cleanup_run': getattr(self, '_last_cleanup_time', None),
+                    'items_cleaned_last_run': getattr(self, '_last_cleanup_count', 0)
+                }
+            }
 
 # ==============================
 #  2. Core Public API
@@ -310,10 +412,14 @@ class SharedMemory:
                      if key in self._data: # Ensure data exists before removing
                          self._remove_key(key)
                          count += 1
+            # Update cleanup metrics
+            self._last_cleanup_time = current_time
+            self._last_cleanup_count = count
         return count
 
     def _start_expiration_cleaner(self):
         def cleaner():
+            count = 0
             while True:
                 time.sleep(self.ttl_check_interval)
                 current_time = time.time()
@@ -323,6 +429,9 @@ class SharedMemory:
                     for key in keys:
                         if self._is_expired(key, current_time):
                             self._remove_key(key)
+                    # Update last cleanup time
+                    self._last_cleanup_time = current_time
+                    self._last_cleanup_count = count
         thread = threading.Thread(target=cleaner, daemon=True)
         thread.start()
 
