@@ -18,7 +18,11 @@ class ReplayBuffer:
     
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
-    
+
+    @property
+    def capacity(self):
+        return self.buffer.maxlen  # or  capacity
+
     def push(self, transition):
         """Store transition (state, action, reward, next_state, done)"""
         self.buffer.append(transition)
@@ -26,7 +30,7 @@ class ReplayBuffer:
     def sample(self, batch_size):
         """Random batch of transitions"""
         return random.sample(self.buffer, min(batch_size, len(self.buffer)))
-    
+        
     def __len__(self):
         return len(self.buffer)
 
