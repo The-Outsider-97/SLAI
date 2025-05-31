@@ -50,12 +50,8 @@ class VisionEncoder(torch.nn.Module):
         self._cache = {}
         if self.encoder_type == "transformer":
             # Initialize transformer components using shared config
-            self.projection = nn.Parameter(
-                TensorOps.he_init(
-                    (self.in_channels * self.patch_size**2, self.embed_dim),
-                    self.in_channels * self.patch_size**2
-                )
-            )
+            in_dim = self.in_channels * self.patch_size**2
+            self.projection = nn.Parameter(TensorOps.he_init((in_dim, self.embed_dim), in_dim))
             
             # Positional encoding
             self.base_num_patches = (self.img_size // self.patch_size) ** 2
@@ -63,6 +59,8 @@ class VisionEncoder(torch.nn.Module):
                 self.position_embed = Parameter(
                     torch.randn(1, self.base_num_patches + 1, self.embed_dim) * 0.02
                 )
+            elif self.positional_encoding == "sinusoidal":
+                self.position_embed = self._init_sinusoidal_encoding(self.base_num_patches + 1, self.embed_dim, device=torch.device("cpu"))
             
             self.cls_token = Parameter(torch.randn(1, 1, self.embed_dim) * 0.02)
             self.transformer = Transformer(config)
@@ -267,29 +265,51 @@ class VisionEncoder(torch.nn.Module):
 
     def forward(self, x, style_id=0):
         if self.encoder_type == "transformer":
-            x = self.extract_patches(x)
-            self._cache['input_shape'] = x.shape
-            self._cache['x'] = x.clone()
+            print(f"[VisionEncoder DEBUG] Input x.shape: {x.shape}") # Should be (B, C, H, W)
+            
+            x_patched = self.extract_patches(x)
+            print(f"[VisionEncoder DEBUG] x_patched (after extract_patches).shape: {x_patched.shape}") # Should be (B, NumPatches, PatchDim) e.g. (1, 36, 768)
+            
+            self._cache['input_shape'] = x_patched.shape
+            self._cache['x'] = x_patched.clone()
 
-            x = torch.matmul(x, self.projection)
-    
+            print(f"[VisionEncoder DEBUG] self.projection.shape: {self.projection.shape}") # Should be (PatchDim, EmbedDim) e.g. (768, 512)
+            
+            # The problematic line:
+            output_matmul = torch.matmul(x_patched, self.projection)
+            # print(f"[VisionEncoder DEBUG] output_matmul.shape: {output_matmul.shape}") # Should be (B, NumPatches, EmbedDim)
+
+            x = output_matmul # Assign back to x
+
             if self.training and self.dropout_rate > 0:
-                mask = (torch.rand(*x.shape) > self.dropout_rate).to(torch.float32)
-                x *= mask
+                mask = (torch.rand(*x.shape, device=x.device) > self.dropout_rate).to(torch.float32) # Ensure mask is on same device
+                x = x * mask # Corrected: use `x = x * mask`
 
             cls_tokens = torch.tile(self.cls_token, (x.shape[0], 1, 1))
             x = torch.concatenate((cls_tokens, x), axis=1)
 
+            # Ensure position_embed is on the same device as x
+            if self.position_embed.device != x.device:
+                self.position_embed = self.position_embed.to(x.device)
+            if self.cls_token.device != x.device: # also for cls_token
+                self.cls_token = self.cls_token.to(x.device)
+
+
             if self.positional_encoding == "sinusoidal":
-                x += self.position_embed[:, :x.shape[1]]
-            else:
+                # This path has an issue: self.position_embed is not set up for sinusoidal
+                # in __init__. This needs to be addressed if sinusoidal encoding is used.
+                # For now, assuming "learned" is used as per default config.
+                # Placeholder for sinusoidal addition:
+                # pos_embed_sin = self._init_sinusoidal_encoding(x.shape[1], self.embed_dim, device=x.device)
+                # x += pos_embed_sin
+                x += self.position_embed[:, :x.shape[1]] # This line would error if sinusoidal path taken as is
+            else: # Covers "learned"
                 x += self.position_embed[:, :x.shape[1]]
     
             x = self.transformer.forward(x, style_id)
             return x
     
         elif self.encoder_type == "cnn":
-            # Process with CNN pipeline
             return self._cnn_forward(x)
     
         else:
