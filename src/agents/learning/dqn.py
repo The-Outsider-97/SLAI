@@ -34,7 +34,7 @@ import copy
 
 from collections import deque
 
-from src.agents.safety.utils.config_loader import load_global_config
+from src.agents.learning.utils.config_loader import load_global_config
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
 from src.utils.buffer.replay_buffer import ReplayBuffer
@@ -64,7 +64,7 @@ class DQNAgent:
         self.batch_size = dqn_config.get('batch_size', 64)
         self.target_update = dqn_config.get('target_update_frequency', 100)
 
-        self.learning_memory = LearningMemory
+        self.learning_memory = LearningMemory()
         self.model_id = "DQN_Agent"
 
         # Initialize networks with validated dimensions
