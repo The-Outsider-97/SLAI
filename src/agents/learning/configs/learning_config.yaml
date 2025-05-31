@@ -104,8 +104,8 @@ rl_engine:
     strategy: "boltzmann"  # boltzmann|ucb|epsilon_greedy
     temperature: 1.0
     ucb_c: 2.0
-    epsilon_decay: 0.995
-    min_epsilon: 0.01
+    epsilon_decay: 0.995   # Reduce epsilon by 0.5% each episode
+    min_epsilon: 0.01      # Minimum exploration probability
   q_table_optimizer:
     batch_size: 32
     momentum: 0.9
@@ -122,3 +122,7 @@ visual_processing:
   use_visual_observations: True
   encoder_type: "transformer"  # or "cnn"
   pretrained_weights: "path/to/weights.pth" # not available yet
+
+rl_visualization:
+  heatmap_resolution: 50
+  use_gpu_acceleration: true
