@@ -11,22 +11,19 @@ Key Features:
 4. Modular design with failure mode analysis (Ibrahim et al. 2021)
 """
 
-import os
 import time
 import math
 import torch
-import hashlib
 import json, yaml
 import pandas as pd
 import torch.nn as nn
 
-from datetime import datetime
 from joblib import load, dump
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.utils.interpretability import InterpretabilityHelper
 from src.utils.database import IssueDBConnector, FallbackIssueTracker
 from src.agents.evaluators.adaptive_risk import RiskAdaptation
@@ -70,20 +67,6 @@ class AnomalyDetector(nn.Module):
     def forward(self, x):
         z = self.encoder(x)
         return self.decoder(z)
-
-@dataclass
-class RiskModelParameters:
-    initial_hazard_rates: Dict[str, float] = field(default_factory=lambda: {
-        "system_failure": 1e-6,
-        "sensor_failure": 1e-5,
-        "unexpected_behavior": 1e-4
-    })
-    update_interval: float = 60.0
-    decay_factor: float = 0.95
-    risk_thresholds: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
-        "warning": (0.4, 0.7),
-        "critical": (0.7, 1.0)
-    })
 
 # ------------------------ Operational Infrastructure ------------------------ #
 @dataclass
@@ -151,13 +134,23 @@ class EvaluationAgent(BaseAgent):
             agent_factory=agent_factory,
             config=config
         )
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
+        self.config = load_global_config()
+        self.evaluation_config = get_config_section('evaluation_agent')
+
+        self.update_interval = self.evaluation_config.get('update_interval', 60.0)
+        self.decay_factor = self.evaluation_config.get('decay_factor', 0.95)
+        self.initial_hazard_rates = self.evaluation_config.get('initial_hazard_rates', {})
+        self.system_failure = self.evaluation_config.get('system_failure', 0.000001)
+        self.sensor_failure = self.evaluation_config.get('sensor_failure', 0.00001)
+        self.risk_thresholds = self.evaluation_config.get('risk_thresholds', {})
+        self.warning = self.evaluation_config.get('warning', [0.4, 0.7])
+        self.critical = self.evaluation_config.get('critical', [0.7, 1.0])
+
         # Load config from file if not provided
         if self.config is None:
             self.config = self._load_config_from_file(LOCAL_CONFIG_PATH)
-        
-        # Initialize core components
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
 
         self.anomaly_model = self._init_anomaly_detector()
         self.issue_db = self._connect_issue_database()
