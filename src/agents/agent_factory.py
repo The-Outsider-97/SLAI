@@ -26,7 +26,7 @@ from src.agents.learning.slaienv import SLAIEnv
 #from src.agents.perception_agent import PerceptionAgent
 #from src.agents.planning_agent import PlanningAgent
 #from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.safety_agent import SafetyAgent, SafetyAgentConfig
+from src.agents.safety_agent import SafetyAgent
 from src.agents.factory.agent_meta_data import AgentMetaData, load_config
 from src.agents.factory.metrics_adapter import MetricsAdapter
 from models.slai_lm import get_shared_slailm
@@ -176,7 +176,7 @@ class AgentFactory:
                 **dependencies
             )
         elif agent_name == "safety":
-            safety_config = SafetyAgentConfig(**config)
+            safety_config = config(**config)
             agent_instance = cls(
                 alignment_agent_cls=AlignmentAgent,
                 config=safety_config,
