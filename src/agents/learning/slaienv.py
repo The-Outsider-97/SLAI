@@ -1,5 +1,6 @@
 
 import cv2
+import copy
 import torch
 import random
 import numpy as np
@@ -14,6 +15,11 @@ from src.agents.learning.learning_memory import LearningMemory
 from logs.logger import get_logger
 
 logger = get_logger("SLAI Learning Environment")
+
+@property
+class spec:
+    def reward_threshold(self):
+        return type('Spec', (), {'reward_threshold': 200})
 
 class SLAIEnv(gym.Env):
     """Enhanced environment for SLAI operations with comprehensive dynamics"""
@@ -60,7 +66,8 @@ class SLAIEnv(gym.Env):
         self.A = self._create_state_transition_matrix()
         self.B = self._create_action_effect_matrix()
         
-        logger.info("SLAI Environment successfully initialized with:\n{self.zones}")
+        #self.spec.id = type('Spec', (), {'reward_threshold': 200})
+        logger.info(f"SLAI Environment successfully initialized with:\n{self.zones}")
 
     def _create_observation_space(self, state_dim):
         if self.env:
@@ -126,7 +133,15 @@ class SLAIEnv(gym.Env):
         else:
             # Generate random initial state near origin
             state = np.random.uniform(-0.5, 0.5, self.state_dim)
-            info = {}
+            info = {
+                "episode": self._episode_count + 1,
+                "initial_state": state.tolist(),
+                "state_dim": self.state_dim,
+                "action_dim": self.action_dim,
+                "max_steps": self.max_steps,
+                "reset_seed": seed,
+                "using_wrapped_env": self.env is not None
+            }
         
         self._current_state = state
         self._step_count = 0
@@ -140,21 +155,33 @@ class SLAIEnv(gym.Env):
         self._step_count += 1
         
         if self.env:
-            next_state, reward, terminated, truncated, info = self.env.step(action)
+            next_state, reward, terminated, truncated, original_info = self.env.step(action)
         else:
-            # Simulate enhanced dynamics
             next_state = self._simulate_dynamics(self._current_state, action)
             reward = self._calculate_reward(self._current_state, action, next_state)
             terminated = False
             truncated = self._step_count >= self.max_steps
-            info = {}
-        
+            original_info = {
+                "step_count": self._step_count,
+                "episode": self._episode_count,
+                "terminated_due_to": "step_limit" if truncated else None,
+                "state": next_state.tolist(),
+                "action_taken": action
+            }
+    
         # Calculate novelty bonus
         with torch.no_grad():
-            novelty_bonus = self.novelty_detector(
-                torch.tensor(next_state, dtype=torch.float32)
-            )
+            state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)
+            novelty_bonus = self.novelty_detector(state_tensor)
         total_reward = reward + novelty_bonus.item()
+        
+        # Build the info dictionary
+        info = {
+            **original_info,
+            "novelty_bonus": novelty_bonus.item(),
+            "raw_reward": reward,
+            "total_reward": total_reward
+        }
         
         # Store experience
         experience = Transition(
@@ -197,6 +224,18 @@ class SLAIEnv(gym.Env):
         )
             
         return next_state
+
+    def _create_physics_variation(self):
+        """Create physics-based task variation"""
+        env_variant = copy.deepcopy(self.env)
+        if hasattr(env_variant.unwrapped, 'dynamics_config'):
+            dynamics = env_variant.unwrapped.dynamics_config
+            env_variant.unwrapped.configure(
+                mass=dynamics.mass * np.random.uniform(0.8, 1.2),
+                damping=dynamics.damping * np.random.uniform(0.7, 1.3),
+                gravity=dynamics.gravity * np.random.uniform(0.9, 1.1)
+            )
+        return env_variant
 
     def _enforce_physics_constraints(self, state):
         """Apply physical constraints to state"""
@@ -293,7 +332,7 @@ class SLAIEnv(gym.Env):
 
     def get_state_embedding(self, state):
         return self.novelty_detector.predictor(
-            torch.tensor(state, dtype=torch.float32)
+            torch.tensor(state, dtype=torch.float32).unsqueeze(0)
         )
     
     def get_metrics(self):
@@ -329,4 +368,6 @@ if __name__ == "__main__":
     print(env._enforce_physics_constraints(state))
     print(env.render(mode=mode))
     print("\n* * * * * Phase 3 * * * * *")
+
+    print(env.get_state_embedding(state))
     print("\n=== Succesfully Ran SLAI Learning Environment ===")
