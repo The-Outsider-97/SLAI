@@ -25,7 +25,7 @@ class LearningFactory:
         if env is None or not hasattr(env, 'observation_space') or not hasattr(env, 'action_space'):
             raise ValueError("LearningFactory requires valid environment with observation_space and action_space")
         self.env = env
-        self.performance = performance_metrics or {}
+        self.performance_metrics = {}
         self.config = load_global_config()
         self.factory_config = get_config_section('evolutionary')
         
@@ -127,6 +127,10 @@ class LearningFactory:
     
         logger.info("Sub-agents initialized with state_dim:%s, action_dim:%s", state_dim, action_dim)
 
+    @property
+    def state_history(self):
+        return self.learning_memory.get_recent_states()
+
     def select_agent(self, task_metadata):
         """
         Enhanced agent selection with checkpoint-aware logic
@@ -225,9 +229,12 @@ class LearningFactory:
         """Generate new agents through selection, mutation, and crossover"""
         optimized_agents = []
         
-        # Select top performing agents
-        sorted_agents = sorted(self.performance.items(), 
-                             key=lambda x: x[1], reverse=True)[:self.top_k]
+        # Select top performing agents (using scalar scores)
+        sorted_agents = sorted(
+            self.performance_scores.items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        )[:self.top_k]
         
         for agent_id, _ in sorted_agents:
             # Create mutated variants
@@ -467,6 +474,17 @@ class LearningFactory:
             else:
                 hybrid_params[param] = self.param_bounds[agent_id2][param][1]
         return hybrid_params
+
+    def compute_intrinsic_reward(state, action, next_state):
+        return action
+
+    def _detect_new_data(self):
+        """Check shared memory for new data flags"""
+        return self.learning_memory.get('new_data_flag', False)
+
+    def get_similar_states(self, state_embedding, k=5):
+        """This uses Learning Memory"""
+        pass
 
     def _replay_historical_data(self):
         """Experience replay with prioritized historical sampling"""
