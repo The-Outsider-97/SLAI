@@ -207,13 +207,17 @@ class LearningMemory:
             indices = self.tag_index.get(tag, [])
             return [self.tree.data[idx] for idx in indices]
 
-    def get(self, key=None):
-        """Get experience(s) - key is data index for SumTree"""
+    def get(self, key=None, default=None):
         with self.lock:
             if key is not None:
-                return self.tree.data[key]
-            # Return all experiences if no key specified
-            return [self.tree.data[i] for i in range(len(self.tree)) if self.tree.data[i] is not None]
+                # Add type check
+                if not isinstance(key, int):
+                    return default
+                if key < len(self.tree.data) and self.tree.data[key] is not None:
+                    return self.tree.data[key]
+                return default
+            return [self.tree.data[i] for i in range(len(self.tree)) 
+                    if self.tree.data[i] is not None]
 
     def set(self, key, value):
         """Set experience at specific index"""
