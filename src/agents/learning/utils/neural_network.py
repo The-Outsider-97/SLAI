@@ -313,23 +313,24 @@ class NeuralNetwork(torch.nn.Module):
 
     def forward(self, X):
         """Performs a forward pass through the network."""
-        self._cache['inputs'] = X # Input to the first layer
-        self._cache['layer_outputs'] = [] # List to store {'z': ..., 'a': ...} for each layer
-
-        current_a = X # Activation from previous layer (or input X)
+        self._cache['inputs'] = X
+        self._cache['layer_outputs'] = []
+        
+        current_a = X
         for i in range(self.num_layers):
             W, b = self.Ws[i], self.bs[i]
-            z = current_a @ W + b  # Linear transformation
-            current_a = activation(z)
-
-            if i < self.num_layers - 1: # Hidden layer
+            z = current_a @ W + b
+            
+            # Remove this line: current_a = activation(z)
+            
+            if i < self.num_layers - 1:
                 current_a = self.hidden_activations[i].forward(z)
-            else: # Output layer
+            else:
                 current_a = self.output_activation.forward(z)
             
             self._cache['layer_outputs'].append({'z': z, 'a': current_a})
         
-        return current_a # Final output of the network
+        return current_a
 
     def compute_loss(self, y_pred_output, y_true):
         """
