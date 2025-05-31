@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict, dataclass, field, fields
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.safety.reward_model import RewardModel
 from src.agents.safety.secure_memory import SecureMemory
 from src.agents.safety.cyber_safety import CyberSafetyModule
@@ -40,19 +41,6 @@ from logs.logger import get_logger
 logger = get_logger("Safety Agent")
 
 LOCAL_CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-INCIDENT_RESPONSE = {
-    "privacy": [
-        "Isolate affected systems",
-        "Notify DPO within 24 hours",
-        "Begin forensic analysis"
-    ],
-    "safety": [
-        "Activate emergency shutdown",
-        "Dispatch safety team",
-        "Preserve system state"
-    ]
-}
 
 @dataclass
 class SafetyAgentConfig:
@@ -68,28 +56,45 @@ class SafetyAgentConfig:
     enable_learnable_aggregation: bool = False
     secure_memory: Dict[str, Any] = field(default_factory=lambda: {"default_ttl_seconds": 3600})
 
+INCIDENT_RESPONSE = {
+    "privacy": [
+        "Isolate affected systems",
+        "Notify DPO within 24 hours",
+        "Begin forensic analysis"
+    ],
+    "safety": [
+        "Activate emergency shutdown",
+        "Dispatch safety team",
+        "Preserve system state"
+    ]
+}
+
 class SafetyAgent(BaseAgent):
     """
     Holistic safety management agent integrating multiple specialized safety modules.
     It assesses inputs, validates actions, monitors compliance, and applies constitutional AI principles.
     """
-    def __init__(self, agent_factory, config: SafetyAgentConfig, shared_memory=None):
-        config_dict = asdict(config) if isinstance(config, SafetyAgentConfig) else config
+    def __init__(self, agent_factory, shared_memory, config=None):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config_dict)
+            config=config)
 
         self.name = "Safety_Agent"
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        if isinstance(config, dict):
-            valid_fields = {f.name for f in fields(SafetyAgentConfig)}
-            filtered_config = {k: v for k, v in config.items() if k in valid_fields}
-            config = SafetyAgentConfig(**filtered_config)
+        self.config = load_global_config()
+        self.safety_config = get_config_section('safety_agent')
         
-        self.config = config
-        self.risk_threshold = self.config.risk_thresholds.get("safety", 0.01)
+        self.risk_thresholds = self.safety_config.get('risk_thresholds', {})
+        self.audit_level = self.safety_config.get('audit_level', 2)
+        self.collect_feedback = self.safety_config.get('collect_feedback', True)
+        self.enable_learnable_aggregation = self.safety_config.get('enable_learnable_aggregation', False)
+        self.secure_memory_config = self.safety_config.get('secure_memory', field(default_factory=lambda: {"default_ttl_seconds": 3600}))
+        self.constitutional_rules_path = self.safety_config.get(
+            'constitutional_rules_path', 
+            "src/agents/safety/templates/constitutional_rules.json"
+        )
 
         # Add SafetyAgent components
         self.reward_model = RewardModel()
@@ -108,13 +113,10 @@ class SafetyAgent(BaseAgent):
 
         self.learning_factory = self._init_learning_factory()
 
-        if not isinstance(config, SafetyAgentConfig):
-            raise TypeError("Expected SafetyAgentConfig, got", type(config))
-
     def _load_constitution(self) -> Dict:
         """Load constitutional rules from the path specified in SafetyAgentConfig."""
         try:
-            constitution_path = Path(self.config.constitutional_rules_path)
+            constitution_path = Path(self.safety_config['constitutional_rules_path'])
             with open(constitution_path, 'r', encoding='utf-8') as f:
                 rules = json.load(f)
             logger.info(f"Constitutional rules loaded successfully from {constitution_path}")
@@ -131,11 +133,12 @@ class SafetyAgent(BaseAgent):
 
     def _init_learning_factory(self):
         # Initialize Learning Factory for adaptive risk aggregation
-        if self.config.enable_learnable_aggregation:
+        if self.enable_learnable_aggregation:
             from src.agents.learning.learning_factory import LearningFactory
+            learning_factory_config = self.global_config.get('learning_factory', {})
             self.learning_factory = LearningFactory(
                 env=self._create_risk_aggregation_env(),
-                config=self.config.learning_factory_config
+                config=learning_factory_config
             )
             self.risk_aggregator = None
         else:
@@ -187,7 +190,7 @@ class SafetyAgent(BaseAgent):
             cyber_context = context.get("cyber_context", "general_input_analysis")
             cyber_report = self.cyber_safety.analyze_input(sanitized_data_str, context=cyber_context)
             assessment_results["reports"]["cyber_safety"] = cyber_report
-            if cyber_report.get("risk_score", 0.0) > self.config.risk_thresholds.get("cyber_risk", 0.5):
+            if cyber_report.get("risk_score", 0.0) > self.risk_thresholds.get("cyber_risk", 0.5):
                 logger.warning(f"[{self.name}] High cyber risk detected: {cyber_report.get('risk_score')}")
                 # Decision to block or just warn can be made later based on aggregated score
         except Exception as e:
@@ -220,7 +223,7 @@ class SafetyAgent(BaseAgent):
             logger.error(f"[{self.name}] Error during RewardModel evaluation: {e}")
             assessment_results["reports"]["reward_model"] = {"status": "error", "error": str(e)}
 
-        if self.config.collect_feedback:
+        if self.collect_feedback:
             self._request_human_feedback(
                 data_to_assess, 
                 assessment_results,
@@ -256,7 +259,7 @@ class SafetyAgent(BaseAgent):
         # final_safety_score -= cyber_risk * 0.5 # Penalize for cyber risk
 
         assessment_results["final_safety_score"] = final_safety_score
-        if final_safety_score > self.config.risk_thresholds.get("overall_safety", 0.75):
+        if final_safety_score > self.risk_thresholds.get("overall_safety", 0.75):
             assessment_results["is_safe"] = True
             assessment_results["overall_recommendation"] = "proceed"
         else:
@@ -284,7 +287,7 @@ class SafetyAgent(BaseAgent):
         else:
             # Fallback to heuristic aggregation
             assessment_results["final_safety_score"] = final_safety_score
-            assessment_results["is_safe"] = final_safety_score > self.config.risk_thresholds["overall_safety"]
+            assessment_results["is_safe"] = final_safety_score > self.risk_thresholds["overall_safety"]
             assessment_results["aggregation_method"] = "heuristic"
 
         # Optionally apply constitutional rules to output if this agent was generating text
@@ -376,7 +379,7 @@ class SafetyAgent(BaseAgent):
             cyber_report = self.cyber_safety.analyze_input(action_description_str, context=action_context.get("cyber_context", "action_validation"))
             validation_result["risk_assessment"]["cyber_risk"] = cyber_report.get("risk_score", 0.0)
             validation_result["cyber_findings"] = cyber_report.get("findings", [])
-            if cyber_report.get("risk_score", 0.0) > self.config.risk_thresholds.get("cyber_risk", 0.5):
+            if cyber_report.get("risk_score", 0.0) > self.risk_thresholds.get("cyber_risk", 0.5):
                 validation_result["approved"] = False
                 validation_result["details"].append(f"Cyber risk ({cyber_report.get('risk_score')}) exceeds threshold.")
                 self._log_audit_event("action_validation_fail", {"reason": "high_cyber_risk", "action": action_params, "report": cyber_report})
@@ -1038,10 +1041,20 @@ if __name__ == "__main__":
         "enable_learnable_aggregation": False
     }
     # Create SafetyAgentConfig instance
-    agent_config_obj = SafetyAgentConfig(**safety_agent_config_data)
+    agent_config_obj = {
+        "constitutional_rules_path": "src/agents/safety/templates/constitutional_rules.json",
+        "risk_thresholds": {
+            "overall_safety": 0.7,
+            "cyber_risk": 0.6
+        },
+        "audit_level": 2,
+        "collect_feedback": True,
+        "enable_learnable_aggregation": False,
+        "secure_memory": {"default_ttl_seconds": 3600}
+    }
 
     # Create dummy constitutional_rules.json if it doesn't exist for the test run
-    rules_path = Path(agent_config_obj.constitutional_rules_path)
+    rules_path = Path(agent_config_obj['constitutional_rules_path'])
     rules_path.parent.mkdir(parents=True, exist_ok=True)
     if not rules_path.exists():
         with open(rules_path, 'w') as f:
