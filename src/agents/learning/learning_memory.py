@@ -114,6 +114,7 @@ class LearningMemory:
         self.beta_end = 1.0
         self.beta_annealing_steps = 100000
 
+        self.key_value_store = {}
         logger.info("Learning Memory successfully initialized with SumTree")
 
     def size(self):
@@ -201,6 +202,17 @@ class LearningMemory:
                 self.tree.update(idx, priority)
                 self.max_priority = max(self.max_priority, priority)
 
+    def get_recent_states(self, num_states=100):
+        with self.lock:
+            recent = []
+            for i in range(len(self.tree.data) - 1, -1, -1):
+                transition = self.tree.data[i]
+                if transition is not None and hasattr(transition, 'state'):
+                    recent.append(transition.state)
+                if len(recent) >= num_states:
+                    break
+            return recent
+
     def get_by_tag(self, tag):
         """Get experiences by tag"""
         with self.lock:
@@ -220,13 +232,19 @@ class LearningMemory:
                     if self.tree.data[i] is not None]
 
     def set(self, key, value):
-        """Set experience at specific index"""
+        """Set experience at specific index or store key-value pair"""
         with self.lock:
-            if key < len(self.tree.data):
-                self.tree.data[key] = value
+            if isinstance(key, int):
+                if key < len(self.tree.data):
+                    self.tree.data[key] = value
+            else:
+                # Handle string keys for key-value storage
+                self.key_value_store[key] = value
 
     def save_checkpoint(self, path=None):
         """Save memory state to disk"""
+        checkpoint_dir = self.memory_config['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)    # Create checkpoint directory if it doesn't exist
         checkpoint_path = path or os.path.join(
             self.memory_config['checkpoint_dir'],
             f"memory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
@@ -250,6 +268,7 @@ class LearningMemory:
             try:
                 # First try with weights_only=True for security
                 checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+                self.key_value_store = checkpoint.get('key_value_store', {})
             except Exception as e:
                 # If that fails, try with weights_only=False for compatibility
                 logger.warning(f"Safe loading failed, using compatibility mode: {str(e)}")
