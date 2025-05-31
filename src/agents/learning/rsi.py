@@ -19,6 +19,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
 from logs.logger import get_logger
@@ -39,20 +40,15 @@ def get_merged_config(user_config=None):
     return base_config
 
 class RSIAgent:
-    def __init__(self, state_size, action_size, agent_id, config: dict = None):
-        self.state_size = state_size
-        self.action_size = action_size
+    def __init__(self, state_size, action_size, agent_id):
+        self.config = load_global_config()
+        self.rsi_config = get_config_section('neural_network')
+
         self.agent_id = agent_id
-        base_config = load_config()
-        self.config = {
-            'rsi': config.get('rsi', {}),
-            'neural_network': base_config.get('neural_network', {})
-        }
         self.state_size = state_size
         self.action_size = action_size
 
-        # Retrieve RSI-specific parameters
-        rsi_config = self.config['rsi']
+        rsi_config = self.config.get('rsi', {})
         self.gamma = rsi_config.get('gamma')
         self.epsilon = rsi_config.get('epsilon')
         self.epsilon_min = rsi_config.get('epsilon_min')
@@ -70,13 +66,11 @@ class RSIAgent:
         self.config['neural_network']['layer_dims'] = [self.state_size, 64, 64, self.action_size]
 
         # Initialize neural networks
-        self.q_network = NeuralNetwork(
-            config=self.config,
+        self.q_network = NeuralNetwork( 
             input_dim=self.state_size,
             output_dim=self.action_size
         )
         self.target_network = NeuralNetwork(
-            config=self.config,
             input_dim=self.state_size,
             output_dim=self.action_size
         )
@@ -89,11 +83,12 @@ class RSIAgent:
         self.target_update_frequency = rsi_config.get('target_update_frequency')
         self.update_counter = 0
         self.current_epoch = 0
-        self.learning_memory = LearningMemory(config=base_config.get('learning_memory', {}))
+
+        self.learning_memory = LearningMemory()
         self.model_id = "RSI_Agent"
         self.memory = deque(maxlen=10000)
 
-        logger.info(f"Recursive Self-Improvement has succesfully initialized with")
+        logger.info(f"Recursive Self-Improvement has succesfully initialized")
 
     def execute(self, task_data):
         """Execute RSI task with integrated self-improvement cycle"""
@@ -619,11 +614,10 @@ class RSIAgent:
 if __name__ == "__main__":
     print("\n=== Running Recursive Self-Improvement ===\n")
 
-    config = load_config()
+    config = load_global_config()
     agent_id = None
 
     agent = RSIAgent(
-        config=config,
         action_size=2,
         state_size=4,
         agent_id=agent_id
