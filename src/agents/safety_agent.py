@@ -40,22 +40,6 @@ from logs.logger import get_logger
 
 logger = get_logger("Safety Agent")
 
-LOCAL_CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-@dataclass
-class SafetyAgentConfig:
-    """Configuration for SafetyAgent, distinct from sub-module configs."""
-    constitutional_rules_path: str = "src/agents/safety/templates/constitutional_rules.json"
-    risk_thresholds: Dict[str, float] = field(default_factory=lambda: {
-        "overall_safety": 0.75, # Example: Action must have a safety score > 0.75
-        "cyber_risk": 0.5,      # Example: Cyber risk score from CyberSafetyModule should be < 0.5
-        "compliance_failure_is_blocker": True
-    })
-    audit_level: int = 2
-    collect_feedback: bool = True
-    enable_learnable_aggregation: bool = False
-    secure_memory: Dict[str, Any] = field(default_factory=lambda: {"default_ttl_seconds": 3600})
-
 INCIDENT_RESPONSE = {
     "privacy": [
         "Isolate affected systems",
@@ -1008,6 +992,8 @@ if __name__ == "__main__":
 
 #    logger.info(f"{agent}")
     # print(guard._validate_privacy_params())
+    LOCAL_CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
+
     print(f"\n* * * * * Phase 2 * * * * *\n")
     class CollaborativeSharedMemory:
         def __init__(self, config):
