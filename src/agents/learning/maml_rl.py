@@ -19,7 +19,7 @@ import numpy as np
 
 from collections import namedtuple, defaultdict
 
-from src.agents.safety.utils.config_loader import load_global_config
+from src.agents.learning.utils.config_loader import load_global_config
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.learning.utils.policy_network import PolicyNetwork, NoveltyDetector
 from logs.logger import get_logger
@@ -50,7 +50,7 @@ class MAMLAgent:
         )
         self.meta_optimizer = optim.Adam(self.policy.parameters(), lr=self.meta_lr)
 
-        self.learning_memory = LearningMemory
+        self.learning_memory = LearningMemory()
         self.model_id = "MAML_Agent"
         self._init_nlp(action_size)
 
