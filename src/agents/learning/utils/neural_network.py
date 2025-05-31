@@ -1,27 +1,13 @@
 
 import torch
-import yaml
-import math
+import torch.nn as nn
+import time
 
+from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
+from logs.logger import get_logger
 
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        # Merge nested dictionaries recursively
-        for key in user_config:
-            if key in base_config and isinstance(base_config[key], dict) and isinstance(user_config[key], dict):
-                base_config[key].update(user_config[key])
-            else:
-                base_config[key] = user_config[key]
-    return base_config
+logger = get_logger("Neural Network")
 
 class Softmax(Activation):
     """Softmax activation, typically for multi-class classification output.
@@ -206,10 +192,11 @@ class Adam(Optimizer):
             # Update bs
             params_bs[i] -= self.learning_rate * m_hat_b / (torch.sqrt(v_hat_b) + self.epsilon)
 
-class NeuralNetwork:
+class NeuralNetwork(torch.nn.Module):
     """Simple 3-layer neural network with manual backpropagation"""
     
-    def __init__(self, config, input_dim, output_dim, hidden_dim=128):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
         # He initialization with ReLU
         # self.W1 = torch.randn(input_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / input_dim))
         # self.b1 = torch.zeros(hidden_dim)
@@ -217,31 +204,32 @@ class NeuralNetwork:
         # self.b2 = torch.zeros(hidden_dim)
         # self.W3 = torch.randn(hidden_dim, output_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
         # self.b3 = torch.zeros(output_dim)
-
-
-        nn_config = config.get('neural_network', {})
-        self.layer_dims = nn_config.get('layer_dims', [input_dim, 128, 64, output_dim])
+        self.config = load_global_config()
+        self.nn_config = get_config_section('neural_network')
+        self.layer_dims = self.nn_config.get('layer_dims', [input_dim, 128, 64, output_dim])
 
         # Override input/output dims explicitly to ensure compatibility
         self.layer_dims[0] = input_dim
         self.layer_dims[-1] = output_dim
 
-        self.hidden_activation = nn_config.get('hidden_activation', 'relu')
-        self.output_activation = nn_config.get('output_activation', 'linear')
-        self.loss_function = nn_config.get('loss_function', 'mse')
-        self.optimizer = nn_config.get('optimizer', 'adam')
-        self.learning_rate = nn_config.get('learning_rate', 0.001)
+        self.hidden_activation = self.nn_config.get('hidden_activation', 'relu')
+        self.output_activation = self.nn_config.get('output_activation', 'linear')
+        self.loss_function = self.nn_config.get('loss_function', 'mse')
+        self.optimizer = self.nn_config.get('optimizer', 'adam')
+        self.learning_rate = self.nn_config.get('learning_rate', 0.001)
         self.num_layers = len(self.layer_dims) - 1 # Number of layers with weights/biases
-        self.l1_lambda = nn_config.get('l1_lambda', 0.0)
-        self.l2_lambda = nn_config.get('l2_lambda', 0.0)
+        self.l1_lambda = self.nn_config.get('l1_lambda', 0.0)
+        self.l2_lambda = self.nn_config.get('l2_lambda', 0.0)
 
-        self._init_activation_functions(config)
-        self._init_loss_function(config)
+        self._init_activation_functions()
+        self._init_loss_function()
         self._initialize_weights() # Depends on activation types for He/Xavier
-        self._init_optimizer(config)
+        self._init_optimizer()
 
         # Intermediate values for backprop
         self._cache = {}
+
+        logger.info(f"Learning Neural Network succesfully initialized")
 
     def _str_to_activation(self, name_str):
         name_lower = name_str.lower()
@@ -252,18 +240,17 @@ class NeuralNetwork:
         if name_lower == 'softmax': return Softmax()
         raise ValueError(f"Unknown activation function: {name_str}")
 
-    def _init_activation_functions(self, config):
-        hidden_act_str = config.get('hidden_activation', 'relu')
-        output_act_str = config.get('output_activation', 'linear')
+    def _init_activation_functions(self):
+        hidden_act_str = self.nn_config.get('hidden_activation', 'relu')
+        output_act_str = self.nn_config.get('output_activation', 'linear')
 
         self.hidden_activations = []
         if self.num_layers > 1: # If there are hidden layers
             self.hidden_activations = [self._str_to_activation(hidden_act_str) for _ in range(self.num_layers - 1)]
         self.output_activation = self._str_to_activation(output_act_str)
 
-    def _init_loss_function(self, config):
-        nn_config = config.get('neural_network', {})  # Access neural_network subsection
-        loss_str = nn_config.get('loss_function', 'mse').lower()  # Get loss from nn_config
+    def _init_loss_function(self):
+        loss_str = self.nn_config.get('loss_function', 'mse').lower()
     
         if loss_str == 'mse':
             self.loss_fn = MSELoss()
@@ -307,19 +294,19 @@ class NeuralNetwork:
             self.Ws.append(torch.randn(fan_in, fan_out) * std_dev)
             self.bs.append(torch.zeros(fan_out))
             
-    def _init_optimizer(self, config):
-        optimizer_name = config.get('optimizer', 'sgd').lower()
-        lr = config.get('learning_rate', 0.01)
+    def _init_optimizer(self):
+        optimizer_name = self.nn_config.get('optimizer', 'sgd').lower()
+        lr = self.nn_config.get('learning_rate', 0.01)
 
         if optimizer_name == 'sgd':
             self.optimizer = SGD(learning_rate=lr)
         elif optimizer_name == 'momentum':
-            beta = config.get('momentum_beta', 0.9)
+            beta = self.nn_config.get('momentum_beta', 0.9)
             self.optimizer = SGDMomentum(learning_rate=lr, beta=beta)
         elif optimizer_name == 'adam':
-            beta1 = config.get('adam_beta1', 0.9)
-            beta2 = config.get('adam_beta2', 0.999)
-            epsilon = config.get('adam_epsilon', 1e-8)
+            beta1 = self.nn_config.get('adam_beta1', 0.9)
+            beta2 = self.nn_config.get('adam_beta2', 0.999)
+            epsilon = self.nn_config.get('adam_epsilon', 1e-8)
             self.optimizer = Adam(learning_rate=lr, beta1=beta1, beta2=beta2, epsilon=epsilon)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_name}")
@@ -332,7 +319,8 @@ class NeuralNetwork:
         current_a = X # Activation from previous layer (or input X)
         for i in range(self.num_layers):
             W, b = self.Ws[i], self.bs[i]
-            z = current_a @ W + b # Linear transformation
+            z = current_a @ W + b  # Linear transformation
+            current_a = activation(z)
 
             if i < self.num_layers - 1: # Hidden layer
                 current_a = self.hidden_activations[i].forward(z)
@@ -431,28 +419,133 @@ class NeuralNetwork:
         """
         Performs a single training step: forward pass, loss computation,
         backward pass (gradient computation), and parameter update.
+        
+        Expanded to include:
+        - Input validation
+        - Gradient clipping
+        - NaN value checks
+        - Detailed logging
+        - Performance timing
+        
         Args:
-            X_batch: Input data for the batch.
-            y_batch: True labels for the batch.
+            X_batch: Input data for the batch (Tensor of shape [batch_size, input_dim])
+            y_batch: True labels for the batch (Tensor shape depends on loss function)
+            
         Returns:
-            The loss value for the batch (scalar).
+            The loss value for the batch (scalar float)
+            
+        Raises:
+            ValueError: If input dimensions are invalid
+            RuntimeError: If NaNs are detected in gradients or outputs
         """
-        # 1. Forward pass to get predictions
-        y_pred_output = self.forward(X_batch)
+        # 1. Validate inputs
+        if X_batch.dim() != 2:
+            raise ValueError(f"X_batch must be 2D tensor, got {X_batch.dim()}D")
+        if X_batch.shape[0] == 0:
+            raise ValueError("Batch size cannot be zero")
+        if X_batch.shape[1] != self.layer_dims[0]:
+            raise ValueError(f"Input feature dimension mismatch. Expected {self.layer_dims[0]}, got {X_batch.shape[1]}")
         
-        # 2. Compute loss
-        # y_pred_output is the activated output. compute_loss handles if logits are needed.
-        loss = self.compute_loss(y_pred_output, y_batch)
+        # Start timing for performance monitoring
+        forward_time = time.time()
         
-        # 3. Backward pass to compute gradients (dL/dWs, dL/dBs)
-        # y_batch is passed for loss computation & format consistency.
-        # Gradients are calculated based on cached values and y_batch.
-        self.backward(y_batch)
+        try:
+            # 2. Forward pass to get predictions
+            y_pred_output = self.forward(X_batch)
+            
+            # Check for NaN in outputs
+            if torch.isnan(y_pred_output).any():
+                raise RuntimeError("NaN detected in network output during forward pass")
+                
+        except Exception as e:
+            logger.error(f"Forward pass failed: {str(e)}")
+            logger.debug(f"Input shape: {X_batch.shape}, Input range: [{X_batch.min()}, {X_batch.max()}]")
+            raise
+            
+        forward_time = time.time() - forward_time
         
-        # 4. Update parameters using optimizer
-        self.update_parameters()
+        loss_time = time.time()
         
-        return loss.item() # Return scalar loss value
+        try:
+            # 3. Compute loss
+            loss = self.compute_loss(y_pred_output, y_batch)
+            
+            # Check for invalid loss
+            if torch.isnan(loss):
+                raise RuntimeError("Loss is NaN")
+            if torch.isinf(loss):
+                raise RuntimeError("Loss is infinite")
+                
+        except Exception as e:
+            logger.error(f"Loss computation failed: {str(e)}")
+            logger.debug(f"y_true range: [{y_batch.min()}, {y_batch.max()}]")
+            logger.debug(f"y_pred range: [{y_pred_output.min()}, {y_pred_output.max()}]")
+            raise
+            
+        loss_time = time.time() - loss_time
+        
+        backward_time = time.time()
+        
+        try:
+            # 4. Backward pass to compute gradients
+            self.backward(y_batch)
+            
+            # 5. Gradient clipping to prevent explosion
+            max_grad_norm = 5.0  # Configurable value
+            for i in range(len(self.dWs)):
+                # Weight gradients
+                grad_norm = torch.norm(self.dWs[i])
+                if grad_norm > max_grad_norm:
+                    self.dWs[i] = self.dWs[i] * (max_grad_norm / (grad_norm + 1e-6))
+                    
+                # Bias gradients
+                grad_norm = torch.norm(self.dBs[i])
+                if grad_norm > max_grad_norm:
+                    self.dBs[i] = self.dBs[i] * (max_grad_norm / (grad_norm + 1e-6))
+                    
+                # Check for NaN in gradients
+                if torch.isnan(self.dWs[i]).any() or torch.isnan(self.dBs[i]).any():
+                    raise RuntimeError(f"NaN detected in gradients at layer {i}")
+                    
+        except Exception as e:
+            logger.error(f"Backward pass failed: {str(e)}")
+            logger.debug(f"Loss value: {loss.item()}")
+            raise
+            
+        backward_time = time.time() - backward_time
+        
+        update_time = time.time()
+        
+        try:
+            # 6. Update parameters using optimizer
+            self.update_parameters()
+        except Exception as e:
+            logger.error(f"Parameter update failed: {str(e)}")
+            raise
+            
+        update_time = time.time() - update_time
+        
+        # Log performance metrics
+        import logging
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"Train step timings: "
+                f"Forward: {forward_time:.4f}s, "
+                f"Loss: {loss_time:.4f}s, "
+                f"Backward: {backward_time:.4f}s, "
+                f"Update: {update_time:.4f}s, "
+                f"Total: {forward_time+loss_time+backward_time+update_time:.4f}s"
+            )
+            
+            # Log gradient norms
+            for i, (dw, db) in enumerate(zip(self.dWs, self.dBs)):
+                logger.debug(
+                    f"Layer {i} gradient norms: "
+                    f"Weights: {torch.norm(dw):.6f}, "
+                    f"Biases: {torch.norm(db):.6f}"
+                )
+        
+        return loss.item()
 
     def predict(self, X):
         """
@@ -486,97 +579,130 @@ class NeuralNetwork:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Neural Network ===\n")
-
-    config = load_config()
+    import argparse
+    config = load_global_config()
     input_dim = 64
     output_dim = 10
 
     network = NeuralNetwork(
         input_dim=input_dim,
-        output_dim=output_dim,
-        hidden_dim=128,
-        config=config)
+        output_dim=output_dim)
     
     print(f"\n{network}\n")
     print("\n=== Successfully Neural Network ===\n")
 
 # ====================== Usage Example 2 ======================
-if __name__ == "__main__":
     print("\n * * * * Phase 2 * * * *\n=== Neural Network Demonstration ===\n")
-    
-    # 1. Load configuration
-    user_config = {
-        'neural_network': {
-            'loss_function': 'cross_entropy'  # Only update this key, keep others from base config
-        }
-    }
-    config = get_merged_config(user_config)
-    
-    # 2. Create synthetic dataset
-    input_dim = 784  # MNIST-like input dimension
-    output_dim = 10  # 10-class classification
-    num_samples = 1000
-    X = torch.randn(num_samples, input_dim)  # Random "images"
-    y = torch.randint(0, output_dim, (num_samples,))  # Random class labels
 
-    # 3. Initialize network from config
-    network = NeuralNetwork(
-        config=config,
-        input_dim=input_dim,
-        output_dim=output_dim
-    )
-    
-    print(f"Initialized network with architecture: {network.layer_dims}")
-    print(f"Using {network.hidden_activation} activation | {network.output_activation} output")
-    print(f"Optimizer: {network.optimizer} | Learning rate: {network.learning_rate}\n")
+    parser = argparse.ArgumentParser(description='Neural Network Examples')
+    parser.add_argument('--example', type=int, default=1, choices=[1, 2],
+                        help='Example to run (1: simple init, 2: training demo)')
+    args = parser.parse_args()
 
-    # 4. Training loop
-    num_epochs = 50
-    batch_size = 32
-    losses = []
+    if args.example == 1:
+        print("\n=== Running Neural Network Example 1 ===\n")
+        input_dim = 64
+        output_dim = 10
 
-    print("Training network...")
-    for epoch in range(num_epochs):
-        epoch_loss = 0
-        for i in range(0, num_samples, batch_size):
-            X_batch = X[i:i+batch_size]
-            y_batch = y[i:i+batch_size]
+        network = NeuralNetwork(input_dim, output_dim)
+        
+        # Print configuration details
+        print("Network Configuration:")
+        print(f"  Layer dimensions: {network.layer_dims}")
+        # Handle case where there might be no hidden activations
+        hidden_act = 'None'
+        if network.hidden_activations:
+            hidden_act = type(network.hidden_activations[0]).__name__
+        print(f"  Hidden activation: {hidden_act}")
+        print(f"  Output activation: {type(network.output_activation).__name__}")
+        print(f"  Loss function: {type(network.loss_fn).__name__}")
+        print(f"  Optimizer: {type(network.optimizer).__name__}")
+        print(f"  Learning rate: {network.learning_rate}")
+        print(f"  L1 Lambda: {network.l1_lambda}")
+        print(f"  L2 Lambda: {network.l2_lambda}")
+        
+        print("\n=== Example 1 Complete ===\n")
+
+    else:
+        print("\n=== Running Neural Network Example 2 ===\n")
+        
+        # Create synthetic dataset
+        input_dim = 784  # MNIST-like input dimension
+        output_dim = 10  # 10-class classification
+        num_samples = 1000
+        X = torch.randn(num_samples, input_dim)  # Random "images"
+        y = torch.randint(0, output_dim, (num_samples,))  # Random class labels
+
+        # Initialize network
+        network = NeuralNetwork(input_dim, output_dim)
+        
+        # Print configuration details
+        print("Network Configuration:")
+        # Handle case where there might be no hidden activations
+        hidden_act = 'None'
+        if network.hidden_activations:
+            hidden_act = type(network.hidden_activations[0]).__name__
+        print(f"  Layer dimensions: {network.layer_dims}")
+        print(f"  Hidden activation: {hidden_act}")
+        print(f"  Output activation: {type(network.output_activation).__name__}")
+        print(f"  Loss function: {type(network.loss_fn).__name__}")
+        print(f"  Optimizer: {type(network.optimizer).__name__}")
+        print(f"  Learning rate: {network.learning_rate}")
+        print(f"  L1 Lambda: {network.l1_lambda}")
+        print(f"  L2 Lambda: {network.l2_lambda}")
+        print()
+
+        # Training loop
+        num_epochs = 5  # Reduced for demonstration
+        batch_size = 32
+        losses = []
+
+        print(f"Training network for {num_epochs} epochs...")
+        for epoch in range(num_epochs):
+            epoch_loss = 0
+            num_batches = 0
+            for i in range(0, num_samples, batch_size):
+                X_batch = X[i:i+batch_size]
+                y_batch = y[i:i+batch_size]
+                
+                loss = network.train_step(X_batch, y_batch)
+                epoch_loss += loss
+                num_batches += 1
             
-            loss = network.train_step(X_batch, y_batch)
-            epoch_loss += loss
-        
-        avg_loss = epoch_loss / (num_samples/batch_size)
-        losses.append(avg_loss)
-        
-        if (epoch+1) % 10 == 0:
+            # Calculate average loss per batch
+            avg_loss = epoch_loss / num_batches
+            losses.append(avg_loss)
+            
             print(f"Epoch {epoch+1}/{num_epochs} | Avg Loss: {avg_loss:.4f}")
 
-    # 5. Evaluation
-    with torch.no_grad():
-        test_X = torch.randn(100, input_dim)  # Test batch
-        test_y = torch.randint(0, output_dim, (100,))
+        # Evaluation
+        with torch.no_grad():
+            test_X = torch.randn(100, input_dim)  # Test batch
+            test_y = torch.randint(0, output_dim, (100,))
+            
+            preds = network.predict(test_X)
+            predicted_classes = torch.argmax(preds, dim=1)
+            accuracy = (predicted_classes == test_y).float().mean()
+            
+            print(f"\nTest Accuracy: {accuracy.item()*100:.1f}%")
+
+        # Checkpoint demonstration
+        checkpoint_path = "network_checkpoint.pt"
+        print(f"\nSaving model to {checkpoint_path}")
+        torch.save(network.get_weights(), checkpoint_path)
+
+        # Load checkpoint into a NEW network for verification
+        new_network = NeuralNetwork(input_dim, output_dim)
+        loaded_weights = torch.load(checkpoint_path)
+        new_network.set_weights(loaded_weights)
         
-        preds = network.predict(test_X)
-        predicted_classes = torch.argmax(preds, dim=1)
-        accuracy = (predicted_classes == test_y).float().mean()
+        # Verify matching predictions
+        test_sample = test_X[0:1]
+        original_pred = network.predict(test_sample)
+        reloaded_pred = new_network.predict(test_sample)
+        torch.allclose(original_pred, reloaded_pred)
         
-        print(f"\nTest Accuracy: {accuracy.item()*100:.1f}%")
+        print("\nCheckpoint verification:", 
+              "Match" if torch.allclose(original_pred, reloaded_pred, atol=1e-6) else "Mismatch")
 
-    # 6. Checkpoint demonstration
-    checkpoint_path = "src/agents/learning/cache/network_checkpoint.pt"
-    print(f"\nSaving model to {checkpoint_path}")
-    torch.save(network.get_weights(), checkpoint_path)
-
-    # 7. Load checkpoint verification
-    loaded_weights = torch.load(checkpoint_path)
-    network.set_weights(loaded_weights)
-    
-    # Verify matching predictions
-    original_pred = network.predict(test_X[0:1])
-    network.set_weights(loaded_weights)
-    reloaded_pred = network.predict(test_X[0:1])
-    
-    print("\nCheckpoint verification:", 
-          "Match" if torch.allclose(original_pred, reloaded_pred) else "Mismatch")
-
-    print("\n=== Demonstration Complete ===\n")
+        print("\n=== Example 2 Complete ===\n")
