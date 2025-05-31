@@ -1,0 +1,9 @@
+lm_store:
+  enable_memory_tracking: true
+  default_category: "performance"
+  max_history_size: 1000
+
+lazy_agent:
+  max_init_attempts: 3
+  enable_init_logging: true
+  timeout_seconds: 30
