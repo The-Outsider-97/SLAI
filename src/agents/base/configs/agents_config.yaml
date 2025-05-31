@@ -1,0 +1,34 @@
+base_agent:
+    defer_initialization: True
+    memory_profile: low
+    network_compression: True
+    max_error_log_size: 50
+    error_similarity_threshold: 0.75
+    max_task_retries: 0
+    task_timeout_seconds: None
+
+collaborative_agent: {}
+
+adaptive_agent: {}
+
+alignment_agent: {}
+
+browser_agent: {}
+
+evaluation_agent: {}
+
+execution_agent: {}
+
+knowledge_agent: {}
+
+language_agent: {}
+
+learning_agent: {}
+
+perception_agent: {}
+
+planning_agent: {}
+
+reasoning_agent: {}
+
+safety_agent: {}
