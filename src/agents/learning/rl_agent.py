@@ -27,24 +27,13 @@ from typing import Dict, Tuple, List, Any, Union
 from dataclasses import dataclass, field
 from collections import deque, defaultdict, OrderedDict
 
+from src.agents.perception.encoders.vision_encoder import VisionEncoder
+from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.learning.utils.rl_engine import StateProcessor, ExplorationStrategies, QTableOptimizer
 from logs.logger import get_logger
 
 logger = get_logger("Recursive Learning")
-
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
 
 class RLAgent:
     """
@@ -67,7 +56,7 @@ class RLAgent:
     - Watkins, C. J. C. H., & Dayan, P. (1992). Q-learning. Machine learning, 8(3-4), 279-292.
     """
 
-    def __init__(self, agent_id, config, possible_actions: List[Any], state_size: int):
+    def __init__(self, agent_id, possible_actions: List[Any], state_size: int):
         """
         Initializes the RL Agent.
 
@@ -77,19 +66,17 @@ class RLAgent:
             discount_factor (float): The discount factor (gamma) for future rewards.
             epsilon (float): The probability of taking a random action (exploration).
         """
+        self.config = load_global_config()
+        self.rl_engine_config = get_config_section('rl_engine')
+
         self.agent_id = agent_id
-        base_config = load_config()
-        self.config = {
-            'rl': config.get('rl', {}),
-            'rl_engine': base_config.get('rl_engine', {})
-        }
-        if not possible_actions:
-            raise ValueError("At least one possible action must be provided.")
         self.possible_actions = possible_actions
         self.state_size = state_size
+        if not possible_actions:
+            raise ValueError("At least one possible action must be provided.")
 
         # Retrieve RL-specific parameters
-        rl_config = self.config['rl']
+        rl_config = self.config.get('rl', {})
         self.learning_rate = rl_config.get('learning_rate')
         self.discount_factor = rl_config.get('discount_factor')
         self.epsilon = rl_config.get('epsilon')
@@ -109,17 +96,20 @@ class RLAgent:
             state_size=state_size
         )
         
+        exploration_config = self.rl_engine_config.get('exploration_strategies', {})
         self.exploration = ExplorationStrategies(
             action_space=possible_actions,
-            strategy=self.config['rl_engine']['exploration_strategies']['strategy'],
-            temperature=self.config['rl_engine']['exploration_strategies']['temperature'],
-            ucb_c=self.config['rl_engine']['exploration_strategies']['ucb_c']
+            strategy=exploration_config.get('strategy'),
+            temperature=exploration_config.get('temperature'),
+            ucb_c=exploration_config.get('ucb_c')
         )
         
+        # Corrected QTableOptimizer initialization
+        q_optimizer_config = self.rl_engine_config.get('q_table_optimizer', {})
         self.q_optimizer = QTableOptimizer(
-            batch_size=self.config['rl_engine']['q_table_optimizer']['batch_size'],
-            momentum=self.config['rl_engine']['q_table_optimizer']['momentum'],
-            cache_size=self.config['rl_engine']['q_table_optimizer']['cache_size'],
+            batch_size=q_optimizer_config.get('batch_size'),
+            momentum=q_optimizer_config.get('momentum'),
+            cache_size=q_optimizer_config.get('cache_size'),
             learning_rate=self.learning_rate
         )
 
@@ -127,9 +117,15 @@ class RLAgent:
         self.state_action_counts = defaultdict(int)
         self.episode_count = 0
 
-        learning_memory_config = base_config.get('learning_memory', {})
-        self.learning_memory = LearningMemory(config=learning_memory_config)
+        self.learning_memory = LearningMemory()
         self.model_id = "RL_Agent"
+
+        if any(param is None for param in [self.learning_rate, self.discount_factor, self.epsilon, self.trace_decay]):
+            logger.error("Critical RL parameters missing in config! Using fallback values")
+            self.learning_rate = self.learning_rate or 0.1
+            self.discount_factor = self.discount_factor or 0.9
+            self.epsilon = self.epsilon or 0.1
+            self.trace_decay = self.trace_decay or 0.7
 
         logger.info("Recursive Learning has successfully initialized")
 
@@ -149,7 +145,8 @@ class RLAgent:
 
     def _process_state(self, raw_state):
         """Apply state processing and feature engineering"""
-        if self.config['rl_engine']['state_processor']['feature_engineering']:
+        state_processor_config = self.rl_engine_config.get('state_processor', {})
+        if state_processor_config.get('feature_engineering', False):
             return tuple(self.state_processor.extract_features(raw_state))
         return self.state_processor.discretize(raw_state)
 
@@ -157,18 +154,72 @@ class RLAgent:
         """Enhanced action selection using configured strategy"""
         processed_state = self._process_state(state)
         
-        if self.config['rl_engine']['exploration_strategies']['strategy'] == "ucb":
+        exploration_config = self.rl_engine_config.get('exploration_strategies', {})
+        strategy = exploration_config.get('strategy', 'epsilon_greedy')
+        
+        if strategy == "ucb":
             return self.exploration.ucb(
                 state_action_counts=self.state_action_counts,
                 current_state=processed_state
             )
-        elif self.config['rl_engine']['exploration_strategies']['strategy'] == "boltzmann":
+        elif strategy == "boltzmann":
             # Convert to numpy array for vector operations
             q_values = np.array([self._get_q_value(processed_state, a) 
                        for a in self.possible_actions])
             return self.exploration.boltzmann(q_values)
         else:  # Fallback to epsilon-greedy
             return self._epsilon_greedy(processed_state)
+
+    def _epsilon_greedy(self, processed_state: Tuple[Any]) -> Any:
+        """
+        Selects an action using the epsilon-greedy exploration strategy.
+        
+        With probability epsilon, chooses a random action (exploration).
+        Otherwise, chooses the best known action for the state (exploitation).
+        Handles ties by randomly selecting among actions with the maximum Q-value.
+        
+        Mathematical Formulation:
+            action = {
+                random choice from possible_actions,       if rand < epsilon
+                argmax_a Q(state, a),                     otherwise
+            }
+        
+        Where:
+            epsilon = exploration probability (0 ≤ epsilon ≤ 1)
+            Q(state, a) = estimated value of taking action 'a' in 'state'
+        
+        Args:
+            processed_state: The current state after processing and discretization
+            
+        Returns:
+            Selected action
+        """
+        # Exploration: choose random action with probability epsilon
+        if random.random() < self.epsilon:
+            action = random.choice(self.possible_actions)
+            logger.debug(f"Exploring: random action {action}")
+            return action
+        
+        # Exploitation: choose best known action
+        # Calculate Q-values for all possible actions in current state
+        q_values = {}
+        for action in self.possible_actions:
+            q_values[action] = self._get_q_value(processed_state, action)
+        
+        # Find maximum Q-value
+        max_q = max(q_values.values())
+        
+        # Collect all actions with this maximum value (handle ties)
+        best_actions = [a for a, q in q_values.items() if q == max_q]
+        
+        # Randomly select among best actions
+        action = random.choice(best_actions)
+        
+        logger.debug(
+            f"Exploiting: best action {action} with Q-value {max_q:.4f} "
+            f"(tie broken among {len(best_actions)} candidates)"
+        )
+        return action
 
     def learn(self, next_state: Tuple[Any], reward: float, done: bool) -> None:
         """
@@ -187,14 +238,10 @@ class RLAgent:
         self.state_action_counts[(processed_state, action)] += 1
 
         # Store experience in optimized format
-        self.q_optimizer.compressed_store(
-            state=processed_state,
-            action=action,
-            value=self._get_q_value(processed_state, action)
-        )
-
-        # Perform batch updates periodically
-        if self.episode_count % self.config['rl_engine']['q_table_optimizer']['update_frequency'] == 0:
+        q_optimizer_config = self.rl_engine_config.get('q_table_optimizer', {})
+        update_freq = q_optimizer_config.get('update_frequency', 100)
+        
+        if self.episode_count % update_freq == 0:
             self.q_optimizer.batch_update(
                 self._prepare_batch_updates(processed_next_state, reward, done)
             )
@@ -211,28 +258,71 @@ class RLAgent:
         return updates
 
     def step(self, state: Tuple[Any]) -> Any:
-        """Process state before stepping"""
-        processed_state = self._process_state(state)
-        return super().step(processed_state)
-
-    def step(self, state: Tuple[Any]) -> Any:
         """Record state and choose action"""
         action = self.choose_action(state)
         self.state_history.append(state)
         self.action_history.append(action)
         return action
 
-    def train(self, num_tasks=3, episodes_per_task=5):
-        pass
+    def train(self, env, num_tasks=3, episodes_per_task=5):
+        """Comprehensive training loop with task-based learning"""
+        for task in range(num_tasks):
+            print(f"\n=== Starting Task {task+1}/{num_tasks} ===")
+            task_rewards = []
+            
+            for episode in range(episodes_per_task):
+                state, _ = env.reset()
+                done = False
+                total_reward = 0
+                
+                while not done:
+                    action = self.step(state)
+                    next_state, reward, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
+                    
+                    # Enhanced reward processing
+                    self.receive_reward(reward, state, action)
+                    state = next_state
+                    total_reward += reward
+                    
+                self.end_episode(state, done)
+                task_rewards.append(total_reward)
+                print(f"Episode {episode+1}/{episodes_per_task} | Reward: {total_reward}")
+            
+            avg_reward = sum(task_rewards) / len(task_rewards)
+            print(f"Task {task+1} Complete | Avg Reward: {avg_reward:.2f}")
+        
+        print("\n=== Training Complete ===")
+        return self.get_policy()
 
-    def receive_reward(self, reward: float) -> None:
-        """Record immediate reward"""
+    def receive_reward(self, reward: float, state=None, action=None) -> None:
+        """Record reward with optional state-action context"""
         self.reward_history.append(reward)
+        
+        # Add reward shaping if state/action provided
+        if state is not None and action is not None:
+            processed_state = self._process_state(state)
+            self.q_optimizer.compressed_store(
+                state=processed_state,
+                action=action,
+                value=reward,
+                #reward=True
+            )
 
     def end_episode(self, final_state: Tuple[Any], done: bool) -> None:
-        """Finalize episode learning"""
+        """Finalize episode learning with epsilon decay"""
         if self.state_history and self.action_history and self.reward_history:
             self.learn(final_state, self.reward_history[-1], done)
+
+        # Get decay parameters from config with proper defaults
+        exploration_config = self.rl_engine_config.get('exploration_strategies', {})
+        min_epsilon = exploration_config.get('min_epsilon', 0.01)
+        epsilon_decay = exploration_config.get('epsilon_decay', 0.995)
+
+        # Apply epsilon decay
+        self.epsilon = max(min_epsilon, self.epsilon * epsilon_decay)
+
+        logger.debug(f"Epsilon decayed to {self.epsilon:.4f}")
         self.reset_history()
 
     def get_q_table(self):
@@ -457,7 +547,7 @@ class RLVisualizer:
         
         video_writer = cv2.VideoWriter(
             'policy_animation.mp4', 
-            cv2.VideoWriter_fourcc(*'avc1'), fps, 
+            cv2.VideoWriter_fourcc(*'mp4v'), fps, 
             (frame_width*2, frame_height*2)  # Use actual frame dimensions
         )
         
@@ -521,6 +611,8 @@ class RLVisualizer:
 
     def _calculate_exploration_ratio(self, window=100):
         """Calculate exploration percentage from action history"""
+        if not self.agent.action_history:
+            return 0.0
         recent_actions = self.agent.action_history[-window:]
         if not recent_actions: return 0.0
         return sum(1 for a in recent_actions if a != np.argmax(
@@ -533,6 +625,9 @@ class RLVisualizer:
 
     def plot_learning_curves(self, window=100):
         """Interactive matplotlib dashboard with multiple metrics"""
+        if not self.agent.reward_history:
+            print("Warning: Reward history is empty. Skipping plot.")
+            return
         plt.figure(figsize=(15, 8))
         
         # Smoothed reward curve
@@ -588,29 +683,64 @@ class RLVisualizer:
         ])
 
 class RLEncoder(RLAgent):
-    def __init__(self, config, possible_actions, state_size, vision_encoder=None, train_vision=False):
-        super().__init__(config, possible_actions, state_size)
+    def __init__(self, agent_id: str,
+                 possible_actions: List[Any], 
+                 state_size: int, 
+                 vision_encoder: VisionEncoder = None,
+                 rl_encoder_config: Dict[str, Any] = None,
+                 train_vision: bool = False):
+        
+        super().__init__(agent_id, possible_actions, state_size)
         
         # Vision processing
         self.vision_encoder = vision_encoder
-        if self.vision_encoder:
-            self.projection = nn.Linear(
-                self.vision_encoder.embed_dim,
-                self.state_size)
-            self.vision_encoder.eval()  # Freeze if pre-trained
-            
-        # Replace StateProcessor for visual observations
-        if config['use_visual_observations']:
-            self.state_processor = self._visual_state_processor
+        
+        _rl_encoder_config = rl_encoder_config if rl_encoder_config else {}
+        self.use_visual_observations = _rl_encoder_config.get('use_visual_observations', False)
+        
+        if self.vision_encoder and self.use_visual_observations:
 
-        if train_vision and self.vision_encoder:
-            self.vision_encoder.train() 
-            self.vision_encoder.requires_grad_(True)
+            if train_vision:
+                self.vision_encoder.train()
+                for param in self.vision_encoder.parameters():
+                    param.requires_grad = True
+            else:
+                self.vision_encoder.eval()
+                for param in self.vision_encoder.parameters():
+                    param.requires_grad = False
+        elif self.use_visual_observations and not self.vision_encoder:
+            logger.warning("RLEncoder: use_visual_observations is True, but no vision_encoder provided.")
+            self.use_visual_observations = False
+
+        logger.info(f"Recursive Learning Encoder Activated!")
+
+    def _visual_state_processor(self, raw_state):
+        """Process raw pixels using VisionEncoder"""
+        with torch.no_grad() if not (
+            self.vision_encoder.training and any(
+                p.requires_grad for p in self.vision_encoder.parameters())) else torch.enable_grad():
+            state_tensor = torch.tensor(
+                raw_state, dtype=torch.float32, device=next(
+                    self.vision_encoder.parameters()).device if list(
+                        self.vision_encoder.parameters()) else torch.device("cpu"))
+            state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
+            
+            embeddings = self.vision_encoder(state_tensor)
+            cls_embedding = embeddings[0, 0]
+            return tuple(cls_embedding.detach().cpu().numpy())
+
+    def _process_state(self, raw_state):
+        """Override state processing for visual inputs"""
+        if self.use_visual_observations and self.vision_encoder:
+            return self._visual_state_processor(raw_state)
+        else:
+            return super()._process_state(raw_state)
 
     def _visual_state_processor(self, raw_state):
         """Process raw pixels using VisionEncoder"""
         with torch.no_grad():
-            state_tensor = torch.tensor(raw_state).float().unsqueeze(0)
+            state_tensor = torch.tensor(raw_state, dtype=torch.float32)
+            state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
             embeddings = self.vision_encoder(state_tensor)
         return tuple(embeddings.cpu().numpy().flatten())
 
@@ -638,154 +768,93 @@ class RLTransformer(RLEncoder):
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Recursive Learning ===\n")
-
-    env = gym.make("CartPole-v1", render_mode="rgb_array")
-    config = load_config()
-    state_size = env.observation_space.shape[0]
-    possible_actions = list(range(env.action_space.n))
-    agent_id = None
-    
-    agent = RLAgent(
-        config=config,
-        possible_actions=possible_actions,
-        state_size=state_size,
-        agent_id=agent_id
-    )
-    visualizer = RLVisualizer(agent, env)
-    visualizer.animate_policy(fps=60)
-    
-    # Training loop
-    for episode in range(1000):
-        state, _ = env.reset()
-        done = False
-        total_reward = 0
-        
-        while not done:
-            action = agent.step(state)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
+    class VisualCartPole(gym.Wrapper):
+        def __init__(self):
+            env = gym.make('CartPole-v1', render_mode='rgb_array')
+            super().__init__(env)
+            self.observation_space = gym.spaces.Box(
+                low=0, high=255, shape=(84, 84, 3), dtype=np.uint8
+            )
             
-            agent.receive_reward(reward)
-            agent.learn(next_state, reward, done)
-            state = next_state
-            total_reward += reward
+        def reset(self, **kwargs):
+            state, info = self.env.reset(**kwargs)
+            return self._process_frame(), info
         
-        agent.end_episode(state, done)
-        print(f"Episode {episode+1} | Total Reward: {total_reward}")
-
-    visualizer.plot_learning_curves()
-    print(f"\n{agent}\n")
-    print("\n=== Successfully Ran Recursive Learning ===\n")
-
-if __name__ == "__main__":
-    print("\n * * * * Phase 2 * * * *\n=== Running Recursive Learning ===\n")
-    import argparse
-    import pickle, os
+        def step(self, action):
+            state, reward, terminated, truncated, info = self.env.step(action)
+            return self._process_frame(), reward, terminated, truncated, info
+        
+        def _process_frame(self):
+            frame = self.env.render()
+            frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
+            return frame
     
-    # CLI for optional config
-    parser = argparse.ArgumentParser(description="Run RLAgent in CartPole")
-    parser.add_argument('--episodes', type=int, default=1000, help='Number of training episodes')
-    parser.add_argument('--render', action='store_true', help='Render the environment')
-    parser.add_argument('--save_qtable', action='store_true', help='Save Q-table to file after training')
-    parser.add_argument('--evaluate', action='store_true', help='Run evaluation after training')
-    args = parser.parse_args()
+    # Main test function
+    def test_rl_with_vision():
+        print("\n=== Running RL Agent with Vision Encoder Test ===")
+        
+        # Create environment
+        env = VisualCartPole()
+        
+        # Load vision encoder configuration
+        config_path = "src/agents/perception/configs/perception_config.yaml"
+        with open(config_path, 'r') as f:
+            vision_config = yaml.safe_load(f)
+        
+        # Override for CartPole environment
+        vision_config['vision_encoder']['img_size'] = 84
+        vision_config['vision_encoder']['patch_size'] = 14
+        
+        # Create vision encoder
+        vision_encoder = VisionEncoder(vision_config)
+        print(f"Vision Encoder created with {sum(p.numel() for p in vision_encoder.parameters()):,} parameters")
+        
+        # Agent configuration
+        agent_id = "RL-Vision-Agent"
+        possible_actions = [0, 1]  # CartPole actions (left/right)
+        state_size = vision_config['transformer']['embed_dim']  # Embedding size as state size
+        
+        # Create RL agent with vision processing
+        print("\n * * * * Phase 1 * * * *")
+        print("=== Creating RL Agent with Vision Encoder ===")
+        agent = RLEncoder(
+            agent_id=agent_id,  # Pass agent_id correctly
+            possible_actions=possible_actions,
+            state_size=state_size,
+            vision_encoder=vision_encoder,
+            rl_encoder_config={'use_visual_observations': True}, # Pass specific config
+            train_vision=False  # Explicitly False
+        )
+        
+        # Create visualizer
+        print("\n * * * * Phase 2 * * * *")
+        print("=== Creating RL Visualizer ===")
+        visualizer = RLVisualizer(agent, env)
 
-    env = gym.make("CartPole-v1")
-    config = load_config()
-    state_size = env.observation_space.shape[0]
-    possible_actions = list(range(env.action_space.n))
-    agent_id = None
-
-    agent = RLAgent(
-        config=config,
-        possible_actions=possible_actions,
-        state_size=state_size,
-        agent_id=agent_id
-    )
-
-    reward_log = []
-
-    try:
-        for episode in range(args.episodes):
-            state, _ = env.reset()
-            done = False
-            total_reward = 0
-
-            while not done:
-                if args.render:
-                    env.render()
-
-                action = agent.step(state)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-
-                agent.receive_reward(reward)
-                agent.learn(next_state, reward, done)
-                state = next_state
-                total_reward += reward
-
-            agent.end_episode(state, done)
-            reward_log.append(total_reward)
-
-            print(f"Episode {episode+1} | Total Reward: {total_reward}")
-
-    except KeyboardInterrupt:
-        print("\nTraining interrupted by user.")
-
-    finally:
-        env.close()
-
-        if args.save_qtable:
-            os.makedirs("output", exist_ok=True)
-            with open("src/agents/learning/cache/q_table.pkl", "wb") as f:
-                pickle.dump(agent.get_q_table(), f)
-            print("Q-table saved to output/q_table.pkl")
-
-        if args.evaluate:
-            print("\n--- Evaluation ---")
-            eval_rewards = []
-            for _ in range(10):
-                state, _ = env.reset()
-                done = False
-                total = 0
-                while not done:
-                    action = agent.get_policy().get(agent._process_state(state), random.choice(possible_actions))
-                    state, reward, terminated, truncated, _ = env.step(action)
-                    done = terminated or truncated
-                    total += reward
-                eval_rewards.append(total)
-            avg_eval = sum(eval_rewards) / len(eval_rewards)
-            print(f"Average Evaluation Reward: {avg_eval:.2f}")
-
-        print("\n=== Recursive Learning Complete ===")
-
-if __name__ == "__main__":
-    print("\n * * * * Phase 3 * * * *\n=== Running Recursive Learning ===\n")
-    from src.agents.perception.encders.vision_encoder import VisionEncoder
-    from src.agents.perception.modules.transformer import Transformer
-    # Initialize integrated system
-
-    optimizer = torch.optim.Adam([
-        {'params': agent.vision_encoder.parameters()},
-        {'params': agent.transformer.parameters()},
-        {'params': agent.q_network.parameters()}
-    ], lr=config['meta_lr'])
+        logger.info(f"{visualizer}\n{agent}\n{env}")
+        
+        # Run short training
+        print("\n * * * * Phase 3 * * * *")
+        print("=== Starting Training ===")
+        policy = agent.train(
+            env, 
+            num_tasks=2, 
+            episodes_per_task=3
+        )
+        
+        # Visualize results
+        print("\n * * * * Phase 4 * * * *")
+        print("=== Visualizing Results ===")
+        visualizer.plot_learning_curves()
+        visualizer.animate_policy(fps=30, max_steps=200)
+        
+        print("\n=== Test Completed Successfully ===")
     
-    vision_encoder = VisionEncoder(config)
-    agent = RLTransformer(
-        config=config,
-        possible_actions=possible_actions,
-        state_size=512,  # Must match vision_encoder output dim
-        vision_encoder=vision_encoder,
-        train_vision=True
-    )
-    # Should handle both visual and vector states
-    agent.step(env.render(mode='rgb_array'))  # Visual input
-    agent.step(env.get_vector_state())
-
-    
-    # Training loop
-    for episode in episodes:
-        state = env.render(mode='rgb_array')  # Visual observation
-        action = agent.step(state)
+    if __name__ == "__main__":
+        # Set random seeds for reproducibility
+        torch.manual_seed(42)
+        np.random.seed(42)
+        random.seed(42)
+        
+        test_rl_with_vision()
     print("\n=== Recursive Learning Complete ===")
