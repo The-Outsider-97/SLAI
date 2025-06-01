@@ -62,10 +62,14 @@ class MAMLAgent:
             NLP_ENGINE_AVAILABLE = True
         except ImportError:
             NLP_ENGINE_AVAILABLE = False
+        nlp_engine = NLPEngine
         maml_config = self.config.get('maml', {})
         self.vocab_size = maml_config.get('vocab_size', 50)
         self.max_message_length = maml_config.get('max_message_length', 10)
 
+        self.nlp_engine = nlp_engine
+        if self.nlp_engine is None:
+            logger.warning(f"NLPEngine not initialized in agent {self.agent_id}")
         # Initialize NLPEngine
         self.nlp_engine = None
         if NLP_ENGINE_AVAILABLE:
@@ -312,7 +316,109 @@ class MAMLAgent:
         loss = self.meta_update(tasks)
         return {"status": "success", "agent": "MAMLAgent", "meta_loss": loss}
 
-    def train(self, num_meta_epochs=100, tasks_per_epoch=5, adaptation_steps=1):
+    def select_action(self, processed_state):
+        action, log_prob, _ = self.get_action(processed_state)
+        return action
+    
+    def learn_step(self, trajectory):
+        loss = self.compute_loss_from_trajectory(trajectory, self.policy)
+        self.meta_optimizer.zero_grad()
+        loss.backward()
+        self.meta_optimizer.step()
+
+    def evaluate(self, env, num_eval_tasks=20, adaptation_steps=3, meta_eval=False):
+        """
+        Comprehensive meta-RL evaluation with adaptation analysis
+        Args:
+            num_eval_tasks: Number of tasks to evaluate on
+            adaptation_steps: Adaptation steps per task
+            meta_eval: Evaluate meta-policy without adaptation
+        
+        Returns:
+            Dict containing evaluation metrics
+        """
+        logger.info(f"Evaluating MAML Agent {self.agent_id} on {num_eval_tasks} tasks")
+        
+        evaluation_metrics = {
+            'baseline_performance': 0,
+            'adapted_performance': 0,
+            'adaptation_gain': 0,
+            'communication_accuracy': 0,
+            'task_success_rate': 0,
+            'adaptation_speed': [],
+            'reward_components': defaultdict(list)
+        }
+        
+        for _ in range(num_eval_tasks):
+            env = self._sample_evaluation_task()
+            task_type = getattr(env, 'task_type', 'default')
+            
+            # Baseline performance (no adaptation)
+            baseline_trajectory = self.collect_trajectory(env, self.policy)
+            baseline_return = sum(t.reward for t in baseline_trajectory)
+            evaluation_metrics['baseline_performance'] = sum(t.reward for t in baseline_trajectory)
+            
+            if not meta_eval:
+                # Adaptation process
+                adapted_policy = self.policy
+                adaptation_rewards = []
+                
+                for step in range(adaptation_steps):
+                    trajectory = self.collect_trajectory(env, adapted_policy)
+                    adaptation_rewards.append(sum(t.reward for t in trajectory))
+                    loss = self.compute_loss_from_trajectory(trajectory, adapted_policy)
+                    adapted_policy = self.inner_update(env, adapted_policy)
+                
+                # Post-adaptation performance
+                final_trajectory = self.collect_trajectory(env, adapted_policy)
+                final_return = sum(t.reward for t in final_trajectory)
+                adaptation_gain = final_return - baseline_return
+                
+                # Update metrics
+                evaluation_metrics['adapted_performance'] = final_return
+                evaluation_metrics['adaptation_gain'] = final_return - evaluation_metrics['baseline_performance']
+                evaluation_metrics['adaptation_speed'].append(
+                    (np.mean(adaptation_rewards[-3:]) - baseline_return) if adaptation_steps > 3 else 0
+                )
+                
+                # Task-specific metrics
+                final_metrics = self._compute_task_metrics(final_trajectory, env)
+                evaluation_metrics['communication_accuracy'] += final_metrics['communication_success']
+                evaluation_metrics['task_success_rate'] += final_metrics['task_success']
+                
+                # Reward decomposition
+                for key, value in final_metrics.items():
+                    if 'reward' in key or 'bonus' in key:
+                        evaluation_metrics['reward_components'][key].append(value)
+        
+        # Normalize metrics
+        evaluation_metrics['baseline_performance'] = np.mean(evaluation_metrics['baseline_performance'])
+        if not meta_eval:
+            evaluation_metrics['adapted_performance'] = np.mean(evaluation_metrics['adapted_performance'])
+            evaluation_metrics['adaptation_gain'] = np.mean(evaluation_metrics['adaptation_gain'])
+            evaluation_metrics['adaptation_speed'] = np.mean(evaluation_metrics['adaptation_speed'])
+            evaluation_metrics['communication_accuracy'] /= num_eval_tasks
+            evaluation_metrics['task_success_rate'] /= num_eval_tasks
+            
+            for key in evaluation_metrics['reward_components']:
+                evaluation_metrics['reward_components'][key] = np.mean(
+                    evaluation_metrics['reward_components'][key]
+                )
+        
+        # Policy complexity analysis
+        total_params = sum(p.numel() for p in self.policy.parameters())
+        trainable_params = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+        
+        evaluation_metrics.update({
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'adaptation_steps': adaptation_steps,
+            'meta_evaluation': meta_eval
+        })
+        
+        return evaluation_metrics
+
+    def train(self, num_meta_epochs=50, tasks_per_epoch=5, adaptation_steps=1):
         """
         Enhanced training with comprehensive reward system
         """
@@ -378,73 +484,6 @@ class MAMLAgent:
 
         logger.info("Meta-training complete")
         return self.training_metrics
-
-    def evaluate(self, num_eval_tasks=20, adaptation_steps=3):
-        """
-        Comprehensive evaluation with multiple performance metrics
-        """
-        logger.info(f"Starting evaluation on {num_eval_tasks} tasks")
-        evaluation_metrics = {
-            'average_return': 0,
-            'success_rate': 0,
-            'communication_accuracy': 0,
-            'adaptation_speed': [],
-            'reward_components': {
-                'extrinsic': [],
-                'intrinsic': [],
-                'task_completion': [],
-                'communication': []
-            }
-        }
-
-        for _ in range(num_eval_tasks):
-            env = self._sample_evaluation_task()
-            task_type = getattr(env, 'task_type', 'default')
-            adaptation_rewards = []
-
-            # Initial policy performance
-            baseline_trajectory = self.collect_trajectory(env, self.policy)
-            baseline_return = sum(t.reward for t in baseline_trajectory)
-            
-            # Adaptation process
-            adapted_policy = self.policy
-            for step in range(adaptation_steps):
-                trajectory = self.collect_trajectory(env, adapted_policy)
-                loss = self.compute_loss_from_trajectory(trajectory, adapted_policy)
-                adapted_policy = self.inner_update(env, adapted_policy)
-                adaptation_rewards.append(sum(t.reward for t in trajectory))
-
-            # Post-adaptation performance
-            final_trajectory = self.collect_trajectory(env, adapted_policy)
-            final_metrics = self._compute_task_metrics(final_trajectory, env)
-            
-            # Update metrics
-            evaluation_metrics['average_return'] += sum(t.reward for t in final_trajectory)
-            evaluation_metrics['success_rate'] += final_metrics['task_success']
-            evaluation_metrics['communication_accuracy'] += final_metrics['communication_success']
-            evaluation_metrics['adaptation_speed'].append(
-                (sum(adaptation_rewards) - baseline_return) / adaptation_steps
-            )
-            
-            # Record reward components
-            evaluation_metrics['reward_components']['extrinsic'].append(final_metrics['extrinsic_reward'])
-            evaluation_metrics['reward_components']['intrinsic'].append(final_metrics['intrinsic_reward'])
-            evaluation_metrics['reward_components']['task_completion'].append(final_metrics['task_completion_bonus'])
-            evaluation_metrics['reward_components']['communication'].append(final_metrics['communication_bonus'])
-
-        # Normalize metrics
-        evaluation_metrics['average_return'] /= num_eval_tasks
-        evaluation_metrics['success_rate'] /= num_eval_tasks
-        evaluation_metrics['communication_accuracy'] /= num_eval_tasks
-        evaluation_metrics['adaptation_speed'] = np.mean(evaluation_metrics['adaptation_speed'])
-        
-        for component in evaluation_metrics['reward_components']:
-            evaluation_metrics['reward_components'][component] = np.mean(
-                evaluation_metrics['reward_components'][component]
-            )
-
-        logger.info(f"Evaluation complete. Success rate: {evaluation_metrics['success_rate']:.2f}")
-        return evaluation_metrics
 
     def _compute_task_metrics(self, trajectory, env):
         """
@@ -654,6 +693,7 @@ if __name__ == "__main__":
 
     config = load_global_config()
     agent_id = None
+    env = None
 
     agent = MAMLAgent(
         state_size=4,
@@ -661,7 +701,7 @@ if __name__ == "__main__":
         agent_id=agent_id
     )
     training_metrics = agent.train(num_meta_epochs=20)
-    evaluation_metrics = agent.evaluate(num_eval_tasks=50)
+    evaluation_metrics = agent.evaluate(env, num_eval_tasks=50)
     print(f"\n{agent}\n")
     print("\n=== Successfully Ran Model-Agnostic Meta-Learning ===\n")
 
