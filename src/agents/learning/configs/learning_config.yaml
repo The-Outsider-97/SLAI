@@ -126,3 +126,6 @@ visual_processing:
 rl_visualization:
   heatmap_resolution: 50
   use_gpu_acceleration: true
+
+state_processor_config:
+  normalize: False
