@@ -50,9 +50,11 @@ cluster_monitoring:
 task_scheduler:
   risk_threshold: 0.7
   retry_policy:
+    max_retries: 3
     max_attempts: 3
     backoff_factor: 1.5
-  base_duration_per_requirement: 2.0  # Time per capability requirement
+    delay: 10
+  base_duration_per_requirement: 5.0  # Time per capability requirement
   efficiency_attribute: "efficiency"  # Key in agent's details for efficiency
 
 decision_tree_heuristic:
@@ -115,3 +117,9 @@ planning_types:
   default_constraints: []
   type_checks: enabled
   validation_level: strict
+
+learning_retraining_scheduler:
+  risk_threshold: 0.4
+  base_duration_per_requirement: 300  # 5 minutes per requirement
+  efficiency_attribute: "efficiency"
+  max_concurrent_training: 3
