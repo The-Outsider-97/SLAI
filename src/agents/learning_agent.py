@@ -17,7 +17,9 @@ Academic Foundations:
 """
 
 import torch
+import copy
 import time
+import math
 import psutil
 import random
 import functools
@@ -25,23 +27,28 @@ import numpy as np
 import torch.nn as nn
 import gymnasium as gym
 
-from collections import deque, defaultdict, OrderedDict
-from pathlib import Path
+from collections import deque, defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, Union, Tuple, Optional, Any
 from functools import partial
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.learning.utils.error_calls import (NaNException, GradientExplosionError,
+                                                   InvalidActionError, InvalidConfigError)
+from src.agents.learning.utils.state_processor import StateProcessor
+from src.agents.learning.utils.multi_task_learner import MultiTaskLearner
+from src.agents.learning.learning_factory import LearningFactory
 from src.agents.learning.dqn import DQNAgent
 from src.agents.learning.maml_rl import MAMLAgent
 from src.agents.learning.rsi import RSIAgent
 from src.agents.learning.rl_agent import RLAgent
-from src.agents.learning.learning_factory import LearningFactory, load_config
-from src.agents.base_agent import BaseAgent, LightMetricStore, LazyAgent
+from src.agents.learning.slaienv import SLAIEnv
+from src.agents.base.light_metric_store import LightMetricStore
+from src.agents.base.lazy_agent import LazyAgent
+from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
 
 logger = get_logger("Learning Agent")
-
-LOCAL_CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
 
 def validation_logic(self):
     required_params = {
@@ -52,54 +59,13 @@ def validation_logic(self):
         if not all(k in self.config[agent_type] for k in params):
             raise ValueError(f"Missing params for {agent_type}: {params}")
 
-class NaNException(Exception):
-    """Raised when a NaN is encountered during learning"""
-    def __init__(self, message="NaN value detected in training"):
-        super().__init__(message)
-
-class GradientExplosionError(Exception):
-    """Raised when gradient norms exceed a safety threshold"""
-    def __init__(self, norm, threshold=1e3):
-        super().__init__(f"Gradient explosion detected: norm={norm:.2f}, threshold={threshold}")
-
-class InvalidActionError(Exception):
-    """Raised when an action fails safety validation or is undefined"""
-    def __init__(self, action=None):
-        message = f"Invalid or unsafe action: {action}" if action else "Invalid or unsafe action encountered"
-        super().__init__(message)
-
-class InvalidConfigError(Exception):
-    """Raised when agent configuration validation fails"""
-    def __init__(self, message="Invalid agent configuration"):
-        super().__init__(message)
-        self.message = message
-
-    def __str__(self):
-        return f'InvalidConfigError: {self.message}'
-
-class MultiTaskLearner(nn.Module):
-    def __init__(self, shared_dim=256, task_dims=None):
-        super().__init__()
-        self.shared_encoder = nn.Sequential(
-            nn.Linear(input_dim, shared_dim),
-            nn.ReLU()
-        )
-        self.task_heads = nn.ModuleDict({
-            task: nn.Linear(shared_dim, dim) 
-            for task, dim in task_dims.items()
-        })
-
-    def forward(self, x, task):
-        shared = self.shared_encoder(x)
-        return self.task_heads[task](shared)
-    
 class LearningAgent(BaseAgent):
     """Orchestrates SLAI's lifelong learning capabilities through multiple strategies"""
 
     def __init__(self,
                  shared_memory,
                  agent_factory,
-                 env=None, config=None,
+                 env=SLAIEnv, config=None,
                  args=(), kwargs={}):
         super().__init__(
             shared_memory=shared_memory,
@@ -114,35 +80,86 @@ class LearningAgent(BaseAgent):
             config: Dictionary with agent configurations
         """
         self.env = env
+        state_dim = env.state_dim if isinstance(env, SLAIEnv) else config["state_dim"]
+        self.task_ids = ['default_task'] # Example task list – adapt based on actual environment capabilities ['navigate', 'explore', 'avoid', 'collect'] 
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.config = config or {}
+        self.config = load_global_config()
+        self.learning_agent_config = get_config_section('learning_agent')
+
         self.rl_algorithm = self.config.get("rl_algorithm", None)
-        self.strategy_weights = np.array([0.25]*4)  # [RL, DQN, MAML, RSI]
-        self.prediction_weights = self.config.get('prediction_weights', [0.25, 0.25, 0.25, 0.25])
-        self.performance_history = deque(maxlen=1000)
-        self.embedding_buffer = deque(maxlen=512)  # store latest 512 embeddings
 
-        self.policy_net = nn.Sequential(
-            nn.Linear(512, 256),  # input_dim (embeddings) → hidden_dim
+        self.strategy_weights = np.array(self.learning_agent_config.get('strategy_weights', [0.25]*4))
+        self.prediction_weights = self.learning_agent_config.get('prediction_weights', [0.25]*4)
+        self.maml_task_pool_size = self.learning_agent_config.get('maml_task_pool_size', 100)
+        self.rsi_improvement_cycle = self.learning_agent_config.get('rsi_improvement_cycle', 50)
+        self.performance_threshold = self.learning_agent_config.get('performance_threshold', 0.7)
+        self.data_change_threshold = self.learning_agent_config.get('data_change_threshold', 0.15)
+        self.retraining_interval = timedelta(hours=self.learning_agent_config.get('retraining_interval_hours', 24))
+        self.novelty_threshold = self.learning_agent_config.get('novelty_threshold', 0.3)
+        self.uncertainty_threshold = self.learning_agent_config.get('uncertainty_threshold', 0.25)
+        self.maml_adaptation_steps = self.learning_agent_config.get('maml_adaptation_steps', 10)
+        
+        # Initialize buffers with config sizes
+        self.embedding_buffer = deque(maxlen=self.learning_agent_config.get('embedding_buffer_size', 512))
+        self.performance_history = deque(maxlen=self.learning_agent_config.get('performance_history_size', 1000))
+        self.error_history = deque(maxlen=self.learning_agent_config.get('error_history_size', 100))
+        self.state_recency = deque(maxlen=self.learning_agent_config.get('state_recency_size', 1000))
+        self.architecture_history = deque(maxlen=self.learning_agent_config.get('architecture_history_size', 10))
+        self.task_embedding_dim = self.learning_agent_config.get("task_embedding_dim", 256)
+
+        # State embedding layer
+        self.state_embedder = nn.Sequential(
+            nn.Linear(256, 64),
             nn.ReLU(),
-            nn.Linear(256, 2)    # hidden_dim → num_classes (binary: 0 or 1)
+            nn.Linear(64, self.task_embedding_dim)
         )
-        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=1e-3)
-        self.loss_fn = nn.CrossEntropyLoss()
+        
+        # Deferred initialization config
+        deferred_config = self.learning_agent_config.get('deferred_init', {})
+        self._config = {
+            'max_network_size': deferred_config.get('max_network_size', 256),
+            'max_task_pool': deferred_config.get('max_task_pool', 50),
+            'max_history': deferred_config.get('max_history', 500)
+        }
 
+        # Meta-controller (self.policy_net) configuration
+        meta_controller_config = self.learning_agent_config.get('meta_controller', {})
+        self.task_embedding_dim = meta_controller_config.get('task_embedding_dim', 256) # Dimension of task/state embeddings
+        
+        self.agent_strategies_map = {
+            'dqn': 0,
+            'maml': 1,
+            'rsi': 2,
+            'rl': 3
+        }
+        self.num_agent_strategies = len(self.agent_strategies_map)
+
+        # policy_net in LearningAgent is for meta-control: predicting best agent strategy
+        self.policy_net = nn.Sequential(
+            nn.Linear(self.task_embedding_dim, meta_controller_config.get('hidden_dim', 128)),
+            nn.ReLU(),
+            nn.Linear(meta_controller_config.get('hidden_dim', 128), self.num_agent_strategies) # Outputs logits for each strategy
+        )
+        self.optimizer = torch.optim.Adam(
+            self.policy_net.parameters(),
+            lr=meta_controller_config.get('learning_rate', 1e-3)
+        )
+        self.loss_fn = nn.CrossEntropyLoss()    
         self.performance_metrics = {}
 
         # Initialize Learning Factory
         self.learning_factory = LearningFactory(
             env=self.env,
-            performance_metrics=self.performance_metrics,
-            config=self.config.get('evolutionary', {})
+            performance_metrics=self.performance_metrics
         )
+        self.state_processor = StateProcessor(env)
+        self.multi_task_learner = MultiTaskLearner(task_ids=self.task_ids)
 
         self.observation_count = 0
 
-        logger.info(f"Learning Agent has succesfully initialized")
+        logger.info(f"Learning Agent has succesfully initialized with meta-controller for {self.num_agent_strategies} strategies.")
+        logger.info(f"Meta-controller input (task embedding) dimension: {self.task_embedding_dim}")
 
     @property
     def performance_metrics(self):
@@ -160,8 +177,7 @@ class LearningAgent(BaseAgent):
         # Initialize learning subsystems
         self._initialize_agents(
             env=self.env,
-            performance_metrics=self.performance_metrics,
-            shared_memory=self.shared_memory
+            performance_metrics=self.performance_metrics
         )
         if self.env is None or not hasattr(self.env, 'observation_space') or not hasattr(self.env, 'action_space'):
             raise ValueError("LearningAgent requires a valid environment with observation_space and action_space.")
@@ -182,20 +198,17 @@ class LearningAgent(BaseAgent):
             'maml': MAMLAgent(
                     state_size=state_size,
                     action_size=action_size,
-                    agent_id="maml_agent",
-                    config=load_config(LOCAL_CONFIG_PATH)
+                    agent_id="maml_agent"
                 ),
             'rsi': RSIAgent(
                     state_size=state_size,
                     action_size=action_size,
-                    agent_id="rsi_agent",
-                    config=load_config(LOCAL_CONFIG_PATH)
+                    agent_id="rsi_agent"
                 ),
             'rl': RLAgent(
                     possible_actions=list(range(action_dim)),
                     state_size=state_size,
-                    agent_id="rl_agent",
-                    config=load_config(LOCAL_CONFIG_PATH)
+                    agent_id="rl_agent"
                 )
         }
 
@@ -237,10 +250,6 @@ class LearningAgent(BaseAgent):
         logger.info(f"[TIME] create executed in {time.time()-start_time:.2f} seconds")
         logger.info(f"[MEMORY] create used {(psutil.Process().memory_info().rss - mem_before)/1024/1024:.2f} MB")
 
-
-    def _init_encoder(self, text_encoder=None):
-        self.text_encoder = text_encoder
-
     def _deferred_initialization(self):
         """Initialize heavy components only when needed"""
         # Lightweight agent shells
@@ -251,10 +260,6 @@ class LearningAgent(BaseAgent):
             'rl': LazyAgent(partial(self._create_rl_agent))
         }
 
-        # Shared components
-        self.memory = BaseAgent.SharedMemoryView(self.shared_memory)
-        self._performance_metrics = LightMetricStore()
-        
         # Configuration with memory limits
         self._config = {
             'max_network_size': 256,  # Hidden units
@@ -267,11 +272,7 @@ class LearningAgent(BaseAgent):
         return DQNAgent(
             state_dim=self.env.observation_space.shape[0],
             action_dim=self.env.action_space.n,
-            config={
-                'hidden_size': min(128, self._config['max_network_size']),
-                'buffer_size': 2000,
-                'batch_size': 32
-            }
+            agent_id="dqn_agent"
         )
 
     def _create_maml_agent(self):
@@ -279,8 +280,7 @@ class LearningAgent(BaseAgent):
         return MAMLAgent(
             state_size=self.env.observation_space.shape[0],
             action_size=self.env.action_space.n,
-            hidden_size=min(64, self._config['max_network_size']),
-            shared_components=self.shared_memory.get('shared_networks')
+            agent_id="maml_agent"
         )
 
     def _create_rsi_agent(self):
@@ -288,97 +288,206 @@ class LearningAgent(BaseAgent):
         return RSIAgent(
             state_size=self.env.observation_space.shape[0],
             action_size=self.env.action_space.n,
-            shared_memory=self.memory,
-            config={'memory_size': 1000}
+            agent_id="rsi_agent"
         )
 
     def _create_rl_agent(self):
         """Create basic RL agent"""
         return RLAgent(
+            state_size=self.env.observation_space.shape[0],
             possible_actions=list(range(self.env.action_space.n)),
-            learning_rate=0.001,
-            discount_factor=0.95
+            agent_id="rl_agent"
         )
 
-    def observe(self, embedding_with_label):
-        """Store live embeddings into buffer."""
-        # Handle None input first
-        if embedding_with_label is None:
-            logger.warning("[observe] Received None as input. Skipping.")
+    def observe(self, task_embedding: torch.Tensor, best_agent_strategy_name: str):
+        """
+        Stores a (task_embedding, best_agent_label) pair for training the meta-controller.
+        Robust validation and logging included.
+
+        Args:
+            task_embedding (torch.Tensor): Processed task representation
+            best_agent_strategy_name (str): Name of best-performing strategy
+        """
+        # Input validation
+        if task_embedding is None or best_agent_strategy_name is None:
+            logger.warning("observe() called with None arguments")
+            return
+            
+        if not isinstance(task_embedding, torch.Tensor):
+            logger.error(f"task_embedding must be Tensor, got {type(task_embedding)}")
+            return
+            
+        if best_agent_strategy_name not in self.agent_strategies_map:
+            valid_strategies = list(self.agent_strategies_map.keys())
+            logger.error(f"Invalid strategy '{best_agent_strategy_name}'. Valid: {valid_strategies}")
             return
 
-        # Process valid input
-        if isinstance(embedding_with_label, np.ndarray):
-            embedding_with_label = torch.tensor(embedding_with_label, dtype=torch.float32)
+        # Create label tensor
+        label = self.agent_strategies_map[best_agent_strategy_name]
+        label_tensor = torch.tensor([label], dtype=torch.long)
         
-        if embedding_with_label.dim() == 2:
-            embedding_with_label = embedding_with_label.squeeze(0)
+        # Store in buffer with cloning to prevent reference issues
+        self.embedding_buffer.append((
+            task_embedding.clone().detach(),
+            label_tensor.clone().detach()
+        ))
         
-        embedding = embedding_with_label[:-1]  # all but last value
-        label = embedding_with_label[-1].long()  # last value as integer label (0 or 1)
-        
-        self.embedding_buffer.append((embedding, label))
-        self.observation_count += 1
-    
+        logger.debug(f"Buffered embedding for strategy: {best_agent_strategy_name} "
+                     f"(Label: {label}, Buffer size: {len(self.embedding_buffer)})")
+
     def train_from_embeddings(self):
-        """Train a small supervised task on buffered embeddings."""
-        if not hasattr(self, 'embedding_buffer') or len(self.embedding_buffer) < 16:
-            return  # Not enough data yet
-    
-        batch = list(self.embedding_buffer)  # Grab batch
-        embeddings = torch.stack([pair[0] for pair in batch])  # extract embeddings
-        labels = torch.tensor([pair[1] for pair in batch], dtype=torch.long)  # extract labels
-    
-        # Move to tensor
-        #inputs = torch.FloatTensor(inputs)
-        inputs = embeddings
-    
-        # Simulate prediction targets
-        targets = torch.randint(0, 2, (inputs.shape[0],))  # Random 0/1 labels
-        targets = targets.long()
-    
-        # Forward pass into the network and loss
-        preds = self.policy_net(embeddings)
-        loss = self.loss_fn(preds, labels)
-    
-        # Backward pass
+        """Train meta-controller using buffered embeddings"""
+        min_batch = self.learning_agent_config.get('meta_controller_batch_size', 32)
+        
+        if len(self.embedding_buffer) < min_batch:
+            logger.info(f"Deferring training: {len(self.embedding_buffer)}/{min_batch} samples")
+            return
+
+        # Prepare batch
+        embeddings, labels = zip(*random.sample(self.embedding_buffer, min_batch))
+        embeddings = torch.stack(embeddings)
+        labels = torch.cat(labels)
+        
+        device = next(self.policy_net.parameters()).device
+        embeddings = embeddings.to(device)
+        labels = labels.to(device)
+        
+        # Training step
+        self.policy_net.train()
         self.optimizer.zero_grad()
+        
+        # Forward pass
+        logits = self.policy_net(embeddings)
+        
+        # Loss calculation
+        loss = self.loss_fn(logits, labels)
+        
+        # Backpropagation
         loss.backward()
         self.optimizer.step()
-    
-        logger.info(f"[LearningAgent] Trained on {len(batch)} embeddings. Loss: {loss.item():.4f}")
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)  # Prevent explosions
+        
+        # Logging
+        logger.info(f"Meta-controller training | Loss: {loss.item():.4f} | "
+                    f"Accuracy: {self._calculate_accuracy(logits, labels):.2%}")
+        
+        # Clear buffer after successful training
         self.embedding_buffer.clear()
 
-    def perform_task(self, task_data: Union[str, Dict]) -> Dict:
-        """Handle interaction data for learning."""
-        if isinstance(task_data, dict) and "interaction_data" in task_data:
-            interaction_data = task_data["interaction_data"]
-            # Store interaction in memory or shared memory
-            if hasattr(self, 'memory') and hasattr(self.memory, 'push'):
-                self.memory.push(interaction_data)
-                return {"status": "interaction_logged"}
-            else:
-                timestamp = interaction_data.get('timestamp', time.time())
-                self.shared_memory[f"la_interaction_log_{timestamp}"] = interaction_data
-                return {"status": "logged_to_shared_memory"}
-        else:
-            logger.error("Unsupported task format for LearningAgent")
-            return {"status": "failed", "error": "Unsupported task format"}
+    def _calculate_accuracy(self, logits, labels):
+        """Calculate prediction accuracy"""
+        preds = torch.argmax(logits, dim=1)
+        return (preds == labels).float().mean().item()
 
+    def _generate_task_embedding(self, state):
+        """Convert state to task embedding"""
+        state_tensor = state.detach().clone() if torch.is_tensor(state) else torch.tensor(state, dtype=torch.float32)
+        return self.state_embedder(state_tensor)
+ 
+    def _generate_task_embedding_and_label(self, task_env, episode_results: Dict[str, float]):
+        """
+        Generate task embedding and best strategy label from environment and results.
+        Uses multi-source feature extraction.
+        """
+        # Validate inputs
+        if not episode_results:
+            logger.warning("No episode results for embedding generation")
+            return None
+            
+        # Feature extraction
+        features = []
+        
+        # 1. Environment structural features
+        if hasattr(task_env, 'observation_space'):
+            obs_shape = task_env.observation_space.shape
+            features.append(obs_shape[0] if obs_shape else 0)
+            
+        if hasattr(task_env, 'action_space'):
+            features.append(task_env.action_space.n)
+            
+        # 2. Performance characteristics
+        perf_features = [
+            np.mean(list(episode_results.values())),  # Avg performance
+            np.std(list(episode_results.values())),   # Performance variance
+            len(episode_results)                     # Number of strategies
+        ]
+        features.extend(perf_features)
+        
+        # 3. Environment-specific parameters (if available)
+        for param in ['gravity', 'friction_coeff', 'wind_strength']:
+            if hasattr(task_env, param):
+                features.append(getattr(task_env, param))
+                
+        # 4. Initial state characteristics
+        try:
+            initial_state, _ = task_env.reset()
+            processed_state = self.state_processor.process(initial_state)
+            features.extend(processed_state[:5])  # Use first 5 elements
+        except Exception as e:
+            logger.warning(f"State processing failed: {str(e)}")
+            
+        # Padding/truncation
+        features = features[:self.task_embedding_dim]
+        if len(features) < self.task_embedding_dim:
+            features += [0.0] * (self.task_embedding_dim - len(features))
+            
+        # Convert to tensor
+        task_embedding = torch.tensor(features, dtype=torch.float32)
+        
+        # Determine best strategy
+        best_strategy = max(episode_results, key=episode_results.get)
+        
+        logger.debug(f"Generated embedding | Dim: {len(features)} | "
+                     f"Best: {best_strategy} | Score: {episode_results[best_strategy]:.2f}")
+        
+        return task_embedding, best_strategy
+
+    def select_agent_strategy_with_meta_controller(self, current_task_env_or_state_embedding):
+        """
+        Select agent strategy using meta-controller. Handles both environments
+        and precomputed embeddings.
+        """
+        # Process input type
+        if isinstance(current_task_env_or_state_embedding, torch.Tensor):
+            embedding = current_task_env_or_state_embedding
+        else:
+            embedding, _ = self._generate_task_embedding_and_label(
+                current_task_env_or_state_embedding, 
+                self.performance_metrics
+            )
+            if embedding is None:
+                logger.warning("Falling back to random strategy selection")
+                return random.choice(list(self.agent_strategies_map.keys()))
+        
+        # Add batch dimension if needed
+        if embedding.dim() == 1:
+            embedding = embedding.unsqueeze(0)
+            
+        # Move to appropriate device
+        device = next(self.policy_net.parameters()).device
+        embedding = embedding.to(device)
+        
+        # Prediction
+        self.policy_net.eval()
+        with torch.no_grad():
+            logits = self.policy_net(embedding)
+            strategy_idx = torch.argmax(logits, dim=1).item()
+            
+        # Map to strategy name
+        inverse_map = {v: k for k, v in self.agent_strategies_map.items()}
+        strategy_name = inverse_map.get(strategy_idx, 'dqn')  # Default to DQN
+        
+        logger.info(f"Meta-controller selected: {strategy_name} "
+                    f"(Confidence: {torch.softmax(logits, dim=1)[0, strategy_idx].item():.2%})")
+        
+        return strategy_name
+
+    # Remove update_from_embeddings since it's redundant
     def update_from_embeddings(self, inputs, targets):
-        """Train directly from embeddings without full transition tuples."""
-        if inputs.shape[0] == 0:
-            return 0.0
-    
-        preds = self.policy_net.forward(inputs)
-        loss = np.mean((preds - targets)**2)  # Simple MSE
-    
-        self.policy_net.backward(inputs, targets, learning_rate=self.lr)
-    
-        return loss
+        logger.warning("Deprecated method called. Use train_from_embeddings instead.")
+        return 0.0
 
     def _create_task_variation(self):
-        import copy
         """Enhanced environment variation generator for MAML"""
         try:
             env_variant = copy.deepcopy(self.env)
@@ -413,99 +522,213 @@ class LearningAgent(BaseAgent):
             return self.env  # Fallback to base env
 
     def _calculate_reward(self, state, action, next_state, base_reward):
-        """Enhanced reward calculation with multi-faceted components"""
-        # 1. Safety Penalty (Action Validation)
-        safety_penalty = 2.0 if self.safety_agent.is_unsafe(action) else 0.0
-        
-        # 2. Compliance Monitoring (From LearningMemory)
-        memory_metrics = self.memory.get('compliance_metrics', {})
-        ethical_compliance = memory_metrics.get('ethical_score', 1.0)
-        regulatory_compliance = memory_metrics.get('regulatory_score', 1.0)
-        compliance_penalty = 1.0 - (0.7*ethical_compliance + 0.3*regulatory_compliance)
-        
-        # 3. Curiosity Bonus with Adaptive Scaling
-        curiosity_bonus = self._calculate_novelty_bonus(state)
-        adaptive_curiosity = curiosity_bonus * self._curiosity_scaling_factor()
-        
-        # 4. Behavioral Consistency Bonus
-        consistency_bonus = self._calculate_consistency(state, action)
-        
-        # 5. Energy Efficiency Penalty
-        efficiency_penalty = self._calculate_energy_cost(action)
-        
-        total_reward = (
-            base_reward
-            - safety_penalty
-            - compliance_penalty
-            + adaptive_curiosity
-            + consistency_bonus
-            - efficiency_penalty
-        )
-        
-        # Store reward components for analysis
-        self.memory.set('reward_components', {
-            'timestamp': time.time(),
-            'base': base_reward,
-            'safety_penalty': -safety_penalty,
-            'compliance_penalty': -compliance_penalty,
-            'curiosity': adaptive_curiosity,
-            'consistency': consistency_bonus,
-            'efficiency': -efficiency_penalty
-        })
-        
-        return np.clip(total_reward, -1.0, 5.0)
-    
-    def _calculate_novelty_bonus(self, state):
-        """Multi-factor novelty detection combining:
-        1. State frequency
-        2. Temporal recency
-        3. Embedding cluster density
-        4. Prediction uncertainty
         """
-        # State fingerprint generation
-        state_hash = self._generate_state_fingerprint(state)
+        Enhanced reward calculation with multi-faceted components:
+        1. Base environment reward
+        2. Novelty bonus for unexplored states
+        3. Consistency bonus for predictable behavior
+        4. Energy cost penalty for computational expense
+        5. Curiosity-driven intrinsic motivation
+        """
+        # 1. Base environment reward
+        total_reward = base_reward
         
-        # 1. Frequency-based novelty
-        frequency = self.memory.metrics().get('state_frequency', {}).get(state_hash, 0)
-        freq_novelty = 1 / (1 + frequency)
+        # 2. Novelty bonus
+        novelty_bonus = self._calculate_novelty_bonus(next_state)
+        total_reward = base_reward
+        total_reward += novelty_bonus * self._curiosity_scaling_factor()
+        next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+
+
+        # 3. Consistency bonus
+        consistency_bonus = self._calculate_consistency(state, action)
+        total_reward += consistency_bonus
         
-        # 2. Temporal recency (hours since last seen)
-        last_seen = self.memory.get(f'last_seen:{state_hash}', 0)
-        recency_novelty = 1 / (1 + (time.time() - last_seen)/3600)
+        # 4. Energy cost penalty
+        energy_cost = self._calculate_energy_cost(action)
+        total_reward -= energy_cost
         
-        # 3. Embedding cluster density
-        if len(self.embedding_buffer) > 10:
-            state_embedding = self.text_encoder.encode(state)
-            similarities = [torch.cosine_similarity(state_embedding, e[0], dim=0) 
-                           for e in self.embedding_buffer]
-            cluster_density = torch.mean(torch.stack(similarities))
-            density_novelty = 1 - cluster_density.item()
+        # 5. Curiosity-driven intrinsic motivation
+        if hasattr(self, 'curiosity_module'):
+            intrinsic_reward = self.learning_factory.compute_intrinsic_reward(state, action, next_state)
+            total_reward += intrinsic_reward
+            
+        return total_reward
+
+    def _calculate_novelty_bonus(self, state: np.ndarray) -> float:
+        """
+        Calculate multi-factor novelty bonus for less explored states.
+        
+        Args:
+            state: Current state vector
+            
+        Returns:
+            Novelty bonus value [0.0 - 1.0]
+        """
+        # Initialize novelty tracking
+        if not hasattr(self, 'state_visitation'):
+            self.state_visitation = defaultdict(int)
+            self.state_recency = deque(maxlen=1000)
+            self.state_clusters = defaultdict(int)
+            self.state_recency_map = {}
+        
+        # 1. Generate state fingerprint
+        state_fingerprint = self._generate_state_fingerprint(state)
+        
+        # 2. Frequency-based novelty
+        visit_count = self.state_visitation[state_fingerprint] + 1
+        frequency_novelty = 1.0 / math.sqrt(visit_count)
+        
+        # 3. Temporal recency (hours since last seen)
+        current_time = time.time()
+        last_seen = self.state_recency_map.get(state_fingerprint, 0)
+        temporal_novelty = 0.0
+        if last_seen > 0:
+            hours_since_seen = (current_time - last_seen) / 3600
+            temporal_novelty = min(1.0, 0.5 / (1 + math.exp(-hours_since_seen/12)))
+        
+        # 4. Embedding cluster density
+        if hasattr(self, 'state_encoder'):
+            state_embedding = self.state_encoder(state)
+            cluster_id = self._assign_to_cluster(state_embedding)
+            cluster_density = self.state_clusters[cluster_id]
+            density_novelty = 1.0 - math.tanh(cluster_density / 50)
         else:
-            density_novelty = 1.0
+            density_novelty = 0.5
         
-        # 4. Prediction uncertainty
-        with torch.no_grad():
-            preds = self.policy_net(state_embedding.unsqueeze(0))
-            uncertainty = 1 - torch.max(torch.softmax(preds, dim=1)).item()
+        # 5. Prediction uncertainty
+        if hasattr(self, 'dynamics_model'):
+            with torch.no_grad():
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                pred_variance = self.dynamics_model.forward_variance(state_tensor).item()
+                uncertainty_novelty = min(1.0, pred_variance * 5)
+        else:
+            uncertainty_novelty = 0.3
         
         # Combine factors with adaptive weights
-        weights = torch.softmax(torch.tensor([
-            self.memory.get('novelty_weight_freq', 1.0),
-            self.memory.get('novelty_weight_recency', 0.8),
-            self.memory.get('novelty_weight_density', 1.2),
-            self.memory.get('novelty_weight_uncertainty', 0.9)
-        ]), dim=0)
+        weights = np.array([0.4, 0.2, 0.2, 0.2])  # Frequency, Temporal, Density, Uncertainty
+        novelty_score = np.dot(weights, [frequency_novelty, temporal_novelty, density_novelty, uncertainty_novelty])
         
-        novelty_score = (
-            weights[0] * freq_novelty +
-            weights[1] * recency_novelty +
-            weights[2] * density_novelty +
-            weights[3] * uncertainty
-        )
+        # Update state tracking
+        self.state_visitation[state_fingerprint] = visit_count
+        self.state_recency.append(state_fingerprint)
+        self.state_recency_map[state_fingerprint] = current_time
         
         # Dynamic normalization
-        max_novelty = self.memory.get('max_novelty', 4.0)
-        return np.clip(novelty_score / max_novelty, 0.0, 1.0)
+        max_novelty = max(1.0, np.max(list(self.state_visitation.values())) / 10)
+        return np.clip(novelty_score / max_novelty, 0.0, 1.0) * self._curiosity_scaling_factor()
+    
+    def _calculate_consistency(self, state, action):
+        """
+        Reward for consistent behavior in similar states:
+        1. Action consistency in similar states
+        2. Temporal consistency in state transitions
+        """
+        # 1. Action consistency in similar states
+        state_embedding = self._process_state(state)
+        similar_states = self.learning_factory.get_similar_states(state_embedding, k=5)
+        
+        if not similar_states:
+            return 0.0
+            
+        similar_actions = [self.action_memory[s] for s in similar_states]
+        action_consistency = 1.0 if action in similar_actions else -0.2
+        
+        # 2. Temporal consistency
+        temporal_consistency = 0.0
+        if len(self.state_history) >= 2:
+            prev_state = self.state_history[-2]
+            prev_action = self.action_history[-2]
+            transition_prob = self.transition_model.get_probability(prev_state, prev_action, state)
+            temporal_consistency = min(1.0, transition_prob * 2)  # Scale probability to [0, 1]
+        
+        return 0.6 * action_consistency + 0.4 * temporal_consistency
+
+    def _calculate_energy_cost(self, action):
+        """
+        Penalty for computationally expensive actions:
+        1. Model-based action cost
+        2. Memory access cost
+        3. Communication cost
+        """
+        # 1. Model-based action cost
+        if action in self.complex_actions:
+            cost = 0.2  # Higher cost for model-based actions
+        else:
+            cost = 0.05  # Lower cost for simple actions
+            
+        # 2. Memory access cost
+        memory_cost = min(0.1, len(self.learning_factory.state_history) / 100000)
+        
+        # 3. Communication cost (if applicable)
+        comm_cost = 0.0
+        if action in self.communication_actions:
+            comm_cost = 0.15
+            
+        return cost + memory_cost + comm_cost
+
+    @property
+    def complex_actions(self):
+        """
+        Returns a list of action indices considered computationally or behaviorally complex.
+        These typically incur higher energy cost or involve multi-step execution.
+        """
+        return self._config.get("complex_actions", [0, 2, 4])
+    
+    @property
+    def communication_actions(self):
+        """
+        Returns a list of action indices dedicated to inter-agent communication.
+        These may involve signaling, broadcasting, or transmitting information.
+        """
+        return self._config.get("communication_actions", [1, 3, 5])
+
+    def _is_unsafe(self, action: int) -> bool:
+        """
+        Check if an action is unsafe using SafetyGuard.
+        
+        Args:
+            action: Action index to validate
+            
+        Returns:
+            True if action is unsafe, False otherwise
+            
+        Raises:
+            ToxicContentError if action triggers safety violation
+        """
+        # Convert action to semantic representation for safety validation
+        action_description = self.env.action_space.actions[action] if hasattr(self.env.action_space, 'actions') else f"Action_{action}"
+        
+        try:
+            # Initialize SafetyGuard if needed
+            if not hasattr(self, 'safety_guard'):
+                from src.agents.safety.safety_guard import SafetyGuard
+                from src.agents.safety.utils.security_error import ToxicContentError, PrivacyViolationError, PiiLeakageError
+                self.safety_guard = SafetyGuard()
+            
+            # Create safety context
+            context = {
+                "current_state": self._current_state.tolist() if hasattr(self, '_current_state') else [],
+                "action_description": action_description,
+                "episode": self._episode_count,
+                "step": self._step_count
+            }
+            
+            # Validate action through safety guard
+            validation = self.safety_guard.validate_action({
+                'state': context,
+                'proposed_action': action_description,
+                'context': context
+            })
+            
+            return not validation['approved']
+        
+        except (ToxicContentError, PrivacyViolationError, PiiLeakageError) as e:
+            self.logger.error(f"Unsafe action detected: {action} - {str(e)}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Safety check failed: {str(e)}")
+            return False
     
     def _generate_state_fingerprint(self, state):
         """Create unique state identifier for tracking"""
@@ -515,47 +738,37 @@ class LearningAgent(BaseAgent):
     
     def _curiosity_scaling_factor(self):
         """Adaptive scaling based on learning stage"""
-        progress = self.memory.get('training_progress', 0.0)
+        progress = self.shared_memory.get('training_progress', 0.0)
         return 0.3 * (1 + np.sin(progress * np.pi / 0.5))
-    
-    def _calculate_consistency(self, state, action):
-        """Reward for consistent behavior in similar states"""
-        similar_states = self.memory.get(f'similar_to:{self._generate_state_fingerprint(state)}', [])
-        if not similar_states:
-            return 0.0
-        
-        action_counts = defaultdict(int)
-        for s in similar_states:
-            action_counts[s['action']] += 1
-        
-        total = sum(action_counts.values())
-        return action_counts.get(action, 0) / total
-    
-    def _calculate_energy_cost(self, action):
-        """Penalty for computationally expensive actions"""
-        action_complexity = self.memory.get(f'action_complexity:{action}', 1.0)
-        return 0.1 * action_complexity
 
     def _run_rsi_self_improvement(self):
         """Enhanced RSI integration with architectural evolution"""
-        analysis = self.agents["rsi"].execute({
-            "performance_history": self.performance_history,
-            "strategy_weights": self.strategy_weights,
-            "network_metrics": self._get_network_metrics()
-        })
+        # 1. Performance analysis
+        performance_report = self.rsi_agent.analyze_performance(
+            self.performance_history,
+            self.architecture_snapshot
+        )
         
-        # Apply architectural improvements
-        if 'network_architecture' in analysis:
-            new_arch = analysis['network_architecture']
-            self._evolve_network_architecture(new_arch)
-            self.architecture_history.append(new_arch)
-        
-        # Strategy reweighting based on RSI analysis
-        if 'strategy_weights' in analysis:
-            self.strategy_weights = np.clip(
-                analysis['strategy_weights'], 0.1, 0.8
+        # 2. Architecture optimization
+        if performance_report['architecture_update_needed']:
+            new_architecture = self.rsi_agent.propose_architecture(
+                self.architecture_history,
+                performance_report
             )
-            self.logger.info(f"RSI updated strategy weights: {self.strategy_weights}")
+            self._evolve_network_architecture(new_architecture)
+            
+        # 3. Hyperparameter optimization
+        optimized_params = self.rsi_agent.optimize_hyperparameters(
+            self.performance_tracker,
+            self.config
+        )
+        self._update_agent_hyperparameters(optimized_params)
+        
+        # 4. Knowledge distillation
+        self.rsi_agent.distill_knowledge(
+            teacher_agents=self.agents,
+            student_agent=self.rsi_agent
+        )
 
     def _evolve_network_architecture(self, new_arch):
         """Dynamic network architecture modification"""
@@ -643,13 +856,15 @@ class LearningAgent(BaseAgent):
     def _get_training_context(self):
         """Capture training state for error diagnostics"""
         return {
-            'current_strategy': self.active_strategy,
-            'recent_rewards': list(self.performance_history)[-10:],
-            'memory_usage': len(self.memory),
-            'gradient_norms': {
-                agent_id: self._get_gradient_norm(agent)
-                for agent_id, agent in self.agents.items()
-            }
+            'current_state': self.state_history[-1] if self.state_history else None,
+            'last_action': self.action_history[-1] if self.action_history else None,
+            'learning_phase': self.learning_phase,
+            'active_strategy': self.active_strategy,
+            'epsilon': self.agents[self.active_strategy].epsilon if hasattr(self.agents[self.active_strategy], 'epsilon') else None,
+            'learning_rate': self.agents[self.active_strategy].learning_rate if hasattr(self.agents[self.active_strategy], 'learning_rate') else None,
+            'gradient_norm': self._get_gradient_norm(self.agents[self.active_strategy]),
+            'recent_loss': self.performance_metrics['loss'][-10:] if 'loss' in self.performance_metrics else [],
+            'recent_rewards': self.reward_history[-10:]
         }
 
     def _get_gradient_norm(self, agent):
@@ -666,11 +881,22 @@ class LearningAgent(BaseAgent):
 
     def _recover_soft_reset(self):
         """Level 1 Recovery: Reset network weights and clear buffers"""
-        self.logger.warning("Executing soft reset")
+        self.logger.warning("Performing soft reset")
+        # Reset neural network weights
         for agent in self.agents.values():
-            if hasattr(agent, 'reset_parameters'):
-                agent.reset_parameters()
-        self.memory.clear()
+            if hasattr(agent, 'policy_net'):
+                agent.policy_net.reset_parameters()
+                
+        # Clear experience buffers
+        self.state_history.clear()
+        self.action_history.clear()
+        self.reward_history.clear()
+        
+        # Reset exploration parameters
+        for agent_id in self.agents:
+            if hasattr(self.agents[agent_id], 'epsilon'):
+                self.agents[agent_id].epsilon = min(1.0, self.agents[agent_id].epsilon * 1.5)
+                
         return {'status': 'recovered', 'strategy': 'soft_reset'}
 
     def _recover_learning_rate_adjustment(self):
@@ -686,8 +912,8 @@ class LearningAgent(BaseAgent):
         """Level 3 Recovery: Fallback to safe strategy"""
         self.logger.warning("Switching to safe strategy")
         self.active_strategy = 'rl'  # Default to basic RL
-        if self.safety_agent:
-            return self.safety_agent.execute({'task': 'emergency_override'})
+        if self.safety_guard:
+            return self.safety_guard.execute({'task': 'emergency_override'})
         return {'status': 'recovered', 'strategy': 'strategy_switch'}
 
     def _recover_full_reset(self):
@@ -697,11 +923,10 @@ class LearningAgent(BaseAgent):
         return {'status': 'recovered', 'strategy': 'full_reset'}
 
         # Initialize sub-agents
-    def _initialize_agents(self, env, performance_metrics, shared_memory, 
+    def _initialize_agents(self, env, performance_metrics, 
                  mutation_rate=0.1, top_k=2):
         self.env = env
         self.performance = performance_metrics
-        self.shared_memory = shared_memory
         self.mutation_rate = mutation_rate
         self.top_k = top_k
         self.param_bounds = {
@@ -743,28 +968,25 @@ class LearningAgent(BaseAgent):
             return DQNAgent(
                 state_dim=state_size,
                 action_dim=action_size,
-                config=params
+                agent_id=agent_id
             )
         elif agent_id == 'maml':
             return MAMLAgent(
                 state_size=state_size,
                 action_size=action_size,
-                shared_memory=self.shared_memory,
-                **params
+                agent_id=agent_id
             )
         elif agent_id == 'rsi':
             return RSIAgent(
                 state_size=state_size,
                 action_size=action_size,
-                shared_memory=self.shared_memory,
-                config=params
+                agent_id=agent_id
             )
         elif agent_id == 'rl':
             return RLAgent(
                 possible_actions=list(range(action_size)),
-                learning_rate=params.get('learning_rate', 0.001),
-                discount_factor=params.get('discount_factor', 0.99),
-                epsilon=params.get('epsilon', 1.0)
+                state_size=state_size,
+                agent_id=agent_id
             )
         raise ValueError(f"Unknown agent type: {agent_id}")
 
@@ -773,7 +995,7 @@ class LearningAgent(BaseAgent):
         action = super()._select_action(state, agent_type)
 
         # Validate with safety agent
-        validation = self.safety_agent.validate_action({
+        validation = self.safety_guard.validate_action({
             'state': state,
             'proposed_action': action,
             'agent_type': agent_type
@@ -786,33 +1008,7 @@ class LearningAgent(BaseAgent):
         return action
 
     def _process_state(self, raw_state):
-        """
-        Use the SLAILM to process environment state into a semantic feature vector.
-        """
-        if not isinstance(raw_state, str):
-            raise ValueError("Expected raw_state to be a string.")
-    
-        analysis = self.slai_lm.process_input(prompt="Agent observation", text=raw_state)
-    
-        # Basic check on result structure
-        if not isinstance(analysis, dict) or "feature_vector" not in analysis:
-            raise NaNException("SLAILM returned malformed or incomplete feature vector")
-    
-        features = analysis["feature_vector"]
-    
-        if isinstance(features, list):
-            # Convert to tensor
-            features = torch.tensor(features, dtype=torch.float32)
-    
-        # Safety: check for NaNs or explosion
-        if torch.isnan(features).any():
-            raise NaNException("Feature vector contains NaN values.")
-    
-        grad_norm = features.norm().item()
-        if grad_norm > 1e3:  # Customizable explosion threshold
-            raise GradientExplosionError(grad_norm)
-    
-        return features
+        return self.state_processor.process(raw_state)
 
     def _training_error_handler(func):
         """Decorator for error recovery in training methods"""
@@ -834,6 +1030,91 @@ class LearningAgent(BaseAgent):
                     self.consecutive_errors -= 1
         return wrapper
 
+    def train_step(self, state, action, reward, next_state, task_id):
+        """
+        Enhanced training step with gradient management and task-specific loss
+        """
+        if not isinstance(task_id, (str, int, float, tuple)):
+            task_id = "default_task"
+
+        if task_id not in self.multi_task_learner.task_ids:
+            self.multi_task_learner.task_ids.append(task_id)
+            self.multi_task_learner.task_weights[task_id] = 1.0
+
+        # Generate task embedding from state
+        task_embedding = self._generate_task_embedding(state)
+        output = self.policy_net(task_embedding.unsqueeze(0))
+
+        # Convert to tensors
+        state_tensor = state.detach().clone() if torch.is_tensor(state) else torch.tensor(state, dtype=torch.float32)
+        next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
+        reward_tensor = torch.tensor(reward, dtype=torch.float32)
+        
+        # Forward pass
+        self.optimizer.zero_grad()
+        output = self.policy_net(state_tensor.unsqueeze(0))
+        
+        # Compute task-specific loss
+        loss = self._compute_task_loss(output, action, reward_tensor, next_state_tensor, task_id)
+        
+        # Update multitask learner
+        self.multi_task_learner.update_loss(task_id, loss.item())
+        
+        # Apply task weighting
+        weighted_loss = loss * self.multi_task_learner.task_weights[task_id]
+        
+        # Backpropagation with gradient clipping
+        weighted_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
+        self.optimizer.step()
+        
+        # Check for numerical instability
+        if torch.isnan(weighted_loss):
+            logger.error(f"NaN loss detected in task {task_id}")
+            raise NaNException(f"NaN loss in task {task_id}")
+            
+        return weighted_loss.item()
+
+    def _compute_task_loss(self, prediction, action, reward, next_state, task_id):
+        """
+        Enhanced task-specific loss calculation with:
+        - Different loss functions per task type
+        - Temporal difference for RL tasks
+        - Cross-entropy for classification tasks
+        """
+        # Get task metadata
+        task_type = self._get_task_type(task_id)
+        
+        if task_type == "rl":
+            # Temporal Difference loss
+            with torch.no_grad():
+                next_q = self.policy_net(next_state.unsqueeze(0))
+                target = reward + self.agents['dqn'].gamma * torch.max(next_q)
+            current_q = prediction[0, action]
+            return torch.nn.functional.mse_loss(current_q, target)
+            
+        elif task_type == "classification":
+            # Cross-entropy loss
+            target = torch.tensor([action], dtype=torch.long)
+            return torch.nn.functional.cross_entropy(prediction, target)
+            
+        elif task_type == "regression":
+            # MSE loss
+            return torch.nn.functional.mse_loss(prediction.squeeze(), reward)
+            
+        else:  # Default to MSE
+            return torch.nn.functional.mse_loss(prediction.squeeze(), reward)
+
+    def _get_task_type(self, task_id):
+        """Determine task type from configuration or task ID pattern"""
+        # In real implementation, this would come from config
+        if "classify" in task_id:
+            return "classification"
+        elif "regress" in task_id:
+            return "regression"
+        else:
+            return "rl"
+
     @_training_error_handler
     def train_episode(self, agent_type="dqn"):
         """
@@ -844,18 +1125,13 @@ class LearningAgent(BaseAgent):
         """
         state = self._process_state(self.env.reset())
         action = self._select_action(state, agent_type)
-        if not self.safety_agent.validate_action({'action': action})['approved']:
-            action = self.safety_agent.apply_corrections()
-        self.shared_memory.append('learning_experiences', episode_data)
-        external_data = self.shared_memory.get('external_experiences', [])
-        self.memory.extend(external_data)
         state = self.env.reset()
         total_reward = 0
         episode_data = []
         agent = self.agents.get(agent_type)
         if not agent:
             raise ValueError(f"No agent found for type '{agent_type}'")
-        
+
         dqn_loss = agent.train()
         grad_norm = self._get_gradient_norm(agent)
         
@@ -882,11 +1158,12 @@ class LearningAgent(BaseAgent):
         self.performance_history.append(total_reward)
         self.performance_metrics['dqn_loss'].append(dqn_loss)
         self.performance_metrics['maml_grad_norm'].append(grad_norm)
-        self.shared_memory.set('learning_metrics', self.performance_metrics)
-        
         # Update strategy weights
         self._update_strategy_weights(loss)
-        
+
+        # Rebalance after each episode
+        self.multi_task_learner.rebalance()
+
         return total_reward
 
     def _process_feedback(self, state, action, reward):
@@ -1021,20 +1298,53 @@ class LearningAgent(BaseAgent):
 
     def _apply_biologically_constrained_learning(self, gradients):
         """Apply neuromodulated, structure-aware learning rules"""
-        # Dendritic compartmentalization
-        gradients = self._scale_by_dendritic_branches(gradients)
-        
-        # Glial-guided learning
-        gradients = self._apply_glial_modulation(gradients)
-        
-        # STDP-based weight update
-        return self._stdp_weight_update(gradients)
+        if gradients is None:
+            return "No gradients found"
+
+        gradients = self._scale_by_dendritic_branches(gradients)    # Dendritic compartmentalization
+        gradients = self._apply_glial_modulation(gradients)         # Glial-guided learning
+        return self._stdp_weight_update(gradients)                  # STDP-based weight update
 
     def _scale_by_dendritic_branches(self, gradients):
         """Simulate dendritic tree computation through gradient modulation"""
         for param, grad in gradients.items():
             if 'hidden' in param.name:
                 gradients[param] *= self.dendritic_scaling * self.glial_support_factor
+        return gradients
+    
+    def _apply_glial_modulation(self, gradients):
+        """Glial-guided learning through neuromodulation"""
+        # 1. Calculate metabolic support level
+        metabolic_support = self._calculate_metabolic_support()
+        
+        # 2. Apply glial modulation to gradients
+        for param, grad in gradients.items():
+            if 'excitatory' in param.name:
+                gradients[param] *= self.synaptic_strengths['excitatory'] * metabolic_support
+            elif 'inhibitory' in param.name:
+                gradients[param] *= self.synaptic_strengths['inhibitory'] * metabolic_support
+            else:
+                gradients[param] *= self.synaptic_strengths['modulatory'] * metabolic_support
+                
+        return gradients
+
+    def _stdp_weight_update(self, gradients):
+        """Spike-Timing Dependent Plasticity weight update"""
+        # Only apply STDP to excitatory synapses
+        for param, grad in gradients.items():
+            if 'excitatory' in param.name:
+                # Get pre-post spike timing difference from buffer
+                if self.stdp_window:
+                    avg_timing_diff = np.mean([d['timing_diff'] for d in self.stdp_window])
+                    
+                    # Apply STDP rule
+                    if avg_timing_diff > 0:  # Pre-before-post (LTP)
+                        stdp_factor = self.stdp_parameters['A_plus'] * math.exp(-avg_timing_diff/self.stdp_parameters['tau_plus'])
+                    else:  # Post-before-pre (LTD)
+                        stdp_factor = -self.stdp_parameters['A_minus'] * math.exp(avg_timing_diff/self.stdp_parameters['tau_minus'])
+                        
+                    gradients[param] += stdp_factor * param.data
+                    
         return gradients
 
     def _requires_neurogenesis(self, episode_data):
@@ -1099,7 +1409,7 @@ class LearningAgent(BaseAgent):
         """Main learning orchestration loop"""
         if self.concept_drift_detector.analyze():
             self._adjust_learning_strategies()
-            self._replay_historical_data()
+            self.learning_factory._replay_historical_data()
 
     def _adjust_learning_strategies(self):
         """Dynamic strategy reweighting based on concept drift detection"""
@@ -1139,64 +1449,10 @@ class LearningAgent(BaseAgent):
                     1e-5, 0.1
                 )
 
-    def _replay_historical_data(self):
-        """Experience replay with prioritized historical sampling"""
-        # Retrieve historical data from shared memory
-        historical_data = self.shared_memory.get('historical_episodes', [])
-        if not historical_data:
-            return
-
-        # Hybrid replay sampling
-        replay_strategy = 'prioritized' if len(historical_data) > 100 else 'uniform'
-        
-        if replay_strategy == 'prioritized':
-            # Simple temporal prioritization (recent experiences first)
-            replay_data = sorted(historical_data, 
-                            key=lambda x: x['timestamp'], 
-                            reverse=True)[:100]
-        else:
-            replay_data = random.sample(historical_data, 
-                                    min(len(historical_data), 100))
-
-        # Batch replay training
-        for episode in replay_data:
-            # Convert stored data to training format
-            states = episode.get('states', [])
-            actions = episode.get('actions', [])
-            rewards = episode.get('rewards', [])
-            
-            if len(states) < 2:
-                continue
-
-            # Train each agent with historical data
-            for agent_id, agent in self.agents.items():
-                if agent_id == 'dqn' and hasattr(agent, 'store_transition'):
-                    # Convert to DQN's transition format
-                    for i in range(len(states)-1):
-                        agent.store_transition(
-                            states[i], actions[i], rewards[i], 
-                            states[i+1], False
-                        )
-                    if len(agent.memory) > agent.batch_size:
-                        agent.train()
-                        
-                elif agent_id == 'rl' and hasattr(agent, 'learn'):
-                    # Update Q-values directly from historical traces
-                    for i in range(len(states)-1):
-                        current_state = tuple(states[i])
-                        next_state = tuple(states[i+1])
-                        agent.learn(next_state, rewards[i], False)
-
-                # Additional agent-specific replay logic can be added here
-
-        # Clear old memories to prevent overfitting
-        if len(historical_data) > 1000:
-            self.shared_memory.set('historical_episodes', historical_data[-1000:])
-
     def _check_learning_triggers(self):
         """Evaluate activation conditions for learning"""
         return any([
-            self._detect_new_data(),
+            self.learning_factory._detect_new_data(),
             self._check_performance_drop(),
             self._detect_concept_drift(),
             self._check_scheduled_retraining()
@@ -1246,12 +1502,35 @@ class LearningAgent(BaseAgent):
         return 0.0
 
     def _requires_meta_update(self):
-        pass
+        """Check if meta-update should be performed"""
+        # Check based on performance plateau
+        recent_perf = list(self.performance_history)[-10:]
+        if len(recent_perf) < 5:
+            return False
+            
+        plateau_threshold = 0.05  # 5% change considered plateau
+        max_perf, min_perf = max(recent_perf), min(recent_perf)
+        if (max_perf - min_perf) / max_perf < plateau_threshold:
+            return True
+            
+        # Check based on novelty of recent tasks
+        if self.concept_drift_detector.detected_drift():
+            return True
+            
+        # Check scheduled update
+        if self.meta_update_counter >= self.meta_update_interval:
+            return True
+            
+        return False
 
     def _evaluate_strategies(self):
         """Assess all learning strategies using validation tasks"""
-        return {agent_id: agent.evaluate() 
-                for agent_id, agent in self.agents.items()}
+        return {
+            'dqn': self.agents['dqn'].evaluate(self.env),
+            'maml': self.agents['maml'].evaluate(env=self.env),
+            'rsi': self.agents['rsi'].evaluate(self.env),
+            'rl': self.agents['rl'].evaluate(self.env)
+        }
 
     def _apply_ewc_regularization(self):
         """Implement Elastic Weight Consolidation"""
@@ -1270,19 +1549,26 @@ class LearningAgent(BaseAgent):
             agent_type = self._detect_agent_type(agent)
             if agent_type in self.agents:
                 current_score = np.mean(self.performance_metrics[agent_type][-50:] or 0)
-                new_score = agent.evaluate()
+                new_score = agent.evaluate(env)
                 if new_score > current_score:
                     self.agents[agent_type] = agent
                     self.logger.info(f"Upgraded {agent_type} with evolved version")
 
     def _detect_agent_type(self, agent):
         """Determine agent type from instance"""
-        return {
-            DQNAgent: 'dqn',
-            MAMLAgent: 'maml',
-            RSIAgent: 'rsi',
-            RLAgent: 'rl'
-        }.get(type(agent), 'unknown')
+        if isinstance(agent, DQNAgent):
+            return 'dqn'
+        elif isinstance(agent, MAMLAgent):
+            return 'maml'
+        elif isinstance(agent, RSIAgent):
+            return 'rsi'
+        elif isinstance(agent, RLAgent):
+            return 'rl'
+        else:
+            # Check for hybrid agents
+            if hasattr(agent, 'agent_type'):
+                return agent.agent_type
+            return 'unknown'
 
     def _run_rsi_self_improvement(self):
         """RSI optimization cycle"""
@@ -1292,6 +1578,67 @@ class LearningAgent(BaseAgent):
         })
         logger.info(f"RSI optimization result: {analysis}")
 
+    def _adapt_exploration_strategy(self):
+        """
+        Dynamically adjust exploration parameters based on learning progress.
+        
+        Implements:
+        - Epsilon decay based on performance
+        - Curiosity-driven exploration boosting
+        - Uncertainty-guided exploration
+        """
+        # Performance-based exploration adjustment
+        if len(self.performance_history) > 20:
+            recent_perf = np.mean(self.performance_history[-10:])
+            baseline_perf = np.mean(self.performance_history[:10])
+            
+            # Calculate performance improvement ratio
+            improvement_ratio = (recent_perf - baseline_perf) / (abs(baseline_perf) + 1e-6)
+            
+            # Adjust exploration based on improvement
+            if improvement_ratio > 0.1:  # Good improvement
+                decay_factor = 0.95  # Reduce exploration
+            elif improvement_ratio < -0.1:  # Performance degradation
+                decay_factor = 1.05  # Increase exploration
+            else:  # Stable performance
+                decay_factor = 0.99  # Slow decay
+            
+            # Apply to all agents with epsilon
+            for agent in self.agents.values():
+                if hasattr(agent, 'epsilon'):
+                    new_epsilon = agent.epsilon * decay_factor
+                    agent.epsilon = max(0.01, min(1.0, new_epsilon))
+        
+        # Curiosity-driven exploration boost
+        if hasattr(self, 'novelty_threshold'):
+            if len(self.embedding_buffer) > 50:
+                embeddings = [e[0] for e in self.embedding_buffer]
+                avg_novelty = np.mean([self._calculate_novelty_bonus(e) for e in embeddings])
+                
+                if avg_novelty < self.novelty_threshold:
+                    for agent in self.agents.values():
+                        if hasattr(agent, 'epsilon'):
+                            agent.epsilon = min(1.0, agent.epsilon * 1.2)
+        
+        # Uncertainty-guided exploration
+        if hasattr(self, 'uncertainty_threshold') and hasattr(self, 'dynamics_model'):
+            state = self._current_state if hasattr(self, '_current_state') else None
+            if state is not None:
+                with torch.no_grad():
+                    state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+                    uncertainty = self.dynamics_model.forward_variance(state_tensor).item()
+                    
+                if uncertainty > self.uncertainty_threshold:
+                    for agent in self.agents.values():
+                        if hasattr(agent, 'epsilon'):
+                            agent.epsilon = min(1.0, agent.epsilon * 1.3)
+        
+        # Log exploration strategy update
+        epsilons = [agent.epsilon for agent in self.agents.values() if hasattr(agent, 'epsilon')]
+        if epsilons:
+            avg_epsilon = np.mean(epsilons)
+            self.logger.info(f"Exploration strategy updated - Avg epsilon: {avg_epsilon:.3f}")
+
     def _update_strategy_weights(self, rewards):
         strategy_performance = {
             agent_id: np.mean(rewards[agent_id][-10:]) 
@@ -1299,10 +1646,6 @@ class LearningAgent(BaseAgent):
         }
         total = sum(strategy_performance.values())
         self.strategy_weights = np.array([strategy_performance[id]/total for id in self.agents.keys()])
-
-    def _detect_new_data(self):
-        """Check shared memory for new data flags"""
-        return self.shared_memory.get('new_data_flag', False)
 
     def _check_performance_drop(self):
         """Calculate relative performance degradation"""
@@ -1315,14 +1658,138 @@ class LearningAgent(BaseAgent):
         return recent_perf < (self.performance_threshold * max_perf)
 
     def _detect_concept_drift(self):
-        """Statistical test for distribution shifts"""
-        return self.concept_drift_detector.analyze(
-            self.shared_memory.get('data_stream')
-        )
+        """Statistical test for distribution shifts using KL-divergence"""
+        # Get recent state distribution
+        recent_states = self.state_history[-100:]
+        if len(recent_states) < 20:
+            return False
+            
+        # Compare with historical distribution
+        historical_states = self.state_history[-1000:-100]
+        if len(historical_states) < 50:
+            return False
+            
+        # Calculate KL-divergence
+        kl_div = self._calculate_kl_divergence(historical_states, recent_states)
+        return kl_div > self.data_change_threshold
 
     def _check_scheduled_retraining(self):
-        """Time-based retraining trigger"""
-        return datetime.now() > self.last_retraining + self.retraining_interval
+        """Time-based retraining trigger using TaskScheduler
+        
+        Implements intelligent scheduling considering:
+        - Time since last retraining
+        - Current system load
+        - Performance trends
+        - Resource availability
+        """
+        # Initialize scheduler if not already done
+        if not hasattr(self, '_task_scheduler'):
+            from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+            self._task_scheduler = DeadlineAwareScheduler(agent=self)
+        
+        # Create retraining task
+        retraining_task = {
+            'id': 'periodic_retraining',
+            'requirements': ['retraining', 'model_update'],
+            'deadline': time.time() + self.retraining_interval.total_seconds(),
+            'priority': 2,  # Medium priority
+            'metadata': {
+                'last_retraining': self.last_retraining.timestamp(),
+                'performance_trend': self._calculate_performance_trend(),
+                'resource_usage': self._get_current_resource_usage()
+            }
+        }
+        
+        # Create virtual agent representing our retraining capability
+        retraining_agent = {
+            'self_retraining': {
+                'capabilities': ['retraining', 'model_update'],
+                'current_load': self._calculate_learning_load(),
+                'efficiency': self._get_retraining_efficiency(),
+                'successes': len([x for x in self.performance_history if x > 0]),
+                'failures': len([x for x in self.performance_history if x <= 0])
+            }
+        }
+        
+        # Schedule the retraining task
+        schedule = self._task_scheduler.schedule(
+            tasks=[retraining_task],
+            agents=retraining_agent,
+            risk_assessor=self._assess_retraining_risk,
+            state={
+                'tasks': [retraining_task],
+                'dependency_graph': self._get_retraining_dependencies()
+            }
+        )
+        
+        # Check if scheduling approved the retraining now
+        if schedule.get('periodic_retraining', {}).get('start_time', float('inf')) <= time.time():
+            self.last_retraining = datetime.now()
+            return True
+        
+        return False
+    
+    def _calculate_performance_trend(self):
+        """Calculate performance trend over last 100 episodes"""
+        if len(self.performance_history) < 10:
+            return 0.0
+        
+        recent = np.mean(self.performance_history[-10:])
+        baseline = np.mean(self.performance_history[:10])
+        return (recent - baseline) / (abs(baseline) + 1e-6)
+    
+    def _get_current_resource_usage(self):
+        """Get current system resource usage"""
+        return {
+            'cpu': psutil.cpu_percent(),
+            'memory': psutil.virtual_memory().percent,
+            'gpu': self._get_gpu_usage() if torch.cuda.is_available() else 0.0
+        }
+    
+    def _calculate_learning_load(self):
+        """Calculate current learning system load (0-1 scale)"""
+        active_processes = sum(1 for _ in self.agents.values() if hasattr(_, 'is_training') and _.is_training)
+        max_concurrent = self.learning_agent_config.get('max_concurrent_training', 3)
+        return min(1.0, active_processes / max_concurrent)
+    
+    def _get_retraining_efficiency(self):
+        """Calculate retraining efficiency based on historical performance"""
+        if not hasattr(self, '_retraining_history'):
+            return 1.0
+        
+        improvements = []
+        for i in range(1, len(self._retraining_history)):
+            prev = self._retraining_history[i-1]['performance']
+            curr = self._retraining_history[i]['performance']
+            improvements.append((curr - prev) / (abs(prev) + 1e-6))
+        
+        return np.mean(improvements) if improvements else 1.0
+    
+    def _assess_retraining_risk(self, task):
+        """Risk assessment for retraining task"""
+        volatility = np.std(list(self.performance_history)[-50:] or [0])
+        stability_score = 1.0 / (volatility + 1e-6)
+        
+        return {
+            'risk_score': min(1.0, 0.7 - 0.5 * stability_score),
+            'recommendations': [
+                'reduce_batch_size' if volatility > 0.5 else 'proceed',
+                'warm_start' if len(self.performance_history) > 100 else 'cold_start'
+            ]
+        }
+    
+    def _get_retraining_dependencies(self):
+        """Get dependencies for retraining tasks"""
+        deps = defaultdict(list)
+        
+        # Add dependencies based on current learning state
+        if hasattr(self, 'active_strategy'):
+            deps['strategy_selection'] = ['periodic_retraining']
+        
+        if len(self.performance_history) > 50:
+            deps['performance_analysis'] = ['periodic_retraining']
+        
+        return deps
 
     # Core Learning Components
     def _run_meta_learning_phase(self):
@@ -1333,7 +1800,55 @@ class LearningAgent(BaseAgent):
 
     def _generate_meta_tasks(self):
         """Create task variations for meta-learning"""
-        return [self._create_task_variation() for _ in range(3)]
+        tasks = []
+        
+        # 1. Physics-based variations
+        for _ in range(2):
+            env_variant = self.env._create_physics_variation()
+            tasks.append((env_variant, {'variation_type': 'physics'}))
+            
+        # 2. Reward-shaping variations
+        for _ in range(2):
+            env_variant = self._create_reward_variation()
+            tasks.append((env_variant, {'variation_type': 'reward'}))
+            
+        # 3. Observation variations
+        tasks.append((self._add_observation_noise(), {'variation_type': 'sensory'}))
+        
+        # 4. Adversarial perturbations
+        tasks.append((self._add_adversarial_perturbation(), {'variation_type': 'adversarial'}))
+        
+        return tasks
+
+    def _create_reward_variation(self):
+        """Create reward-shaping variation"""
+        env_variant = copy.deepcopy(self.env)
+        if hasattr(env_variant.unwrapped, 'reward_weights'):
+            original_weights = env_variant.unwrapped.reward_weights
+            new_weights = {k: v * np.random.uniform(0.5, 1.5) for k, v in original_weights.items()}
+            env_variant.unwrapped.reward_weights = new_weights
+        return env_variant
+
+    def _add_adversarial_perturbation(self):
+        """Add adversarial perturbations to observations"""
+        class AdversarialWrapper(gym.Wrapper):
+            def __init__(self, env, perturbation_strength=0.1):
+                super().__init__(env)
+                self.perturbation_strength = perturbation_strength
+                
+            def step(self, action):
+                obs, reward, done, truncated, info = self.env.step(action)
+                # Add perturbation in the direction that minimizes Q-value
+                with torch.no_grad():
+                    obs_tensor = torch.tensor(obs, dtype=torch.float32)
+                    obs_tensor.requires_grad = True
+                    q_values = self.agent.policy_net(obs_tensor.unsqueeze(0))
+                    target_q = torch.min(q_values)
+                    target_q.backward()
+                    perturbation = self.perturbation_strength * torch.sign(obs_tensor.grad)
+                return (obs + perturbation.numpy(), reward, done, truncated, info)
+                
+        return AdversarialWrapper(self.env)
 
     def _create_task_variation(self):
         import copy
@@ -1391,12 +1906,12 @@ class LearningAgent(BaseAgent):
                 'mass': getattr(env_variant.unwrapped, 'mass', None),
                 'reward_weights': reward_weights
             }
-            self.logger.info(f"Created task variant with params: {params}")
+            logger.info(f"Created task variant with params: {params}")
             
             return env_variant
             
         except Exception as e:
-            self.logger.warning(f"Task variation failed: {str(e)}")
+            logger.warning(f"Task variation failed: {str(e)}")
             # Fallback: Add observation noise to original environment
             return self._add_observation_noise()
 
@@ -1532,20 +2047,14 @@ class ConceptDriftDetector:
         
         return 0.5 * (trace_term + quad_form - n + logdet_term)
 
-class safety_agent: 
-    def is_unsafe(self, action):
-        pass
-
 __all__ = ['LearningAgent', 'SLAIEnv']
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Learning Agent ===\n")
-    import gymnasium as gym
-
     shared_memory = {}
     agent_factory = lambda: None
-    env = gym.make("CartPole-v1")
+    env = SLAIEnv(state_dim=4, action_dim=2, max_steps=500)
 
     agent = LearningAgent(shared_memory, agent_factory, env=env, config=None)
 
@@ -1553,19 +2062,37 @@ if __name__ == "__main__":
 
     print("\n* * * * * Phase 2 * * * * *\n")
     embedding_with_label=None
-    observe = agent.observe(embedding_with_label)
+    best_agent_strategy_name=[]
+    observe = agent.observe(embedding_with_label, best_agent_strategy_name)
     print(f"\n{observe}")
 
     print("\n* * * * * Phase 3 * * * * *\n")
-    task = agent._create_task_variation()
-    print(f"\n{task}")
-
-    print("\n* * * * * Phase 4 * * * * *\n")
-    state = env.reset()
+    task_ids = ['default_task']
+    reward = 0.0
+    gradients = None
+    state, _ = env.reset()
     action = env.action_space.sample()
     next_state, base_reward, terminated, truncated, info = env.step(action)
+
+    processed_state = agent._process_state(state)
+    processed_next_state = agent._process_state(next_state)
+ 
+    task = agent._create_task_variation()
+    # train = agent.train_step(processed_state, action, reward, processed_next_state, task_id)
+    dummy_embedding = torch.randn(256)
+    train = agent.train_step(dummy_embedding, action, reward, dummy_embedding, task_id=task_ids)
+    
+    print(f"\nCreated task variation: {task}")
+    print(train)
+    print(agent._apply_biologically_constrained_learning(gradients))
+
+    print("\n* * * * * Phase 4 * * * * *\n")
     done = terminated or truncated
     calculate = agent._calculate_reward(state, action, next_state, base_reward)
+    print(agent._check_scheduled_retraining())
     print(f"Calculated reward: \n{calculate}")
 
+    print("\n* * * * * Phase 5 * * * * *\n")
+
+    print(agent._execute_continual_learning())
     print("\n=== Successfully Ran Learning Agent ===\n")
