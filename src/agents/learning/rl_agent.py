@@ -129,9 +129,16 @@ class RLAgent:
 
         logger.info("Recursive Learning has successfully initialized")
 
-    def _get_q_value(self, state: Tuple[Any], action: Any) -> float:
-        """Get Q-value with optimistic initialization"""
-        return self.q_table.get((state, action), 1.0)  # Optimistic initial values
+    def _get_q_value(self, state: Union[np.ndarray, list, tuple, torch.Tensor], action: Any) -> float:
+        # Convert state to hashable tuple format
+        if isinstance(state, (np.ndarray, torch.Tensor)):
+            state = tuple(state.tolist())
+        elif isinstance(state, list):
+            state = tuple(state)
+        elif not isinstance(state, tuple):
+            state = (state,)
+        
+        return self.q_table.get((state, action), 1.0)
 
     def _update_eligibility(self, state: Tuple[Any], action: Any) -> None:
         """Update eligibility traces using accumulating traces"""
@@ -143,83 +150,23 @@ class RLAgent:
         for key in self.eligibility_traces:
             self.eligibility_traces[key] *= self.discount_factor * self.trace_decay
 
-    def _process_state(self, raw_state):
-        """Apply state processing and feature engineering"""
-        state_processor_config = self.rl_engine_config.get('state_processor', {})
-        if state_processor_config.get('feature_engineering', False):
-            return tuple(self.state_processor.extract_features(raw_state))
-        return self.state_processor.discretize(raw_state)
+    def select_action(self, processed_state):
+        return self._epsilon_greedy(processed_state)
 
-    def choose_action(self, state):
-        """Enhanced action selection using configured strategy"""
-        processed_state = self._process_state(state)
+    def _epsilon_greedy(self, processed_state) -> Any:
+        if isinstance(processed_state, (np.ndarray, list)):
+            processed_state = tuple(processed_state.tolist() if isinstance(processed_state, np.ndarray) else tuple(processed_state))
         
-        exploration_config = self.rl_engine_config.get('exploration_strategies', {})
-        strategy = exploration_config.get('strategy', 'epsilon_greedy')
-        
-        if strategy == "ucb":
-            return self.exploration.ucb(
-                state_action_counts=self.state_action_counts,
-                current_state=processed_state
-            )
-        elif strategy == "boltzmann":
-            # Convert to numpy array for vector operations
-            q_values = np.array([self._get_q_value(processed_state, a) 
-                       for a in self.possible_actions])
-            return self.exploration.boltzmann(q_values)
-        else:  # Fallback to epsilon-greedy
-            return self._epsilon_greedy(processed_state)
-
-    def _epsilon_greedy(self, processed_state: Tuple[Any]) -> Any:
-        """
-        Selects an action using the epsilon-greedy exploration strategy.
-        
-        With probability epsilon, chooses a random action (exploration).
-        Otherwise, chooses the best known action for the state (exploitation).
-        Handles ties by randomly selecting among actions with the maximum Q-value.
-        
-        Mathematical Formulation:
-            action = {
-                random choice from possible_actions,       if rand < epsilon
-                argmax_a Q(state, a),                     otherwise
-            }
-        
-        Where:
-            epsilon = exploration probability (0 ≤ epsilon ≤ 1)
-            Q(state, a) = estimated value of taking action 'a' in 'state'
-        
-        Args:
-            processed_state: The current state after processing and discretization
-            
-        Returns:
-            Selected action
-        """
-        # Exploration: choose random action with probability epsilon
         if random.random() < self.epsilon:
-            action = random.choice(self.possible_actions)
-            logger.debug(f"Exploring: random action {action}")
-            return action
+            return random.choice(self.possible_actions)
         
-        # Exploitation: choose best known action
-        # Calculate Q-values for all possible actions in current state
         q_values = {}
         for action in self.possible_actions:
             q_values[action] = self._get_q_value(processed_state, action)
         
-        # Find maximum Q-value
         max_q = max(q_values.values())
-        
-        # Collect all actions with this maximum value (handle ties)
         best_actions = [a for a, q in q_values.items() if q == max_q]
-        
-        # Randomly select among best actions
-        action = random.choice(best_actions)
-        
-        logger.debug(
-            f"Exploiting: best action {action} with Q-value {max_q:.4f} "
-            f"(tie broken among {len(best_actions)} candidates)"
-        )
-        return action
+        return random.choice(best_actions)
 
     def learn(self, next_state: Tuple[Any], reward: float, done: bool) -> None:
         """
@@ -230,7 +177,7 @@ class RLAgent:
         - Terminal state handling
         - Batch updates from experience
         """
-        processed_state = self._process_state(self.state_history[-1])
+        processed_state = self.state_history[-1]
         processed_next_state = self._process_state(next_state)
         action = self.action_history[-1]
 
@@ -257,12 +204,131 @@ class RLAgent:
             updates.append((state, action, self.learning_rate * td_error * trace))
         return updates
 
-    def step(self, state: Tuple[Any]) -> Any:
+    def step(self, state: Any) -> Any:
         """Record state and choose action"""
-        action = self.choose_action(state)
-        self.state_history.append(state)
+        processed_state = self._process_state(state)
+        action = self.select_action(processed_state)
+        # Store processed state (already in tuple form)
+        self.state_history.append(processed_state)
         self.action_history.append(action)
         return action
+
+    def _process_state(self, raw_state: Any) -> Tuple[Any, ...]:
+        """Convert raw state into hashable tuple format"""
+        if isinstance(raw_state, (np.ndarray, torch.Tensor)):
+            return tuple(raw_state.tolist())
+        elif isinstance(raw_state, list):
+            return tuple(raw_state)
+        elif not isinstance(raw_state, tuple):
+            return (raw_state,)
+        return raw_state
+
+    def evaluate(self, env, episodes=20, exploration_rate=0.05, visualize=False):
+        """
+        Comprehensive tabular RL evaluation with state coverage analysis
+        Args:
+            env: Environment to evaluate in
+            episodes: Number of evaluation episodes
+            exploration_rate: Minimal exploration rate during evaluation
+            visualize: Whether to render environment during evaluation
+        
+        Returns:
+            Dict containing evaluation metrics
+        """
+        logger.info(f"Evaluating RL Agent {self.agent_id} over {episodes} episodes")
+        
+        # Performance tracking
+        total_rewards = []
+        episode_lengths = []
+        visited_states = set()
+        action_distribution = {a: 0 for a in self.possible_actions}
+        state_action_coverage = defaultdict(lambda: defaultdict(int))
+        
+        # Store original epsilon for restoration
+        original_epsilon = self.epsilon
+        self.epsilon = exploration_rate
+        
+        for ep in range(episodes):
+            state, _ = env.reset()
+            done = False
+            episode_reward = 0
+            steps = 0
+            
+            while not done:
+                if visualize:
+                    env.render()
+                    
+                action = self.select_action(state)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                
+                # Track state coverage
+                processed_state = self._process_state(state)
+                visited_states.add(processed_state)
+                action_distribution[action] += 1
+                state_action_coverage[processed_state][action] += 1
+                
+                # Update trackers
+                episode_reward += reward
+                steps += 1
+                state = next_state
+    
+            total_rewards.append(episode_reward)
+            episode_lengths.append(steps)
+            logger.debug(f"Episode {ep+1}: Reward={episode_reward:.1f}, Steps={steps}")
+    
+        # Restore original exploration rate
+        self.epsilon = original_epsilon
+        
+        # Calculate metrics
+        avg_reward = np.mean(total_rewards)
+        std_reward = np.std(total_rewards)
+        try:
+            threshold = env.spec.reward_threshold
+        except AttributeError:
+            # Use 90% of max possible reward if threshold unavailable
+            threshold = np.max(total_rewards) * 0.9 if total_rewards else 0
+        success_rate = (np.array(total_rewards) >= threshold).mean()
+        avg_length = np.mean(episode_lengths)
+        
+        # State coverage analysis
+        total_states = len(self.q_table)
+        visited_percentage = len(visited_states) / total_states * 100 if total_states > 0 else 0
+        
+        # Policy consistency analysis
+        optimal_actions = 0
+        total_actions = 0
+        for state, actions in state_action_coverage.items():
+            max_action = max(actions, key=actions.get)
+            if state in self.q_table:
+                q_vals = [self._get_q_value(state, a) for a in self.possible_actions]
+                best_action = self.possible_actions[np.argmax(q_vals)]
+                if best_action == max_action:
+                    optimal_actions += sum(actions.values())
+            total_actions += sum(actions.values())
+        policy_consistency = optimal_actions / total_actions * 100 if total_actions > 0 else 0
+        
+        # Action distribution normalization
+        total_actions = sum(action_distribution.values())
+        action_distribution = {k: v/total_actions for k, v in action_distribution.items()}
+        
+        return {
+            'episodes': episodes,
+            'avg_reward': avg_reward,
+            'std_reward': std_reward,
+            'min_reward': min(total_rewards),
+            'max_reward': max(total_rewards),
+            'success_rate': success_rate,
+            'avg_episode_length': avg_length,
+            'state_coverage': len(visited_states),
+            'state_coverage_percentage': visited_percentage,
+            'policy_consistency': policy_consistency,
+            'action_distribution': action_distribution,
+            'q_table_size': total_states,
+            'q_value_range': (min(self.q_table.values()), max(self.q_table.values())) if self.q_table else (0, 0),
+            'exploration_rate': exploration_rate,
+            'detailed_rewards': total_rewards
+        }
 
     def train(self, env, num_tasks=3, episodes_per_task=5):
         """Comprehensive training loop with task-based learning"""
@@ -364,6 +430,9 @@ class AdvancedQLearning(RLAgent):
         super().__init__(*args, **kwargs)
         self.q_table2 = {}  # Second Q-table for double Q-learning
         self.replay_buffer = deque(maxlen=10000)  # Experience replay storage
+
+    def _process_state(self, raw_state: Any) -> Tuple[Any, ...]:
+        return super()._process_state(raw_state)
     
     def _double_q_update(self, state: tuple, action: Any, reward: float, next_state: tuple) -> None:
         """
@@ -716,25 +785,26 @@ class RLEncoder(RLAgent):
 
     def _visual_state_processor(self, raw_state):
         """Process raw pixels using VisionEncoder"""
-        with torch.no_grad() if not (
-            self.vision_encoder.training and any(
-                p.requires_grad for p in self.vision_encoder.parameters())) else torch.enable_grad():
-            state_tensor = torch.tensor(
-                raw_state, dtype=torch.float32, device=next(
-                    self.vision_encoder.parameters()).device if list(
-                        self.vision_encoder.parameters()) else torch.device("cpu"))
+        with torch.no_grad():
+            state_tensor = torch.tensor(raw_state, dtype=torch.float32)
             state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
-            
             embeddings = self.vision_encoder(state_tensor)
-            cls_embedding = embeddings[0, 0]
-            return tuple(cls_embedding.detach().cpu().numpy())
+
+        return tuple(float(x) for x in embeddings.cpu().numpy().flatten().tolist())
 
     def _process_state(self, raw_state):
         """Override state processing for visual inputs"""
         if self.use_visual_observations and self.vision_encoder:
-            return self._visual_state_processor(raw_state)
+            processed = self._visual_state_processor(raw_state)
         else:
-            return super()._process_state(raw_state)
+            processed = super()._process_state(raw_state)
+        
+        # Ensure the output is always a tuple
+        if isinstance(processed, (np.ndarray, list)):
+            return tuple(processed.tolist() if isinstance(processed, np.ndarray) else tuple(processed))
+        elif isinstance(processed, torch.Tensor):
+            return tuple(processed.cpu().numpy().flatten().tolist())
+        return tuple(processed) if not isinstance(processed, tuple) else processed
 
     def _visual_state_processor(self, raw_state):
         """Process raw pixels using VisionEncoder"""
@@ -751,14 +821,14 @@ class RLTransformer(RLEncoder):
         self.transformer = Transformer(config['transformer'])
         self.state_memory = deque(maxlen=config['sequence_length'])
         
-    def choose_action(self, state):
+    def select_action(self, state):
         # Process state sequence
         self.state_memory.append(self._process_state(state))
         sequence = F.normalize(torch.tensor(list(self.state_memory)), dim=-1)
         
         # Transformer-based policy
         context = checkpoint(self.transformer, sequence.unsqueeze(0))
-        return super().choose_action(context[-1])
+        return super().select_action(context[-1])
     
     def _visual_state_processor(self, raw_state):
         with torch.cuda.amp.autocast():  # Add this
