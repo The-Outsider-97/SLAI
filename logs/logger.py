@@ -18,6 +18,48 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.utils.system_optimizer import SystemOptimizer
 
+COLOR_CODES = {
+    'RESET': "\033[0m",
+    'BLUE': "\033[94m",
+    'GREEN': "\033[92m",
+    'YELLOW': "\033[93m",
+    'RED': "\033[91m",
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'white': '\033[37m',
+    'black': '\033[30m',
+}
+STYLES = {
+    'reset': '\033[0m',
+    'bold': '\033[1m',
+    'dim': '\033[2m',
+    'italic': '\033[3m',
+    'underline': '\033[4m',
+    'blink': '\033[5m',
+    'inverse': '\033[7m',
+    'hidden': '\033[8m',
+    'strike': '\033[9m',
+
+    'bg_black': '\033[40m',
+    'bg_red': '\033[41m',
+    'bg_green': '\033[42m',
+    'bg_yellow': '\033[43m',
+    'bg_blue': '\033[44m',
+    'bg_magenta': '\033[45m',
+    'bg_cyan': '\033[46m',
+    'bg_white': '\033[47m',
+    
+    # Add color styles
+    'blue': '\033[94m',
+    'green': '\033[92m',
+    'yellow': '\033[93m',
+    'red': '\033[91m',
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'white': '\033[37m',
+    'black': '\033[30m',
+}
+
 # Shared logging queue
 log_queue = queue.Queue()
 
@@ -25,37 +67,7 @@ log_queue = queue.Queue()
 _logger_initialized = False
 
 class ColorFormatter(logging.Formatter):
-    COLOR_CODES = {
-        'RESET': "\033[0m",
-        'BLUE': "\033[94m",
-        'GREEN': "\033[92m",
-        'YELLOW': "\033[93m",
-        'RED': "\033[91m",
-        'magenta': '\033[35m',
-        'cyan': '\033[36m',
-        'white': '\033[37m',
-        'black': '\033[30m',
-    }
-    STYLES = {
-        'reset': '\033[0m',
-        'bold': '\033[1m',
-        'dim': '\033[2m',
-        'italic': '\033[3m',
-        'underline': '\033[4m',
-        'blink': '\033[5m',
-        'inverse': '\033[7m',
-        'hidden': '\033[8m',
-        'strike': '\033[9m',
 
-        'bg_black': '\033[40m',
-        'bg_red': '\033[41m',
-        'bg_green': '\033[42m',
-        'bg_yellow': '\033[43m',
-        'bg_blue': '\033[44m',
-        'bg_magenta': '\033[45m',
-        'bg_cyan': '\033[46m',
-        'bg_white': '\033[47m',
-    }
     def format(self, record):
         if not sys.stdout.isatty():
             return super().format(record)
@@ -63,18 +75,18 @@ class ColorFormatter(logging.Formatter):
         message = record.getMessage()
 
         if "initializ" in message.lower():
-            color = self.COLOR_CODES['BLUE']
+            color = COLOR_CODES['BLUE']
         elif "load" in message.lower() and record.levelno < logging.WARNING:
-            color = self.COLOR_CODES['GREEN']
+            color = COLOR_CODES['GREEN']
         elif record.levelno >= logging.CRITICAL:
-            color = self.COLOR_CODES['RED']
+            color = COLOR_CODES['RED']
         elif record.levelno >= logging.WARNING:
-            color = self.COLOR_CODES['YELLOW']
+            color = COLOR_CODES['YELLOW']
         else:
-            color = self.COLOR_CODES['RESET']
+            color = COLOR_CODES['RESET']
 
         formatted = f"{record.levelname}:{record.name}:{message}"
-        return f"{color}{formatted}{self.COLOR_CODES['RESET']}"
+        return f"{color}{formatted}{COLOR_CODES['RESET']}"
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, q: queue.Queue, batch_size: int = 10, flush_interval: int = 5) -> None:
@@ -302,8 +314,13 @@ class PrettyPrinter:
 
     @classmethod
     def _style(cls, text, *styles):
-        codes = ''.join([cls.STYLES[style] for style in styles])
-        return f"{codes}{text}{cls.STYLES['reset']}"
+        codes = []
+        for style in styles:
+            if style in STYLES:
+                codes.append(STYLES[style])
+            elif style in COLOR_CODES:
+                codes.append(COLOR_CODES[style])
+        return f"{''.join(codes)}{text}{STYLES['reset']}"
 
     @classmethod
     def table(cls, headers, rows, title=None):
