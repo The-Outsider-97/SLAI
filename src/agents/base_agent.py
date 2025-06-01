@@ -1,6 +1,5 @@
 __version__ = "1.8.0"
 
-import logging
 import os, sys
 import abc
 import time
@@ -9,125 +8,68 @@ import torch
 import difflib
 import traceback
 import numpy as np
+import torch.nn as nn
 
 from typing import Any
 from collections import OrderedDict, defaultdict, deque
 
+from src.agents.base.lazy_agent import LazyAgent
+from src.agents.base.light_metric_store import LightMetricStore
+from src.agents.base.issue_handler import DEFAULT_ISSUE_HANDLERS
 from src.agents.collaborative.shared_memory import SharedMemory
 from logs.logger import get_logger
 
-logger = get_logger("Base Agent")
+logger = get_logger("SLAI Base Agent")
+
+MAIN_CONFIG_PATH =  "src/agents/base/configs/agents_config.yaml"
 
 class BaseAgent(abc.ABC):
-    def __init__(self, shared_memory, agent_factory, config=None):
-            self.logger = logging.getLogger(self.__class__.__name__)
-            self.name = self.__class__.__name__
-            
-            if shared_memory is None:
-                shared_memory = SharedMemory(config={})
-            self.shared_memory = shared_memory
-            self.agent_factory=agent_factory
-            self.config=config or {
-                'defer_initialization': True,
-                'memory_profile': 'low',
-                'network_compression': True,
-                'max_error_log_size': 50,
-                'error_similarity_threshold': 0.75,
-                'max_task_retries': 0, 
-                'task_timeout_seconds': None 
-            }
-            
-            # Configurable parameters for error handling and retries
-            self.max_error_log_size = self.config.get('max_error_log_size', 50)
-            self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
-            self.max_task_retries = self.config.get('max_task_retries', 0)
-            # task_timeout_seconds is available but robust timeout implementation is complex and
-            # often task-specific (IO vs CPU bound). Subclasses can implement it in perform_task.
-            self.task_timeout_seconds = self.config.get('task_timeout_seconds', None)
-
-            # Initialize lazy components system
-            self._component_initializers = {
-                'memory_view': lambda: self.SharedMemoryView(shared_memory),
-                'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500)) # Maxlen for individual metric series
-            }
-            self._lazy_components = OrderedDict()
-
-            self.retraining_thresholds = {} # Populated by subclasses based on their specific metrics
-            self.evaluation_log_dir = "evaluation_logs"
-            os.makedirs(self.evaluation_log_dir, exist_ok=True)
-
-            # Known issue handlers registry
-            self._known_issue_handlers = {}
-            self.register_default_known_issue_handlers()
-
-            # Initialize core components immediately
-            self._init_core_components()
-
-
-    def register_default_known_issue_handlers(self):
-        """Registers common known issue handlers. Subclasses can add more."""
-        # Patterns should be specific enough to avoid false positives.
-        # These are examples; actual patterns would depend on common errors encountered.
-        self.register_known_issue_handler("emoji", self._handle_unicode_or_emoji_error) # General catch for "emoji" in message
-        self.register_known_issue_handler("UnicodeEncodeError", self._handle_unicode_or_emoji_error) # Specific error type
-        # Add more generic handlers here if applicable, e.g., for common network errors if relevant
-        # self.register_known_issue_handler("ConnectionError", self._handle_transient_network_error)
-
-
-    def _handle_unicode_or_emoji_error(self, task_data, error_info):
-        """
-        Handles errors suspected to be caused by emojis or non-ASCII characters,
-        often manifesting as UnicodeEncodeError or messages containing 'emoji'.
-        """
-        # Check if this handler is appropriate for the given error
-        is_unicode_error = error_info.get("error_type") == "UnicodeEncodeError"
-        mentions_emoji = "emoji" in error_info.get("error_message", "").lower()
+    def __init__(self, shared_memory, agent_factory, config=MAIN_CONFIG_PATH):
+        self.logger = get_logger(self.__class__.__name__)
+        self.name = self.__class__.__name__
         
-        if not (is_unicode_error or mentions_emoji):
-            return {"status": "failed", "reason": "Error not identified as unicode/emoji issue by this handler."}
-
-        cleaned_input = None
-        input_changed = False
-
-        if isinstance(task_data, str):
-            cleaned_version = task_data.encode("ascii", "ignore").decode()
-            if cleaned_version != task_data:
-                cleaned_input = cleaned_version
-                input_changed = True
-        elif isinstance(task_data, dict):
-            temp_cleaned_data = task_data.copy() # Work on a copy
-            modified_in_dict = False
-            for key, val in temp_cleaned_data.items():
-                if isinstance(val, str):
-                    cleaned_val = val.encode("ascii", "ignore").decode()
-                    if cleaned_val != val:
-                        temp_cleaned_data[key] = cleaned_val
-                        modified_in_dict = True
-            if modified_in_dict:
-                cleaned_input = temp_cleaned_data
-                input_changed = True
+        if shared_memory is None:
+            shared_memory = SharedMemory()
+        self.shared_memory = shared_memory
+        self.agent_factory=agent_factory
+        self.config = (config or {}).get('base_agent', {})
+        self.metric_store = LightMetricStore()
         
-        if input_changed and cleaned_input is not None:
-            self.logger.info(f"[{self.name}] Known issue handler '{self._handle_unicode_or_emoji_error.__name__}': Retrying with ASCII-cleaned input.")
-            try:
-                # Rerun perform_task with the cleaned input
-                return self.perform_task(cleaned_input)
-            except Exception as e_retry:
-                self.logger.warning(f"[{self.name}] Retry after unicode/emoji cleaning also failed: {e_retry}")
-                return {"status": "failed", "reason": f"Retry after unicode/emoji cleaning failed: {e_retry}"}
-        else:
-            # Handler was matched but no changes were made (e.g., input was already ASCII clean)
-            # or input type was not string/dict.
-            return {"status": "failed", "reason": f"Unicode/emoji handler: Input type '{type(task_data).__name__}' not handled or no changes made after cleaning."}
+        # Configurable parameters for error handling and retries
+        self.max_error_log_size = self.config.get('max_error_log_size', 50)
+        self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
+        self.max_task_retries = self.config.get('max_task_retries', 0)
+        self.task_timeout_seconds = self.config.get('task_timeout_seconds', None)
+
+        # Initialize lazy components system
+        self._component_initializers = {
+            'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
+        }
+        self._lazy_components = OrderedDict()
+
+        self.retraining_thresholds = {} # Populated by subclasses based on their specific metrics
+        self.evaluation_log_dir = "evaluation_logs"
+        os.makedirs(self.evaluation_log_dir, exist_ok=True)
+
+        self._known_issue_handlers = {}
+        self.register_default_known_issue_handlers()
+        self._init_core_components()
 
     def _init_core_components(self):
         """Initialize essential components first"""
-        # Access memory view to initialize it
-        _ = self.memory_view  # Triggers initialization through property
+        # Create LazyAgent instance for expensive components
+        self.lazy_agent = LazyAgent(lambda: self._create_expensive_components())
+        
+    def _create_expensive_components(self):
+        """Create components that should be lazily initialized"""
+        return {
+            'performance_metrics': defaultdict(lambda: deque(maxlen=500))
+        }
 
-    @property
-    def memory_view(self):
-        return self.lazy_property('memory_view')
+    def register_default_known_issue_handlers(self):
+        """Registers common known issue handlers. Subclasses can add more."""
+        for pattern, handler in DEFAULT_ISSUE_HANDLERS.items():
+            self.register_known_issue_handler(pattern, handler)
 
     @property
     def performance_metrics(self):
@@ -197,105 +139,109 @@ class BaseAgent(abc.ABC):
         """
         retries_done = 0
         last_exception_in_retry_loop = None
+        self.metric_store.start_tracking('execute', 'performance')
+        try:
 
-        # --- STAGE 1: Perform Task (with retries) ---
-        while retries_done <= self.max_task_retries:
-            try:
-                self.logger.info(f"[{self.name}] Attempting task (attempt {retries_done + 1}/{self.max_task_retries + 1})...")
-                # Note: Robust timeout for self.perform_task is complex (threading, signals, or async).
-                # If self.task_timeout_seconds is set, subclasses might need to handle it internally
-                # or a more sophisticated execution wrapper would be needed here.
-                result = self.perform_task(input_data) # perform_task is now abstract
+            # --- STAGE 1: Perform Task (with retries) ---
+            while retries_done <= self.max_task_retries:
+                try:
+                    self.logger.info(f"[{self.name}] Attempting task (attempt {retries_done + 1}/{self.max_task_retries + 1})...")
+                    # Note: Robust timeout for self.perform_task is complex (threading, signals, or async).
+                    # If self.task_timeout_seconds is set, subclasses might need to handle it internally
+                    # or a more sophisticated execution wrapper would be needed here.
+                    result = self.perform_task(input_data) # perform_task is now abstract
 
-                if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
-                    performance_data = self.extract_performance_metrics(result)
-                    if performance_data: # Only evaluate if metrics are meaningfully extracted
-                        self.evaluate_performance(performance_data)
+                    if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
+                        performance_data = self.extract_performance_metrics(result)
+                        if performance_data: # Only evaluate if metrics are meaningfully extracted
+                            self.evaluate_performance(performance_data)
+                    
+                    self.logger.info(f"[{self.name}] Task execution successful on attempt {retries_done + 1}.")
+                    self.shared_memory.set(f"agent_stats:{self.name}", {
+                        "last_run": time.time(), "success": True, 
+                        "attempts": retries_done + 1,
+                        "result_summary": str(result)[:200]
+                    })
+                    return result
                 
-                self.logger.info(f"[{self.name}] Task execution successful on attempt {retries_done + 1}.")
-                self.shared_memory.set(f"agent_stats:{self.name}", {
-                    "last_run": time.time(), "success": True, 
-                    "attempts": retries_done + 1,
-                    "result_summary": str(result)[:200]
-                })
-                return result
-            
-            except Exception as e:
-                last_exception_in_retry_loop = e
-                if retries_done < self.max_task_retries:
-                    retries_done += 1
-                    self.logger.warning(f"[{self.name}] Task attempt {retries_done} failed. Retrying... Error: {e}")
-                    time.sleep(min(retries_done * 0.5, 5)) # Simple backoff, capped at 5s
-                else: # Max retries reached
-                    self.logger.error(f"[{self.name}] Task failed after {retries_done + 1} attempts. Last error: {e}")
-                    break # Exit retry loop to proceed with further error handling stages
+                except Exception as e:
+                    last_exception_in_retry_loop = e
+                    if retries_done < self.max_task_retries:
+                        retries_done += 1
+                        self.logger.warning(f"[{self.name}] Task attempt {retries_done} failed. Retrying... Error: {e}")
+                        time.sleep(min(retries_done * 0.5, 5)) # Simple backoff, capped at 5s
+                    else: # Max retries reached
+                        self.logger.error(f"[{self.name}] Task failed after {retries_done + 1} attempts. Last error: {e}")
+                        break # Exit retry loop to proceed with further error handling stages
 
-        # --- STAGE 2: Log Initial Error and Check Similarity ---
-        # This stage is reached only if all retries in Stage 1 failed.
-        error_info = {
-            "timestamp": time.time(),
-            "error_type": type(last_exception_in_retry_loop).__name__,
-            "error_message": str(last_exception_in_retry_loop),
-            "traceback": traceback.format_exc()
-        }
-        self._log_error_to_shared_memory(error_info) # Log the definitive error from perform_task attempts
-        _ = self._check_and_log_similar_errors(error_info) # Log if similar error found, result not critical for flow here
+            # --- STAGE 2: Log Initial Error and Check Similarity ---
+            # This stage is reached only if all retries in Stage 1 failed.
+            error_info = {
+                "timestamp": time.time(),
+                "error_type": type(last_exception_in_retry_loop).__name__,
+                "error_message": str(last_exception_in_retry_loop),
+                "traceback": traceback.format_exc()
+            }
+            self._log_error_to_shared_memory(error_info) # Log the definitive error from perform_task attempts
+            _ = self._check_and_log_similar_errors(error_info) # Log if similar error found, result not critical for flow here
 
-        # --- STAGE 3: Handle Known Issue ---
-        try:
-            self.logger.info(f"[{self.name}] Attempting to handle as known issue: {error_info['error_type']}...")
-            recovery_result = self.handle_known_issue(input_data, error_info) # Pass original input_data
-            
-            # Check if handler successfully resolved it (i.e., did not return a failure dict)
-            if not (isinstance(recovery_result, dict) and recovery_result.get("status") == "failed"):
-                self.logger.info(f"[{self.name}] Task recovered by 'handle_known_issue'.")
-                self.shared_memory.set(f"agent_stats:{self.name}", {
-                    "last_run": time.time(), "success": True, "recovered_by": "handle_known_issue",
-                    "attempts": retries_done + 1, "result_summary": str(recovery_result)[:200]
-                })
-                return recovery_result # Success via known issue handler
-            else:
-                self.logger.info(f"[{self.name}] 'handle_known_issue' did not resolve the issue: {recovery_result.get('reason')}")
-        except Exception as e_known_issue_handler_crash: # If handle_known_issue itself crashes
-            self.logger.error(f"[{self.name}] The 'handle_known_issue' method itself crashed: {e_known_issue_handler_crash}")
-            self.logger.debug(traceback.format_exc())
-            # Proceed to alternative_execute
+            # --- STAGE 3: Handle Known Issue ---
+            try:
+                self.logger.info(f"[{self.name}] Attempting to handle as known issue: {error_info['error_type']}...")
+                recovery_result = self.handle_known_issue(input_data, error_info) # Pass original input_data
+                
+                # Check if handler successfully resolved it (i.e., did not return a failure dict)
+                if not (isinstance(recovery_result, dict) and recovery_result.get("status") == "failed"):
+                    self.logger.info(f"[{self.name}] Task recovered by 'handle_known_issue'.")
+                    self.shared_memory.set(f"agent_stats:{self.name}", {
+                        "last_run": time.time(), "success": True, "recovered_by": "handle_known_issue",
+                        "attempts": retries_done + 1, "result_summary": str(recovery_result)[:200]
+                    })
+                    return recovery_result # Success via known issue handler
+                else:
+                    self.logger.info(f"[{self.name}] 'handle_known_issue' did not resolve the issue: {recovery_result.get('reason')}")
+            except Exception as e_known_issue_handler_crash: # If handle_known_issue itself crashes
+                self.logger.error(f"[{self.name}] The 'handle_known_issue' method itself crashed: {e_known_issue_handler_crash}")
+                self.logger.debug(traceback.format_exc())
+                # Proceed to alternative_execute
 
-        # --- STAGE 4: Alternative Execution ---
-        try:
-            self.logger.info(f"[{self.name}] Attempting alternative execution strategy...")
-            alternative_result = self.alternative_execute(input_data, original_error=last_exception_in_retry_loop)
-            
-            # Check if alternative_execute signaled a failure (e.g., returned specific string or dict)
-            is_alt_exec_failure = False
-            if isinstance(alternative_result, str) and "[Fallback failure]" in alternative_result:
-                is_alt_exec_failure = True
-            elif isinstance(alternative_result, dict) and alternative_result.get("status") == "failed":
-                is_alt_exec_failure = True
+            # --- STAGE 4: Alternative Execution ---
+            try:
+                self.logger.info(f"[{self.name}] Attempting alternative execution strategy...")
+                alternative_result = self.alternative_execute(input_data, original_error=last_exception_in_retry_loop)
+                
+                # Check if alternative_execute signaled a failure (e.g., returned specific string or dict)
+                is_alt_exec_failure = False
+                if isinstance(alternative_result, str) and "[Fallback failure]" in alternative_result:
+                    is_alt_exec_failure = True
+                elif isinstance(alternative_result, dict) and alternative_result.get("status") == "failed":
+                    is_alt_exec_failure = True
 
-            if not is_alt_exec_failure:
-                self.logger.info(f"[{self.name}] Task processed by 'alternative_execute'.")
-                self.shared_memory.set(f"agent_stats:{self.name}", {
-                    "last_run": time.time(), "success": True, "recovered_by": "alternative_execute",
-                    "attempts": retries_done + 1, "result_summary": str(alternative_result)[:200]
-                })
-                return alternative_result # Success via alternative execution
-            else:
-                self.logger.warning(f"[{self.name}] 'alternative_execute' indicated failure or could not process.")
-        except Exception as e_alternative_handler_crash: # If alternative_execute itself crashes
-            self.logger.error(f"[{self.name}] The 'alternative_execute' method itself crashed: {e_alternative_handler_crash}")
-            self.logger.debug(traceback.format_exc())
-            # Proceed to final failure reporting
+                if not is_alt_exec_failure:
+                    self.logger.info(f"[{self.name}] Task processed by 'alternative_execute'.")
+                    self.shared_memory.set(f"agent_stats:{self.name}", {
+                        "last_run": time.time(), "success": True, "recovered_by": "alternative_execute",
+                        "attempts": retries_done + 1, "result_summary": str(alternative_result)[:200]
+                    })
+                    return alternative_result # Success via alternative execution
+                else:
+                    self.logger.warning(f"[{self.name}] 'alternative_execute' indicated failure or could not process.")
+            except Exception as e_alternative_handler_crash: # If alternative_execute itself crashes
+                self.logger.error(f"[{self.name}] The 'alternative_execute' method itself crashed: {e_alternative_handler_crash}")
+                self.logger.debug(traceback.format_exc())
+                # Proceed to final failure reporting
 
-        # --- STAGE 5: Final Failure ---
-        final_error_message = f"All task execution and recovery attempts failed. Original error after retries: {str(last_exception_in_retry_loop)}"
-        self.logger.error(f"[{self.name}] {final_error_message}")
-        self.shared_memory.set(f"agent_stats:{self.name}", {
-            "last_run": time.time(), "success": False, 
-            "error": str(last_exception_in_retry_loop), "recovery_failed": True,
-            "attempts": retries_done + 1
-        })
-        return {"status": "failed", "error": str(last_exception_in_retry_loop), "reason": "All recovery attempts failed."}
+            # --- STAGE 5: Final Failure ---
+            final_error_message = f"All task execution and recovery attempts failed. Original error after retries: {str(last_exception_in_retry_loop)}"
+            self.logger.error(f"[{self.name}] {final_error_message}")
+            self.shared_memory.set(f"agent_stats:{self.name}", {
+                "last_run": time.time(), "success": False, 
+                "error": str(last_exception_in_retry_loop), "recovery_failed": True,
+                "attempts": retries_done + 1
+            })
+            return {"status": "failed", "error": str(last_exception_in_retry_loop), "reason": "All recovery attempts failed."}
+        finally:
+            self.metric_store.stop_tracking('execute', 'performance')
 
     def register_known_issue_handler(self, issue_pattern_or_id: str, handler_func: callable):
         """
@@ -315,7 +261,6 @@ class BaseAgent(abc.ABC):
         If a handler itself raises an unhandled exception, it's caught here.
         """
         self.logger.debug(f"[{self.name}] Checking known issue handlers for error: type='{error_info.get('error_type')}', msg='{error_info.get('error_message', '')[:100]}...'")
-
         error_message_lower = error_info.get("error_message", "").lower()
         error_type_lower = error_info.get("error_type", "").lower()
 
@@ -325,7 +270,7 @@ class BaseAgent(abc.ABC):
             if pattern_lower in error_message_lower or pattern_lower == error_type_lower: # Exact match for type, substring for message
                 self.logger.info(f"[{self.name}] Potential known issue match with pattern '{issue_id_pattern}'. Attempting handler '{handler_func.__name__}'.")
                 try:
-                    result = handler_func(task_data, error_info) # Handler attempts to resolve
+                    result = handler_func(self, task_data, error_info) # Handler attempts to resolve
                     
                     # If handler explicitly returns a dict with "status": "failed", it means it matched but couldn't fix THIS instance.
                     if isinstance(result, dict) and result.get("status") == "failed":
@@ -543,8 +488,8 @@ class BaseAgent(abc.ABC):
             self.logger.warning(f"[{self.name}] 'performance_metrics' component is not a defaultdict. Cannot update rolling metrics.")
         else:
             for key, value in metrics.items():
-                if isinstance(value, (int, float, bool)): # Only store simple numeric/boolean metrics in deques
-                    perf_metrics_component[key].append(value)
+                if isinstance(value, (int, float)):
+                    self.metric_store.metrics['timings']['performance'][key].append(value)
                 else:
                     self.logger.debug(f"[{self.name}] Skipping rolling update for non-scalar metric '{key}'.")
 
@@ -581,7 +526,6 @@ class BaseAgent(abc.ABC):
                 else:
                     self.logger.debug(f"[{self.name}] Metric '{metric_key}' or its threshold is not numeric. Skipping threshold check.")
 
-
     def flag_for_retraining(self):
         """Sets a flag in shared memory indicating this agent needs retraining."""
         flag_key = f"retraining_flag:{self.name}"
@@ -608,67 +552,6 @@ class BaseAgent(abc.ABC):
                 f.write(json.dumps(log_entry, default=str) + "\n") # default=str for non-serializable
         except Exception as e:
             self.logger.error(f"[{self.name}] Failed to write evaluation log to '{path}': {e}")
-
-    class SharedMemoryView:
-        """Lightweight memory access view with its own small LRU cache for frequently accessed keys."""
-        __slots__ = ['_source_shared_memory', '_cache', '_cache_max_size'] # _cache_size renamed to _cache_max_size
-        
-        def __init__(self, source_shared_memory_instance): 
-            if source_shared_memory_instance is None:
-                raise ValueError("SharedMemoryView requires a valid shared_memory instance.")
-            self._source_shared_memory = source_shared_memory_instance
-            self._cache = OrderedDict()
-            # Attempt to get cache size from source config, otherwise use a small default
-            default_view_cache_size = 20 
-            if hasattr(self._source_shared_memory, 'config') and isinstance(self._source_shared_memory.config, dict):
-                self._cache_max_size = self._source_shared_memory.config.get('memory_view_cache_size', default_view_cache_size)
-            else:
-                self._cache_max_size = default_view_cache_size
-            
-        def get(self, key: str, default: Any = None) -> Any:
-            """Gets a value from the cache or falls back to the source shared memory."""
-            if key in self._cache:
-                self._cache.move_to_end(key)
-                return self._cache[key]
-   
-            value = self._source_shared_memory.get(key, default) # Pass default to source
-            
-            # Only cache if the value is not the default (i.e., key was found in source)
-            # and if caching is enabled (cache_max_size > 0)
-            if value != default and self._cache_max_size > 0:
-                self._cache[key] = value
-                self._cache.move_to_end(key) # New/updated items go to the end (most recently used)
-                if len(self._cache) > self._cache_max_size:
-                    self._cache.popitem(last=False) # Evict least recently used
-            return value
-
-        def set(self, key: str, value: Any):
-            """Sets a value in the source shared memory and updates the local cache."""
-            self._source_shared_memory.set(key, value)
-            
-            if self._cache_max_size > 0: # Only update cache if enabled
-                self._cache[key] = value
-                self._cache.move_to_end(key)
-                if len(self._cache) > self._cache_max_size:
-                    self._cache.popitem(last=False)
-
-
-        def get_usage_stats(self) -> dict:
-            """Returns statistics about this memory view's cache."""
-            source_cache_hit_rate = 0.0 # Default if source doesn't provide it
-            if hasattr(self._source_shared_memory, 'get_usage_stats'): 
-                source_stats = self._source_shared_memory.get_usage_stats()
-                if isinstance(source_stats, dict):
-                    source_cache_hit_rate = source_stats.get('hit_rate', 0.0)
-            
-            return {
-                'view_cache_current_size': len(self._cache),
-                'view_cache_max_size': self._cache_max_size,
-                'source_shared_memory_type': type(self._source_shared_memory).__name__,
-                'source_cache_hit_rate_estimate': source_cache_hit_rate 
-            }
-
-    # --- Template methods for subclasses (intended to be overridden or used as examples) ---
 
     def optimized_step(self, state: Any) -> Any:
         """
@@ -730,16 +613,15 @@ class BaseAgent(abc.ABC):
         Returns a basic, shallow neural network-like structure for demonstration or simple tasks.
         This is a placeholder; real agents would use more sophisticated models (e.g., PyTorch nn.Module).
         """
-        
-
-        class SimplePolicyNet:
+        class PolicyNet(nn.Module):
             def __init__(self, input_dim: int, output_dim: int):
+                super().__init__()
                 self.input_dim = input_dim
                 self.output_dim = output_dim
                 # Initialize weights and biases (e.g., Xavier/He initialization for small nets)
                 self.weights = np.random.randn(input_dim, output_dim).astype(np.float32) * np.sqrt(1.0 / input_dim)
                 self.bias = np.zeros(output_dim, dtype=np.float32)
-                logging.debug(f"SimplePolicyNet initialized with input_dim={input_dim}, output_dim={output_dim}")
+                logger.debug(f"PolicyNet initialized with input_dim={input_dim}, output_dim={output_dim}")
 
             def predict(self, state: Any) -> Any:
                 # Ensure state is a 1D numpy array of the correct input dimension
@@ -749,7 +631,7 @@ class BaseAgent(abc.ABC):
                         raise ValueError(f"Input state dimension {state_vec.shape[0]} "
                                          f"does not match network input dimension {self.input_dim}")
                 except Exception as e:
-                    logging.error(f"SimplePolicyNet: Error processing input state: {e}")
+                    logger.error(f"PolicyNet: Error processing input state: {e}")
                     # Return a default action or raise, depending on desired behavior
                     return np.random.randint(self.output_dim) # Example: random action on error
 
@@ -761,7 +643,7 @@ class BaseAgent(abc.ABC):
                 # probs = exp_logits / np.sum(exp_logits)
                 # return probs
         
-        return SimplePolicyNet(input_dim=input_dim, output_dim=output_dim)
+        return PolicyNet(input_dim=input_dim, output_dim=output_dim)
     
     def update_projection(self, reward_scores: list, lr: float):
         """
@@ -818,151 +700,6 @@ class BaseAgent(abc.ABC):
             self.logger.error(f"[{self.name}] Error in 'update_projection': {e}")
             self.logger.debug(traceback.format_exc())
 
-
-class LightMetricStore:
-    """Lightweight metric tracking for performance (timings) and memory usage changes."""
-    def __init__(self):
-        self.metrics = {
-            'timings': defaultdict(list),      # category: {metric_name: [durations]}
-            'memory_deltas': defaultdict(list) # category: {metric_name: [memory_deltas_mb]}
-        }
-        self._start_times = {} # (category, metric_name): start_time_perf_counter
-        self._start_memory_rss = {} # (category, metric_name): start_memory_rss_bytes
-
-    def start_tracking(self, metric_name: str, category: str = "default"):
-        """Start tracking a specific operation under a category."""
-        key = (category, metric_name)
-        self._start_times[key] = time.perf_counter() 
-        try:
-            import psutil
-            self._start_memory_rss[key] = psutil.Process().memory_info().rss 
-        except ImportError:
-            if key not in self._start_memory_rss: # Log warning only once per metric start
-                 logging.debug("psutil not installed. Memory delta tracking will be zero for LightMetricStore.")
-            self._start_memory_rss[key] = 0 # psutil not available, store 0
-
-    def stop_tracking(self, metric_name: str, category: str = "default"):
-        """Stop tracking and record the duration and memory delta."""
-        key = (category, metric_name)
-        
-        # Record timing
-        if key in self._start_times:
-            duration_s = time.perf_counter() - self._start_times.pop(key)
-            if category not in self.metrics['timings']: self.metrics['timings'][category] = defaultdict(list)
-            self.metrics['timings'][category][metric_name].append(duration_s)
-        else:
-            logging.warning(f"Metric ('{category}', '{metric_name}') timing was stopped without being started.")
-
-        # Record memory usage delta
-        if key in self._start_memory_rss:
-            start_rss = self._start_memory_rss.pop(key)
-            mem_delta_mb = 0.0
-            if start_rss != 0: # Implies psutil was available at start
-                try:
-                    import psutil
-                    current_rss = psutil.Process().memory_info().rss
-                    mem_delta_mb = (current_rss - start_rss) / (1024 ** 2)
-                except ImportError:
-                    pass # Already logged, delta remains 0
-            
-            if category not in self.metrics['memory_deltas']: self.metrics['memory_deltas'][category] = defaultdict(list)
-            self.metrics['memory_deltas'][category][metric_name].append(mem_delta_mb)
-        else:
-            logging.warning(f"Metric ('{category}', '{metric_name}') memory tracking was stopped without being started.")
-
-    def get_metrics_summary(self, category: str = "default") -> dict:
-        """Generate a summary (e.g., average) of metrics for a category."""
-        summary = {}
-        if category in self.metrics['timings']:
-            summary['timings_avg_s'] = {
-                name: sum(values)/len(values) if values else 0 
-                for name, values in self.metrics['timings'][category].items()
-            }
-        if category in self.metrics['memory_deltas']:
-            summary['memory_deltas_avg_mb'] = {
-                name: sum(values)/len(values) if values else 0 
-                for name, values in self.metrics['memory_deltas'][category].items()
-            }
-        return summary
-
-    def get_all_metrics_json(self, pretty: bool = True) -> str:
-        """Generate a JSON string of all raw recorded metrics."""
-        if pretty:
-            return json.dumps(self.metrics, indent=2, default=lambda o: str(o)) # Handle defaultdict
-        return json.dumps(self.metrics, default=lambda o: str(o))
-
-
-class LazyAgent:
-    """
-    Wrapper for deferred initialization of an object (often an agent).
-    The initialization function (`init_fn`) is called only when an attribute 
-    of the wrapped object is first accessed.
-    """
-    _instance = None # Class variable to store the actual wrapped object instance
-    _initialized = False # Flag to track if _init_fn has been called
-
-    def __init__(self, init_fn: callable): 
-        if not callable(init_fn):
-            raise ValueError("LazyAgent's init_fn must be a callable.")
-        self._init_fn = init_fn
-        # Note: _instance and _initialized are reset per instance by __getattr__ logic
-        # Making them instance variables for clarity if multiple LazyAgent instances are used for different objects
-        self._instance_local = None 
-        self._initialized_local = False
-        self.logger = logging.getLogger(f"{self.__class__.__name__}[{init_fn.__name__ if hasattr(init_fn, '__name__') else 'anonymous_fn'}]")
-
-
-    def _ensure_initialized(self):
-        """Internal helper to initialize the wrapped object if not already done."""
-        if not self._initialized_local:
-            self.logger.debug(f"Initializing wrapped object...")
-            try:
-                self._instance_local = self._init_fn()
-                if self._instance_local is None:
-                    self.logger.error("Initialization function returned None. Wrapped object cannot be used.")
-                    # Consider raising an error here if None is an invalid state
-                    # raise RuntimeError("LazyAgent's init_fn returned None.")
-                else:
-                    self.logger.debug(f"Wrapped object of type '{type(self._instance_local).__name__}' initialized successfully.")
-            except Exception as e:
-                self.logger.error(f"Error during lazy initialization of wrapped object: {e}")
-                self.logger.debug(traceback.format_exc())
-                # self._instance_local remains None, getattr will likely fail or an error should be raised
-                raise # Re-raise the exception to make the failure visible
-            finally:
-                self._initialized_local = True # Mark as initialized even if it failed, to prevent re-attempts
-
-
-    def __getattr__(self, name: str) -> Any:
-        """
-        Initializes the wrapped object if necessary, then delegates attribute access.
-        """
-        self._ensure_initialized() # Initialize if not already
-        
-        if self._instance_local is None: # If initialization failed or returned None
-            raise AttributeError(
-                f"Wrapped object in LazyAgent is None (likely due to initialization failure). "
-                f"Cannot access attribute '{name}'."
-            )
-            
-        try:
-            return getattr(self._instance_local, name)
-        except AttributeError:
-            # This provides a more informative error message if the attribute doesn't exist on the wrapped object
-            raise AttributeError(
-                f"Attribute '{name}' not found on the lazily initialized object "
-                f"of type '{type(self._instance_local).__name__}'."
-            )
-
-    def __repr__(self) -> str:
-        if self._initialized_local and self._instance_local is not None:
-            return f"<LazyAgent wrapping [{self._instance_local.__class__.__name__}] (initialized)>"
-        else:
-            func_name = self._init_fn.__name__ if hasattr(self._init_fn, '__name__') else 'anonymous_function'
-            status = "initialization_failed" if self._initialized_local and self._instance_local is None else "uninitialized"
-            return f"<LazyAgent for [{func_name}] ({status})>"
-
-
 class RetrainingManager:
     """
     Manages the retraining process for an agent based on flags in shared memory
@@ -976,7 +713,7 @@ class RetrainingManager:
 
         self.agent = agent
         self.shared_memory = shared_memory
-        self.logger = logging.getLogger(f"{self.__class__.__name__}[{self.agent.name}]")
+        self.logger = get_logger(f"{self.__class__.__name__}[{self.agent.name}]")
 
     def check_and_trigger_retraining(self):
         """
@@ -1017,7 +754,7 @@ class RetrainingManager:
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
-    print("\n=== Running Agent Meta Data ===\n")
+    print("\n=== Running SLAI Base Agent ===\n")
     config = None
     shared_memory={}
     agent_factory=None
@@ -1025,7 +762,7 @@ if __name__ == "__main__":
     class TempAgent(BaseAgent):
         def __init__(self, shared_memory, agent_factory, config=None):
             # Initialize logger FIRST
-            self.logger = logging.getLogger(self.__class__.__name__)
+            self.logger = get_logger(self.__class__.__name__)
             self.name = self.__class__.__name__
             # Now call parent constructor
             super().__init__(shared_memory, agent_factory, config)
@@ -1072,4 +809,4 @@ if __name__ == "__main__":
     print(f"\n{store}\n{lazy}\n{agent}\n{manager}")
     print("\n* * * * * Phase 4 * * * * *\n")
 
-    print("\n=== Successfully Ran Agent Meta Data ===\n")
+    print("\n=== Successfully Ran SLAI Base Agent ===\n")
