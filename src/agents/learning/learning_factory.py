@@ -231,7 +231,7 @@ class LearningFactory:
         
         # Select top performing agents (using scalar scores)
         sorted_agents = sorted(
-            self.performance_scores.items(), 
+            self.performance_metrics.items(), 
             key=lambda x: x[1], 
             reverse=True
         )[:self.top_k]
@@ -252,7 +252,7 @@ class LearningFactory:
             )
         
         return optimized_agents
-
+    
     def _mutate_parameters(self, agent_id):
         """Apply q-Gaussian mutation with self-adaptation to parameters within defined bounds."""
         params = {}
