@@ -1,6 +1,6 @@
 """
 Proficient In:
-    Adaptive environments requiring self-optimization (e.g., finance, trading).
+    Adaptive environments requiring self-optimization.
     Long-term autonomous agents needing continuous self-tuning.
 
 Best Used When:
@@ -15,29 +15,17 @@ import yaml
 import torch
 import numpy as np
 from torch import nn, optim
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Recursive Self-Improvement")
-
-CONFIG_PATH = "src/agents/learning/configs/learning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class RSIAgent:
     def __init__(self, state_size, action_size, agent_id):
@@ -131,49 +119,40 @@ class RSIAgent:
             target_q_values = self.target_network.forward(next_state_tensor)
         return target_q_values.max().item()
 
-    def train_episode(self) -> float:
+    def train_episode(self) -> Tuple[float, float]:
         """Neural network enhanced experience replay"""
         if len(self.memory) < 32:
-            return 0.0
-
+            return 0.0, 0.0  # reward, loss
+    
         batch = random.sample(self.memory, 32)
         states, actions, rewards, next_states, dones = zip(*batch)
-
-        # Convert to tensors
+    
         states = torch.FloatTensor(np.array(states))
         actions = torch.LongTensor(actions)
         rewards = torch.FloatTensor(rewards)
         next_states = torch.FloatTensor(np.array(next_states))
         dones = torch.BoolTensor(dones)
-
-        # Compute current Q values
+    
         current_q = self.q_network.forward(states)
-
-        # Compute next Q values using target network
         next_q = self.target_network.forward(next_states)
         max_next_q = torch.max(next_q, dim=1).values
-
-        # Compute target Q values
+    
         target_q = rewards + (1 - dones.float()) * self.gamma * max_next_q
-
-        # Create target tensor
+    
         target = current_q.clone().detach()
         batch_indices = torch.arange(len(states))
         target[batch_indices, actions] = target_q
-
-        # Compute loss and update q_network
+    
         loss = self.q_network.compute_loss(current_q, target)
         self.q_network.backward(target)
         self.q_network.update_parameters()
-
-        # Update target network periodically
+    
         self.update_counter += 1
         if self.update_counter % self.target_update_frequency == 0:
             self.target_network.set_weights(self.q_network.get_weights())
-
-        # Decay exploration rate
+    
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        return torch.mean(rewards).item()
+        return torch.mean(rewards).item(), loss.item()
 
     def _update_parameters(self, gradient: float):
         """Parameter update with momentum-based learning"""
@@ -216,71 +195,72 @@ class RSIAgent:
         self.gamma += 0.01 * np.random.randn()
         self.gamma = np.clip(self.gamma, 0.8, 0.999)
 
-    def act(self, state):
-        """Enhanced RSI-based action with exploration"""
+    def act(self, state: Any, state_sequence: Optional[List[Any]] = None) -> int:
+        """
+        Action selection with optional RSI meta-policy.
+    
+        Args:
+            state: Current environment state.
+            state_sequence: Optional recent state history for RSI scoring.
+    
+        Returns:
+            Action index.
+        """
+        if state_sequence:
+            score = self.calculate_rsi(state_sequence)
+            return self._rsi_policy(score)
+    
         if np.random.rand() < self.epsilon:
             return random.randint(0, self.action_size - 1)
-            
-        rsi_value = self.calculate_rsi(state)
-        return self._rsi_policy(rsi_value)
+    
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_network.forward(state_tensor)
+        return torch.argmax(q_values).item()
 
-    def _rsi_policy(self, rsi_value: float) -> int:
-        """Adaptive threshold policy"""
-        # Dynamic thresholds based on market volatility
-        volatility = self._calculate_volatility()
-        upper_thresh = 70 + 5*(volatility - 0.5)  # Scale with volatility
-        lower_thresh = 30 - 5*(volatility - 0.5)
+    def calculate_rsi(self, state_sequence: List[Any]) -> float:
+        """
+        Generic variability score from recent states (not RSI).
+    
+        Args:
+            state_sequence: List of recent environment states
         
-        if rsi_value > upper_thresh:
-            return 0  # sell
-        elif rsi_value < lower_thresh:
-            return 1  # buy
-        return 2  # hold
+        Returns:
+            Scalar score (0–1) indicating variability or novelty
+        """
+        if not isinstance(state_sequence, (list, np.ndarray)) or len(state_sequence) < 2:
+            return 0.5  # Neutral default
+    
+        try:
+            diffs = np.diff(np.array(state_sequence), axis=0)
+            magnitude = np.linalg.norm(diffs, axis=1)
+            score = np.tanh(np.mean(magnitude))  # Normalized variability
+            return float(np.clip(score, 0.0, 1.0))
+        except Exception:
+            return 0.5  # Safe fallback
 
-    def calculate_rsi(self, prices: List[float]) -> float:
-        """Enhanced RSI calculation with validation"""
-        if len(prices) < self.rsi_period + 1:
-            return 50  # Neutral value
+    def _rsi_policy(self, score: float) -> int:
+        """
+        Abstract policy using a scalar meta-score to select action.
+    
+        Args:
+            score: A continuous scalar (e.g., uncertainty, novelty score)
         
-        deltas = np.diff(prices)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        
-        # Smoothed averages (Wilder's smoothing)
-        avg_gain = np.convolve(gains, np.ones(self.rsi_period)/self.rsi_period)
-        avg_loss = np.convolve(losses, np.ones(self.rsi_period)/self.rsi_period)
-        
-        with np.errstate(divide='ignore'):
-            rs = avg_gain[-1] / avg_loss[-1] if avg_loss[-1] != 0 else np.inf
-        return 100 - (100 / (1 + rs))
-
-    def _calculate_volatility(self) -> float:
-        """Calculate normalized price volatility"""
-        if len(self.memory) < 2:
-            return 0.5
-        recent_prices = [m[0][-1] for m in self.memory][-50:]  # Last 50 prices
-        returns = np.diff(recent_prices) / recent_prices[:-1]
-        return np.std(returns) if len(returns) > 0 else 0.5
-
-    def evaluate(self) -> Dict[str, float]:
-        """Comprehensive performance evaluation"""
-        if not self.memory:
-            return {}
-            
-        returns = []
-        for state, action, reward, _, _ in self.memory:
-            returns.append(reward)
-            
-        sharpe_ratio = self._calculate_sharpe(returns)
-        max_drawdown = self._calculate_max_drawdown()
-        
-        return {
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown,
-            'win_rate': np.mean(np.array(returns) > 0),
-            'avg_return': np.mean(returns),
-            'rsi_period': self.rsi_period
-        }
+        Returns:
+            Discrete action index
+        """
+        threshold_high = 0.7
+        threshold_low = 0.3
+    
+        if self.action_size < 3:
+            return int(score * self.action_size)  # fallback discretization
+    
+        if score > threshold_high:
+            return 0  # e.g., explore aggressively
+        elif score < threshold_low:
+            return 1  # e.g., exploit known good behavior
+        else:
+            return 2  # e.g., maintain current trajectory
 
     def _calculate_sharpe(self, returns: List[float]) -> float:
         """Annualized Sharpe ratio calculation"""
@@ -288,13 +268,6 @@ class RSIAgent:
             return 0.0
         excess_returns = np.array(returns)
         return np.sqrt(252) * np.mean(excess_returns) / np.std(excess_returns)
-
-    def _calculate_max_drawdown(self) -> float:
-        """Maximum drawdown calculation"""
-        cumulative = np.cumsum([reward for _, _, reward, _, _ in self.memory])
-        peak = np.maximum.accumulate(cumulative)
-        drawdown = (peak - cumulative) / (peak + 1e-9)
-        return np.max(drawdown) if len(drawdown) > 0 else 0.0
 
     def _get_weight_vector(self) -> Dict[str, Dict[str, np.ndarray]]:
         """Extracts complete neural network weight structure with metadata"""
@@ -334,14 +307,14 @@ class RSIAgent:
         """Enhanced synchronization with LearningMemory system"""
         if self.learning_memory:
             # Store current parameters
-            self.learning_memory.add({
+            self.learning_memory.set("agent_state", {  # Use string key
                 "epsilon": self.epsilon,
                 "learning_rate": self.learning_rate,
                 "rsi_period": self.rsi_period,
                 "performance": self.baseline_performance,
                 "network_weights": self.q_network.get_weights(),
                 "target_weights": self.target_network.get_weights()
-            }, tag="agent_state")
+            })
             
             # Store experience memory in batches
             batch_size = 100
@@ -388,8 +361,8 @@ class RSIAgent:
             
             # Restore core parameters
             memory_state = self.learning_memory.get()
-            if 'agent_state' in memory_state:
-                state = memory_state['agent_state']
+            state = self.learning_memory.get("agent_state", {})
+            if state:
                 self.epsilon = state.get('epsilon')
                 self.learning_rate = state.get('learning_rate', 0.001)
                 self.rsi_period = state.get('rsi_period')
@@ -411,6 +384,15 @@ class RSIAgent:
             self._set_default_parameters()
             return {'success': False, 'error': str(e)}
 
+    def select_action(self, processed_state):
+        # RSI already supports direct state input
+        return self.act(processed_state)
+    
+    def learn_step(self, experience_batch):
+        # Push to memory, then call train_episode
+        self.memory.extend(experience_batch)
+        return self.train_episode()
+
     def _calculate_file_hash(self, filepath: str) -> str:
         """Calculate file hash for integrity verification"""
         import hashlib
@@ -430,7 +412,87 @@ class RSIAgent:
         self.memory.clear()
         self.performance_history.clear()
 
-    def train(self, total_epochs=1000, episodes_per_epoch=100, 
+    def evaluate(self, env, episodes=50, include_training_data=True):
+        """
+        General-purpose evaluation for RSI Agent
+        Args:
+            env: Environment to evaluate in
+            episodes: Number of evaluation episodes
+            include_training_data: Include training memory in evaluation
+        
+        Returns:
+            Dict containing evaluation metrics
+        """
+        logger.info(f"Evaluating RSI Agent {self.agent_id} over {episodes} episodes")
+    
+        # Performance tracking
+        total_rewards = []
+        episode_lengths = []
+        action_distribution = {action: 0 for action in range(self.action_size)}
+        state_visit_counts = defaultdict(int)
+        
+        for ep in range(episodes):
+            state, _ = env.reset()
+            done = False
+            episode_reward = 0
+            steps = 0
+            
+            while not done:
+                action = self.act(state)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                
+                # Track state visits and actions
+                state_visit_counts[tuple(state)] += 1
+                action_distribution[action] += 1
+                
+                # Update trackers
+                episode_reward += reward
+                steps += 1
+                state = next_state
+    
+            total_rewards.append(episode_reward)
+            episode_lengths.append(steps)
+    
+        # Calculate metrics
+        avg_reward = np.mean(total_rewards)
+        std_reward = np.std(total_rewards)
+        min_reward = min(total_rewards)
+        max_reward = max(total_rewards)
+        avg_length = np.mean(episode_lengths)
+        
+        # Action distribution normalization
+        total_actions = sum(action_distribution.values())
+        action_distribution = {
+            k: v/total_actions for k, v in action_distribution.items()
+        }
+        
+        # State coverage analysis
+        state_coverage = len(state_visit_counts)
+        sharpe_ratio = self._calculate_sharpe(total_rewards)
+        
+        return {
+            'episodes': episodes,
+            'avg_reward': avg_reward,
+            'std_reward': std_reward,
+            'min_reward': min_reward,
+            'max_reward': max_reward,
+            'avg_episode_length': avg_length,
+            'action_distribution': action_distribution,
+            'state_coverage': state_coverage,
+            'exploration_rate': self.epsilon,
+            'sharpe_ratio': sharpe_ratio,
+            'parameter_effectiveness': {
+                'learning_rate': self.learning_rate,
+                'gamma': self.gamma,
+                'rsi_period': self.rsi_period,
+                'epsilon': self.epsilon
+            },
+            'training_memory_utilized': include_training_data,
+            'detailed_rewards': total_rewards
+        }
+
+    def train(self, env, total_epochs=1000, episodes_per_epoch=100, 
               evaluation_interval=10, performance_threshold=0.0,
               checkpoint_interval=50):
         """
@@ -451,6 +513,7 @@ class RSIAgent:
                 logger.info("Resuming training from checkpoint")
                 
             for epoch in range(self.current_epoch, total_epochs):
+                state, _ = env.reset()
                 epoch_loss = 0.0
                 epoch_rewards = []
                 volatility_history = []
@@ -458,19 +521,17 @@ class RSIAgent:
                 # Training phase
                 for _ in range(episodes_per_epoch):
                     # Standard training episode
-                    episode_reward = self.train_episode()
+                    episode_reward, episode_loss = self.train_episode()
                     epoch_rewards.append(episode_reward)
-                    
-                    # Track market volatility
-                    volatility_history.append(self._calculate_volatility())
-                    
+                    epoch_loss += episode_loss
+
                     # Store experience in learning memory
                     if len(self.memory) > 0:
                         latest_exp = self.memory[-1]
                         self.learning_memory.add(latest_exp, tag="rsi_experience")
     
                 # Calculate epoch metrics
-                avg_loss = np.mean(epoch_loss)
+                avg_loss = epoch_loss / episodes_per_epoch
                 avg_reward = np.mean(epoch_rewards)
                 avg_volatility = np.mean(volatility_history)
                 
@@ -489,7 +550,8 @@ class RSIAgent:
     
                 # Evaluation and self-improvement
                 if epoch % evaluation_interval == 0:
-                    eval_results = self.evaluate()
+                    eval_results = self.evaluate(env)
+                    logger.info(f"Epoch {epoch} Evaluation - AvgReward: {eval_results['avg_reward']:.2f} | Sharpe: {eval_results['sharpe_ratio']:.2f}")
                 
                     if all(k in eval_results for k in ('sharpe_ratio', 'max_drawdown', 'avg_return')):
                         logger.info(f"Epoch {epoch} Evaluation - Sharpe: {eval_results['sharpe_ratio']:.2f} | "
@@ -499,7 +561,19 @@ class RSIAgent:
                             self._mutate_parameters()
                             logger.info("Triggered performance-based parameter mutation")
                     else:
-                        logger.warning(f"Epoch {epoch} Evaluation skipped due to missing data: {eval_results}")
+                        if isinstance(eval_results, dict):
+                            PrettyPrinter.section_header(f"Epoch {epoch} Evaluation")
+                            for key, value in eval_results.items():
+                                if isinstance(value, dict):
+                                    print(f"{key}:")
+                                    for subkey, subvalue in value.items():
+                                        print(f"  - {subkey}: {subvalue}")
+                                elif isinstance(value, list) and len(value) > 10:
+                                    print(f"{key}: [length: {len(value)}] (truncated)")
+                                else:
+                                    print(f"{key}: {value}")
+                        else:
+                            logger.warning(f"Epoch {epoch} Evaluation result is malformed: {eval_results}")
     
                 # Periodic checkpointing
                 if checkpoint_interval and epoch % checkpoint_interval == 0:
@@ -521,7 +595,7 @@ class RSIAgent:
             logger.error(f"Training interrupted: {str(e)}")
             self._save_training_state(self.current_epoch)
             raise
-    
+
     def _save_training_state(self, epoch):
         """Persist complete training state using LearningMemory"""
         state = {
@@ -613,9 +687,10 @@ class RSIAgent:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Recursive Self-Improvement ===\n")
+    from src.agents.learning.slaienv import SLAIEnv
 
-    config = load_global_config()
     agent_id = None
+    env = SLAIEnv(state_dim=4, action_dim=3)
 
     agent = RSIAgent(
         action_size=2,
@@ -623,10 +698,12 @@ if __name__ == "__main__":
         agent_id=agent_id
     )
     training_report = agent.train(
-        total_epochs=500,
-        episodes_per_epoch=50,
-        evaluation_interval=25,
-        checkpoint_interval=100
+        env=env,
+        total_epochs=1000,
+        episodes_per_epoch=100,
+        evaluation_interval=10,
+        performance_threshold=0.0,
+        checkpoint_interval=50
     )
 
     print(f"\n{agent}\n{training_report}")
