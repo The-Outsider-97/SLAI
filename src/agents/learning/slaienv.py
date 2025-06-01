@@ -8,8 +8,8 @@ import gymnasium as gym
 
 from collections import namedtuple
 
+from src.agents.base.utils.physics_constraints import apply_environmental_effects, enforce_physics_constraints, apply_constants
 from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from src.agents.learning.utils.physics_constraints import apply_environmental_effects, enforce_physics_constraints
 from src.agents.learning.utils.policy_network import NoveltyDetector
 from src.agents.learning.learning_memory import LearningMemory
 from logs.logger import get_logger
@@ -49,10 +49,23 @@ class SLAIEnv(gym.Env):
         self.metadata = {'render_modes': ['human', 'rgb_array']}
         
         # Physics parameters
-        self.dt = 0.05  # Time step
+        self.dt = 0.05
         self.gravity = 9.8
         self.friction_coeff = 0.1
         self.elasticity = 0.8
+        self.wind_strength = 0.5
+        self.wind_direction = np.pi/4
+        self.drag_coeff = 0.01
+        self.terminal_velocity = 25.0
+        self.rotational_friction = 0.05
+        self.mass = 1.0  # kg (default mass)
+        
+        # Register physical constants
+        self.constants = apply_constants(self)
+        
+        # Use standard gravity constant if available
+        if 'g' in self.constants:
+            self.gravity = self.constants['g']
 
         goal_zone_bounds = [8.0, 9.0, 8.0, 9.0]  # x_min, x_max, y_min, y_max
         hazard_zone_bounds = [-5.0, -4.0, -5.0, -4.0]
@@ -199,24 +212,27 @@ class SLAIEnv(gym.Env):
         return next_state, total_reward, terminated, truncated, info
 
     def _simulate_dynamics(self, state, action):
-        """Enhanced physics-based dynamics simulation"""
+        """Physics-based dynamics simulation with enhanced effects"""
         # Linear dynamics core
-        next_state = self.A @ state  # 'state' here is self._current_state
+        next_state = self.A @ state
         
         # Add action effect
         if action < self.action_dim:
             next_state += self.B[:, action]
         
-        # Environmental forces - Call imported function
-        next_state = apply_environmental_effects(self, next_state) # Pass self (as env_instance) and next_state
+        # Apply environmental effects
+        next_state = apply_environmental_effects(self, next_state)
         
-        # Physics constraints - Call imported function
-        next_state = enforce_physics_constraints(self, next_state) # Pass self (as env_instance) and next_state
+        # Apply physics constraints
+        next_state = enforce_physics_constraints(self, next_state)
         
-        # Random perturbations
-        next_state += np.random.normal(0, 0.02, self.state_dim)
+        # Random quantum fluctuations
+        if np.random.random() < 0.01:  # 1% chance per step
+            hbar = self.constants["hbar"]
+            quantum_jitter = np.random.normal(0, np.sqrt(hbar/2), self.state_dim)
+            next_state[:len(quantum_jitter)] += quantum_jitter
         
-        # Boundary constraints (final clipping)
+        # Boundary constraints
         next_state = np.clip(
             next_state, 
             self.observation_space.low, 
@@ -227,42 +243,29 @@ class SLAIEnv(gym.Env):
 
     def _create_physics_variation(self):
         """Create physics-based task variation"""
-        env_variant = copy.deepcopy(self.env)
-        if hasattr(env_variant.unwrapped, 'dynamics_config'):
-            dynamics = env_variant.unwrapped.dynamics_config
-            env_variant.unwrapped.configure(
-                mass=dynamics.mass * np.random.uniform(0.8, 1.2),
-                damping=dynamics.damping * np.random.uniform(0.7, 1.3),
-                gravity=dynamics.gravity * np.random.uniform(0.9, 1.1)
+        if self.env is None:
+            # Create a new instance with randomized physics parameters
+            new_env = SLAIEnv(
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                env=None,
+                max_steps=self.max_steps
             )
-        return env_variant
-
-    def _enforce_physics_constraints(self, state):
-        """Apply physical constraints to state"""
-        # Ground collision
-        if len(state) > 1 and state[1] < self.observation_space.low[1] + 0.01:
-            state[1] = self.observation_space.low[1] + 0.01
-            if len(state) > 3:
-                state[3] = -state[3] * self.elasticity  # Bounce
-                
-        # Ceiling collision
-        if len(state) > 1 and state[1] > self.observation_space.high[1] - 0.01:
-            state[1] = self.observation_space.high[1] - 0.01
-            if len(state) > 3:
-                state[3] = -state[3] * self.elasticity
-                
-        # Wall collisions
-        if len(state) > 0 and state[0] < self.observation_space.low[0] + 0.01:
-            state[0] = self.observation_space.low[0] + 0.01
-            if len(state) > 2:
-                state[2] = -state[2] * self.elasticity
-                
-        if len(state) > 0 and state[0] > self.observation_space.high[0] - 0.01:
-            state[0] = self.observation_space.high[0] - 0.01
-            if len(state) > 2:
-                state[2] = -state[2] * self.elasticity
-                
-        return state
+            # Randomize physics parameters
+            new_env.gravity = self.gravity * random.uniform(0.8, 1.2)
+            new_env.friction_coeff = self.friction_coeff * random.uniform(0.7, 1.3)
+            new_env.elasticity = self.elasticity * random.uniform(0.8, 1.2)
+            return new_env
+        else:
+            env_variant = copy.deepcopy(self.env)
+            if hasattr(env_variant.unwrapped, 'dynamics_config'):
+                dynamics = env_variant.unwrapped.dynamics_config
+                env_variant.unwrapped.configure(
+                    mass=dynamics.mass * random.uniform(0.8, 1.2),
+                    damping=dynamics.damping * random.uniform(0.7, 1.3),
+                    gravity=dynamics.gravity * random.uniform(0.9, 1.1)
+                )
+            return env_variant
 
     def _calculate_reward(self, state, action, next_state):
         """Multi-component reward function"""
@@ -364,9 +367,18 @@ if __name__ == "__main__":
     print(env._simulate_dynamics(state, action))
     print("\n* * * * * Phase 2 * * * * *")
     mode='human'
-
-    print(env._enforce_physics_constraints(state))
-    print(env.render(mode=mode))
+    next_state=[]
+    
+    # Test physics constraints with an out-of-bound state
+    test_state = np.array([-11.0, 0.2, 0.3, 0.4])
+    print("Before constraint:", test_state)
+    constrained_state = enforce_physics_constraints(env, test_state)
+    print("After constraint:", constrained_state)
+    
+    print(env._calculate_reward(state, action, next_state))
+    # Only render if environment is initialized
+    if env._current_state is not None:
+        print(env.render(mode=mode))
     print("\n* * * * * Phase 3 * * * * *")
 
     print(env.get_state_embedding(state))
