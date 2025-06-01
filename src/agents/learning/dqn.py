@@ -31,6 +31,7 @@ import torch
 import random
 import os
 import copy
+import numpy as np
 
 from collections import deque
 
@@ -92,16 +93,138 @@ class DQNAgent:
         """Hard update target network weights"""
         self.target_net.set_weights(self.policy_net.get_weights())
 
-    def select_action(self, state, explore=True):
+    def select_action(self, processed_state, explore=True):
         """Epsilon-greedy action selection"""
         if explore and torch.rand(1).item() < self.epsilon:
             return torch.randint(self.action_dim, size=())
+
+        if not isinstance(processed_state, torch.Tensor):
+            processed_state = torch.tensor(processed_state, dtype=torch.float32)
         
-        q_values = self.policy_net.forward(torch.Tensor([state]))
+        processed_state = processed_state.float().unsqueeze(0)  # ensure batch dimension
+        q_values = self.policy_net.forward(processed_state)
         return torch.argmax(q_values[0])
+
+    def learn_step(self, experience_batch):
+        """ standard DQN learning from batch """
 
     def store_transition(self, *transition):
         self.memory.push(transition)
+
+    def evaluate(self, env, episodes=20, exploration_rate=0.05, visualize=False):
+        """
+        Comprehensive DQN evaluation with multiple performance metrics
+        Args:
+            env: Environment to evaluate in
+            episodes: Number of evaluation episodes
+            exploration_rate: Minimal exploration rate during evaluation
+            visualize: Whether to render environment during evaluation
+        
+        Returns:
+            Dict containing evaluation metrics
+        """
+        logger.info(f"Evaluating DQN Agent {self.agent_id} over {episodes} episodes")
+        
+        # Performance tracking
+        total_rewards = []
+        episode_lengths = []
+        q_value_means = []
+        q_value_stds = []
+        action_distribution = {a: 0 for a in range(self.action_dim)}
+        
+        # Store original epsilon for restoration
+        original_epsilon = self.epsilon
+        self.epsilon = exploration_rate
+        
+        for ep in range(episodes):
+            state, _ = env.reset()
+            done = False
+            episode_reward = 0
+            steps = 0
+            
+            while not done:
+                if visualize:
+                    env.render()
+                    
+                action = self.select_action(state, explore=True)
+                action_int = action.item() if isinstance(action, torch.Tensor) else action
+                next_state, reward, terminated, truncated, _ = env.step(action_int)
+                done = terminated or truncated
+                
+                # Collect Q-value statistics
+                state_tensor = torch.tensor([state], dtype=torch.float32)
+                with torch.no_grad():
+                    q_values = self.policy_net(state_tensor).cpu().numpy()[0]
+                q_value_means.append(np.mean(q_values))
+                q_value_stds.append(np.std(q_values))
+                
+                # Update trackers
+                episode_reward += reward
+                steps += 1
+                action_distribution[action_int] += 1
+                state = next_state
+
+            total_rewards.append(episode_reward)
+            episode_lengths.append(steps)
+            logger.debug(f"Episode {ep+1}: Reward={episode_reward:.1f}, Steps={steps}")
+
+        # Restore original exploration rate
+        self.epsilon = original_epsilon
+        
+        # Calculate metrics
+        avg_reward = np.mean(total_rewards)
+        std_reward = np.std(total_rewards)
+        try:
+            threshold = env.spec.reward_threshold
+        except AttributeError:
+            # Use 90% of max possible reward if threshold unavailable
+            threshold = np.max(total_rewards) * 0.9 if total_rewards else 0
+        success_rate = (np.array(total_rewards) >= threshold).mean()
+        avg_length = np.mean(episode_lengths)
+        
+        # Normalize action distribution
+        total_actions = sum(action_distribution.values())
+        action_distribution = {k: v/total_actions for k, v in action_distribution.items()}
+        
+        # Q-value analysis
+        avg_q_mean = np.mean(q_value_means)
+        avg_q_std = np.mean(q_value_stds)
+        
+        # Target network divergence
+        policy_weights_dict = self.policy_net.get_weights()
+        target_weights_dict = self.target_net.get_weights()
+        param_diff = []
+
+        # Compare weight matrices for each layer
+        for i in range(len(policy_weights_dict['Ws'])):
+            pw = policy_weights_dict['Ws'][i].detach().cpu().numpy()
+            tw = target_weights_dict['Ws'][i].detach().cpu().numpy()
+            param_diff.append(np.linalg.norm(pw - tw))
+            
+        # Compare bias vectors for each layer
+        for i in range(len(policy_weights_dict['bs'])):
+            pb = policy_weights_dict['bs'][i].detach().cpu().numpy()
+            tb = target_weights_dict['bs'][i].detach().cpu().numpy()
+            param_diff.append(np.linalg.norm(pb - tb))
+
+        avg_param_diff = np.mean(param_diff) if param_diff else 0.0
+        
+        return {
+            'episodes': episodes,
+            'avg_reward': avg_reward,
+            'std_reward': std_reward,
+            'min_reward': min(total_rewards),
+            'max_reward': max(total_rewards),
+            'success_rate': success_rate,
+            'avg_episode_length': avg_length,
+            'action_distribution': action_distribution,
+            'avg_q_value': avg_q_mean,
+            'q_value_std': avg_q_std,
+            'target_network_divergence': avg_param_diff,
+            'replay_buffer_utilization': len(self.memory)/self.memory.capacity,
+            'exploration_rate': exploration_rate,
+            'detailed_rewards': total_rewards
+        }
 
     def train(self):
         """Single training step from replay buffer"""
@@ -308,10 +431,7 @@ class UnifiedDQNAgent:
                     
                     loss = self.agent.train()
                     if loss is not None:
-                        if isinstance(loss, torch.Tensor):
-                            losses.append(loss.item())
-                        else:
-                            losses.append(loss)
+                        losses.append(loss)
                     
                     total_reward += reward
                     state = next_state
@@ -324,8 +444,15 @@ class UnifiedDQNAgent:
                 episode_lengths.append(steps)
 
                 # Calculate moving averages
-                avg_reward_10 = torch.mean(episode_rewards[-10:]) if len(episode_rewards) >= 10 else total_reward
-                avg_loss_10 = torch.mean(torch.tensor(episode_losses[-10:])) if len(episode_losses) >= 10 else avg_loss
+                if len(episode_rewards) >= 10:
+                    avg_reward_10 = torch.mean(torch.tensor(episode_rewards[-10:])).item()
+                else:
+                    avg_reward_10 = total_reward
+                    
+                if len(episode_losses) >= 10:
+                    avg_loss_10 = torch.mean(torch.tensor(episode_losses[-10:])).item()
+                else:
+                    avg_loss_10 = avg_loss
 
                 print(f"Episode {ep+1}/{episodes} | "
                       f"Reward: {total_reward:.1f} (Avg10: {avg_reward_10:.1f}) | "
