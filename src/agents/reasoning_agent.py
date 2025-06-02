@@ -21,27 +21,22 @@ Real-World Usage:
 import json
 import re
 import yaml
-import math
 import time
-import itertools
 import random
-import hashlib
-import numpy as np
 
 from collections import defaultdict, OrderedDict
 from typing import Any, Callable, Dict, List, Set, Tuple, Union, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.agents.base_agent import BaseAgent
-from src.agents.reasoning.rule_engine import RuleEngine, load_config
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.reasoning.rule_engine import RuleEngine
 from src.agents.reasoning.probabilistic_models import ProbabilisticModels
 from src.agents.reasoning.validation import ValidationEngine
+from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger
 
 logger = get_logger("Reasoning Agent")
-
-LOCAL_CONFIG_PATH = "src/agents/reasoning/configs/reasoning_config.yaml"
 
 def identity_rule(kb):
     return {(s, p, o): 1.0 for (s, p, o) in kb if p == 'is'}
@@ -72,148 +67,42 @@ class ReasoningAgent(BaseAgent):
     Initialize the Reasoning Agent with learning capabilities.
     """
     def __init__(self, shared_memory, agent_factory,
-                 config=None,
-                 tuple_key: Tuple = ("subject", "predicate", "object"),
-                 contradiction_threshold=0.25,
-                 rule_validation: Dict = None,
-                 nlp_integration: Dict = None,
-                 inference: Dict = None,
-                 llm: Any = None,
-                 language_agent: Any = None):
+                 config=None):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
             config=config)
         
-        self.tuple_key = tuple_key
+        self.reasoning_agent = []
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
+        self.config = load_global_config()
+        self.reasoning_config = get_config_section('reasoning_agent')
+
+        self.rule_engine = RuleEngine(knowledge_base=None)
+        self.validation_engine = ValidationEngine(knowledge_base=None)
+        self.probabilistic_models = ProbabilisticModels()
+
+        # Set tuple_key from parameter or config
+        self.tuple_key = self.reasoning_config.get(
+            'tuple_key', ("subject", "predicate", "object"))
+
+        # Extract specific parameters from config
+        self.language_config_path = self.reasoning_config.get('language_config_path')
+        self.glove_path = self.reasoning_config.get('glove_path')
+        self.ner_tag = self.reasoning_config.get('ner_tag')
+        self.embedding = self.reasoning_config.get('embedding')
+        self.decay = self.reasoning_config.get('decay', 0.8)
+
         self.hypothesis_graph = defaultdict(
             lambda: {
                 'nodes': set(),
                 'edges': defaultdict(float),
                 'confidence': 0.0
             })
-        self.reasoning_agent = []
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
-        self.inference_settings = config.get("inference", {"exploration_rate": 0.1})
-        storage_path = config.get("storage", {}).get("knowledge_db")
-        self.storage_path = storage_path
-
-        self.rule_engine = RuleEngine(config=load_config(LOCAL_CONFIG_PATH))
-        self.validation_engine = ValidationEngine(config=load_config(LOCAL_CONFIG_PATH))
-        self.probabilistic_models = ProbabilisticModels(config=load_config(LOCAL_CONFIG_PATH))
-
-
-
-        # Initialize components
-        self._load_knowledge()
-
-        # Initialize Language components
-        language_config_path = "src/agents/language/configs/language_config.yaml"
-        self.language_config = self._load_language_config(language_config_path)
-        glove_path = self.language_config.get("nlu", {}).get("glove_path")
-        self._initialize_nlp(glove_path, tokens=[])
+        self.storage_path = None
 
         logger.info(f"\nReasoning Agent Initialized...")
-
-    def _save_knowledge(self):
-        """Save knowledge and learned models to storage."""
-        data = {
-            'knowledge': {list(k): v for k, v in self.knowledge_base.items()},
-            'rules': [(r[0], r[1].__name__, r[2]) for r in self.rules],
-            'rule_weights': self.rule_weights,
-            'bayesian_network': self.bayesian_network
-        }
-        with open(self.storage_path, 'w') as f:
-            json.dump(data, f)
-
-    def _load_knowledge(self, storage_path: str = None):
-        """Load knowledge and learned models from storage."""
-        self.knowledge_base = {}
-        self.rule_weights = {}
-        self.bayesian_network = {}
-
-        # Use the instance storage_path if not overridden
-        path = storage_path or self.storage_path
-        knowledge = []
-        if not path:
-            logger.warning("No storage path provided for knowledge base")
-            return
-        
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-        if Path(path).exists():
-            try:
-                with open(path, 'r') as f:
-                    data = json.load(f)
-                    knowledge = data.get('knowledge', [])
-
-                if isinstance(knowledge, list):
-                    clean_knowledge = {}
-                    for k in knowledge:
-                        try:
-                            key = tuple(k) if isinstance(k, (list, tuple)) else (k,)
-                            clean_knowledge[key] = 1.0
-                        except TypeError:
-                            print(f"[Warning] Skipped invalid knowledge item: {k}")
-                    knowledge = clean_knowledge
-
-                self.knowledge_base = {tuple(k): v for k, v in knowledge.items()}
-                self.rule_weights = data.get('rule_weights', {})
-                self.bayesian_network = data.get('bayesian_network', {})
-            except Exception as e:
-                logger.error(f"Error loading knowledge: {str(e)}")
-
-    def _load_language_config(self, path: str) -> Dict:
-        """Load language configuration file."""
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f)
-        except Exception as e:
-            logger.error(f"Failed to load language config: {e}")
-            return {}
-
-    def _initialize_nlp(self, path: str, tokens: List['Token']):
-        """
-        Advanced NLP initialization with multi-layered linguistic features.
-        """
-        from src.agents.language.nlp_engine import NLPEngine
-        from src.agents.language.nlu_engine import Wordlist
-    
-        # Initialize NLPEngine instance
-        nlp_engine = NLPEngine(config=self.language_config)
-    
-        # Core linguistic resources
-        self.stop_words = nlp_engine.STOPWORDS
-    
-        # Embedding spaces
-        wordlist_instance = Wordlist(config=self.language_config)
-        self.word_vectors = wordlist_instance._load_glove(path)
-        
-        # Initialize POS tagger with valid tokens
-        if not tokens:
-            # Create minimal default tokens if empty
-            tokens = [Token(text="", lemma="", pos="", index=0)]
-        self.pos_tagger = nlp_engine.apply_dependency_rules(tokens)
-    
-        # Rest of the initialization code remains unchanged
-        self.dependency_grammar = self.rule_engine._create_dependency_rules()
-        self.morphology = self._initialize_morphology
-        semantic_frames = self.config.get("semantic_frames_path")
-        self.semantic_frames = semantic_frames
-        self.vocab = self._build_core_lexicon
-    
-        # Discourse features
-        self.cohesion_metrics = {'entity_grid': {}, 'coref_chains': {}}
-        self.pragmatic_rules = self.rule_engine._load_pragmatic_heuristics()
-
-    def _build_core_lexicon(self):
-        # This accesses the NLP Engine
-        pass
-
-    def _initialize_morphology(self):
-        # this access the morphologies in morphology_rules.json
-        pass
 
     def _initialize_probabilistic_models(self):
         """Initialize probabilistic reasoning structures."""
@@ -455,7 +344,7 @@ class ReasoningAgent(BaseAgent):
             current_new = {}
 
             # Explore new rules occasionally
-            if random.random() < self.inference_settings.get("exploration_rate", 0.1):
+            if random.random() < self.config.get("exploration_rate", 0.1):
                 self.rule_engine._discover_new_rules()
 
             for name, rule_func, weight in self.rules:
@@ -478,7 +367,7 @@ class ReasoningAgent(BaseAgent):
             self.knowledge_base.update(current_new)
 
         # --- Validation Phase ---
-        rule_engine = RuleEngine(config=load_config(LOCAL_CONFIG_PATH), knowledge_base=self.knowledge_base)
+        rule_engine = RuleEngine(knowledge_base=self.knowledge_base)
         circular = rule_engine.detect_circular_rules()
         conflicts = rule_engine.detect_fact_conflicts()
         redundant = rule_engine.redundant_fact_check(confidence_margin=0.05)
