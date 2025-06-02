@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Dict, Any, Union
 
-from src.agents.adaptive.utils.math_science import (
+from src.agents.base.utils.math_science import (
     sigmoid, sigmoid_derivative, relu, relu_derivative, tanh, tanh_derivative,
     leaky_relu, leaky_relu_derivative, elu, elu_derivative, swish, swish_derivative,
     softmax, cross_entropy, cross_entropy_derivative)
