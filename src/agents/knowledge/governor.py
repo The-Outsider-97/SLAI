@@ -1,16 +1,34 @@
+"""
+The Governor module serves as a policy enforcement and ethics auditing layer.
+It integrates tightly with the KnowledgeMemory and RuleEngine modules to:
+    - Apply Ethical Guidelines
+    - Filter and Approve Rules
+    - Audit Memory and Agent Behavior
+    - Violation Detection
+    - Emergency Handling
+    - Bias Detection
+    - Reporting & Monitoring
+"""
+import pandas as pd
+import numpy as np
 import yaml, json
+import hashlib
 import time
 import re
+import os
 
-from typing import Dict, Union, List
-from difflib import SequenceMatcher
+from typing import Dict, Union, List, Optional
 from collections import deque, defaultdict
+from difflib import SequenceMatcher
 
+from src.agents.alignment.bias_detection import BiasDetector
 from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
+from src.agents.knowledge.utils.rule_engine import RuleEngine
 from src.agents.knowledge.knowledge_memory import KnowledgeMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Governor")
+printer = PrettyPrinter
 
 class DotDict(dict):
     """Dictionary with dot access (safe SimpleNamespace replacement)."""
@@ -32,18 +50,45 @@ class Governor:
         if isinstance(self.governor_config.get("memory_thresholds"), dict):
             self.governor_config["memory_thresholds"] = DotDict(self.governor_config["memory_thresholds"])
         self.guidelines = self._load_guidelines()
-        
-        # Initialize rule engine
-        from src.agents.knowledge.rule_engine import RuleEngine
+    
+        self.sensitive_attributes = self.governor_config.get('sensitive_attributes', [])
+        self._bias_detector = None 
         self.rule_engine = RuleEngine()
         self.knowledge_memory = KnowledgeMemory()
-        self._load_enforcement_rules()
-        
+        self._init_knowledge_memory()
+
         self.audit_history = deque(maxlen=getattr(self.governor_config, 'max_audit_history', 100))
         self.last_audit = time.time()
         
         if getattr(self.governor_config, 'realtime_monitoring', True):
             self._start_monitoring_thread()
+
+    def _init_knowledge_memory(self):
+        """Initialize knowledge memory with governor-specific settings"""
+        # Load rules from configured sources
+        rule_engine_config = get_config_section('rule_engine')
+        rule_sources = rule_engine_config.get('rule_sources', [])
+        
+        # Store rules in knowledge memory
+        for path in rule_sources:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        rules = yaml.safe_load(f) if path.endswith((".yaml", ".yml")) else json.load(f)
+                        rule_id = hashlib.md5(path.encode()).hexdigest()
+                        self.knowledge_memory.update(
+                            key=f"rule_source:{rule_id}",
+                            value=rules,
+                            metadata={
+                                "source": path,
+                                "type": "rule_source",
+                                "timestamp": time.time()
+                            }
+                        )
+                except Exception as e:
+                    logger.error(f"Error loading rules from {path}: {str(e)}")
+            else:
+                logger.warning(f"Rule source path not found: {path}")
 
     def _load_guidelines(self) -> Dict[str, list]:
         """Load ethical guidelines from configured paths"""
@@ -52,7 +97,7 @@ class Governor:
         
         for path_str in guideline_paths:
             try:
-                with open(path_str, "r", encoding='utf-8') as f: # Added encoding
+                with open(path_str, "r", encoding='utf-8') as f:
                     data = yaml.safe_load(f) if path_str.endswith((".yaml", ".yml")) else json.load(f)
                     guidelines["principles"].extend(data.get("principles", []))
                     guidelines["restrictions"].extend(data.get("restrictions", []))
@@ -61,24 +106,108 @@ class Governor:
                 
         return guidelines
 
-    def get_approved_rules(self):
-        # TODO: Implement rule approval logic
-        return []
+    def _get_bias_detector(self):
+        """Lazy initializer for BiasDetector"""
+        if self._bias_detector is None and self.sensitive_attributes:
+            self._bias_detector = BiasDetector(sensitive_attributes=self.sensitive_attributes)
+        return self._bias_detector
 
-    def _load_enforcement_rules(self):
-        """Load dynamic enforcement rules based on guidelines"""
-        for restriction in self.guidelines.get("restrictions", []): 
-            if 'id' in restriction and 'patterns' in restriction and 'severity' in restriction: # Ensure keys exist
-                self.rule_engine.add_rule(
-                    name=f"Restriction/{restriction['id']}",
-                    rule_func=self._create_restriction_func(restriction),
-                    weight=1.0,
-                    tags=["governance"],
-                    metadata={"type": "hard_restriction", "severity": restriction["severity"]}
-                )
-            else:
-                logger.warning(f"Skipping malformed restriction: {restriction}")
+    def audit_model_predictions(self, data: pd.DataFrame, predictions: np.ndarray, 
+                               labels: Optional[np.ndarray] = None, context: dict = None) -> dict:
+        """
+        Audit model predictions using advanced bias detection
+        Returns audit report with bias metrics
+        """
+        detector = self._get_bias_detector()
+        if not detector:
+            return {"error": "Bias detector not initialized - check sensitive_attributes config"}
+        
+        try:
+            report = detector.compute_metrics(data, predictions, labels)
+            audit_entry = {
+                "timestamp": time.time(),
+                "type": "model_bias_audit",
+                "context": context or {},
+                "report": report
+            }
+            self.audit_history.append(audit_entry)
+            return audit_entry
+        except Exception as e:
+            logger.error(f"Bias detection failed: {str(e)}")
+            return {"error": str(e)}
 
+    def get_approved_rules(self) -> List[Dict]:
+        """
+        Retrieve approved rules from multiple sources:
+        1. Pre-configured rule sources
+        2. Manually approved rules in knowledge memory
+        3. System-generated rules that meet approval thresholds
+        
+        Returns:
+            List of approved rule dictionaries
+        """
+        approved_rules = []
+        
+        # 1. Get pre-configured rules from rule sources
+        rule_sources = self.knowledge_memory.recall(filters={"type": "rule_source"})
+        for _, metadata in rule_sources:
+            if "rules" in metadata.get("value", {}):
+                approved_rules.extend(metadata["value"]["rules"])
+        
+        # 2. Get manually approved rules
+        manual_rules = self.knowledge_memory.recall(
+            filters={"type": "approved_rule", "approval_status": "approved"}
+        )
+        for value, _ in manual_rules:
+            approved_rules.append(value)
+        
+        # 3. Get system-generated rules that meet criteria
+        system_rules = self.knowledge_memory.recall(
+            filters={"type": "system_rule"},
+            sort_by="confidence",
+            top_k=10  # Get top 10 most confident rules
+        )
+        min_confidence = self.config.get('rule_engine', {}).get('min_rule_confidence', 0.7)
+        for rule, metadata in system_rules:
+            if metadata.get("confidence", 0) >= min_confidence:
+                approved_rules.append(rule)
+        
+        # Apply governance filters to all rules
+        filtered_rules = [
+            rule for rule in approved_rules 
+            if self._rule_passes_governance(rule)
+        ]
+        
+        logger.info(f"Retrieved {len(filtered_rules)} approved rules after governance filtering")
+        return filtered_rules
+
+    def _rule_passes_governance(self, rule: Dict) -> bool:
+        """Check if a rule meets governance requirements"""
+        # 1. Check against ethical guidelines
+        for principle in self.guidelines["principles"]:
+            if "conflicts" in principle.get("tags", []) and any(
+                pattern in rule.get("description", "") 
+                for pattern in principle.get("patterns", [])
+            ):
+                logger.warning(f"Rule conflicts with principle {principle['id']}: {rule.get('id')}")
+                return False
+        
+        # 2. Check rule complexity threshold
+        complexity_threshold = self.governor_config.get("rule_complexity_threshold", 5)
+        if len(rule.get("conditions", [])) > complexity_threshold:
+            logger.warning(f"Rule {rule.get('id')} exceeds complexity threshold")
+            return False
+        
+        # 3. Check safety restrictions
+        for restriction in self.guidelines["restrictions"]:
+            if any(
+                pattern in rule.get("action", "") 
+                for pattern in restriction.get("patterns", [])
+            ):
+                logger.warning(f"Rule {rule.get('id')} violates restriction {restriction['id']}")
+                return False
+        
+        return True
 
     def _create_restriction_func(self, restriction: dict):
         """Generate rule function from restriction definition"""
@@ -112,11 +241,15 @@ class Governor:
 
     def full_audit(self):
         """Comprehensive system audit"""
+        # Get approved rules and initialize RuleEngine with them
+        approved_rules = self.get_approved_rules()
+
         audit_report = {
             "timestamp": time.time(),
             "behavior_checks": self._audit_agent_behavior(),
             "violations": [],
-            "recommendations": []
+            "recommendations": [],
+            "rules_used": [r['id'] for r in approved_rules]  # Track which rules were used
         }
     
         # Ensure knowledge_agent and its memory are valid before applying rules
@@ -301,13 +434,13 @@ class Governor:
             logger.warning(f"Shared memory not properly configured for {agent_name} in Governor health check.")
             return
 
-        consecutive_errors_threshold = getattr(self.governor_config.violation_thresholds, 'consecutive_errors', 5)
+        consecutive_errors_threshold = getattr(self.governor_config.get('violation_thresholds', {}), 'consecutive_errors', 5)
         errors = shared_mem.get(f"errors:{agent_name}", [])
         if isinstance(errors, list) and len(errors) >= consecutive_errors_threshold:
             logger.warning(f"Consecutive error threshold breached for {agent_name}: {len(errors)} errors")
             shared_mem.set(f"retraining_flag:{agent_name}", True)
 
-        warning_memory_threshold = getattr(self.governor_config.memory_thresholds, 'warning', 2048)
+        warning_memory_threshold = getattr(self.governor_config.get('memory_thresholds', {}), 'warning', 2048)
         mem_usage = shared_mem.get(f"memory_usage:{agent_name}")
         if mem_usage and isinstance(mem_usage, (int, float)) and mem_usage > warning_memory_threshold:
             logger.info(f"High memory usage for {agent_name}: {mem_usage} MB")
@@ -364,106 +497,17 @@ class Governor:
 
 
 if __name__ == "__main__":
-    import pprint
-    from unittest.mock import Mock
+    print("\n=== Running Governor ===\n")
+    printer.status("Init", "Governor initialized", "success")
+    format_type="json"
+    text = "I love the way you talk! I like black people from Nigeria!"
+    auditor = Governor()
 
-    print("\n=== Governor Test Mode ===\n")
-
-    # Step 1: Mock knowledge agent
-    mock_knowledge_agent_instance = Mock()
-    mock_knowledge_agent_instance.name = "TestKnowledgeAgent"
-    
-    mock_shared_memory_for_agent = {} 
-    def mock_sm_get(key, default=None):
-        return mock_shared_memory_for_agent.get(key, default)
-    def mock_sm_set(key, value):
-        mock_shared_memory_for_agent[key] = value
-
-    mock_knowledge_agent_instance.shared_memory = Mock()
-    mock_knowledge_agent_instance.shared_memory.get = Mock(side_effect=mock_sm_get)
-    mock_knowledge_agent_instance.shared_memory.set = Mock(side_effect=mock_sm_set)
-    
-    mock_shared_memory_for_agent[f"errors:{mock_knowledge_agent_instance.name}"] = [{"error_type": "TimeoutError", "error_message": "System stall"}]
-    mock_shared_memory_for_agent[f"retraining_flag:{mock_knowledge_agent_instance.name}"] = False
-    mock_shared_memory_for_agent[f"memory_usage:{mock_knowledge_agent_instance.name}"] = 600
-    
-    mock_knowledge_agent_instance.performance_metrics = defaultdict(list, {
-        "retrieval_times": [0.23, 0.47],
-        "cache_hits": [1, 0]
-    })
-    
-    mock_knowledge_memory_instance = {} 
-    mock_knowledge_agent_instance.memory = Mock()
-    mock_knowledge_agent_instance.memory._store = mock_knowledge_memory_instance # Mock the internal _store
-    mock_knowledge_memory_instance["entry1"] = {"value": "The robot was ordered to bypass safety measures.", "metadata": {"timestamp": time.time() - 2000}}
-    mock_knowledge_memory_instance["entry2"] = {"value": "AI systems should always avoid harm.", "metadata": {"timestamp": time.time() - 1000}}
-
-    # Step 2: Instantiate Governor with the mocked knowledge_agent
-    governor = Governor(knowledge_agent=mock_knowledge_agent_instance)
-
-    # Step 3: Manually patch required config attributes on governor.governor_config for testing
-    # These would normally be loaded from knowledge_config.yaml's 'governor' section
-    governor.governor_config['violation_thresholds'] = {
-        'unethical': 0.2,
-        'similarity': 0.7,
-        'critical': 0.5,
-        'consecutive_errors': 3
-    }
-    governor.governor_config['memory_thresholds'] = {
-        'warning': 500,
-        'critical': 3072
-    }
-    governor.governor_config['bias_detection_categories'] = {
-        "gender": ["he", "she"],
-        "race": ["white", "black"]
-    }
-    governor.governor_config['enforcement_mode'] = "alert"
-    governor.governor_config['freshness_threshold'] = 48
-    governor.governor_config['guideline_paths'] = []
-
-    # Inject dummy ethical principles directly as guideline_paths is empty
-    governor.guidelines["principles"] = [
-        {
-            "id": "P001",
-            "type": "prohibition",
-            "patterns": [r"\bbypass safety\b", r"\bavoid harm\b"],
-            "description": "Avoid bypassing safety or causing harm."
-        }
-    ]
-    governor.guidelines["restrictions"] = [] # No restrictions for now
-    governor._load_enforcement_rules() # Reload rules based on new guidelines
-
-    # Step 4: Test unethical content detection
-    sample_text = "The AI was told to bypass safety protocols immediately."
-    score = governor._detect_unethical_content(sample_text)
-    print(f"🧪 Unethical Score: {score:.2f}")
-
-    # Step 5: Simulate an audit retrieval
-    results = [
-        (0.95, {
-            "text": sample_text,
-            "metadata": {
-                "timestamp": time.time() - (100 * 3600) 
-            }
-        })
-    ]
-    context = {"user": "debug_user", "module": "test_audit"}
-    audit_retrieval_report = governor.audit_retrieval("safety protocol", results, context) # Renamed
-
-    print("\n📋 Audit Retrieval Output:")
-    pprint.pprint(audit_retrieval_report)
-
-    # Step 6: Run full audit
-    full_audit_report_data = governor.full_audit() # Renamed
-    print("\n🛡️ Full Governance Audit:")
-    pprint.pprint(full_audit_report_data)
-
-    # Step 7: Generate report
-    final_report_output = governor.generate_report() # Renamed
-    print("\n📝 Final Report:")
-    pprint.pprint(final_report_output)
-    
-    print("\n🩺 Testing Agent Health Check:")
-    governor._check_agent_health()
-
+    printer.status("Auditor", auditor, "success")
+    printer.status("Detector", auditor._get_bias_detector(), "success")
+    printer.status("Approval", auditor.get_approved_rules(), "success")
+    printer.status("monitoring", auditor._start_monitoring_thread(), "success")
+    printer.status("Content Check", auditor._detect_unethical_content(text=text), "success")
+    printer.status("Bias",  auditor._detect_bias(text=text), "success")
+    printer.status("Report", auditor.generate_report(format_type=format_type), "success")
     print("\n=== Governor Test Completed ===")
