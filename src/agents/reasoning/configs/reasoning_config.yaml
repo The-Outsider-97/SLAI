@@ -44,3 +44,16 @@ storage:
   rule_backup: "src/agents/knowledge/discovered_rules.json"
   lexicon_path: "src/agents/language/templates/sentiment_lexicon.json"
   bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"
+
+model_compute:
+  lr: 0.001
+
+reasoning_memory:
+  max_size: 1000
+  checkpoint_dir: "src/agents/reasoning/checkpoints"
+  checkpoint_freq: 1000
+  auto_save: True
+  alpha: 0.6
+  beta: 0.4
+  epsilon: 0.00005
+
