@@ -6,31 +6,11 @@ import yaml, json
 from typing import Dict, Any, List, Optional, Callable, Union
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from types import SimpleNamespace
 
+from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger
 
 logger = get_logger("Task Scheduler")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
 
 class TaskScheduler(ABC):
     """Abstract scheduler interface"""
@@ -47,22 +27,17 @@ class TaskScheduler(ABC):
 
 class DeadlineAwareScheduler(TaskScheduler):
     """Earliest Deadline First scheduler with capability matching"""
-    def __init__(self, agent=None, risk_threshold: Optional[float] = None,
-                 config_section_name: str = "task_scheduler",
-                 config_file_path: str = CONFIG_PATH,
-                 retry_policy: Optional[Dict] = None):
+    def __init__(self, agent=None):
         super().__init__()
-        self.config = get_config_section(config_section_name, config_file_path)
         self.agent = agent
-        self.risk_threshold = risk_threshold if risk_threshold is not None else self.config.risk_threshold
-        self.retry_policy = retry_policy if retry_policy is not None else self.config.retry_policy
+        self.config = load_global_config()
+        self.task_config = get_config_section('task_scheduler')
+
+        self.risk_threshold = self.task_config.get('risk_threshold', 0.7)
+        self.retry_policy = self.task_config.get('retry_policy', {})
         self.task_history = defaultdict(list)
-        #self.agent.route_message({
-        #    'message_id': '123',
-        #    'content': 'urgent_task',
-        #    'ttl': 30,  # 30 second deadline
-        #    'metadata': {'priority': 2}
-        #})
+
+        logger.info(f"Task Scheduler succesfully initialized with: {self.task_history}")
 
     def schedule(self,
                  tasks: List[Dict],
@@ -240,8 +215,8 @@ class DeadlineAwareScheduler(TaskScheduler):
         """Create task assignment with duration based on requirements and agent efficiency."""
         task = next((t for t in (state.get('tasks', [])) if t.get('id') == task_id), None)
         num_requirements = len(task['requirements']) if task else 1
-        base_duration = self.config.base_duration_per_requirement * num_requirements
-        efficiency = max(agent_details.get(self.config.efficiency_attribute, 1.0), 0.1)
+        base_duration = self.task_config.get('base_duration_per_requirement', 5.0) * num_requirements
+        efficiency = max(agent_details.get(self.task_config.get('efficiency_attribute', 'efficiency'), 1.0), 0.1)
         task_duration = base_duration / efficiency
         
         return {
