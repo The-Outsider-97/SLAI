@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.utils.system_optimizer import SystemOptimizer
 
+if os.name == 'nt':
+    os.system("")
+
+sys.stdout.isatty = lambda: True
+
 COLOR_CODES = {
     'RESET': "\033[0m",
     'BLUE': "\033[94m",
@@ -40,6 +45,10 @@ STYLES = {
     'hidden': '\033[8m',
     'strike': '\033[9m',
 
+    'black': '\033[30m',
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'white': '\033[37m',
     'bg_black': '\033[40m',
     'bg_red': '\033[41m',
     'bg_green': '\033[42m',
@@ -48,16 +57,112 @@ STYLES = {
     'bg_magenta': '\033[45m',
     'bg_cyan': '\033[46m',
     'bg_white': '\033[47m',
-    
-    # Add color styles
-    'blue': '\033[94m',
+    'red': '\033[91m',
     'green': '\033[92m',
     'yellow': '\033[93m',
-    'red': '\033[91m',
-    'magenta': '\033[35m',
-    'cyan': '\033[36m',
-    'white': '\033[37m',
-    'black': '\033[30m',
+    'blue': '\033[94m',
+
+    # see https://www.ditig.com/256-colors-cheat-sheet
+    'Grey0': '\033[38;5;16m',   # Darkest
+    'NavyBlue': '\033[38;5;17m',
+    'DarkBlue': '\033[38;5;18m',
+    'Blue3a': '\033[38;5;19m',
+    'Blue3b': '\033[38;5;20m',
+    'Blue1': '\033[38;5;21m',
+    'DarkGreen': '\033[38;5;22m',
+    'DeepSkyBlue4a': '\033[38;5;23m',
+    'DeepSkyBlue4b': '\033[38;5;24m',
+    'DeepSkyBlue4c': '\033[38;5;25m',
+    'DodgerBlue3': '\033[38;5;26m',
+    'DodgerBlue2': '\033[38;5;27m',
+    'Green4': '\033[38;5;28m',
+    'SpringGreen4': '\033[38;5;29m',
+    'color14': '\033[38;5;30m',
+    'DeepSkyBlue3a': '\033[38;5;31m',
+    'DeepSkyBlue3b': '\033[38;5;32m',
+    'DodgerBlue1': '\033[38;5;33m',
+    'Green3': '\033[38;5;34m',
+    'SpringGreen3': '\033[38;5;35m',
+    'DarkCyan': '\033[38;5;36m',
+    'LightSeaGreen': '\033[38;5;37m',
+    'DeepSkyBlue2': '\033[38;5;38m',
+    'DeepSkyBlue1': '\033[38;5;39m',
+    'Green3': '\033[38;5;40m',
+    'SpringGreen3': '\033[38;5;41m',
+    'SpringGreen2': '\033[38;5;42m',
+    'Cyan3': '\033[38;5;43m',
+    'DarkTurquoise': '\033[38;5;44m',
+    'Turquoise2': '\033[38;5;45m',
+    'Green1': '\033[38;5;46m',
+    'SpringGreen2': '\033[38;5;47m',
+    'SpringGreen1': '\033[38;5;48m',
+    'MediumSpringGreen': '\033[38;5;49m',
+    'Cyan2': '\033[38;5;50m',
+    'Cyan1': '\033[38;5;51m',
+    'DarkRed': '\033[38;5;52m',
+    'DeepPink4': '\033[38;5;53m',
+    'Purple4a': '\033[38;5;54m',
+    'Purple4b': '\033[38;5;55m',
+    'Purple3': '\033[38;5;56m',
+    'BlueViolet': '\033[38;5;57m',
+    'Orange4': '\033[38;5;58m',
+    'Grey37': '\033[38;5;59m',
+    'MediumPurple4': '\033[38;5;60m',
+    'SlateBlue3a': '\033[38;5;61m',
+    'SlateBlue3b': '\033[38;5;62m',
+    'DarkSeaGreen4': '\033[38;5;65m',
+    'PaleTurquoise4': '\033[38;5;66m',   # Mid-range
+    'SteelBlue': '\033[38;5;67m',
+    'SteelBlue3': '\033[38;5;68m',
+    'CornflowerBlue': '\033[38;5;69m',
+    'Chartreuse3': '\033[38;5;70m',
+    'DarkSeaGreen4': '\033[38;5;71m',
+    'CadetBlue': '\033[38;5;72m',
+    'CadetBlue': '\033[38;5;73m',
+    'SkyBlue3': '\033[38;5;74m',
+    'SteelBlue1': '\033[38;5;75m',
+    'Chartreuse3': '\033[38;5;76m',
+    'PaleGreen3': '\033[38;5;77m',
+    'SeaGreen3': '\033[38;5;78m',
+    'Aquamarine3': '\033[38;5;79m',
+    'MediumTurquoise': '\033[38;5;80m',
+    'SteelBlue1': '\033[38;5;81m',
+    'Chartreuse2': '\033[38;5;82m',
+    'SeaGreen2': '\033[38;5;83m',
+    'SeaGreen1a': '\033[38;5;84m',
+    'SeaGreen1b': '\033[38;5;85m',
+    'Aquamarine1': '\033[38;5;86m',
+    'DarkSlateGray2': '\033[38;5;87m',
+    'DarkRed': '\033[38;5;88m',
+    'DeepPink4': '\033[38;5;89m',
+    'DarkMagentaA': '\033[38;5;90m',
+    'DarkMagentaB': '\033[38;5;91m',
+    'DarkViolet': '\033[38;5;92m',
+    'Purple': '\033[38;5;93m',
+    'Orange4': '\033[38;5;94m',
+    'LightPink4': '\033[38;5;95m',
+    'Plum4': '\033[38;5;96m',
+    'MediumPurple3a': '\033[38;5;97m',
+    'MediumPurple3b': '\033[38;5;98m',
+    'SlateBlue1': '\033[38;5;99m',
+    'Yellow4': '\033[38;5;100m',
+    'Wheat4': '\033[38;5;101m',
+    'Grey53': '\033[38;5;102m',
+    'LightSlateGrey': '\033[38;5;103m',
+    'MediumPurple': '\033[38;5;104m',
+    'LightSlateBlue': '\033[38;5;105m',
+    'Yellow4': '\033[38;5;106m',
+    'DarkOliveGreen3': '\033[38;5;107m',
+    'DarkSeaGreen': '\033[38;5;108m',
+    'LightSkyBlue3a': '\033[38;5;109m',
+    'LightSkyBlue3b': '\033[38;5;110m',
+    'SkyBlue2': '\033[38;5;111m',
+    'Chartreuse2': '\033[38;5;112m',
+    'DarkOliveGreen3': '\033[38;5;113m',
+    'PaleGreen3': '\033[38;5;114m',
+    'DarkSeaGreen3': '\033[38;5;115m',   # Lightest
+    'Orange1': '\033[38;5;214m',
+    'Gold1': '\033[38;5;220m',
 }
 
 # Shared logging queue
@@ -82,6 +187,8 @@ class ColorFormatter(logging.Formatter):
             color = COLOR_CODES['RED']
         elif record.levelno >= logging.WARNING:
             color = COLOR_CODES['YELLOW']
+        elif record.levelno >= logging.ERROR:
+            color = STYLES['Orange1']
         else:
             color = COLOR_CODES['RESET']
 
@@ -310,10 +417,13 @@ class AnomalyDetector:
         z_score = (latest_interval - self.mean) / self.std
         return abs(z_score) > self.sigma
 
+USE_ANSI = sys.stdout.isatty()
 class PrettyPrinter:
 
     @classmethod
     def _style(cls, text, *styles):
+        if not USE_ANSI:
+            return text
         codes = []
         for style in styles:
             if style in STYLES:
