@@ -16,35 +16,24 @@ from sentence_transformers import util
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
 
+from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from src.agents.reasoning.utils.mln_rules import mln_rules
+from src.agents.reasoning.reasoning_memory import ReasoningMemory
 from logs.logger import get_logger
 
 logger = get_logger("Validation Engine")
 
-CONFIG_PATH = "src/agents/reasoning/configs/reasoning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    """Load YAML configuration from specified path"""
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    """Merge base config with optional user-provided config"""
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 class ValidationEngine:
-    def __init__(self, config: Dict[str, Any] = None, knowledge_base: Dict[Tuple, float] = None):
-        self.config = config or load_config()
-        self.validation_settings = self.config['validation']
+    def __init__(self, knowledge_base: Dict[Tuple, float] = None):
+        self.config = load_global_config()
+        self.validation_config = get_config_section('validation')
+        self.max_depth = self.validation_config.get('max_circular_depth', 3)
         self.knowledge_base = knowledge_base or self._load_knowledge_base()
 
+        self.reasoning_memory = ReasoningMemory()
         # Initialize semantic similarity model
         self.semantic_model = None
-        if self.validation_settings['enable_semantic_redundancy']:
+        if self.validation_config['enable_semantic_redundancy']:
             self._initialize_semantic_model()
 
         logger.info(f"Validation Initialized with {len(self.knowledge_base)} facts")
@@ -91,13 +80,22 @@ class ValidationEngine:
             results['validation_status'] = f'failed: {str(e)}'
 
         results['execution_time'] = time.time() - start_time
+        self.reasoning_memory.add(
+            experience={
+                "type": "validation_report",
+                "results": results,
+                "rules": [name for name, _, _ in rules],
+                "new_facts_count": len(new_facts)
+            },
+            tag="validation",
+            priority=0.9  # High priority for validation results
+        )
         return results
 
     def detect_circular_rules(self, rules: List[Tuple[str, callable, float]]) -> List[str]:
         """Enhanced circular dependency detection with depth tracking"""
         rule_graph = defaultdict(set)
         rule_names = {name for name, _, _ in rules}
-        max_depth = self.validation_settings.get('max_circular_depth', 3)
     
         # Build rule dependency graph only using known rule names
         for name, rule, _ in rules:
@@ -137,7 +135,7 @@ class ValidationEngine:
     def detect_fact_conflicts(self, new_facts: Dict[Tuple, float]) -> List[Tuple]:
         """Multi-dimensional conflict detection"""
         conflicts = []
-        threshold = self.validation_settings['contradiction_threshold']
+        threshold = self.validation_config.get('contradiction_threshold')
 
         # Direct contradictions
         for (s, p, o), conf in new_facts.items():
@@ -159,7 +157,7 @@ class ValidationEngine:
     def check_redundancies(self, new_facts: Dict[Tuple, float]) -> List[Tuple]:
         """Multi-modal redundancy detection"""
         redundancies = []
-        margin = self.validation_settings['redundancy_margin']
+        margin = self.validation_config.get('redundancy_margin')
 
         # Exact match redundancies
         for fact, conf in new_facts.items():
@@ -178,7 +176,7 @@ class ValidationEngine:
         """Validate rules against current knowledge base"""
         sound_rules = []
         unsound_rules = []
-        min_score = self.validation_settings['min_soundness_score']
+        min_score = self.validation_config.get('min_soundness_score')
 
         for name, rule, weight in rules:
             try:
@@ -200,8 +198,8 @@ class ValidationEngine:
     def validate_knowledge_base_consistency(self, kb: Dict[Tuple, float]) -> Dict:
         """Full KB consistency check with retry logic"""
         attempts = 0
-        max_attempts = self.validation_settings['max_validation_attempts']
-        timeout = self.validation_settings['validation_timeout']
+        max_attempts = self.validation_config.get('max_validation_attempts')
+        timeout = self.validation_config.get('validation_timeout')
 
         while attempts < max_attempts:
             try:
@@ -289,7 +287,7 @@ class ValidationEngine:
         Validate using imported MLN-style soft rules.
         """
         violations = []
-        confidence_threshold = self.validation_settings.get('mln_rule_confidence_threshold', 0.7)
+        confidence_threshold = self.validation_config.get('mln_rule_confidence_threshold', 0.7)
     
         # Use the imported mln_rules list
         for rule_def in mln_rules:
@@ -323,10 +321,6 @@ class ValidationEngine:
 
 if __name__ == "__main__":
     print("\n=== Running Validation Engine ===\n")
-
-    config = load_config()
-    validation = ValidationEngine(config=config)
-
     # Create sample knowledge base for testing
     sample_kb = {
         # Facts for circular rule testing
@@ -369,7 +363,7 @@ if __name__ == "__main__":
     ]
 
     # Initialize validation engine
-    validation = ValidationEngine(config=config, knowledge_base=sample_kb)
+    validation = ValidationEngine(knowledge_base=sample_kb)
     print("Validation Engine initialized with test knowledge base\n")
 
     # Test 1: Circular Rule Detection
