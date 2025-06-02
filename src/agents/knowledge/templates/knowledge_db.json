@@ -1,5 +1,11 @@
 {
-    "knowledge": [],
+    "knowledge": [
+        ["Socrates", "is_a", "Human", 1.0],
+        ["Penguin", "is_a", "Bird", 1.0],
+        ["Tweety", "is_a", "Penguin", 1.0],
+        ["Earth", "orbits_the, "Sun", 1.0],
+        ["Earth", "orbits_the, "center_of", "the_solar_system", 1.0]
+    ],
     "rules": [
         [
             "IdentityRule", "identity_rule", 1.0],
@@ -154,5 +160,5 @@
         "EmotionImpliesConsciousnessRule": 0.8,
         "PartRequiresWholeRule": 0.92
     },
-    "bayesian_network": {}
+    "bayesian_network": "src/agents/reasoning/network/bayesian_network.json"
 }
