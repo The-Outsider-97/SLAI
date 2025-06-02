@@ -7,29 +7,16 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple, Callable
 from collections import defaultdict
 
+from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
+from src.agents.reasoning.reasoning_memory import ReasoningMemory
 from logs.logger import get_logger
 
 logger = get_logger("Rule Engine")
 
-CONFIG_PATH = "src/agents/reasoning/configs/reasoning_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    """Load YAML configuration from specified path"""
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    """Merge base config with optional user-provided config"""
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
 class RuleEngine:
-    def __init__(self, config: Dict[str, Any] = None, knowledge_base: Dict[Tuple, float] = None):
-        self.config = config or load_config()
-        self.rule_settings = self.config['rules']
+    def __init__(self, knowledge_base: Dict[Tuple, float] = None):
+        self.config = load_global_config()
+        self.validation_config = get_config_section('rules')
 
         # Initialize core components
         self.knowledge_base = knowledge_base or self._load_knowledge_base()
@@ -37,6 +24,7 @@ class RuleEngine:
         self.pragmatic_heuristics = self._load_pragmatic_heuristics()
         self.dependency_rules = self._create_dependency_rules()
 
+        self.reasoning_memory = ReasoningMemory()
         # Initialize rule storage
         self.learned_rules = defaultdict(float)
         self.rule_weights = {}
@@ -50,23 +38,147 @@ class RuleEngine:
         logger.info(f" - {len(self.dependency_rules)} dependency grammar rules")
 
     def _load_knowledge_base(self) -> Dict[Tuple, float]:
-        """Load knowledge base with fact confidences"""
-        kb_path = Path(self.config['storage']['knowledge_db'])
+        """
+        Load knowledge base with fact confidences.
+        This version attempts to read facts primarily from a "knowledge" key 
+        within the JSON file, expecting a dictionary of "s||p||o": confidence.
+        It includes a fallback to read from the root if "knowledge" is not found
+        or not in the expected dictionary format.
+        """
+        # Path to knowledge_db.json is taken from the global config
+        kb_path_str = self.config.get('storage', {}).get('knowledge_db')
+        if not kb_path_str:
+            logger.error("Knowledge base path not found in configuration (storage.knowledge_db).")
+            return {}
+        
+        kb_path = Path(kb_path_str)
+
         if not kb_path.exists():
-            raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
+            logger.error(f"Knowledge base file not found: {kb_path}")
+            # Depending on strictness, you might raise FileNotFoundError here
+            # raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
+            return {}
             
         logger.info(f"Loading knowledge base from {kb_path}")
-        with open(kb_path, 'r') as f:
-            kb = json.load(f)
-        
-        parsed_kb = {}
-        #for k, v in kb.items():
-        #    parts = k.split('||')
-        #    if len(parts) != 3:
-        #        logger.error(f"Invalid knowledge base entry: {k} (expected 'subject||predicate||object')")
-        #        continue
-        #    parsed_kb[tuple(parts)] = v
-        
+        parsed_kb: Dict[Tuple, float] = {}
+        try:
+            with open(kb_path, 'r', encoding='utf-8') as f:
+                full_kb_data = json.load(f)
+            
+            # Primary expectation: facts are under a "knowledge" key as a dictionary.
+            # e.g., "knowledge": {"cat||is_animal||True": 0.9, ...}
+            facts_data_source = full_kb_data.get('knowledge')
+
+            if isinstance(facts_data_source, dict):
+                logger.info(f"Found 'knowledge' dictionary in {kb_path}. Parsing facts...")
+                for k, v in facts_data_source.items():
+                    if not isinstance(k, str) or "||" not in k:
+                        logger.warning(f"Skipping invalid fact key '{k}' in 'knowledge' dict. Expected 's||p||o' format.")
+                        continue
+                    try:
+                        parts = k.split('||')
+                        if len(parts) == 3: # s, p, o
+                            obj_str = parts[2]
+                            # Convert common boolean strings to actual booleans
+                            if obj_str.lower() == 'true':
+                                obj_val = True
+                            elif obj_str.lower() == 'false':
+                                obj_val = False
+                            else:
+                                obj_val = obj_str # Keep as string if not 'true'/'false'
+                            
+                            fact_tuple = (parts[0], parts[1], obj_val)
+                            parsed_kb[fact_tuple] = float(v)
+                        else:
+                            logger.warning(f"Fact key '{k}' in 'knowledge' dict does not have 3 parts. Skipping.")
+                    except ValueError:
+                        logger.error(f"Error converting confidence for fact '{k}': '{v}' to float. Skipping.")
+                    except Exception as e:
+                        logger.error(f"Error parsing fact '{k}': {v} from 'knowledge' dict: {e}")
+            
+            elif isinstance(facts_data_source, list):
+                # This handles the case where "knowledge": [] (empty list)
+                if not facts_data_source:
+                    logger.info(f"'knowledge' field in {kb_path} is an empty list. No facts loaded from this field.")
+                else:
+                    # If it's a list of {"fact_string": "s||p||o", "confidence": 0.9}
+                    # or list of {"subject":s, "predicate":p, "object":o, "confidence":0.9}
+                    # This part would need to be more specific based on the actual list structure.
+                    # For now, we log a warning if it's a non-empty list and not a dict.
+                    logger.warning(f"'knowledge' field in {kb_path} is a list, but a dictionary was primarily expected. "
+                                   f"Attempting to parse list items if structured specifically (not fully generic).")
+                    # Example: parsing list of {"s||p||o": conf} dicts (less common)
+                    for item_dict in facts_data_source:
+                        if isinstance(item_dict, dict):
+                            for k, v in item_dict.items(): # Assuming one fact per dict in list
+                                if isinstance(k, str) and "||" in k:
+                                    parts = k.split('||')
+                                    if len(parts) == 3:
+                                        obj_str = parts[2]
+                                        if obj_str.lower() == 'true': obj_val = True
+                                        elif obj_str.lower() == 'false': obj_val = False
+                                        else: obj_val = obj_str
+                                        parsed_kb[(parts[0], parts[1], obj_val)] = float(v)
+                                    break # Process first valid key-value pair
+            
+            elif facts_data_source is None:
+                logger.warning(f"'knowledge' key not found in {kb_path}.")
+                # Fallback: Check if the root of the JSON is the fact dictionary itself
+                # This maintains compatibility if knowledge_db.json is flat like {"s||p||o": conf, ...}
+                if isinstance(full_kb_data, dict):
+                    is_flat_fact_dict = True
+                    # Heuristic: check if most keys look like facts
+                    fact_like_keys = 0
+                    if len(full_kb_data) > 0: # Avoid division by zero
+                        for k_root in full_kb_data.keys():
+                            if isinstance(k_root, str) and "||" in k_root:
+                                fact_like_keys +=1
+                        if (fact_like_keys / len(full_kb_data)) < 0.5: # If less than half keys are fact-like, probably not it
+                            is_flat_fact_dict = False
+                    else: # Empty dict
+                        is_flat_fact_dict = False
+
+
+                    if is_flat_fact_dict:
+                        logger.info(f"Treating root of {kb_path} as facts dictionary (fallback).")
+                        for k, v in full_kb_data.items():
+                            if not isinstance(k, str) or "||" not in k:
+                                # This case should ideally not be hit if is_flat_fact_dict was true
+                                logger.warning(f"Skipping invalid fact key '{k}' at root. Expected 's||p||o' format.")
+                                continue
+                            try:
+                                parts = k.split('||')
+                                if len(parts) == 3:
+                                    obj_str = parts[2]
+                                    if obj_str.lower() == 'true': obj_val = True
+                                    elif obj_str.lower() == 'false': obj_val = False
+                                    else: obj_val = obj_str
+                                    parsed_kb[(parts[0], parts[1], obj_val)] = float(v)
+                                else:
+                                    logger.warning(f"Fact key '{k}' at root does not have 3 parts. Skipping.")
+                            except ValueError:
+                                logger.error(f"Error converting confidence for fact '{k}': '{v}' (root) to float. Skipping.")
+                            except Exception as e:
+                                logger.error(f"Error parsing fact '{k}': {v} (root): {e}")
+                    else:
+                        logger.info(f"Root of {kb_path} is not a flat facts dictionary. No facts loaded from root.")
+                else:
+                    logger.info(f"Root of {kb_path} is not a dictionary. No facts loaded from root.")
+
+
+            if not parsed_kb:
+                logger.info(f"No facts were successfully parsed from {kb_path} into the knowledge base.")
+            else:
+                logger.info(f"Successfully loaded {len(parsed_kb)} facts into the knowledge base.")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON from {kb_path}: {e}")
+            # raise ValueError(f"Invalid JSON format in {kb_path}") from e # Or return {}
+            return {}
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while loading knowledge base from {kb_path}: {e}")
+            return {} # Return empty on other errors to prevent crash
+
         return parsed_kb
 
     def _load_sentiment_lexicon(self) -> Dict[str, Any]:
@@ -217,6 +329,15 @@ class RuleEngine:
                 
             rule_name = f"LearnedRule_{hash(frozenset(ant+cons))}"
             self.add_rule(rule_func, rule_name, weight=rule['confidence'])
+            self.reasoning_memory.add(
+                experience={
+                    "type": "rule_discovery",
+                    "rule_name": rule_name,
+                    "antecedents": ant,
+                    "consequents": cons,
+                    "confidence": rule['confidence']
+                },
+            )
 
     def add_rule(self, rule_func: Callable, name: str, weight: float, antecedents: List, consequents: List):
         self.learned_rules[name] = rule_func
@@ -339,13 +460,22 @@ class RuleEngine:
         Returns:
             Dictionary with detailed analysis results
         """
-        return {
+        result = {
             'gricean_violations': self._check_gricean_maxims(text),
             'politeness_strategies': self._detect_politeness(text),
             'discourse_relations': self._identify_discourse_relations(text),
             'sentiment': self._analyze_sentiment(text),
             'dependency_analysis': self._analyze_dependencies(text)
         }
+        self.reasoning_memory.add(
+            experience={
+                "type": "utterance_analysis",
+                "text": text,
+                "result": result
+            },
+            tag="pragmatic_analysis"
+        )
+        return result
 
     def _check_gricean_maxims(self, text: str) -> Dict[str, bool]:
         """Evaluate utterance against Grice's conversational maxims"""
@@ -440,10 +570,7 @@ class RuleEngine:
 
 if __name__ == "__main__":
     print("\n=== Running Rule Engine ===\n")
-
-    config = load_config()
-
-    engine = RuleEngine(config=config)
+    engine = RuleEngine()
     print(engine)
 
     # Detect issues
@@ -451,10 +578,65 @@ if __name__ == "__main__":
     conflicts = engine.detect_fact_conflicts()
     redundant = engine.redundant_fact_check()
 
-    {
-      "cat||is_animal||true": 0.9,
-      "sky||has_color||blue": 0.8
+    def mock_load_global_config():
+        return {
+            "storage": {
+                "knowledge_db": "knowledge_db.json" # Path to your test DB
+            },
+            "rules": { # From reasoning_config.yaml
+                "min_confidence_to_propagate": 0.1 # Example value
+            }
+        }
+    
+    # Override the actual loader with the mock for this test
+    import src.agents.reasoning.utils.config_loader as cl
+    original_loader = cl.load_global_config
+    cl.load_global_config = mock_load_global_config
+
+    # Create a dummy knowledge_db.json for testing
+    test_kb_content_scenario1 = { # Scenario 1: "knowledge" key with a dict of facts
+        "knowledge": {
+            "cat||is_animal||True": 0.9,
+            "dog||is_animal||True": 0.95,
+            "cat||has_fur||True": 0.8,
+            "sky||is_blue||False": 0.1 # e.g. at night
+        },
+        "rules": [],
+        "rule_weights": {}
     }
+    test_kb_content_scenario2 = { # Scenario 2: "knowledge" key with an empty list
+        "knowledge": [],
+        "rules": [],
+        "rule_weights": {}
+    }
+    test_kb_content_scenario3 = { # Scenario 3: Flat fact dictionary (no "knowledge" key)
+        "bird||can_fly||True": 0.8,
+        "penguin||is_bird||True": 1.0,
+        "penguin||can_fly||False": 0.99
+    }
+    with open("knowledge_db.json", "w") as f:
+        json.dump(test_kb_content_scenario1, f) # Change this to test other scenarios
+
+    print("--- Testing RuleEngine with corrected _load_knowledge_base ---")
+    try:
+        engine = RuleEngine() # This will call _load_knowledge_base
+        print(f"Loaded Knowledge Base ({len(engine.knowledge_base)} facts):")
+        for fact, conf in engine.knowledge_base.items():
+            print(f"  {fact} -> {conf}")
+        
+        if not engine.knowledge_base and "knowledge_db.json": # contains actual facts
+             print("\nWARNING: Knowledge base is empty but knowledge_db.json might have facts. Check parsing logic and file structure.")
+
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}. Ensure knowledge_db.json exists.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Clean up dummy file
+        if Path("knowledge_db.json").exists():
+            Path("knowledge_db.json").unlink()
+        # Restore original loader
+        cl.load_global_config = original_loader
 
     utterances = [
     "I think you might perhaps want to consider this option, however it's not absolutely perfect."
