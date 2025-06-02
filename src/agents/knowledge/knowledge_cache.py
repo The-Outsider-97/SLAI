@@ -5,43 +5,32 @@ import string
 import json, yaml
 import hashlib
 
-from cryptography.fernet import Fernet
 from typing import Optional, Any, Dict, Union, List
-from collections import OrderedDict
-from types import SimpleNamespace
+from cryptography.fernet import Fernet
+from collections import OrderedDict, defaultdict
 
-from logs.logger import get_logger
+from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Knowledge Cache")
+printer = PrettyPrinter
 
-CONFIG_PATH = "src/agents/knowledge/configs/knowledge_config.yaml"
 ACTION_PATTERN = re.compile(r"action:(\w+):(.+)", re.IGNORECASE)
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
 
 class KnowledgeCache:
     """LRU Cache with Semantic Hashing and Encryption"""
-    def __init__(self, config_section_name: str = "knowledge_cache", config_file_path: str = CONFIG_PATH):
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
+        self.config = load_global_config()
+        self.cache_config = get_config_section('knowledge_cache')
         self.cache = OrderedDict()
         self.cipher = Fernet(os.getenv('CACHE_ENCRYPTION_KEY', Fernet.generate_key())) \
-            if self.config.enable_encryption else None
+            if self.cache_config.get('enable_encryption', True) else None
+
+        self.max_size = self.cache_config.get('max_size', 1000)
+        self.hashing_method = self.cache_config.get('hashing_method', "simhash")
+        self.simhash_bits = self.cache_config.get('simhash_bits', 64)
+        self.tokenizer = self.cache_config.get('tokenizer', "word")
+
 
     def __contains__(self, key):
         return key in self.cache
@@ -60,14 +49,14 @@ class KnowledgeCache:
         self.cache.move_to_end(key)
         value = self.cache[key]
         
-        # Decrypt if enabled
-        if self.config.enable_encryption:
+        # Decrypt if enabled (using dictionary access)
+        if self.cache_config.get('enable_encryption'):
             return json.loads(self.cipher.decrypt(value).decode())
         return value
 
     def set(self, key: str, value: Any) -> None:
-        # Encrypt if enabled
-        if self.config.enable_encryption:
+        # Encrypt if enabled (using dictionary access)
+        if self.cache_config.get('enable_encryption'):
             value = self.cipher.encrypt(json.dumps(value).encode())
         
         # LRU logic
@@ -76,100 +65,112 @@ class KnowledgeCache:
         self.cache[key] = value
         
         # Evict oldest if over capacity
-        if len(self.cache) > self.config.max_size:
+        if len(self.cache) > self.cache_config.get('max_size', 1000):
             self.cache.popitem(last=False)
 
     def hash_query(self, query: str) -> str:
-        """Semantic hashing using SimHash or MD5"""
-        if self.config.hashing_method == "simhash":
+        """Semantic hashing using SimHash or MD5 with configurable methods"""
+        hashing_method = self.cache_config.get('hashing_method', "simhash")
+        
+        if hashing_method == "simhash":
             return self._simhash(query)
-        return hashlib.md5(query.encode()).hexdigest()
-
-    def _tokenize(self, text: str) -> List[str]:
-        """Tokenizer for SimHash"""
-        if self.config.tokenizer == "word":
-            # Remove punctuation and split into words
-            text = text.translate(str.maketrans('', '', string.punctuation))
-            return text.lower().split()
-        elif self.config.tokenizer == "char":
-            return list(text.lower())
-        return [text]
+        else:  # Fallback to MD5
+            return hashlib.md5(query.encode()).hexdigest()
 
     def _simhash(self, query: str) -> str:
-        """SimHash implementation for similar query grouping"""
-        tokens = self._tokenize(query)
-        hash_bits = [0] * self.config.simhash_bits
-
-        for token in tokens:
-            # Create weighted hash for each token
-            token_hash = hashlib.md5(token.encode()).digest()
+        """
+        Enhanced SimHash implementation based on Charikar's algorithm
+        - Supports configurable bit-length (64/128/256)
+        - Uses TF weighting by default
+        - Optimized hash selection based on required bits
+        """
+        # Get configuration parameters
+        simhash_bits = self.cache_config.get('simhash_bits', 64)
+        tokenizer_type = self.cache_config.get('tokenizer', 'word')
+        use_tf_weights = self.cache_config.get('use_tf_weights', True)
+        
+        # Tokenize with appropriate method
+        tokens = self._tokenize(query, tokenizer_type)
+        
+        # Calculate token weights (TF by default)
+        token_weights = self._calculate_token_weights(tokens) if use_tf_weights \
+            else {token: 1 for token in set(tokens)}
+        
+        # Initialize bit vector
+        vector = [0] * simhash_bits
+        
+        # Process tokens
+        for token, weight in token_weights.items():
+            # Select optimal hash function based on required bits
+            if simhash_bits <= 128:
+                hash_func = hashlib.md5
+            else:  # >128 bits
+                hash_func = hashlib.sha256
+                
+            # Generate hash and convert to integer
+            token_hash = hash_func(token.encode()).digest()
             bit_mask = int.from_bytes(token_hash, byteorder='big')
-
-            for bit_pos in range(self.config.simhash_bits):
+            
+            # Process each bit position
+            for bit_pos in range(simhash_bits):
                 if bit_mask & (1 << bit_pos):
-                    hash_bits[bit_pos] += 1
+                    vector[bit_pos] += weight
                 else:
-                    hash_bits[bit_pos] -= 1
+                    vector[bit_pos] -= weight
+        
+        # Generate final fingerprint
+        fingerprint = 0
+        for bit_pos in range(simhash_bits):
+            if vector[bit_pos] > 0:
+                fingerprint |= 1 << bit_pos
+        
+        # Convert to fixed-length hex string
+        return self._to_fixed_length_hex(fingerprint, simhash_bits)
+    
+    def _tokenize(self, text: str, tokenizer_type: str = 'word') -> List[str]:
+        """Enhanced tokenizer with configurable methods"""
+        text = text.lower()
+        
+        if tokenizer_type == "word":
+            # Remove punctuation and split
+            text = re.sub(r'[^\w\s]', '', text)
+            return text.split()
+        
+        elif tokenizer_type == "char":
+            # Character n-grams (configurable length)
+            n = self.cache_config.get('char_ngram', 3)
+            return [text[i:i+n] for i in range(len(text) - n + 1)]
+        
+        elif tokenizer_type == "shingle":
+            # Word n-grams (configurable length)
+            n = self.cache_config.get('shingle_size', 4)
+            words = re.sub(r'[^\w\s]', '', text).split()
+            return [' '.join(words[i:i+n]) for i in range(len(words) - n + 1)]
+        
+        else:  # Default to whole text
+            return [text]
 
-        # Convert to bit string
-        simhash_value = 0
-        for bit_pos in range(self.config.simhash_bits):
-            if hash_bits[bit_pos] > 0:
-                simhash_value |= 1 << bit_pos
+    def _calculate_token_weights(self, tokens: List[str]) -> dict:
+        """Calculate TF weights with stopword filtering"""
+        stop_words = self.cache_config.get('stop_words', set())
+        tf = defaultdict(int)
+        
+        for token in tokens:
+            if token not in stop_words:
+                tf[token] += 1
+        
+        return tf
 
-        return hex(simhash_value)[2:]
+    def _to_fixed_length_hex(self, value: int, num_bits: int) -> str:
+        """Convert to zero-padded hex string"""
+        num_hex_digits = (num_bits + 3) // 4  # Bits to hex digits
+        return format(value, f'0{num_hex_digits}x')
+
 if __name__ == "__main__":
-    import os
-    import tempfile
-    import time
+    print("\n=== Running Knowledge Cache ===\n")
+    printer.status("Init", "Knowledge Cache initialized", "success")
 
-    # Create temporary config file (no encryption, use MD5)
-    temp_config_path = os.path.join(tempfile.gettempdir(), "cache_config.yaml")
-    with open(temp_config_path, "w") as f:
-        f.write("""
-knowledge_cache:
-  max_size: 2
-  enable_encryption: false
-  hashing_method: "md5"
-  tokenizer: "word"
-  simhash_bits: 64
-        """)
+    cache = KnowledgeCache()
 
-    # Initialize KnowledgeCache
-    cache = KnowledgeCache(config_file_path=temp_config_path)
-    print("📁 Cache Initialized (MD5, no encryption)\n")
-
-    # Simulated chatbot Q&A
-    questions = {
-        "What is AI?": "AI stands for Artificial Intelligence.",
-        "How does machine learning work?": "ML uses data to learn patterns.",
-        "What is deep learning?": "Deep learning is a subset of ML using neural networks."
-    }
-
-    # Add entries to the cache (2 max entries allowed)
-    for question, answer in questions.items():
-        key = cache.hash_query(question)
-        cache.set(key, {"question": question, "answer": answer})
-        print(f"➕ Cached: {question}")
-
-        time.sleep(0.2)  # Simulate time between requests
-
-    print("\n📦 Cache Contents:")
-    for k in cache.cache:
-        print(f"- {k[:6]}")
-
-    print("\n🔍 Retrieving previous entry (should be evicted):")
-    forgotten_key = cache.hash_query("What is AI?")
-    forgotten_entry = cache.get(forgotten_key)
-    if forgotten_entry:
-        print(f"✅ Found: {forgotten_entry}")
-    else:
-        print("❌ Entry for 'What is AI?' was evicted due to LRU policy")
-
-    print("\n🔄 Retesting access to most recent question:")
-    recent_key = cache.hash_query("What is deep learning?")
-    recent_entry = cache.get(recent_key)
-    if recent_entry:
-        print(f"✅ Found: {recent_entry}")
-    else:
-        print("❌ Unexpected cache miss")
+    printer.status("Details", f"Cache capacity: {cache.max_size}", "info")
+    print("\n=== Succesfully ran Knowledge Cache ===\n")
