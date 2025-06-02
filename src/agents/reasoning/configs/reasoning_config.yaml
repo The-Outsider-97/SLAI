@@ -48,6 +48,11 @@ storage:
 model_compute:
   lr: 0.001
 
+adaptive_circuit:
+  embedding_dim: 64
+  hidden_dim: 128
+  num_kb_embeddings: 1000
+
 reasoning_memory:
   max_size: 1000
   checkpoint_dir: "src/agents/reasoning/checkpoints"
