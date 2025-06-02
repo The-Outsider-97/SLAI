@@ -92,6 +92,7 @@ class ReasoningMemory:
         Manages experiences with SumTree-based prioritized experience replay.
         Memory incorporates a cache mechanism with checkpoints and FIFO principles.
         """
+        self.reasoning_memory = []
         self.config = load_global_config()
         self.memory_config = get_config_section('reasoning_memory')
 
@@ -241,11 +242,23 @@ class ReasoningMemory:
             self.access_counter = 0
             self.max_priority = 1.0
 
-    def get_by_tag(self, tag):
-        """Get experiences by tag"""
+    def get_by_type(self, experience_type: str) -> list:
+        """Get experiences by type"""
         with self.lock:
-            indices = self.tag_index.get(tag, [])
-            return [self.tree.data[idx] for idx in indices]
+            return [exp for exp in self.tree.data 
+                    if exp and exp.get('type') == experience_type]
+
+    def get_high_priority(self, threshold: float = 0.8) -> list:
+        """Get high-priority experiences"""
+        with self.lock:
+            indices = []
+            experiences = []
+            for i in range(len(self.tree)):
+                idx = (self.tree.write_ptr - i - 1) % self.capacity
+                if self.tree.tree[idx + self.capacity - 1] >= threshold:
+                    indices.append(idx)
+                    experiences.append(self.tree.data[idx])
+            return experiences
 
     def metrics(self):
         """Get memory system statistics"""
