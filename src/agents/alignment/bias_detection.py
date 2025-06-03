@@ -12,9 +12,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 from itertools import product, combinations
 from scipy import stats
 from statsmodels.tsa.seasonal import STL
@@ -22,24 +20,11 @@ from statsmodels.stats.multitest import multipletests
 from statsmodels.multivariate.manova import MANOVA
 from ruptures import Binseg #, CostLinear
 
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Bias Detection")
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: str, config_file_path: str):
-    with open(config_file_path, "r") as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class BiasDetector:
     """
@@ -56,24 +41,16 @@ class BiasDetector:
     - Sufficiency (Barocas et al., 2019)
     """
 
-    def __init__(self, sensitive_attributes: List[str],
-                 config_section_name: str = "bias_detector",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"):
+    def __init__(self, sensitive_attributes: List[str]):
         self.sensitive_attrs = sensitive_attributes
-        # Load config from YAML
-        config_data = get_config_section(config_section_name, config_file_path)
-        if not isinstance(config_data, dict):
-            logger.error(f"Config for {config_section_name} is not a dict. Received: {type(config_data)}")
-            self.config = {}
-        else:
-            self.config = config_data
-
-        if hasattr(self, '_config'):
-            self._config = self.config
+        self.config = load_global_config()
+        self.detector_config = get_config_section('bias_detection')
 
         self.bias_history = pd.DataFrame(columns=[
             'timestamp', 'metric', 'value', 'groups', 'stat_significance'
         ])
+
+        printer.status("INIT", f"Bias Detection Initialized with: {self.bias_history}", "Success")
 
     def compute_metrics(self, data: pd.DataFrame,
                        predictions: np.ndarray,
@@ -88,16 +65,17 @@ class BiasDetector:
         self._validate_inputs(data, predictions, labels)
         report = {}
         groups = self._generate_intersectional_groups(data,
-                                                      self.config.get('intersectional_depth', 3),
-                                                      self.config.get('min_group_size', 30))
+                                                      self.detector_config.get('intersectional_depth', 3),
+                                                      self.detector_config.get('min_group_size', 30))
 
-        for metric in self.config.get("metrics", []):
+        for metric in self.detector_config.get("metrics", []):
             metric_report = self._compute_metric(
                 metric, data, predictions, labels, groups
             )
-            report[metric] = self._add_statistical_significance(metric_report, self.config.get("alpha", 0.05))
+            report[metric] = self._add_statistical_significance(metric_report, self.detector_config.get("alpha", 0.05))
             
         self._update_history(report)
+        report 
         return report
 
     def _compute_metric(self, metric: str, data: pd.DataFrame,
@@ -155,8 +133,8 @@ class BiasDetector:
         """Disparate impact ratio analysis"""
         # Add predictions to data and regenerate groups
         df = data.assign(predictions=predictions)
-        min_group_size_val = self.config.get('min_group_size', 30)
-        intersectional_depth_val = self.config.get('intersectional_depth', 3)
+        min_group_size_val = self.detector_config.get('min_group_size', 30)
+        intersectional_depth_val = self.detector_config.get('intersectional_depth', 3)
         current_groups = self._generate_intersectional_groups(df, intersectional_depth_val, min_group_size_val)
         
         group_means = {}
@@ -207,14 +185,14 @@ class BiasDetector:
     def _group_metric(self, data: pd.DataFrame,
                      metric_fn: callable) -> Dict:
         results = {}
-        min_group_size = self.config.get('min_group_size', 30)
-        intersectional_depth = self.config.get('intersectional_depth', 3)
+        min_group_size = self.detector_config.get('min_group_size', 30)
+        intersectional_depth = self.detector_config.get('intersectional_depth', 3)
 
         for group_id, group_data in self._generate_intersectional_groups(data, intersectional_depth, min_group_size).items():
             if len(group_data) < min_group_size:
                 continue
                 
-            samples = self._bootstrap_sample(group_data, metric_fn, self.config.get('bootstrap_samples', 1000))
+            samples = self._bootstrap_sample(group_data, metric_fn, self.detector_config.get('bootstrap_samples', 1000))
             stats_val = self._compute_statistics(samples)
             
             results[group_id] = {
@@ -228,7 +206,7 @@ class BiasDetector:
     def _bootstrap_sample(self, data: pd.DataFrame,
                          metric_fn: callable, bootstrap_samples: int) -> np.ndarray:
         return np.array([
-            metric_fn(data.sample(frac=1, replace=True))
+            float(metric_fn(data.sample(frac=1, replace=True)))
             for _ in range(bootstrap_samples)
         ])
 
@@ -343,7 +321,7 @@ class BiasDetector:
         }
 
         # Calculate metric-level statistics
-        for metric in self.config["metrics"]:
+        for metric in self.detector_config.get('metrics'):
             metric_data = current_data[current_data['metric'] == metric]
             
             # Basic stats
@@ -386,7 +364,7 @@ class BiasDetector:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df.set_index('timestamp', inplace=True)
     
-        for metric in self.config["metrics"]:
+        for metric in self.detector_config.get('metrics'):
             metric_df = df[df['metric'] == metric]
             
             # Resample to daily frequency
@@ -434,7 +412,7 @@ class BiasDetector:
         }
 
         # Distribution characteristics
-        for metric in self.config["metrics"]:
+        for metric in self.detector_config.get('metrics'):
             values = self.bias_history[self.bias_history['metric'] == metric]['value']
             stats['distribution_analysis'][metric] = {
                 'skewness': float(values.skew()),
@@ -443,11 +421,11 @@ class BiasDetector:
             }
 
         # Multivariate ANOVA across groups
-        if len(self.config["metrics"]) > 1:
+        if len(self.detector_config.get('metrics')) > 1:
             stats['hypothesis_testing']['manova'] = self._perform_manova()
 
         # Effect size calculations
-        for metric in self.config["metrics"]:
+        for metric in self.detector_config.get('metrics'):
             metric_values = self.bias_history[self.bias_history['metric'] == metric]['value']
             stats['effect_sizes'][metric] = {
                 'cohens_d': self._cohens_d(metric_values),
@@ -477,7 +455,7 @@ class BiasDetector:
                 before = data[:cp]
                 after = data[cp:]
                 p_value = stats.ttest_ind(before, after).pvalue
-                if p_value < self.config["alpha"]:
+                if p_value < self.detector_config.get('alpha'):
                     significant_points.append(cp)
                     
             return significant_points
@@ -541,7 +519,7 @@ class BiasDetector:
             
             # Filter metrics with numerical values and sufficient variance
             valid_metrics = [
-                m for m in self.config["metrics"] 
+                m for m in self.detector_config.get('metrics')
                 if pd.api.types.is_numeric_dtype(df[m]) 
                 and df[m].var() > 0.01
             ]
@@ -577,126 +555,48 @@ class BiasDetector:
         return self._cohens_d(values) * (1 - (3)/(4*(n-2)-1))
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import datetime
+    print("\n=== Running Bias Detection ===\n")
+    printer.status("Init", "Bias Detection initialized", "success")
+    sensitive_attributes=["gender", "age_group", "race", "education_level"]
+
+    detector = BiasDetector(
+        sensitive_attributes=sensitive_attributes
+    )
+
+    printer.pretty("detector", f"{detector}", "success")
+    print("\n* * * * * Phase 2 * * * * *")
     import random
-    import json
+    if not detector.detector_config.get("metrics"):
+        detector.detector_config["metrics"] = [
+            "demographic_parity",
+            "equal_opportunity",
+            "predictive_parity",
+            "disparate_impact"
+        ]
+
+    n = 1000
+    data = pd.DataFrame({
+        'gender': random.choices(['Male', 'Female', 'Non-binary', 'Prefer not to say'], [0.48, 0.48, 0.03, 0.01], k=n),
+        'age_group': random.choices(['18-24', '25-34', '35-44', '45-54', '55-64', '65+'], [0.15, 0.25, 0.2, 0.15, 0.15, 0.1], k=n),
+        'race': random.choices(['White', 'Black', 'Asian', 'Hispanic', 'Other'], [0.6, 0.13, 0.06, 0.18, 0.03], k=n),
+        'education_level': random.choices(['No HS', 'HS', 'Some College', 'Bachelor', 'Graduate'], [0.1, 0.25, 0.25, 0.25, 0.15], k=n)})
+    predictions = np.random.binomial(1, 0.3, n)
+    labels = np.random.binomial(1, 0.5, n)  # Random labels for demonstration
     
-    # Realistic test config as dictionary
-    test_config = {
-        "metrics": ["demographic_parity", "equal_opportunity", "predictive_parity", "disparate_impact"],
-        "min_group_size": 30,
-        "bootstrap_samples": 100,  # Reduced from 1000 to 100
-        "alpha": 0.05,
-        "intersectional_depth": 2  # Reduced from 3 to 2
-    }
-
-    # Patch BiasDetector to use dict-style config access
-    class PatchedBiasDetector(BiasDetector):
-        def __getattr__(self, name):
-            if name == "config":
-                return self.__dict__["_config"]
-            raise AttributeError(f"'BiasDetector' object has no attribute '{name}'")
-
-        @property
-        def config(self):
-            return self._config
-
-        @config.setter
-        def config(self, value):
-            self._config = value
-
-    # Initialize patched detector
-    detector = PatchedBiasDetector(
-        sensitive_attributes=["gender", "age_group", "race", "education_level"],
-        config_section_name="bias_detector"
+    # Generate predictions and labels
+    metric_fn = callable
+    
+    compute = detector.compute_metrics(
+        data=data,
+        predictions=predictions,
+        labels=labels
     )
-    detector.config = test_config
-
-    # Data generator
-    def generate_realistic_data(n=5000):
-        data = pd.DataFrame()
-        data['gender'] = random.choices(['Male', 'Female', 'Non-binary', 'Prefer not to say'], [0.48, 0.48, 0.03, 0.01], k=n)
-        data['age_group'] = random.choices(['18-24', '25-34', '35-44', '45-54', '55-64', '65+'], [0.15, 0.25, 0.2, 0.15, 0.15, 0.1], k=n)
-        data['race'] = random.choices(['White', 'Black', 'Asian', 'Hispanic', 'Other'], [0.6, 0.13, 0.06, 0.18, 0.03], k=n)
-        data['education_level'] = random.choices(['No HS', 'HS', 'Some College', 'Bachelor', 'Graduate'], [0.1, 0.25, 0.25, 0.25, 0.15], k=n)
-        base_prob = 0.3
-        data['prediction'] = np.random.binomial(1, base_prob, n)
-
-        for idx, row in data.iterrows():
-            if row['gender'] == 'Male':
-                data.at[idx, 'prediction'] = np.random.binomial(1, min(0.9, base_prob * 1.4))
-            if row['age_group'] in ['55-64', '65+']:
-                data.at[idx, 'prediction'] = np.random.binomial(1, max(0.1, base_prob * 0.7))
-            if row['race'] in ['Black', 'Hispanic']:
-                data.at[idx, 'prediction'] = np.random.binomial(1, max(0.1, base_prob * 0.8))
-            if row['education_level'] in ['Bachelor', 'Graduate']:
-                data.at[idx, 'prediction'] = np.random.binomial(1, min(0.9, base_prob * 1.3))
-
-        data['label'] = data['prediction'].apply(lambda x: x if random.random() < 0.8 else 1 - x)
-        return data
-
-    # Run initial detection
-    print("\n=== Initial Bias Detection ===")
-    test_data = generate_realistic_data(10000)
-    initial_report = detector.compute_metrics(
-        data=test_data,
-        predictions=test_data['prediction'],
-        labels=test_data['label']
-    )
-
-    print("\nDisparate Impact Ratios:")
-    for group, value in initial_report["disparate_impact"]["group_means"].items():
-        print(f"{group}: {value:.3f}")
-
-    print("\n=== Simulating Temporal Analysis (1 year daily data) ===")
-    start_date = datetime.datetime(2023, 1, 1)
-    for day in range(365):
-        daily_data = generate_realistic_data(100)
-        if day > 180:
-            daily_data.loc[daily_data['gender'] == 'Female', 'prediction'] = np.random.binomial(
-                1, max(0.1, 0.3 * (1 - 0.5 * (day - 180) / 185)), sum(daily_data['gender'] == 'Female')
-            )
-        detector.compute_metrics(
-            data=daily_data,
-            predictions=daily_data['prediction'],
-            labels=daily_data['label']
-        )
-
-    print("\n=== Generating Final Report ===")
-    final_report = detector.generate_report()
-
-    print("\nCurrent State Summary:")
-    for metric, stats in final_report["current_state"]["metrics_summary"].items():
-        print(f"{metric}:")
-        print(f"  Mean disparity: {stats['mean_disparity']:.3f}")
-        print(f"  Max disparity: {stats['max_disparity']:.3f}")
-        print(f"  Affected groups: {stats['affected_groups']}")
-
-    print("\nTrend Analysis:")
-    for metric, trend in final_report["historical_trends"].items():
-        print(f"{metric}:")
-        print(f"  Direction: {trend['trend_direction']}")
-        print(f"  Magnitude: {trend['trend_magnitude']:.3f}")
-        print(f"  Change points: {len(trend['changepoints'])}")
-
-    def plot_realistic_trends(detector):
-        plt.figure(figsize=(14, 8))
-        for metric in ["demographic_parity", "equal_opportunity"]:
-            metric_data = detector.bias_history[detector.bias_history["metric"] == metric]
-            metric_data = metric_data.groupby("timestamp")["value"].mean().rolling(30).mean()
-            plt.plot(metric_data.index, metric_data.values, label=metric, linewidth=2)
-        plt.title("Realistic Bias Trends (30-day MA)")
-        plt.xlabel("Date")
-        plt.ylabel("Disparity")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
-    plot_realistic_trends(detector)
-
-    with open("bias_audit_report.json", "w") as f:
-        json.dump(final_report, f, indent=2, default=str)
-
-    print("\n✅ Full report saved to bias_audit_report.json")
+    metric = detector._group_metric(data=data, metric_fn=metric_fn)
+    
+    printer.pretty("compute", f"{compute}", "success")
+    printer.pretty("metric", metric, "success")
+    print("\n* * * * * Phase 3 * * * * *")
+    format="structured"
+    report = detector.generate_report(format="structured")
+    printer.pretty("report", report, "success")
+    print("\n=== Bias Detection Test Completed ===")
