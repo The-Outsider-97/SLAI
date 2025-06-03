@@ -14,9 +14,10 @@ from src.agents.adaptive.utils.config_loader import load_global_config, get_conf
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from src.agents.adaptive.utils.neural_network import NeuralNetwork, NeuralLayer
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Reinforcement Learning")
+printer = PrettyPrinter
 
 @dataclass
 class Transition:
@@ -119,11 +120,11 @@ class ReinforcementLearning(torch.nn.Module):
         self.config = load_global_config()
         self.rl_config = get_config_section('adaptive_memory')
         self.local_memory = MultiModalMemory()
-        self.learner_memory = LearningMemory(config=self.config)
+        self.learner_memory = LearningMemory()
         
         # Set default values for critical parameters
-        self.config.setdefault('retrieval_limit', 5)
-        self.config.setdefault('drift_threshold', 0.4)
+        self.retrieval_limit = self.rl_config.get('retrieval_limit', 5)
+        self.drift_threshold = self.rl_config.get('drift_threshold', 0.4)
         self.buffer = deque(maxlen=self.rl_config.get("replay_capacity", 100000))
 
         # Create merged configuration by combining sections
