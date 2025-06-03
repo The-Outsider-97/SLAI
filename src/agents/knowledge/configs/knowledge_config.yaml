@@ -13,6 +13,7 @@ knowledge_memory:
   cache_size: 1000              # Size of local retrieval cache
 
   # Relevance & Retrieval
+  relevance_weights: {}
   relevance_mode: "hybrid"      # Options: tfidf, embedding, hybrid
   similarity_threshold: 0.2     # Cosine similarity threshold for retrieval
   decay_factor: 0.8             # Contextual search decay for older entries
@@ -45,32 +46,34 @@ rule_engine:
   min_rule_confidence: 0.6
   slow_rule_threshold: 0.5
   rule_sources:
-    - "rules/physics_rules.yaml"
-    - "rules/logic_rules.json"
+    - "src/agents/knowledge/rules/physics_rules.yaml"
+    - "src/agents/knowledge/rules/logic_rules.json"
   save_inferred: true
   max_facts_per_rule: 10
 
 governor:
   enabled: true
+  realtime_monitoring: true
+  bias_categories: "src/agents/knowledge/templates/bias_categories.json"
+  sensitive_attributes: ["gender", "age_group", "race", "education_level"]
   audit_interval: 300             # Seconds between full system audits
-  realtime_monitoring: true       # Monitor shared memory continuously
+  freshness_threshold: 720        # 30 days in hours
+  enforcement_mode: "log"         # Options: log, alert, restrict
+  max_audit_history: 100          # Max stored audit records
   guideline_paths:
     - "src/agents/safety/guidelines/ai_ethics.yaml"
     - "src/agents/safety/guidelines/safety_protocols.json"
   violation_thresholds:
     unethical: 0.65
-    similarity: 0.85              # Min match similarity for guideline detection
-    consecutive_errors: 5         # Max allowed consecutive errors before intervention
-  freshness_threshold: 720        # 30 days in hours
-  enforcement_mode: "log"         # Options: log, alert, restrict
-  max_audit_history: 100          # Max stored audit records
+    similarity: 0.85
+    consecutive_errors: 5
   memory_thresholds:
     warning: 2048                 # Memory warning threshold in MB
     critical: 3072  
 
 perform_action:
-  enabled: true                   # Global toggle for action execution
-  allowed_action_types: ["http", "database", "shell"]  # Permitted action categories
+  enabled: True                   # Global toggle for action execution
+  allowed_action_types: ["http", "database", "shell"]
   retry_attempts: 3               # Max retries on transient failures
   retry_delay: 2.0                # Seconds between retry attempts
   timeout: 30                     # Max seconds per action execution
@@ -78,19 +81,19 @@ perform_action:
   allowed_domains:                # Whitelist for HTTP calls
     - "https://scholar.google.com/"
     - "internal-service.net"
-  enable_sandbox: true            # Restrict shell/database access
+  enable_sandbox: True            # Restrict shell/database access
   log_level: "detailed"           # Options: minimal, detailed, debug
   confirmation_required: false    # Require human approval for高危actions
 
 knowledge_cache:
   max_size: 1000                  # Max items in cache (LRU enforced)
-  enable_encryption: true         # Encrypt cached data
+  enable_encryption: True         # Encrypt cached data
   hashing_method: "simhash"       # Options: md5, simhash
   simhash_bits: 64                # Bit-length for SimHash
   tokenizer: "word"               # Tokenizer for semantic hashing (word/char)
 
 knowledge_monitor:
-  enabled: true                  # Master switch for monitoring system
+  enabled: True                  # Master switch for monitoring system
   check_interval: 3600          # Seconds between checks (1 hour)
   allowed_academic_domains:     # Approved academic domains
     - "arxiv.org"
@@ -103,30 +106,30 @@ knowledge_monitor:
     - "data/academic_sources.yaml"
     - "data/approved_datasets.json"
   max_source_age: 5             # Maximum allowed age of sources (years)
-  enable_data_integrity_checks: true
+  enable_data_integrity_checks: True
   violation_policy: "alert"       # Options: log, quarantine, alert
-  auto_flush_on_alert: true       # Automatic cache cleanup during critical alerts
+  auto_flush_on_alert: True       # Automatic cache cleanup during critical alerts
   severity_thresholds:
     critical: 3                   # Severity level for emergency response
     high: 2
     medium: 1
-  cross_component_validation: true
-  system_impact_analysis: true
+  cross_component_validation: True
+  system_impact_analysis: True
   verification_level: "strict"  # strict/moderate/lenient
-  crossref_checking: true        # Enable DOI validation via CrossRef API
+  crossref_checking: True        # Enable DOI validation via CrossRef API
   plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
   auto_archive_outdated: false  # Automatically archive outdated sources
 
 knowledge_sync:
   auto_sync:
-    enabled: true
+    enabled: True
     interval: 3600  # Seconds between syncs
   conflict_resolution:
     strategy: "semantic"  # Options: timestamp, confidence, semantic, governance
     similarity_threshold: 0.85
-    auto_quarantine: true
+    auto_quarantine: True
   versioning:
-    enabled: true
+    enabled: True
     max_versions: 10
   external_sources:
     - data/external_knowledge_1.yaml
