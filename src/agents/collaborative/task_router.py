@@ -178,8 +178,8 @@ class AdaptiveRouter:
         retry_policy = self.router_config.get('retry_policy', {'max_attempts': 3, 'backoff_factor': 1.5})
         
         self.task_scheduler = DeadlineAwareScheduler(
-            risk_threshold,
-            retry_policy
+            # risk_threshold,
+            # retry_policy
         )
 
     def _init_alignment(self):
