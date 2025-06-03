@@ -55,6 +55,7 @@ class Governor:
         self._bias_detector = None 
         self.rule_engine = RuleEngine()
         self.knowledge_memory = KnowledgeMemory()
+        self.bias_categories = self._load_bias_categories()
         self._init_knowledge_memory()
 
         self.audit_history = deque(maxlen=getattr(self.governor_config, 'max_audit_history', 100))
@@ -62,6 +63,25 @@ class Governor:
         
         if getattr(self.governor_config, 'realtime_monitoring', True):
             self._start_monitoring_thread()
+
+    def _load_bias_categories(self) -> dict:
+        """Load bias categories from JSON file specified in config"""
+        path_str = getattr(self.governor_config, 'bias_categories', '')
+        if not path_str:
+            logger.warning("No bias_categories path configured in governor")
+            return {}
+
+        try:
+            with open(path_str, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Bias categories file not found: {path_str}")
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON format in bias categories file: {path_str}")
+        except Exception as e:
+            logger.error(f"Error loading bias categories: {str(e)}")
+            
+        return {}
 
     def _init_knowledge_memory(self):
         """Initialize knowledge memory with governor-specific settings"""
@@ -359,19 +379,40 @@ class Governor:
         return matches / num_principles 
 
     def _detect_bias(self, text: str) -> dict:
-        """Simple bias detection through sensitive term counting"""
-        default_bias_cats = {
-            "gender": ["he/she", "man/woman", "gender", "male/female"],
-            "race": ["race", "ethnicity", "nationality"],
-            "religion": ["religion", "belief", "faith"]
-        }
-        bias_categories = getattr(self.governor_config, 'bias_detection_categories', default_bias_cats)
-        
-        scores = {}
-        for category, terms in bias_categories.items():
-            scores[category] = sum(text.lower().count(term) for term in terms)
+        """Enhanced bias detection using loaded categories"""
+        if not self.bias_categories:
+            logger.warning("No bias categories loaded, using simple detection")
+            return self._simple_bias_detection(text)
             
-        return scores
+        scores = defaultdict(int)
+        text_lower = text.lower()
+        
+        # Traverse through all categories, subcategories, and types
+        for category in self.bias_categories.get('categories', []):
+            # Check category-level keywords
+            scores[category['id']] += self._count_keywords(text_lower, category.get('keywords', []))
+            
+            # Check subcategories
+            for subcategory in category.get('subcategories', []):
+                scores[subcategory['id']] += self._count_keywords(text_lower, subcategory.get('keywords', []))
+                
+                # Check types
+                for bias_type in subcategory.get('types', []):
+                    scores[bias_type['id']] += self._count_keywords(text_lower, bias_type.get('keywords', []))
+        
+        return dict(scores)
+
+    def _count_keywords(self, text: str, keywords: list) -> int:
+        """Count occurrences of keywords in text"""
+        return sum(text.count(keyword.lower()) for keyword in keywords)
+    
+    def _simple_bias_detection(self, text: str) -> dict:
+        """Fallback simple bias detection"""
+        return {
+            "gender": sum(text.lower().count(term) for term in ["gender", "male", "female"]),
+            "race": sum(text.lower().count(term) for term in ["race", "ethnic", "black", "white"]),
+            "religion": sum(text.lower().count(term) for term in ["religion", "god", "christian", "muslim"])
+        }
 
     def _audit_agent_behavior(self) -> dict:
         """Analyze recent behavior using self.knowledge_agent if available."""
@@ -500,7 +541,7 @@ if __name__ == "__main__":
     print("\n=== Running Governor ===\n")
     printer.status("Init", "Governor initialized", "success")
     format_type="json"
-    text = "I love the way you talk! I like black people from Nigeria!"
+    text = "I love the way you talk! I like christian black male from Nigeria!"
     auditor = Governor()
 
     printer.status("Auditor", auditor, "success")
