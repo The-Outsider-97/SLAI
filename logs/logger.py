@@ -10,11 +10,12 @@ import zlib
 import statistics
 import atexit
 import shutil
+import pprint
 
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.utils.system_optimizer import SystemOptimizer
 
@@ -419,6 +420,11 @@ class AnomalyDetector:
 
 USE_ANSI = sys.stdout.isatty()
 class PrettyPrinter:
+    @classmethod
+    def pretty(cls, label: str, obj: Any, status: str = "info"):
+        """Pretty-print structured objects (e.g., dicts, lists) in readable form"""
+        formatted = pprint.pformat(obj, indent=2, width=100, compact=False)
+        cls.status(label, "\n" + formatted, status)
 
     @classmethod
     def _style(cls, text, *styles):
