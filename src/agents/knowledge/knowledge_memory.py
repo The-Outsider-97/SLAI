@@ -20,7 +20,7 @@ class KnowledgeMemory:
 
     def __init__(self):
         self.config = load_global_config()
-        self.memory_config = get_config_section('memory')
+        self.memory_config = get_config_section('knowledge_memory')
         self._store = defaultdict(dict)  # key -> {value, metadata}
     
     def update(self, key: str, value: Any, metadata: Optional[dict] = None,
@@ -28,7 +28,7 @@ class KnowledgeMemory:
         """
         Store or update a local memory entry.
         """
-        if len(self._store) >= self.config.max_entries:
+        if len(self._store) >= self.memory_config.get('max_entries'):
             oldest_key = min(self._store.items(), key=lambda kv: kv[1]["metadata"]["timestamp"])[0]
             self._store.pop(oldest_key)
         timestamp = time.time()
@@ -127,7 +127,7 @@ class KnowledgeMemory:
                 'temporal': 0.0,
                 'structural': 0.0
             }
-            weights = self.config.relevance_weights  # From config.yaml
+            weights = self.memory_config.get('relevance_weights')
     
             # 1. Semantic Similarity (Embedding-based)
             try:
