@@ -66,7 +66,7 @@ graph LR
 | **CPU**     | 4-core (Intel i5 / Ryzen 5) | 8-core (Intel i7 / Ryzen 7) for intensive tasks.         |
 | **RAM**     | 16 GB                       | 32 GB (for multitasking)                                 |
 | **GPU**     | NVIDIA GTX 1060             | NVIDIA RTX 3060 or higher (for large tasks and training) |
-| **Storage** | 50 GB SSD                   | 100 GB SSD (for models + vector DBs + logs)              |
+| **Storage** | 10 GB SSD                   | 50 GB SSD (for models + vector DBs + logs)              |
 
 ### Software
 
