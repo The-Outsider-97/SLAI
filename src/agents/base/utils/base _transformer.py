@@ -35,10 +35,10 @@ class BaseTransformer(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = load_global_config()
-        self.be_config = get_config_section('base_transformer')
+        self.src_vocab_size = self.config.get('src_vocab_size')
+        self.tgt_vocab_size = self.config.get('tgt_vocab_size')
 
-        self.src_vocab_size = self.pe_config.get('src_vocab_size')
-        self.tgt_vocab_size = self.pe_config.get('tgt_vocab_size')
+        self.be_config = get_config_section('base_transformer')
         self.d_model = self.pe_config.get('d_model', '512')
         self.nhead = self.pe_config.get('nhead', '8')
         self.num_encoder_layers = self.pe_config.get('num_encoder_layers', '6')
