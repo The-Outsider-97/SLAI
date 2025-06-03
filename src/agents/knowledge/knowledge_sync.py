@@ -1,94 +1,61 @@
 """
 Knowledge Synchronization System for SLAI
-- Maintains consistency between memory, cache, and external sources
+- Maintains consistency between memory and external sources
 - Implements conflict resolution strategies
-- Handles version control and rollbacks
-- Synchronizes with governance system for policy enforcement
 """
 
 import time
 import hashlib
 import threading
 import yaml, json
+import requests
+import psycopg2
 
+from psycopg2 import sql
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from difflib import SequenceMatcher
 from collections import defaultdict, deque
-from types import SimpleNamespace
 
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from src.agents.knowledge.knowledge_memory import KnowledgeMemory
+from logs.logger import get_logger, PrettyPrinter
 
-from src.agents.knowledge.knowledge_cache import KnowledgeCache
-from src.agents.knowledge.knowledge_monitor import KnowledgeMonitor
-from src.agents.knowledge.governor import Governor
-from logs.logger import get_logger
-
-logger = get_logger("KnowledgeSync")
-
-CONFIG_PATH = "src/agents/knowledge/configs/knowledge_config.yaml"
-
-def dict_to_namespace(d):
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
+logger = get_logger("Knowledge Synchronizer")
+printer = PrettyPrinter
 
 class KnowledgeSynchronizer:
     """Orchestrates knowledge consistency across components with version control"""
     
-    def __init__(self, knowledge_agent=None, 
-                 config_section_name: str = "knowledge_sync",
-                 config_file_path: str = CONFIG_PATH):
-        self.agent = knowledge_agent or SimpleNamespace(memory={}, rule_engine=SimpleNamespace(rules=[]))
-        self.config = self._load_config(config_section_name, config_file_path)
+    def __init__(self):
+        self.config = load_global_config()
+        self.sync_config = get_config_section('knowledge_sync')
         self.version_history = defaultdict(deque)
         self.sync_lock = threading.Lock()
-        self.conflict_strategies = self._init_conflict_strategies()
+        self.stop_event = threading.Event()
 
-        self.cache = KnowledgeCache()
-        # Start background sync thread
-        if self.config.auto_sync.enabled:
-            self._start_sync_thread()
+        # Initialize core components
+        self.knowledge_memory = KnowledgeMemory()
 
-    @property
-    def governor(self):
-        if not hasattr(self, "_governor"):
-            self._governor = Governor(knowledge_agent=self.agent)
-        return self._governor
-    
-    @property
-    def monitor(self):
-        if not hasattr(self, "_monitor"):
-            self._monitor = KnowledgeMonitor(agent=self.agent)
-        return self._monitor
+        # Load configuration
+        self.auto_sync = self.sync_config.get('auto_sync', {'enabled': True, 'interval': 300})
+        self.versioning = self.sync_config.get('versioning', {'enabled': True, 'max_versions': 10})
+        self.conflict_resolution = self.sync_config.get(
+            'conflict_resolution', 
+            {'strategy': 'timestamp', 'similarity_threshold': 0.7})
+        self.external_sources = self.sync_config.get('external_sources', [])
 
-
-    def _load_config(self, section: str, path: str) -> SimpleNamespace:
-        try:
-            with open(path, "r", encoding='utf-8') as f:
-                full_config = yaml.safe_load(f) or {}
-            section_config = full_config.get(section, {})
-        except Exception as e:
-            logger.warning(f"Could not load config file: {e}")
-            section_config = {}
-    
-        # Apply defaults if missing
-        section_config.setdefault('auto_sync', {'enabled': False, 'interval': 300})
-        section_config.setdefault('versioning', {'enabled': False, 'max_versions': 10})
-        section_config.setdefault('conflict_resolution', {'strategy': 'timestamp', 'similarity_threshold': 0.7, 'auto_quarantine': False})
-        section_config.setdefault('external_sources', [])
-    
-        return dict_to_namespace(section_config)
-
-    def _init_conflict_strategies(self) -> Dict[str, callable]:
-        """Initialize conflict resolution strategies"""
-        return {
+        # Initialize conflict strategies
+        self.conflict_strategies = {
             'timestamp': self._resolve_by_timestamp,
             'confidence': self._resolve_by_confidence,
             'semantic': self._resolve_by_semantics,
-            'governance': self._resolve_by_governance
+            'rule_based': self._resolve_by_rules
         }
+
+        # Start background sync thread
+        if self.auto_sync.get('enabled', False):
+            self._start_sync_thread()
 
     def full_sync(self, components: List[str] = None) -> Dict[str, int]:
         """
@@ -96,19 +63,17 @@ class KnowledgeSynchronizer:
         Returns: Dictionary of sync statistics
         """
         stats = defaultdict(int)
-        components = components or ['memory', 'cache', 'external', 'rules']
+        components = components or ['memory', 'external', 'rules']
         
         with self.sync_lock:
             if 'memory' in components:
                 stats.update(self._sync_memory_with_external())
-            if 'cache' in components:
-                stats.update(self._sync_cache_with_memory())
             if 'rules' in components:
-                stats.update(self._sync_rules_with_governance())
+                stats.update(self._sync_rule_engine())
             if 'external' in components:
                 stats.update(self._sync_with_external_sources())
                 
-            if self.config.versioning.enabled:
+            if self.versioning.get('enabled', False):
                 self._create_version_snapshot()
                 
         return stats
@@ -119,129 +84,213 @@ class KnowledgeSynchronizer:
         external_data = self._fetch_external_data()
         
         for key, ext_value in external_data.items():
-            mem_value = self.agent.memory.get(key)
+            mem_value = self.knowledge_memory.recall(key=key)
             
-            if mem_value is None:
-                self._safe_memory_update(key, ext_value)
+            if not mem_value:
+                self.knowledge_memory.update(key, ext_value)
                 stats['memory_updates'] += 1
             else:
+                mem_value = mem_value[0][0]  # Unpack (value, metadata)
                 if self._detect_conflict(mem_value, ext_value):
                     stats['memory_conflicts'] += 1
                     resolved = self.resolve_conflict(key, mem_value, ext_value)
-                    self._safe_memory_update(key, resolved)
+                    self.knowledge_memory.update(key, resolved)
                     
         return stats
-    
     def _fetch_external_data(self) -> Dict[str, dict]:
         """Fetch and merge knowledge entries from configured external sources"""
         merged_data = {}
     
-        for source in self.config.external_sources:
+        for source in self.external_sources:
             try:
+                # Handle different source types
                 if isinstance(source, str):
-                    # Assume a local file path
-                    if source.endswith((".yaml", ".yml")):
-                        with open(source, "r", encoding="utf-8") as f:
-                            data = yaml.safe_load(f)
-                    elif source.endswith(".json"):
-                        with open(source, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                    else:
-                        logger.warning(f"Unsupported file type for source: {source}")
-                        continue
+                    # Local file source
+                    data = self._fetch_from_file(source)
                 elif isinstance(source, dict):
-                    # Optionally support inline dict source configs
-                    data = source.get("data", {})
+                    # Structured source definition
+                    source_type = source.get('type', 'inline')
+                    if source_type == 'api':
+                        data = self._fetch_from_api(source)
+                    elif source_type == 'database':
+                        data = self._fetch_from_database(source)
+                    elif source_type == 'inline':
+                        data = source.get("data", {})
+                    else:
+                        logger.warning(f"Unknown source type: {source_type}")
+                        continue
                 else:
                     logger.warning(f"Unknown source format: {source}")
                     continue
-    
+                
+                # Process and validate the data
+                processed_data = self._process_external_data(data, source)
+                
                 # Merge data by keys
-                for key, value in data.items():
-                    if isinstance(value, dict):
-                        merged_data[key] = value
-                    else:
-                        merged_data[key] = {"text": str(value), "metadata": {"timestamp": time.time(), "confidence": 0.5}}
+                for key, value in processed_data.items():
+                    if not isinstance(value, dict):
+                        # Normalize to standard format
+                        value = {"text": str(value), "metadata": {"timestamp": time.time(), "confidence": 0.5}}
+                    
+                    # Add source metadata
+                    if 'metadata' not in value:
+                        value['metadata'] = {}
+                    value['metadata']['source'] = str(source)
+                    
+                    merged_data[key] = value
     
             except Exception as e:
                 logger.error(f"Failed to load external source {source}: {str(e)}")
     
         return merged_data
 
-    def _process_external_data(self, data: dict, source: Any):
-        """Process data fetched from external sources"""
-        # For now, just log that data was received
+    def _fetch_from_file(self, path: str) -> dict:
+        """Fetch data from local file source"""
+        if path.endswith((".yaml", ".yml")):
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+        elif path.endswith(".json"):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        else:
+            logger.warning(f"Unsupported file type: {path}")
+            return {}
+
+    def _fetch_from_api(self, source_config: dict) -> dict:
+        """Fetch data from API endpoint"""
+        endpoint = source_config.get('endpoint')
+        if not endpoint:
+            logger.error("API source missing endpoint")
+            return {}
+            
+        # Handle authentication
+        headers = {}
+        auth_type = source_config.get('auth_type')
+        if auth_type == 'bearer_token':
+            token = source_config.get('token')
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+        
+        # Handle query parameters
+        params = source_config.get('params', {})
+        
+        try:
+            response = requests.get(
+                endpoint,
+                headers=headers,
+                params=params,
+                timeout=10  # 10 second timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed: {str(e)}")
+            return {}
+
+    def _fetch_from_database(self, source_config: dict) -> dict:
+        """Fetch data from database source"""
+        conn_str = source_config.get('connection_string')
+        tables = source_config.get('tables', [])
+        if not conn_str or not tables:
+            logger.error("Database source missing connection string or tables")
+            return {}
+            
+        try:
+            data = {}
+            with psycopg2.connect(conn_str) as conn:
+                with conn.cursor() as cursor:
+                    for table in tables:
+                        query = sql.SQL("SELECT * FROM {}").format(sql.Identifier(table))
+                        cursor.execute(query)
+                        columns = [desc[0] for desc in cursor.description]
+                        for row in cursor.fetchall():
+                            # Use a composite key: table_name + primary key
+                            key = f"{table}_{row[0]}"
+                            data[key] = dict(zip(columns, row))
+            return data
+        except psycopg2.Error as e:
+            logger.error(f"Database query failed: {str(e)}")
+            return {}
+
+    def _process_external_data(self, data: dict, source: Any) -> dict:
+        """Process and validate data from external sources"""
         logger.info(f"Processing data from source: {source}, {len(data)} items")
-
-    def _sync_cache_with_memory(self) -> Dict[str, int]:
-        """Align cache contents with current memory state"""
-        stats = {'cache_invalidations': 0, 'cache_updates': 0}
         
-        for key in list(self.cache.cache.keys()):
-            mem_value = self.agent.memory.get(key)
-            cached_value = self.cache.get(key)
-            
-            if not mem_value:
-                del self.cache.cache[key]
-                stats['cache_invalidations'] += 1
-            elif cached_value != mem_value:
-                self.cache.set(key, mem_value)
-                stats['cache_updates'] += 1
+        processed = {}
+        for key, value in data.items():
+            try:
+                # Validate required fields
+                if not key or not value:
+                    logger.warning(f"Skipping invalid entry: key={key}, value={value}")
+                    continue
+                    
+                # Normalize structure
+                if not isinstance(value, dict):
+                    value = {'text': str(value)}
+                    
+                # Add default metadata if missing
+                if 'metadata' not in value:
+                    value['metadata'] = {}
+                    
+                # Set default timestamp if missing
+                if 'timestamp' not in value['metadata']:
+                    value['metadata']['timestamp'] = time.time()
+                    
+                # Set default confidence if missing
+                if 'confidence' not in value['metadata']:
+                    value['metadata']['confidence'] = 0.5
+                    
+                processed[key] = value
+            except Exception as e:
+                logger.warning(f"Error processing item {key}: {str(e)}")
                 
-        return stats
+        logger.info(f"Processed {len(processed)} valid items from source: {source}")
+        return processed
 
-    def _sync_rules_with_governance(self) -> Dict[str, int]:
-        """Update rule engine based on governance policies"""
-        stats = {'rules_added': 0, 'rules_removed': 0}
-        if not hasattr(self.agent, "rule_engine"):
-            logger.warning("Agent has no rule engine. Skipping rule sync.")
-            return stats
-        current_rules = set(self.agent.rule_engine.rules)
-        
-        # Get governance-approved rules
-        approved_rules = set(self.governor.get_approved_rules())
-        
-        # Add new rules
-        for rule in approved_rules - current_rules:
-            self.agent.rule_engine.add_rule(**rule)
-            stats['rules_added'] += 1
-            
-        # Remove revoked rules
-        for rule in current_rules - approved_rules:
-            self.agent.rule_engine.remove_rule(rule.name)
-            stats['rules_removed'] += 1
-            
+    def _sync_rule_engine(self) -> Dict[str, int]:
+        """Refresh rule engine with latest rules"""
+        from src.agents.knowledge.utils.rule_engine import RuleEngine
+        self.rule_engine = RuleEngine()
+
+        stats = {'rules_loaded': 0}
+        try:
+            # Reload all rule sectors
+            self.rule_engine.load_all_sectors()
+            stats['rules_loaded'] = len(self.rule_engine.rules)
+            logger.info(f"Reloaded {stats['rules_loaded']} rules into RuleEngine")
+        except Exception as e:
+            logger.error(f"Failed to sync rule engine: {str(e)}")
+            stats['errors'] = 1
         return stats
 
     def resolve_conflict(self, key: str, *versions) -> Any:
         """Apply configured conflict resolution strategy"""
-        strategy = self.conflict_strategies.get(
-            self.config.conflict_resolution.strategy,
-            self._resolve_by_timestamp
-        )
+        strategy_name = self.conflict_resolution.get('strategy', 'timestamp')
+        strategy = self.conflict_strategies.get(strategy_name, self._resolve_by_timestamp)
         return strategy(key, *versions)
 
     def _resolve_by_timestamp(self, key: str, *versions) -> Any:
         """Select most recent version based on timestamp"""
-        return max(versions, key=lambda v: v.metadata.get('timestamp', 0))
+        return max(versions, key=lambda v: v.get('metadata', {}).get('timestamp', 0))
 
     def _resolve_by_confidence(self, key: str, *versions) -> Any:
         """Select version with highest confidence score"""
-        return max(versions, key=lambda v: v.metadata.get('confidence', 0))
+        return max(versions, key=lambda v: v.get('metadata', {}).get('confidence', 0))
 
     def _resolve_by_semantics(self, key: str, *versions) -> Any:
-        """Resolve conflicts using semantic similarity with governance guidelines"""
-        guidelines = self.governor.get_guidelines()
+        """Resolve conflicts using semantic similarity"""
         best_match = None
         highest_score = 0
         
         for version in versions:
             text = version.get('text', '')
-            scores = [
-                SequenceMatcher(None, text, g_text).ratio()
-                for g_text in guidelines.get('principles', [])
-            ]
-            avg_score = sum(scores) / len(scores) if scores else 0
+            other_texts = [v.get('text', '') for v in versions if v != version]
+            
+            # Calculate average similarity to other versions
+            avg_score = sum(
+                SequenceMatcher(None, text, other_text).ratio()
+                for other_text in other_texts
+            ) / max(1, len(other_texts))
             
             if avg_score > highest_score:
                 highest_score = avg_score
@@ -249,35 +298,36 @@ class KnowledgeSynchronizer:
                 
         return best_match or versions[0]
 
-    def _resolve_by_governance(self, key: str, *versions) -> Any:
-        """Let governance system decide based on audit results"""
-        audit_report = self.governor.audit_retrieval(
-            query=f"Conflict resolution for {key}",
-            results=[(1.0, v) for v in versions],
-            context={'type': 'conflict_resolution'}
-        )
+    def _resolve_by_rules(self, key: str, *versions) -> Any:
+        """Resolve conflicts using rule engine inference"""
+        # Create knowledge base from versions
+        kb = {
+            f"version_{idx}": {
+                "text": v.get('text', ''),
+                "metadata": v.get('metadata', {})
+            }
+            for idx, v in enumerate(versions)
+        }
         
-        if audit_report.get('violations'):
-            return self._handle_violating_content(versions, audit_report)
-        return versions[0]
-
-    def _handle_violating_content(self, versions, audit_report):
-        """Handle content violating governance policies"""
-        if self.config.conflict_resolution.auto_quarantine:
-            self.monitor.quarantine_items(
-                [v['text'] for v in versions],
-                reason="conflict_resolution_violation"
-            )
-        return None  # Or default safe value
+        # Apply rule engine to infer best version
+        inferred = self.rule_engine.smart_apply(kb)
+        
+        # Select version with highest confidence
+        best_version_key = max(inferred, key=lambda k: inferred[k], default=None)
+        
+        if best_version_key:
+            version_idx = int(best_version_key.split('_')[-1])
+            return versions[version_idx]
+        
+        return versions[0]  # Fallback to first version
 
     def _sync_with_external_sources(self) -> Dict[str, int]:
         """Synchronize with configured external knowledge sources"""
         stats = {'external_fetches': 0, 'external_errors': 0}
         
-        for source in self.config.external_sources:
+        for source in self.external_sources:
             try:
-                data = self._fetch_external_source(source)
-                self._process_external_data(data, source)
+                # Already handled in _fetch_external_data
                 stats['external_fetches'] += 1
             except Exception as e:
                 logger.error(f"External sync failed for {source}: {str(e)}")
@@ -285,17 +335,20 @@ class KnowledgeSynchronizer:
                 
         return stats
 
-    def _fetch_external_source(self, source: dict) -> List[dict]:
-        """Fetch data from external source with authentication"""
-        # Implementation would vary by source type
-        return []  # Placeholder
-
-    def _create_version_snapshot(self):
-        """Create versioned snapshot of current knowledge state"""
+    def _create_version_snapshot(self) -> str:
+        """Create versioned snapshot of current knowledge state and return version ID"""
+        # Get current memory state
+        memory_state = {
+            key: self.knowledge_memory.recall(key=key)[0][0]
+            for key in self.knowledge_memory.keys()
+        }
+        
+        # Get current rule state
+        rule_state = [r['name'] for r in self.rule_engine.rules]
+        
         snapshot = {
-            'memory': dict(self.agent.memory),
-            'cache': dict(self.cache.cache),
-            'rules': [r.name for r in self.agent.rule_engine.rules],
+            'memory': memory_state,
+            'rules': rule_state,
             'timestamp': time.time()
         }
         
@@ -305,84 +358,170 @@ class KnowledgeSynchronizer:
     
         self.version_history[version_id].append(snapshot)
     
-        if len(self.version_history) > self.config.versioning.max_versions:
+        max_versions = self.versioning.get('max_versions', 10)
+        if len(self.version_history) > max_versions:
             oldest = sorted(self.version_history.keys())[0]
             del self.version_history[oldest]
 
-    def rollback_version(self, version_id: str) -> bool:
-        """Restore system to previous version"""
+        return version_id
+
+    def rollback_version(self, version_id: str, confirm: bool = False) -> bool:
+        """Safe version rollback with confirmation and backup"""
         if version_id not in self.version_history:
+            logger.error(f"Rollback failed: Version {version_id} not found")
             return False
             
-        snapshot = self.version_history[version_id][-1]
-        
-        with self.sync_lock:
-            # Restore memory
-            self.agent.memory.clear()
-            self.agent.memory.update(snapshot['memory'])
+        if not confirm:
+            logger.warning("Rollback requires explicit confirmation")
+            return False
             
-            # Restore cache
-            self.cache.cache.clear()
-            self.cache.cache.update(snapshot['cache'])
+        try:
+            # Create backup before rollback
+            backup_id = self._create_version_snapshot()
+            logger.info(f"Created backup version: {backup_id}")
             
-            # Restore rules
-            self.agent.rule_engine.rules = [
-                r for r in self.agent.rule_engine.rules 
-                if r.name in snapshot['rules']
-            ]
+            snapshot = self.version_history[version_id][-1]
             
-        return True
-
-    def _safe_memory_update(self, key: str, value: dict):
-        """Update memory with governance validation"""
-        if self.governor:
-            audit = self.governor.audit_retrieval(
-                query=f"Memory update: {key}",
-                results=[(1.0, value)],
-                context={'type': 'memory_update'}
-            )
+            with self.sync_lock:
+                # Restore memory
+                self.knowledge_memory.clear()
+                for key, value in snapshot['memory'].items():
+                    self.knowledge_memory.update(key, value)
+                
+                # Restore rules - reload all sectors which will reset rules
+                self.rule_engine.load_all_sectors()
+                
+            logger.info(f"Successfully rolled back to version: {version_id}")
+            return True
             
-            if not audit.get('violations'):
-                self.agent.memory[key] = value
-            else:
-                self.monitor.handle_violations(audit['violations'])
-        else:
-            self.agent.memory[key] = value
+        except Exception as e:
+            logger.error(f"Rollback failed: {str(e)}", exc_info=True)
+            return False
 
     def _start_sync_thread(self):
-        """Start background synchronization thread"""
+        """Start background synchronization thread with graceful shutdown"""
         def sync_loop():
-            while True:
-                self.full_sync()
-                time.sleep(self.config.auto_sync.interval)
+            logger.info("Background sync thread started")
+            while not self.stop_event.is_set():
+                try:
+                    start_time = time.time()
+                    stats = self.full_sync()
+                    duration = time.time() - start_time
+                    logger.info(f"Sync completed in {duration:.2f}s. "
+                                f"Updates: {stats.get('memory_updates', 0)}, "
+                                f"Conflicts: {stats.get('memory_conflicts', 0)}")
+                except Exception as e:
+                    logger.error(f"Sync failed: {str(e)}", exc_info=True)
                 
-        thread = threading.Thread(target=sync_loop, daemon=True)
-        thread.start()
+                # Wait for interval or until stop event
+                wait_time = self.auto_sync.get('interval', 300)
+                self.stop_event.wait(wait_time)
+                
+            logger.info("Background sync thread stopped")
+                
+        self.sync_thread = threading.Thread(target=sync_loop, daemon=True)
+        self.sync_thread.start()
+        
+    def stop_sync(self):
+        """Stop background synchronization"""
+        self.stop_event.set()
+        if self.sync_thread.is_alive():
+            self.sync_thread.join(timeout=5)
 
-    def _detect_conflict(self, existing, new) -> bool:
-        """Detect meaningful conflicts between knowledge entries"""
+    def _detect_conflict(self, existing: Dict, new: Dict) -> bool:
+        """Robust conflict detection with multiple strategies"""
+        # 1. Simple equality check
         if existing == new:
             return False
             
-        # Content-based conflict detection
-        text_sim = SequenceMatcher(
-            None, 
-            existing.get('text', ''), 
-            new.get('text', '')
-        ).ratio()
+        # 2. Content-based similarity
+        similarity = self._calculate_content_similarity(existing, new)
+        threshold = self.conflict_resolution.get('similarity_threshold', 0.7)
         
-        return text_sim < self.config.conflict_resolution.similarity_threshold
+        # 3. Confidence threshold check
+        existing_conf = existing.get('metadata', {}).get('confidence', 0.5)
+        new_conf = new.get('metadata', {}).get('confidence', 0.5)
+        confidence_diff = abs(existing_conf - new_conf)
+        
+        # 4. Temporal recency check
+        existing_time = existing.get('metadata', {}).get('timestamp', 0)
+        new_time = new.get('metadata', {}).get('timestamp', 0)
+        time_diff = abs(existing_time - new_time)
+        
+        # Determine conflict based on thresholds
+        if similarity < threshold:
+            logger.debug(f"Conflict detected by similarity: {similarity:.2f} < {threshold}")
+            return True
+            
+        if confidence_diff > 0.3:  # Significant confidence difference
+            logger.debug(f"Conflict detected by confidence diff: {confidence_diff:.2f}")
+            return True
+            
+        if time_diff > 86400 * 30:  # 30 days difference
+            logger.debug(f"Conflict detected by time diff: {time_diff/86400:.1f} days")
+            return True
+            
+        return False
+
+    def _calculate_content_similarity(self, item1: dict, item2: dict) -> float:
+        """Calculate content similarity using multiple strategies"""
+        # Strategy 1: Text similarity
+        text1 = item1.get('text', '')
+        text2 = item2.get('text', '')
+        if text1 and text2:
+            return SequenceMatcher(None, text1, text2).ratio()
+        
+        # Strategy 2: Key-value similarity
+        keys = set(item1.keys()) | set(item2.keys())
+        similarities = []
+        for key in keys:
+            if key == 'metadata':
+                continue  # Skip metadata comparison
+                
+            val1 = str(item1.get(key, ''))
+            val2 = str(item2.get(key, ''))
+            if val1 and val2:
+                similarities.append(SequenceMatcher(None, val1, val2).ratio())
+                
+        if similarities:
+            return sum(similarities) / len(similarities)
+            
+        # Fallback: Structural similarity
+        return 1.0 if item1 == item2 else 0.0
 
 if __name__ == "__main__":
-    from unittest.mock import Mock
-    
     print("\n=== Knowledge Synchronizer Test ===")
     sync = KnowledgeSynchronizer()
-    print("Initial sync:", sync.full_sync())
+    printer.status("Initial sync:", sync,)
+    printer.status("Initial sync:", sync.full_sync(), "success")
+    printer.status("Initial sync:", sync._start_sync_thread(), "success")
 
-    if sync.config.versioning.enabled:
+    if sync.versioning.get('enabled', False):
         sync._create_version_snapshot()
-        print(f"Versions stored: {len(sync.version_history)}")
+        printer.pretty(f"Versions stored:", (sync.version_history), "success")
+
+    # Test API source
+    api_source = {
+        'type': 'api',
+        'endpoint': 'https://api.knowledgebase/v1/updates',
+        'auth_type': 'bearer_token',
+        'token': 'test_token'
+    }
+    print("API data:", sync._fetch_from_api(api_source))
+    
+    # Test conflict detection
+    item1 = {'text': 'The sky is blue', 'metadata': {'timestamp': time.time()}}
+    item2 = {'text': 'The sky is grey', 'metadata': {'timestamp': time.time()}}
+    printer.pretty("Conflict detected:", sync._detect_conflict(item1, item2), "success")
+
+    # Start sync thread
+    sync._start_sync_thread()
+    print("Background sync started")
+    
+    # Stop sync after short delay
+    time.sleep(2)
+    sync.stop_sync()
+    print("Background sync stopped")
 
         
     print("\n=== Synchronization Test Completed ===\n")
