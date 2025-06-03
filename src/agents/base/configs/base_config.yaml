@@ -1,3 +1,25 @@
+src_vocab_size: {}
+tgt_vocab_size: {}
+
+base_trasformer:
+  d_model: 512
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
+  activation: "relu"
+  layer_norm_eps: 0.00001
+  batch_first: True
+
+base_tokenizer:
+  pad_token: "[PAD]"
+  unk_token: "[UNK]"
+  bos_token: "[BOS]"
+  eos_token: "[EOS]"
+  mask_token: "[MASK]"
+  special_tokens: None
+
 lm_store:
   enable_memory_tracking: true
   default_category: "performance"
