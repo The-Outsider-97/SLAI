@@ -12,7 +12,7 @@ import datetime
 import threading
 
 from pympler import asizeof
-from typing import Any, OrderedDict
+from typing import Any, OrderedDict, Optional
 from collections import namedtuple, defaultdict, deque
 
 from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
@@ -47,6 +47,8 @@ class SharedMemory:
     def __init__(self):
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
+        if getattr(self, '_SharedMemory__initialized', False):
+            return
         if self.__initialized:
             return
         self.__initialized = True
@@ -59,7 +61,7 @@ class SharedMemory:
         self.ttl_check_interval = self.memory_config.get('ttl_check_interval', 30) # Default time-to-live
         self.network_latency = self.memory_config.get('network_latency', 0.0)
         self._default_ttl = self.memory_config.get('default_ttl', 3600)
-        self.data = {}
+        # self.data = {}
         self.callbacks = defaultdict(list)
         self._lock = threading.RLock()
         self.subscribers = {}
@@ -297,20 +299,82 @@ class SharedMemory:
 # ==============================
 #  3. Versioning and Append
 # ==============================
-    def append(self, key: str, value: Any):
-        """Store data and trigger callbacks"""
-        with self._lock:
-            if key not in self.data:
-                self.data[key] = []
-            self.data[key].append(value)
+    def append(self, key: str, value: Any, ttl: Optional[int] = None, priority: Optional[int] = None):
+        """
+        Appends a value to a key, treating it like a new versioned entry.
+        This effectively makes 'append' an alias for 'put' in terms of storage,
+        but it might have different callback semantics if desired.
+        """
+        #with self._lock:
+        #    if key not in self.data:
+        #        self.data[key] = []
+        #    self.data[key].append(value)
             
+        #    # Trigger registered callbacks
+        #    for cb in self.callbacks.get(key, []):
+        #        threading.Thread(target=cb, args=(value,)).start()
+        #        try:
+        #            cb(value)
+        #        except Exception as e:
+        #            logger.error(f"Callback error for {key}: {str(e)}")
+
+
+
+        self._simulate_network()
+        current_time = time.time()
+
+        with self._lock:
+            new_version = VersionedItem(timestamp=current_time, value=value)
+            item_size = self._calculate_size(value)
+
+            # Adjust current memory: if key exists, subtract old total size of its versions
+            # This is complex if append truly means "add to existing list of versions".
+            # For simplicity, let's assume append just adds a new version like put.
+            # If _data[key] is new, it's 0.
+            
+            # Store the new version in the deque
+            self._data[key].append(new_version)
+            self.current_memory += item_size # Add size of the new item
+
+            # Handle memory eviction if needed
+            while self.current_memory > self.max_memory and len(self._access_log) > 0: # Ensure there's something to evict
+                self._evict_lru()
+
+            self._access_log[key] = current_time
+            self._access_log.move_to_end(key) # Ensure it's marked as recently accessed
+
+
+            # Process TTL (same as in put)
+            effective_ttl = ttl if ttl is not None else self._default_ttl
+            if effective_ttl is not None:
+                if effective_ttl <= 0:
+                    self._remove_key(key) # Remove immediately if TTL is zero or negative
+                else:
+                    self._expiration[key] = current_time + effective_ttl
+            elif key in self._expiration: # No TTL provided, remove any existing expiration
+                del self._expiration[key]
+
+            # Add to priority queue if needed (same as in put)
+            if priority is not None:
+                heapq.heappush(self._priority_queue, (-priority, current_time, key))
+
             # Trigger registered callbacks
+            # Consider what callbacks should receive: the raw value or VersionedItem
             for cb in self.callbacks.get(key, []):
-                threading.Thread(target=cb, args=(value,)).start()
-                try:
-                    cb(value)
-                except Exception as e:
-                    logger.error(f"Callback error for {key}: {str(e)}")
+                # Run callbacks in a new thread to avoid blocking
+                threading.Thread(target=self._safe_callback_call, args=(cb, value)).start()
+            
+            # Notify subscribers (if applicable to append logic)
+            self.notify(key, value) # Assuming notify is relevant here too
+
+            return current_time # Return timestamp similar to put
+
+    def _safe_callback_call(self, cb, value):
+        """Helper to call callbacks safely."""
+        try:
+            cb(value)
+        except Exception as e:
+            logger.error(f"Callback error: {str(e)}", exc_info=True)
 
     def get_all_versions(self, key, update_access=True):
         """
@@ -585,16 +649,15 @@ class SharedMemory:
         with self._lock:
             current_time = time.time()
             expired_keys = []
-            
+
             # Identify expired keys
             for key in self._data:
                 if self._is_expired(key, current_time):
                     expired_keys.append(key)
-            
-            # Remove expired entries
+
             for key in expired_keys:
                 self._remove_key(key)
-                
+
             return len(self._data)
 
     def __contains__(self, key):
