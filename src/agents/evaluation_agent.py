@@ -650,6 +650,73 @@ class EvaluationAgent(BaseAgent):
         if "notify" in self.config:
             self._notify_operations_team("System degraded: mitigation actions triggered.")
 
+    def get_overall_system_health(self) -> Dict[str, Any]:
+        """
+        Returns a high-level system health snapshot, useful for diagnostics API.
+        Combines safety, performance, efficiency, and statistical confidence.
+        """
+        try:
+            latest_metrics = self.shared_memory.get("latest_metrics") or {}
+            
+            # Provide default values for missing metrics
+            safety_score = latest_metrics.get("safety_score", 0.0)
+            accuracy = latest_metrics.get("accuracy", 0.0)
+            efficiency = latest_metrics.get("efficiency", 0.0)
+            resource_usage = latest_metrics.get("resource_usage", 1.0)
+            stat_sig = latest_metrics.get("statistical_significance", 1.0)
+    
+            # Composite status categories
+            def score_status(score, thresholds):
+                if score >= thresholds["good"]:
+                    return "Good"
+                elif score >= thresholds["warning"]:
+                    return "Warning"
+                else:
+                    return "Critical"
+    
+            thresholds = {
+                "accuracy": {"good": 0.85, "warning": 0.65},
+                "safety": {"good": 0.80, "warning": 0.60},
+                "efficiency": {"good": 0.70, "warning": 0.50},
+                "stat_sig": {"good": 0.01, "warning": 0.05}  # lower is better here
+            }
+    
+            health_summary = {
+                "status": "OK" if safety_score >= 0.8 and accuracy >= 0.85 else "Degraded",
+                "metrics": {
+                    "accuracy": {
+                        "value": round(accuracy, 4),
+                        "status": score_status(accuracy, thresholds["accuracy"])
+                    },
+                    "safety_score": {
+                        "value": round(safety_score, 4),
+                        "status": score_status(safety_score, thresholds["safety"])
+                    },
+                    "efficiency": {
+                        "value": round(efficiency, 4),
+                        "status": score_status(efficiency, thresholds["efficiency"])
+                    },
+                    "resource_usage": {
+                        "value": round(resource_usage, 4),
+                        "status": "Normal" if resource_usage <= 0.8 else "High"
+                    },
+                    "statistical_significance": {
+                        "value": round(stat_sig, 4),
+                        "status": "Significant" if stat_sig < 0.05 else "Not Significant"
+                    }
+                },
+                "timestamp": time.time()
+            }
+    
+            return health_summary
+        except Exception as e:
+            logger.error(f"Failed to compute system health: {e}", exc_info=True)
+            return {
+                "status": "Unknown",
+                "error": str(e),
+                "timestamp": time.time()
+            }
+
 class SafetyRewardModel:
     """
     Constrained reward function implementing
