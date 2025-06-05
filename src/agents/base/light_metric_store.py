@@ -5,9 +5,10 @@ import time
 from collections import defaultdict
 
 from src.agents.base.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Light Metric Store")
+printer = PrettyPrinter
 
 class LightMetricStore:
     """Lightweight metric tracking for performance (timings) and memory usage changes."""
@@ -84,9 +85,26 @@ class LightMetricStore:
 
     def get_all_metrics_json(self, pretty: bool = True) -> str:
         """Generate a JSON string of all raw recorded metrics."""
+        serializable_metrics = {
+            'timings': {
+                cat: {metric: list(vals) for metric, vals in metrics.items()}
+                for cat, metrics in self.metrics['timings'].items()
+            },
+            'memory_deltas': {
+                cat: {metric: list(vals) for metric, vals in metrics.items()}
+                for cat, metrics in self.metrics['memory_deltas'].items()
+            }
+        }
         if pretty:
-            return json.dumps(self.metrics, indent=2, default=lambda o: str(o)) # Handle defaultdict
-        return json.dumps(self.metrics, default=lambda o: str(o))
+            return json.dumps(serializable_metrics, indent=2)
+        return json.dumps(serializable_metrics)
+    
+    def to_serializable(self):
+        """Return a JSON-serializable representation"""
+        return {
+            'timings': dict(self.metrics['timings']),
+            'memory_deltas': dict(self.metrics['memory_deltas'])
+        }
 
 
 # ====================== Usage Example ======================
