@@ -70,7 +70,7 @@ class LearningAgent(BaseAgent):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config
+            config=config, 
         )
         """
         Initialize learning subsystems with environment context
@@ -80,13 +80,13 @@ class LearningAgent(BaseAgent):
             config: Dictionary with agent configurations
         """
         self.env = env
-        state_dim = env.state_dim if isinstance(env, SLAIEnv) else config["state_dim"]
         self.task_ids = ['default_task'] # Example task list – adapt based on actual environment capabilities ['navigate', 'explore', 'avoid', 'collect'] 
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
         self.learning_agent_config = get_config_section('learning_agent')
 
+        state_dim = env.state_dim if isinstance(env, SLAIEnv) else self.learning_agent_config.get('state_dim')
         self.rl_algorithm = self.config.get("rl_algorithm", None)
 
         self.strategy_weights = np.array(self.learning_agent_config.get('strategy_weights', [0.25]*4))
@@ -145,7 +145,9 @@ class LearningAgent(BaseAgent):
             self.policy_net.parameters(),
             lr=meta_controller_config.get('learning_rate', 1e-3)
         )
-        self.loss_fn = nn.CrossEntropyLoss()    
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.training_mode = False
+
         self.performance_metrics = {}
 
         # Initialize Learning Factory
@@ -1968,6 +1970,17 @@ class LearningAgent(BaseAgent):
 
     def extract_new_rules(self):
         return []
+
+    # For a financial advisor
+    def get_learning_status(self):
+        """Return current learning status"""
+        return {
+            "training_mode": self.training_mode,
+            "performance_metrics": self.performance_metrics,
+            "performance_metrics": self.metric_store.get_metrics_summary() 
+            if isinstance(self.strategy_weights, np.ndarray) 
+            else self.strategy_weights
+        }
 
 class MetaStrategyEvaluator:
     """Decides strategy weighting using meta-learning insights"""
