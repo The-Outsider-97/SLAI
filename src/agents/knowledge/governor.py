@@ -66,18 +66,18 @@ class Governor:
 
     def _load_bias_categories(self) -> dict:
         """Load bias categories from JSON file specified in config"""
-        path_str = getattr(self.governor_config, 'bias_categories', '')
+        path_str = self.governor_config.get('bias_categories', '')
         if not path_str:
             logger.warning("No bias_categories path configured in governor")
             return {}
-
         try:
-            with open(path_str, "r", encoding='utf-8') as f:
+            abs_path = os.path.abspath(path_str)
+            with open(abs_path, "r", encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
-            logger.error(f"Bias categories file not found: {path_str}")
+            logger.error(f"Bias categories file not found: {abs_path}")
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON format in bias categories file: {path_str}")
+            logger.error(f"Invalid JSON format in bias categories file: {abs_path}")
         except Exception as e:
             logger.error(f"Error loading bias categories: {str(e)}")
             
@@ -91,24 +91,30 @@ class Governor:
         
         # Store rules in knowledge memory
         for path in rule_sources:
-            if os.path.exists(path):
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
                 try:
-                    with open(path, 'r') as f:
-                        rules = yaml.safe_load(f) if path.endswith((".yaml", ".yml")) else json.load(f)
-                        rule_id = hashlib.md5(path.encode()).hexdigest()
-                        self.knowledge_memory.update(
-                            key=f"rule_source:{rule_id}",
-                            value=rules,
-                            metadata={
-                                "source": path,
-                                "type": "rule_source",
-                                "timestamp": time.time()
-                            }
-                        )
+                    if abs_path.endswith((".yaml", ".yml")):
+                        with open(abs_path, 'r', encoding='utf-8') as f:
+                            rules = yaml.safe_load(f)
+                    else:
+                        with open(abs_path, 'r', encoding='utf-8') as f:
+                            rules = json.load(f)
+                            
+                    rule_id = hashlib.md5(abs_path.encode()).hexdigest()
+                    self.knowledge_memory.update(
+                        key=f"rule_source:{rule_id}",
+                        value=rules,
+                        metadata={
+                            "source": abs_path,
+                            "type": "rule_source",
+                            "timestamp": time.time()
+                        }
+                    )
                 except Exception as e:
-                    logger.error(f"Error loading rules from {path}: {str(e)}")
+                    logger.error(f"Error loading rules from {abs_path}: {str(e)}")
             else:
-                logger.warning(f"Rule source path not found: {path}")
+                logger.warning(f"Rule source path not found: {abs_path}")
 
     def _load_guidelines(self) -> Dict[str, list]:
         """Load ethical guidelines from configured paths"""
@@ -116,13 +122,19 @@ class Governor:
         guideline_paths = getattr(self.governor_config, 'guideline_paths', [])
         
         for path_str in guideline_paths:
+            abs_path = os.path.abspath(path_str)
             try:
-                with open(path_str, "r", encoding='utf-8') as f:
-                    data = yaml.safe_load(f) if path_str.endswith((".yaml", ".yml")) else json.load(f)
-                    guidelines["principles"].extend(data.get("principles", []))
-                    guidelines["restrictions"].extend(data.get("restrictions", []))
+                if abs_path.endswith((".yaml", ".yml")):
+                    with open(abs_path, "r", encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                else:
+                    with open(abs_path, "r", encoding='utf-8') as f:
+                        data = json.load(f)
+                        
+                guidelines["principles"].extend(data.get("principles", []))
+                guidelines["restrictions"].extend(data.get("restrictions", []))
             except Exception as e:
-                logger.error(f"Guideline loading error from {path_str}: {str(e)}")
+                logger.error(f"Guideline loading error from {abs_path}: {str(e)}")
                 
         return guidelines
 
@@ -464,25 +476,50 @@ class Governor:
 
     def _check_agent_health(self):
         """Real-time health checks. Now references self.knowledge_agent."""
+        # Skip health check if knowledge_agent isn't ready
         if not self.knowledge_agent or not hasattr(self.knowledge_agent, "name"):
-            logger.warning("Knowledge agent not available for Governor health checks.")
+            logger.warning("Knowledge agent instance not available for Governor health checks.")
             return
 
         agent_name = getattr(self.knowledge_agent, "name", "unknown_knowledge_agent")
-        shared_mem = getattr(self.knowledge_agent, "shared_memory", None)
+        shared_mem_obj = getattr(self.knowledge_agent, "shared_memory", None)
 
-        if not shared_mem or not hasattr(shared_mem, 'get') or not hasattr(shared_mem, 'set'):
-            logger.warning(f"Shared memory not properly configured for {agent_name} in Governor health check.")
+        # --- START MORE DETAILED CONDITION CHECK ---
+        #is_obj_false = False
+        #if not shared_mem_obj: # Check this part first
+        #    is_obj_false = True
+        
+        #has_get_attr = hasattr(shared_mem_obj, 'get')
+        #has_put_attr = hasattr(shared_mem_obj, 'put')
+
+        #is_not_shared_mem_obj_eval = not shared_mem_obj # Re-evaluate for the log
+        #has_no_get_eval = not has_get_attr
+        #has_no_put_eval = not has_put_attr
+        
+        #logger.info(f"  Detailed Condition Breakdown:")
+        #logger.info(f"    not shared_mem_obj: {is_not_shared_mem_obj_eval} (is_obj_false intermediate: {is_obj_false})")
+        #logger.info(f"    not hasattr(get): {has_no_get_eval} (has_get_attr intermediate: {has_get_attr})")
+        #logger.info(f"    not hasattr(put): {has_no_put_eval} (has_put_attr intermediate: {has_put_attr})")
+        
+        #combined_eval_passes = False
+        #if is_not_shared_mem_obj_eval or has_no_get_eval or has_no_put_eval:
+        #    combined_eval_passes = True
+        
+        #logger.info(f"    Combined condition (A or B or C) evaluates to: {combined_eval_passes}")
+        # --- END MORE DETAILED CONDITION CHECK ---
+
+        if shared_mem_obj is None or not hasattr(shared_mem_obj, 'get'):
+            logger.warning(f"Shared memory is None or lacks required methods for {agent_name}")
             return
 
-        consecutive_errors_threshold = getattr(self.governor_config.get('violation_thresholds', {}), 'consecutive_errors', 5)
-        errors = shared_mem.get(f"errors:{agent_name}", [])
+        consecutive_errors_threshold = self.governor_config.get('violation_thresholds', {}).get('consecutive_errors', 5)
+        errors = shared_mem_obj.get(f"errors:{agent_name}", [])
         if isinstance(errors, list) and len(errors) >= consecutive_errors_threshold:
             logger.warning(f"Consecutive error threshold breached for {agent_name}: {len(errors)} errors")
-            shared_mem.set(f"retraining_flag:{agent_name}", True)
+            shared_mem_obj.set(f"retraining_flag:{agent_name}", True)
 
-        warning_memory_threshold = getattr(self.governor_config.get('memory_thresholds', {}), 'warning', 2048)
-        mem_usage = shared_mem.get(f"memory_usage:{agent_name}")
+        warning_memory_threshold = self.governor_config.get('memory_thresholds', {}).get('warning', 2048)
+        mem_usage = shared_mem_obj.get(f"memory_usage:{agent_name}")
         if mem_usage and isinstance(mem_usage, (int, float)) and mem_usage > warning_memory_threshold:
             logger.info(f"High memory usage for {agent_name}: {mem_usage} MB")
         
@@ -547,8 +584,9 @@ if __name__ == "__main__":
     printer.status("Auditor", auditor, "success")
     printer.status("Detector", auditor._get_bias_detector(), "success")
     printer.status("Approval", auditor.get_approved_rules(), "success")
+    printer.status("checker", auditor._check_agent_health(), "success")
     printer.status("monitoring", auditor._start_monitoring_thread(), "success")
     printer.status("Content Check", auditor._detect_unethical_content(text=text), "success")
-    printer.status("Bias",  auditor._detect_bias(text=text), "success")
-    printer.status("Report", auditor.generate_report(format_type=format_type), "success")
+    printer.pretty("Bias",  auditor._detect_bias(text=text), "success")
+    printer.pretty("Report", auditor.generate_report(format_type=format_type), "success")
     print("\n=== Governor Test Completed ===")
