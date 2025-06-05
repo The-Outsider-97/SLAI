@@ -13,6 +13,7 @@ import torch.nn as nn
 from typing import Any
 from collections import OrderedDict, defaultdict, deque
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.base.lazy_agent import LazyAgent
 from src.agents.base.light_metric_store import LightMetricStore
 from src.agents.base.issue_handler import DEFAULT_ISSUE_HANDLERS
@@ -21,10 +22,10 @@ from logs.logger import get_logger
 
 logger = get_logger("SLAI Base Agent")
 
-MAIN_CONFIG_PATH =  "src/agents/base/configs/agents_config.yaml"
+# MAIN_CONFIG_PATH =  "src/agents/base/configs/agents_config.yaml"
 
 class BaseAgent(abc.ABC):
-    def __init__(self, shared_memory, agent_factory, config=MAIN_CONFIG_PATH):
+    def __init__(self, shared_memory, agent_factory, config=None):
         self.logger = get_logger(self.__class__.__name__)
         self.name = self.__class__.__name__
         
@@ -32,7 +33,7 @@ class BaseAgent(abc.ABC):
             shared_memory = SharedMemory()
         self.shared_memory = shared_memory
         self.agent_factory=agent_factory
-        self.config = (config or {}).get('base_agent', {})
+        self.config = get_config_section('base_agent')
         self.metric_store = LightMetricStore()
         
         # Configurable parameters for error handling and retries
@@ -755,7 +756,7 @@ class RetrainingManager:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running SLAI Base Agent ===\n")
-    config = None
+    config = get_config_section('base_agent')
     shared_memory={}
     agent_factory=None
 
