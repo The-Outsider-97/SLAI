@@ -386,15 +386,118 @@ class LearningAgent(BaseAgent):
         state_tensor = state.detach().clone() if torch.is_tensor(state) else torch.tensor(state, dtype=torch.float32)
         return self.state_embedder(state_tensor)
  
+    def select_agent_strategy_with_meta_controller(
+        self,
+        current_task_env_or_state_embedding,
+        episode_results: dict
+    ) -> str:
+        """
+        Robust strategy selection via meta-controller.
+    
+        Args:
+            current_task_env_or_state_embedding (Union[np.ndarray, torch.Tensor]):
+                Task-level embedding or state vector.
+            episode_results (dict): Metrics from last episode (reward, success rate, etc.)
+    
+        Returns:
+            str: Strategy name chosen by meta-controller (dqn, maml, rsi, rl)
+        """
+    
+        # === Step 1: Validate Input Presence ===
+        if current_task_env_or_state_embedding is None:
+            self.logger.error("Input embedding is None.")
+            return self.default_strategy_name
+    
+        # === Step 2: Convert Input to Torch Tensor ===
+        try:
+            if isinstance(current_task_env_or_state_embedding, torch.Tensor):
+                embedding = current_task_env_or_state_embedding.float()
+            elif isinstance(current_task_env_or_state_embedding, np.ndarray):
+                if current_task_env_or_state_embedding.dtype == np.object_:
+                    current_task_env_or_state_embedding = np.array(
+                        current_task_env_or_state_embedding.tolist(), dtype=np.float32
+                    )
+                embedding = torch.tensor(current_task_env_or_state_embedding, dtype=torch.float32)
+            elif isinstance(current_task_env_or_state_embedding, (list, tuple)):
+                embedding = torch.tensor(current_task_env_or_state_embedding, dtype=torch.float32)
+            else:
+                raise TypeError(f"Unsupported embedding type: {type(current_task_env_or_state_embedding)}")
+        except Exception as e:
+            self.logger.error("Embedding conversion failed", exc_info=True)
+            return self.default_strategy_name
+    
+        # === Step 3: Ensure Correct Shape ===
+        try:
+            if embedding.ndim == 1:
+                embedding = embedding.unsqueeze(0)  # Shape (1, D)
+            elif embedding.ndim != 2:
+                raise ValueError(f"Embedding must be 1D or 2D, got shape {embedding.shape}")
+        except Exception as e:
+            self.logger.error("Embedding shape validation failed", exc_info=True)
+            return self.default_strategy_name
+    
+        # === Step 4: Pad or Truncate ===
+        expected_dim = self.task_embedding_dim
+        actual_dim = embedding.shape[1]
+        if actual_dim < expected_dim:
+            padding = torch.zeros((embedding.shape[0], expected_dim - actual_dim), dtype=embedding.dtype)
+            embedding = torch.cat([embedding, padding], dim=1)
+        elif actual_dim > expected_dim:
+            embedding = embedding[:, :expected_dim]
+    
+        # === Step 5: Check for Meta-Controller ===
+        if not hasattr(self, "policy_net") or self.policy_net is None:
+            self.logger.warning("Meta-controller (policy_net) not defined.")
+            return self.default_strategy_name
+    
+        # === Step 6: Device Matching ===
+        try:
+            device = next(self.policy_net.parameters()).device
+            embedding = embedding.to(device)
+        except Exception as e:
+            self.logger.error("Device mismatch while preparing embedding", exc_info=True)
+            return self.default_strategy_name
+    
+        # === Step 7: Inference ===
+        try:
+            self.policy_net.eval()
+            with torch.no_grad():
+                logits = self.policy_net(embedding)
+                if isinstance(logits, tuple):
+                    logits = logits[0]
+                probs = torch.softmax(logits.squeeze(0), dim=0)
+                strategy_index = torch.argmax(probs).item()
+        except Exception as e:
+            self.logger.error("Meta-controller inference failed", exc_info=True)
+            return self.default_strategy_name
+    
+        # === Step 8: Resolve Strategy ===
+        strategy_names = list(self.agents.keys())
+        if not strategy_names:
+            self.logger.critical("No agent strategies available.")
+            return self.default_strategy_name
+    
+        if strategy_index >= len(strategy_names):
+            self.logger.warning(f"Strategy index {strategy_index} out of bounds. Falling back.")
+            strategy_index = len(strategy_names) - 1
+    
+        selected_strategy = strategy_names[strategy_index]
+        if selected_strategy not in self.agents:
+            self.logger.error(f"Strategy '{selected_strategy}' not found in agent registry.")
+            return self.default_strategy_name
+    
+        self.logger.info(f"Meta-controller selected strategy: {selected_strategy}")
+        return selected_strategy
+
     def _generate_task_embedding_and_label(self, task_env, episode_results: Dict[str, float]):
         """
         Generate task embedding and best strategy label from environment and results.
         Uses multi-source feature extraction.
         """
         # Validate inputs
-        if not episode_results:
+        if not episode_results or len(episode_results) == 0:
             logger.warning("No episode results for embedding generation")
-            return None
+            return np.zeros(self.task_embedding_dim), "unknown"
             
         # Feature extraction
         features = []
@@ -409,9 +512,9 @@ class LearningAgent(BaseAgent):
             
         # 2. Performance characteristics
         perf_features = [
-            np.mean(list(episode_results.values())),  # Avg performance
-            np.std(list(episode_results.values())),   # Performance variance
-            len(episode_results)                     # Number of strategies
+            np.mean(list(dict(episode_results).values())),  # Avg performance
+            np.std(list(episode_results.values())),         # Performance variance
+            len(episode_results)                            # Number of strategies
         ]
         features.extend(perf_features)
         
@@ -443,46 +546,6 @@ class LearningAgent(BaseAgent):
                      f"Best: {best_strategy} | Score: {episode_results[best_strategy]:.2f}")
         
         return task_embedding, best_strategy
-
-    def select_agent_strategy_with_meta_controller(self, current_task_env_or_state_embedding):
-        """
-        Select agent strategy using meta-controller. Handles both environments
-        and precomputed embeddings.
-        """
-        # Process input type
-        if isinstance(current_task_env_or_state_embedding, torch.Tensor):
-            embedding = current_task_env_or_state_embedding
-        else:
-            embedding, _ = self._generate_task_embedding_and_label(
-                current_task_env_or_state_embedding, 
-                self.performance_metrics
-            )
-            if embedding is None:
-                logger.warning("Falling back to random strategy selection")
-                return random.choice(list(self.agent_strategies_map.keys()))
-        
-        # Add batch dimension if needed
-        if embedding.dim() == 1:
-            embedding = embedding.unsqueeze(0)
-            
-        # Move to appropriate device
-        device = next(self.policy_net.parameters()).device
-        embedding = embedding.to(device)
-        
-        # Prediction
-        self.policy_net.eval()
-        with torch.no_grad():
-            logits = self.policy_net(embedding)
-            strategy_idx = torch.argmax(logits, dim=1).item()
-            
-        # Map to strategy name
-        inverse_map = {v: k for k, v in self.agent_strategies_map.items()}
-        strategy_name = inverse_map.get(strategy_idx, 'dqn')  # Default to DQN
-        
-        logger.info(f"Meta-controller selected: {strategy_name} "
-                    f"(Confidence: {torch.softmax(logits, dim=1)[0, strategy_idx].item():.2%})")
-        
-        return strategy_name
 
     # Remove update_from_embeddings since it's redundant
     def update_from_embeddings(self, inputs, targets):
