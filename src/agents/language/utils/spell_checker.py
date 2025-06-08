@@ -1,4 +1,6 @@
 
+import os
+import re
 import yaml
 
 from fuzzywuzzy import fuzz  # For Levenshtein distance
@@ -7,40 +9,27 @@ from spellchecker import SpellChecker
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Set
 
-from logs.logger import get_logger
+from src.agents.language.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Spell Checker")
-
-CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config().get("spell_checker", {})
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class SpellChecker:
-    def __init__(self, config, wordlist=None):
-        self.config = config
-        self.wordlist = wordlist
-        self.words = self._load_wordlist()
-        self.phonetic_map = self._build_phonetic_map() if config.get("enable_phonetic") else None
+    def __init__(self):
+        self.config = load_global_config()
+        self.checker_config = get_config_section('spell_checker')
+        self.wordlist = self.checker_config.get('wordlist_path')
+        self.typo_patterns = self.checker_config.get('typo_patterns_path')
+        self.words = self.wordlist.words if self.wordlist and hasattr(self.wordlist, 'words') else []
+    
+        self.phonetic_map = self._build_phonetic_map() if self.checker_config.get('enable_phonetic') else None
 
-    def _load_wordlist(self):
-        try:
-            with open(self.config.get("wordlist_path"), "r", encoding="utf-8") as f:
-                words = f.read().split()
-                return set(words if self.config.get("case_sensitive") else [w.lower() for w in words])
-        except Exception as e:
-            logger.error(f"Failed to load wordlist: {e}")
-            return set()
+        printer.status("INIT", "Spell Checker succesfully initialized", "info")
 
     def _build_phonetic_map(self):
+        printer.status("INIT", "Phonetic map succesfully initialized", "info")
+
         phonetic_map = {}
         for word in self.words:
             key = self._get_phonetic_key(word)
@@ -48,11 +37,14 @@ class SpellChecker:
         return phonetic_map
 
     def _get_phonetic_key(self, word):
+        printer.status("INIT", "Phonetic key succesfully initialized", "info")
         if self.config.get("phonetic_algorithm") == "soundex":
             return self._soundex(word)
         return doublemetaphone(word)[0]
     
     def suggest_with_scores(self, word: str, max_suggestions: int = 5) -> List[Tuple[str, float]]:
+        printer.status("INIT", "score suggestions succesfully initialized", "info")
+
         word_lc = word.lower()
         candidates = list(self.words)
     
@@ -66,6 +58,8 @@ class SpellChecker:
         return candidates[:max_suggestions]
 
     def _calculate_confidence(self, original: str, candidate: str) -> float:
+        printer.status("INIT", "Confidence calculation succesfully initialized", "info")
+
         edit_dist = self._weighted_edit_distance(original, candidate)
         phonetic_sim = self._phonetic_similarity(original, candidate)
         freq_score = self.wordlist.word_probability(candidate) if self.wordlist else 0.0
@@ -87,11 +81,13 @@ class SpellChecker:
         Uses dynamic programming with configurable costs for substitutions
         (based on keyboard layout) and insertions/deletions.
         """
+        printer.status("INIT", "Weighted edit calculation succesfully initialized", "info")
+
         # Get config parameters with defaults
-        insertion_cost = self.config.get("insertion_cost", 1.0)
-        deletion_cost = self.config.get("deletion_cost", 1.0)
-        default_sub_cost = self.config.get("default_substitution_cost", 2.0)
-        case_sensitive = self.config.get("case_sensitive", False)
+        insertion_cost = self.checker_config.get("insertion_cost", 1.0)
+        deletion_cost = self.checker_config.get("deletion_cost", 1.0)
+        default_sub_cost = self.checker_config.get("default_substitution_cost", 2.0)
+        case_sensitive = self.checker_config.get("case_sensitive", False)
     
         m, n = len(original), len(candidate)
         dp = [[0.0] * (n + 1) for _ in range(m + 1)]
@@ -124,6 +120,8 @@ class SpellChecker:
 
     def _get_keyboard_sub_cost(self, c1: str, c2: str, default: float) -> float:
         """Access keyboard layout through injected Wordlist instance"""
+        printer.status("INIT", "Keyboard access succesfully initialized", "info")
+
         if self.wordlist and hasattr(self.wordlist, "keyboard_layout"):
             cost = self.wordlist.keyboard_layout.get(c1, {}).get(c2, None)
             if cost is None:
@@ -132,11 +130,15 @@ class SpellChecker:
         return default
 
     def _phonetic_similarity(self, w1: str, w2: str) -> float:
+        printer.status("INIT", "Phonetic similarities succesfully initialized", "info")
+
         codes1 = {self._get_phonetic_key(w1)}
         codes2 = {self._get_phonetic_key(w2)}
         return len(codes1 & codes2) / max(len(codes1 | codes2), 1)
     
     def _keyboard_similarity(self, w1: str, w2: str) -> float:
+        printer.status("INIT", "Keyboard similarities succesfully initialized", "info")
+
         if not self.wordlist or not hasattr(self.wordlist, "keyboard_layout"):
             return 2.0  # fallback cost
     
@@ -148,8 +150,54 @@ class SpellChecker:
         return total / min_len if min_len > 0 else 0
     
     def generate_typo_variants(self, word: str) -> Set[str]:
-        import re
-        patterns = [
+        printer.status("INIT", "Typo handler succesfully initialized", "info")
+        variants = set()
+
+        def safe_add(w):  # Avoid adding the original word
+            if w != word:
+                variants.add(w)
+
+        # Load patterns from file or use built-in
+        patterns = self._load_typo_patterns()
+
+        for pat, repl in patterns:
+            try:
+                safe_add(re.sub(pat, repl, word))
+            except re.error:
+                continue
+    
+        # Transpose adjacent characters
+        for i in range(len(word) - 1):
+            swapped = list(word)
+            swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
+            safe_add(''.join(swapped))
+    
+        # Remove each character once
+        for i in range(len(word)):
+            safe_add(word[:i] + word[i + 1:])
+    
+        # Duplicate each character once
+        for i in range(len(word)):
+            safe_add(word[:i + 1] + word[i] + word[i + 1:])
+    
+        # Replace each character with adjacent keyboard key (if keyboard layout provided)
+        if self.wordlist and hasattr(self.wordlist, "keyboard_layout"):
+            layout = self.wordlist.keyboard_layout
+            for i, char in enumerate(word):
+                if char in layout:
+                    for nearby_char in layout[char]:
+                        safe_add(word[:i] + nearby_char + word[i + 1:])
+    
+        # Insert common letters at every position
+        for i in range(len(word) + 1):
+            for c in "aeiou":
+                safe_add(word[:i] + c + word[i:])
+    
+        return variants
+    
+    def _load_typo_patterns(self) -> List[Tuple[str, str]]:
+        """Load patterns from YAML file or return built-in patterns"""
+        builtin_patterns = [
             (r'ie$', 'ei'), (r'ei$', 'ie'),  # receive, their
             (r'ou$', 'uo'), (r'uo$', 'ou'),  # guard vs gurad
             (r'([aeiou])\1', r'\1'),  # repeated vowels: aa -> a
@@ -173,14 +221,22 @@ class SpellChecker:
             (r'([cs])h$', r'\1'), # tech -> tec
             (r'([aeiou])r([e$])', r'\1er'),  # centre -> center
         ]
-        variants = set()
-        for pat, repl in patterns:
-            variants.add(re.sub(pat, repl, word))
-            variants.add(re.sub(repl, pat, word))
-        return variants
+
+        if not self.typo_patterns or not os.path.exists(self.typo_patterns):
+            return builtin_patterns
+
+        try:
+            with open(self.typo_patterns, 'r') as f:
+                pattern_list = yaml.safe_load(f)
+                return [(p, r) for p, r in pattern_list]
+        except Exception as e:
+            logger.error(f"Error loading typo patterns: {e}")
+            return builtin_patterns
 
     def _soundex(self, word):
         """Soundex phonetic algorithm implementation."""
+        printer.status("INIT", "Soundex succesfully initialized", "info")
+
         if not word:
             return "0000"
         
@@ -222,18 +278,20 @@ class SpellChecker:
         return ''.join(soundex_code)[:4]
 
     def suggest(self, word, max_suggestions=None):
+        printer.status("INIT", "Suggestion succesfully initialized", "info")
+
         candidates = []
-        if not self.config.get("case_sensitive"):
+        if not self.checker_config.get("case_sensitive"):
             word = word.lower()
 
-        if "edit_distance" in self.config.get("suggestion_strategies", []):
+        if "edit_distance" in self.checker_config.get("suggestion_strategies", []):
             candidates.extend(sorted(
                 self.words, 
                 key=lambda w: fuzz.ratio(w, word), 
                 reverse=True
-            )[:self.config["max_suggestions"]])
+            )[:self.checker_config.get('max_suggestions')])
 
-        if "phonetic" in self.config.get("suggestion_strategies", []) and self.phonetic_map:
+        if "phonetic" in self.checker_config.get("suggestion_strategies", []) and self.phonetic_map:
             phonetic_key = self._get_phonetic_key(word)
             candidates.extend(self.phonetic_map.get(phonetic_key, []))
 
@@ -244,22 +302,42 @@ class SpellChecker:
             if candidate not in seen:
                 final.append(candidate)
                 seen.add(candidate)
-        max_sug = max_suggestions or self.config.get("max_suggestions", 5)
+        max_sug = max_suggestions or self.checker_config.get("max_suggestions", 5)
         return final[:max_sug]
 
     def is_correct(self, word):
-        return word in self.words if self.config["case_sensitive"] else word.lower() in self.words
+        return word in self.words if self.checker_config.get("case_sensitive") else word.lower() in self.words
     
 
 if __name__ == "__main__":
     print("\n=== Running Spelling Checker ===\n")
-    config = get_merged_config()
+    printer.status("Init", "Governor initialized", "success")
 
-    spelling = SpellChecker(config)
+    spelling = SpellChecker()
+
     suggestions = spelling.suggest("Unfortonally") 
     print(spelling._soundex("Killer"))
     print(spelling._soundex("kill"))
     print(spelling._soundex("Killing"))
     print(spelling)
     print(f"Suggestions: {suggestions}")
+    print("\n* * * * * Phase 2 * * * * *")
+
+    word= "queens"
+    word2= "trainer"
+    words= "trainer, queens, boy, iron"
+    max_suggestions=5
+    original="queen"
+    candidate="queens"
+    badword= "queeen"
+
+    score = spelling.suggest_with_scores(word=word, max_suggestions=max_suggestions)
+    confidence=spelling._calculate_confidence(original=original, candidate=candidate)
+    typo = spelling.generate_typo_variants(word=badword)
+    soundex = spelling._soundex(word=words)
+
+    printer.pretty("SCORE", score, "success")
+    printer.pretty("CALC", confidence, "success")
+    printer.pretty("TYPO", typo, "success")
+    printer.pretty("SOUND", soundex, "success")
     print("\n=== Successfully Ran Spelling Checker ===\n")
