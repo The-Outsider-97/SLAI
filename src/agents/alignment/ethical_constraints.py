@@ -5,41 +5,20 @@ Implements:
 - Constitutional AI principles (Bai et al., 2022)
 - Dynamic rule adaptation (Kasirzadeh & Gabriel, 2023)
 """
-
-import yaml
+import json
 import hashlib
 import numpy as np
 import networkx as nx
 
-from types import SimpleNamespace
-from typing import Dict, List, Optional, Callable, Union
-from dataclasses import dataclass, field
+from typing import Dict, List
 from datetime import datetime
-from functools import partial
 
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from src.agents.alignment.alignment_memory import AlignmentMemory
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Ethical Constraints")
-
-CONFIG_PATH = "src/agents/alignment/configs/alignment_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r") as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class EthicalConstraints:
     """
@@ -56,14 +35,119 @@ class EthicalConstraints:
     4. Adaptation Layer: Experience-driven rule updates
     """
 
-    def __init__(self,
-                 config_section_name: str = "ethical_constraints",
-                 config_file_path: str = CONFIG_PATH
-                 ):
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
+        self.config = load_global_config()
+        self.sensitive_attributes = self.config.get('sensitive_attributes')
+
+        self.ethics_config = get_config_section('ethical_constraints')
+        self.safety_constraints = self.ethics_config.get('safety_constraints', {
+            'physical_harm', 'psychological_harm'})
+        self.fairness_constraints = self.ethics_config.get('fairness_constraints', {
+            'distribution', 'procedure'})
+        self.constitutional_rules = self.ethics_config.get('constitutional_rules', {
+            'privacy', 'transparency'})
+        self.adaptation_rate = self.ethics_config.get('adaptation_rate')
+        self.constraint_priorities = self.ethics_config.get('constraint_priorities')
+
+        self.alignment_memory = AlignmentMemory()
         self.audit_log = []
+        self.constitutional_rules_loaded = self._load_all_constitutional_rules()
+        self.rule_evaluators = self._create_rule_evaluator_mapping()
         self.constraint_weights = self._init_weights()
         self._build_constraint_graph()
+
+    def _load_all_constitutional_rules(self) -> Dict[str, List[str]]:
+        """Load all constitutional rules from files specified in config"""
+        rules_dict = {}
+        constitutional_config = self.ethics_config.get('constitutional_rules', {})
+        for principle, file_path in constitutional_config.items():
+            rules = self._load_rules(file_path)
+            if rules:
+                rules_dict[principle] = rules
+        return rules_dict
+
+    def _init_weights(self) -> Dict:
+        """Initialize constraint weights with safe config access."""
+        safety = self.ethics_config.get('safety_constraints', {})
+        fairness = self.ethics_config.get('fairness_constraints', {})
+        constitutional = self.ethics_config.get('constitutional_rules', {})
+        categories = self.ethics_config.get('constraint_priorities', [])
+        
+        # Collect all constraint types safely
+        all_categories = set(categories)
+        all_categories |= set(safety.keys())
+        all_categories |= set(fairness.keys())
+        all_categories |= set(constitutional.keys())
+    
+        initial_weight = 1.0
+        step = 0.05
+        weights = {}
+        priority_map = {cat: i for i, cat in enumerate(categories)}
+        
+        for category in sorted(all_categories, key=lambda x: priority_map.get(x, 99)):
+            weights[category] = initial_weight - priority_map.get(category, len(all_categories)) * step
+            logger.debug(f"Initialized weight for '{category}': {weights[category]:.4f}")
+
+        for dimension in fairness:
+            if dimension not in weights:
+                weights[dimension] = initial_weight - len(weights) * step
+                logger.warning(f"Fairness dimension added: {dimension}")
+        
+        return weights
+
+    def _build_constraint_graph(self):
+        """Build graph with full safe config access."""
+        self.constraint_graph = nx.DiGraph()
+        
+        # Get all constraint sections with safe defaults
+        safety = self.ethics_config.get('safety_constraints', {})
+        fairness = self.ethics_config.get('fairness_constraints', {})
+        constitutional = self.ethics_config.get('constitutional_rules', {})
+        priority_list = self.ethics_config.get('constraint_priorities', [])
+      
+        # Collect categories from all constraint types
+        categories = set()
+        categories |= set(safety.keys())
+        categories |= set(fairness.keys())
+        categories |= set(constitutional.keys())
+        self.constraint_graph.add_nodes_from(categories)
+      
+        # Priority relationships
+        for i in range(len(priority_list)):
+            for j in range(i + 1, len(priority_list)):
+                u = priority_list[i]
+                v = priority_list[j]
+                if u in self.constraint_graph and v in self.constraint_graph:
+                    self.constraint_graph.add_edge(u, v, type='priority')
+
+        # Define potential conflicts (example: transparency vs privacy)
+        if 'transparency' in self.constraint_graph and 'privacy' in self.constraint_graph:
+            self.constraint_graph.add_edge('transparency', 'privacy', type='conflict')
+            self.constraint_graph.add_edge('privacy', 'transparency', type='conflict')
+            logger.debug("Added conflict edge between transparency and privacy")
+
+        # Add more conflict edges based on domain knowledge
+        # e.g., Safety might conflict with distribution fairness in resource allocation
+        if 'safety' in self.constraint_graph and 'distribution' in self.constraint_graph:
+             self.constraint_graph.add_edge('safety', 'distribution', type='conflict')
+             self.constraint_graph.add_edge('distribution', 'safety', type='conflict')
+             logger.debug("Added conflict edge between safety and distribution")
+
+        logger.info(f"Constraint graph built with {self.constraint_graph.number_of_nodes()} nodes and {self.constraint_graph.number_of_edges()} edges.")
+
+    def _load_rules(self, file_path: str) -> List[dict]:
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                for key in data:
+                    if key.startswith("constitutional_module_"):
+                        return [
+                            {"id": r["id"], "rule_statement": r["rule_statement"]} 
+                            for r in data[key].get("rules", [])
+                        ]
+        except Exception as e:
+            logger.error(f"Error loading rules: {str(e)}")
+        return []
 
     def enforce(self, action_context: Dict) -> Dict:
         """
@@ -73,6 +157,7 @@ class EthicalConstraints:
         3. Societal impact assessment
         4. Adaptive constraint adjustment
         """
+        # action_context=Dict()
         validation_result = {
             'approved': True,
             'violations': [],
@@ -100,66 +185,71 @@ class EthicalConstraints:
 
         return validation_result
 
-    def _check_safety_constraints(self, context: Dict) -> Dict:
-        """STPA-based hazard analysis"""
-        hazards = []
-        corrections = []
-        explanations = []
-        
-        for constraint_type, rules in vars(
-            getattr(self.config, 'safety_constraints', SimpleNamespace())
-        ).items():
-            hazard_detected = self._detect_hazard(context, constraint_type)
-            if hazard_detected:
-                hazards.append(f"{constraint_type}_violation")
-                correction = self._generate_safety_correction(context, constraint_type)
-                corrections.append(correction)
-                explanations.append(f"Hazard prevented: {', '.join(rules)}")
-    
-        return {
-            'approved': len(hazards) == 0,
-            'violations': hazards,
-            'corrections': corrections,
-            'explanations': explanations
-        }
-    
     def _check_constitutional_rules(self, context: Dict) -> Dict:
-        """Principle-based constitutional filtering"""
         violations = []
         corrections = []
         explanations = []
         
-        for principle, rules in vars(
-            getattr(self.config, 'constitutional_rules', SimpleNamespace())
-        ).items():
+        for principle, rules in self.constitutional_rules_loaded.items():
             for rule in rules:
-                if not self._evaluate_constitutional_rule(context, rule):
-                    violations.append(f"constitutional_violation:{principle}")
-                    corrections.append(self._constitutional_correction(principle, rule))
-                    explanations.append(f"Violated {principle} principle: {rule}")
-    
+                rule_id = rule.get('id')
+                rule_stmt = rule.get('rule_statement')
+                
+                if rule_id in self.rule_evaluators:
+                    if not self.rule_evaluators[rule_id](context):
+                        violations.append(f"constitutional_violation:{principle}:{rule_id}")
+                        corrections.append(self._constitutional_correction(principle, rule_stmt))
+                        explanations.append(f"Violated {principle} ({rule_id}): {rule_stmt}")
+                else:
+                    # Fail-safe for unknown rules
+                    violations.append(f"constitutional_unknown:{principle}:{rule_id}")
+                    explanations.append(f"Unknown rule {rule_id} - requires evaluation")
+        
         return {
             'approved': len(violations) == 0,
             'violations': violations,
             'corrections': corrections,
             'explanations': explanations
         }
-    
+
+    def _check_safety_constraints(self, context: Dict) -> Dict:
+        """STPA-based hazard analysis"""
+        hazards = []
+        corrections = []
+        explanations = []
+        
+        # Directly access the dictionary
+        safety_config = self.ethics_config.get('safety_constraints', {})
+        for constraint_type in safety_config:
+            hazard_detected = self._detect_hazard(context, constraint_type)
+            if hazard_detected:
+                hazards.append(f"{constraint_type}_violation")
+                correction = self._generate_safety_correction(context, constraint_type)
+                corrections.append(correction)
+                explanations.append(f"Hazard prevented: {constraint_type}")
+        
+        return {
+            'approved': len(hazards) == 0,
+            'violations': hazards,
+            'corrections': corrections,
+            'explanations': explanations
+        }
+
     def _check_societal_impact(self, context: Dict) -> Dict:
         """Collective welfare impact assessment"""
         impacts = []
         corrections = []
         explanations = []
-        
-        for dimension, rules in vars(
-            getattr(self.config, 'fairness_constraints', SimpleNamespace())
-        ).items():
+
+        # Directly access the dictionary
+        fairness_config = self.ethics_config.get('fairness_constraints', {})
+        for dimension in fairness_config:
             impact_score = self._calculate_societal_impact(context, dimension)
             if impact_score > self.constraint_weights[dimension]:
                 impacts.append(f"societal_impact:{dimension}")
                 corrections.append(self._mitigation_strategy(dimension))
                 explanations.append(f"Excessive {dimension} impact: {impact_score:.2f}")
-    
+
         return {
             'approved': len(impacts) == 0,
             'violations': impacts,
@@ -168,6 +258,8 @@ class EthicalConstraints:
         }
 
     def _detect_hazard(self, context: Dict, hazard_type: str) -> bool:
+        action_params = context.get('action_parameters') or {}
+    
         system_model = {
             'controller': context.get('decision_engine', {}),
             'actuators': context.get('output_mechanisms'),
@@ -179,12 +271,12 @@ class EthicalConstraints:
             'physical_harm': lambda x: x.get('kinetic_energy', 0) < 50,
             'psychological_harm': lambda x: x.get('stress_index', 0) < 0.7
         }
-
+    
+        # Handle missing hazard types
         if hazard_type not in safety_bounds:
-            logger.warning(f"Unknown hazard type '{hazard_type}' for safety bounds. Assuming no specific bound check needed.")
             hazard_specific_condition_met = False
         else:
-            hazard_specific_condition_met = safety_bounds[hazard_type](context.get('action_parameters', {}))
+            hazard_specific_condition_met = safety_bounds[hazard_type](action_params)
 
 
         # Robust checks for controller activity and execution sequence
@@ -215,17 +307,67 @@ class EthicalConstraints:
             context.get('kinetic_energy', 0),
             context.get('informational_entropy', 0) * 10
         ])
-        
-        # Define _calculate_safe_energy_threshold if not defined elsewhere
-        # Placeholder for the safe energy threshold calculation
-        safe_energy_threshold = getattr(self.config, 'safe_energy_threshold', 100)
+
+        safe_energy_threshold = self._calculate_safe_energy_threshold(hazard_type)
 
         return unsafe_control or (system_energy > safe_energy_threshold)
 
-    def _calculate_safe_energy_threshold(self) -> float:
-        # This method should be defined, e.g., load from config or calculate
-        # For now, a placeholder value.
-        return getattr(self.config, 'safe_energy_threshold', 100.0)
+    def _calculate_safe_energy_threshold(self, hazard_type: str = None) -> float:
+        """
+        Calculate dynamic safe energy threshold based on:
+        - Base configuration values
+        - Current hazard type
+        - System state and context
+        - Historical safety performance
+        """
+        # 1. Get base threshold from configuration with fallback
+        base_threshold = self.ethics_config.get('safe_energy_threshold', 100.0)
+        
+        # 2. Hazard-specific adjustments
+        hazard_adjustments = {
+            'physical_harm': 0.7,   # Lower threshold for physical harm
+            'psychological_harm': 0.9  # Higher threshold for psychological harm
+        }
+        
+        adjustment_factor = hazard_adjustments.get(hazard_type, 1.0)
+        threshold = base_threshold * adjustment_factor
+        
+        # 3. System state adjustments
+        system_state = self.alignment_memory._get_current_state()
+        if system_state.get('stress_level', 0) > 0.6:
+            # Reduce threshold under high-stress conditions
+            threshold *= 0.8
+        
+        # 4. Temporal adjustments (lower thresholds during high-activity periods)
+        current_hour = datetime.now().hour
+        if 8 <= current_hour <= 20:  # Daytime hours
+            threshold *= 0.9
+        
+        # 5. Adaptive learning from historical violations
+        violation_history = self.alignment_memory.get_violation_history(hazard_type)
+        if violation_history and len(violation_history) > 5:
+            # Calculate violation rate
+            violation_rate = sum(1 for v in violation_history if v['severity'] > 0.5) / len(violation_history)
+            
+            if violation_rate > 0.2:
+                # Reduce threshold if high violation rate
+                threshold *= max(0.5, 1 - violation_rate)
+        
+        # 6. Apply minimum safety margin
+        min_threshold = self.ethics_config.get('min_energy_threshold', 30.0)
+        threshold = max(threshold, min_threshold)
+        
+        # 7. Apply maximum safety cap
+        max_threshold = self.ethics_config.get('max_energy_threshold', 200.0)
+        threshold = min(threshold, max_threshold)
+        
+        logger.debug(
+            f"Calculated safe energy threshold: {threshold:.2f} "
+            f"(Base: {base_threshold}, Hazard: {hazard_type}, "
+            f"Adjustment: {adjustment_factor:.2f})"
+        )
+        
+        return threshold
 
     def _hazard_condition(self, context: Dict, rule: str) -> bool:
         """Constitutional rule evaluation using formal argumentation frameworks"""
@@ -272,7 +414,7 @@ class EthicalConstraints:
             }
         }
 
-    def _evaluate_constitutional_rule(self, context: Dict, rule: str) -> bool:
+    def _evaluate_constitutional_rule(self, context: Dict, rule: str, rule_id: str = "") -> bool:
         """Evaluate constitutional rules with simple heuristic checks"""
         if "Protect personal data" in rule:
             return self._eval_privacy_protection(context)
@@ -300,7 +442,13 @@ class EthicalConstraints:
             return self._eval_data_breach_response(context)
         else:
             logger.warning(f"No specific evaluation logic found for constitutional rule: '{rule}'. Defaulting to True.")
-            return True
+            # return True
+        
+        if rule_id in self.rule_evaluators:
+            return self.rule_evaluators[rule_id](context)
+        
+        logger.error(f"No evaluator for constitutional rule {rule_id}: '{rule}'")
+        return False
 
     def _eval_privacy_protection(self, context: Dict) -> bool:
         """
@@ -462,34 +610,47 @@ class EthicalConstraints:
 
     def _calculate_societal_impact(self, context: Dict, dimension: str) -> float:
         """Computational welfare economics using fundamental axioms"""
-        # Rawlsian maximin principle for distribution
-        if dimension == 'distribution':
-            utilities = [u['utility'] for u in context['affected_population']]
-            return 1 - (min(utilities) / max(utilities)) if max(utilities) != 0 else 0
+        try:
+            # Rawlsian maximin principle for distribution
+            if dimension == 'distribution':
+                population = context.get('affected_population', [])
+                if not population:
+                    return 0.0
+                    
+                utilities = [u.get('utility', 0) for u in population]
+                if not utilities or max(utilities) == 0:
+                    return 0.0
+                return 1 - (min(utilities) / max(utilities))
     
-        # Atkinson inequality index for procedural fairness
-        elif dimension == 'procedure':
-            scores = [d['fairness_score'] for d in context['decision_history']]
-            n = len(scores)
-            epsilon = 0.9  # Must be < 1 to avoid division by zero
-            mean_score = np.mean(scores)
-        
-            if mean_score == 0 or n == 0:
-                return 0
-        
-            part_sum = sum([s ** (1 - epsilon) for s in scores])
-            atkinson = 1 - (1 / mean_score) * (part_sum / n) ** (1 / (1 - epsilon))
-            return atkinson
+            # Atkinson inequality index for procedural fairness
+            elif dimension == 'procedure':
+                history = context.get('decision_history', [])
+                if not history:
+                    return 0.0
+                    
+                scores = [d.get('fairness_score', 0) for d in history]
+                n = len(scores)
+                epsilon = 0.9  # Must be < 1 to avoid division by zero
+                mean_score = np.mean(scores)
     
-        # Gini coefficient calculation for capabilities
-        def gini(x):
-            x = sorted(x)
-            n = len(x)
-            return (sum(i * xi for i, xi in enumerate(x)) / (n * sum(x))) - (n + 1)/(2 * n)
+                if mean_score == 0 or n == 0:
+                    return 0
     
-        capabilities = context.get('capability_vectors', [])
-        if len(capabilities) > 1:
-            return gini([sum(c) for c in capabilities])
+                part_sum = sum([s ** (1 - epsilon) for s in scores])
+                atkinson = 1 - (1 / mean_score) * (part_sum / n) ** (1 / (1 - epsilon))
+                return atkinson
+    
+            # Gini coefficient calculation for capabilities
+            def gini(x):
+                x = sorted(x)
+                n = len(x)
+                return (sum(i * xi for i, xi in enumerate(x)) / (n * sum(x))) - (n + 1)/(2 * n)
+    
+            capabilities = context.get('capability_vectors', [])
+            if len(capabilities) > 1:
+                return gini([sum(c) for c in capabilities])
+        except Exception as e:
+            logger.error(f"Error calculating societal impact: {str(e)}")
         
         return 0.0
 
@@ -504,11 +665,35 @@ class EthicalConstraints:
             }
         }
 
-    def _adapt_constraints(self, context: Dict, result: Dict):
-        """Experience-driven constraint adaptation"""
-        for violation in result['violations']:
-            constraint_type = violation.split(':')[0]
-            self.constraint_weights[constraint_type] *= (1 + self.config.adaptation_rate)
+    def _create_rule_evaluator_mapping(self):
+        return {
+            # Privacy rules
+            "CP_PRIV_001": self._eval_purpose_limitation,
+            "CP_PRIV_002": self._eval_informed_consent,
+            #"CP_PRIV_003": self._eval_transparency_disclosure,
+            # ... other rule IDs mapped to functions ...
+            #"CP_TRANS_001": self._eval_operational_transparency,
+            #"CP_TRANS_002": self._eval_data_handling_clarity,
+            # ... remaining rules ...
+        }
+
+    def _eval_purpose_limitation(self, context: Dict) -> bool:
+        """Evaluate CP_PRIV_001: Purpose limitation principle"""
+        collected_data = context.get('data_collected', [])
+        justified_purposes = context.get('purpose_justifications', {})
+        
+        # Verify all collected data has pre-defined purpose
+        for data_item in collected_data:
+            if data_item not in justified_purposes:
+                return False
+        return True
+    
+    def _eval_informed_consent(self, context: Dict) -> bool:
+        """Evaluate CP_PRIV_002: Informed consent principle"""
+        consent_obtained = context.get('user_consent', False)
+        consent_type = context.get('consent_type', 'none')
+        return consent_obtained and consent_type == 'explicit'
+
 
     def _log_violation(self, context: Dict, result: Dict):
         """Immutable audit logging with cryptographic hashing"""
@@ -522,9 +707,9 @@ class EthicalConstraints:
 
     def _adapt_constraints(self, context: Dict, result: Dict):
         """Experience-driven constraint adaptation"""
-        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
-        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
-        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
+        safety = self.ethics_config.get('safety_constraints', {})
+        fairness = self.ethics_config.get('fairness_constraints', {})
+        constitutional = self.ethics_config.get('constitutional_rules', {})
 
         for violation in result['violations']:
             if ':' in violation:
@@ -538,184 +723,171 @@ class EthicalConstraints:
             if base_constraint_type in self.constraint_weights:
                 # Adapt the weight for the corresponding base type
                 original_weight = self.constraint_weights[base_constraint_type]
-                self.constraint_weights[base_constraint_type] *= (1 + self.config.adaptation_rate)
+                self.constraint_weights[base_constraint_type] *= (1 + self.adaptation_rate)
                 logger.info(f"Adapting weight for '{base_constraint_type}' due to violation '{violation}'. New weight: {self.constraint_weights[base_constraint_type]:.4f} (from {original_weight:.4f})")
             else:
-                 found_category = False
-                 for category, types in vars(safety).items():
-                     if base_constraint_type in types or base_constraint_type == category:
-                         if category in self.constraint_weights:
-                              original_weight = self.constraint_weights[category]
-                              self.constraint_weights[category] *= (1 + self.config.adaptation_rate)
-                              logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
-                              found_category = True
-                              break
-                         else:
-                              logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
-                              break # Stop searching categories for this violation
+                found_category = False
+                for category, types in safety.items():
+                    if base_constraint_type in types or base_constraint_type == category:
+                        if category in self.constraint_weights:
+                            original_weight = self.constraint_weights[category]
+                            self.constraint_weights[category] *= (1 + self.adaptation_rate)
+                            logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
+                            found_category = True
+                            break
+                        else:
+                            logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
+                            break # Stop searching categories for this violation
 
-                 if not found_category:
-                     # Repeat for fairness constraints
-                     for category, types in vars(fairness).items():
-                          if base_constraint_type in types or base_constraint_type == category:
-                               if category in self.constraint_weights:
-                                    original_weight = self.constraint_weights[category]
-                                    self.constraint_weights[category] *= (1 + self.config.adaptation_rate)
-                                    logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
-                                    found_category = True
-                                    break
-                               else:
-                                    logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
-                                    break
+                if not found_category:
+                    # Repeat for fairness constraints
+                    for category, types in vars(fairness).items():
+                        if base_constraint_type in types or base_constraint_type == category:
+                            if category in self.constraint_weights:
+                                original_weight = self.constraint_weights[category]
+                                self.constraint_weights[category] *= (1 + self.adaptation_rate)
+                                logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
+                                found_category = True
+                                break
+                            else:
+                                logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
+                                break
 
-                 if not found_category:
-                     # Repeat for constitutional rules
-                     for category, types in vars(constitutional).items():
-                          if base_constraint_type in types or base_constraint_type == category:
-                               if category in self.constraint_weights:
-                                    original_weight = self.constraint_weights[category]
-                                    self.constraint_weights[category] *= (1 + self.config.adaptation_rate)
-                                    logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
-                                    found_category = True
-                                    break
-                               else:
-                                    logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
-                                    break
+                if not found_category:
+                    # Repeat for constitutional rules
+                    for category, types in vars(constitutional).items():
+                        if base_constraint_type in types or base_constraint_type == category:
+                            if category in self.constraint_weights:
+                                original_weight = self.constraint_weights[category]
+                                self.constraint_weights[category] *= (1 + self.adaptation_rate)
+                                logger.info(f"Adapting weight for category '{category}' due to violation '{violation}'. New weight: {self.constraint_weights[category]:.4f} (from {original_weight:.4f})")
+                                found_category = True
+                                break
+                            else:
+                                logger.warning(f"Weight category '{category}' for violation type '{base_constraint_type}' not found in constraint_weights.")
+                                break
 
-                 if not found_category:
-                     logger.warning(f"Could not find matching weight key or category for violation '{violation}' (extracted type: '{base_constraint_type}'). No weight adapted.")
+                if not found_category:
+                    logger.warning(f"Could not find matching weight key or category for violation '{violation}' (extracted type: '{base_constraint_type}'). No weight adapted.")
 
-    def _init_weights(self) -> Dict:
-        """Initialize constraint weights with safe config access."""
-        # Safely get all constraint sections with fallbacks
-        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
-        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
-        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
-        categories = getattr(self.config, 'constraint_priorities', [])
+    def verify_constraint_weights(self, auto_fix: bool = True) -> Dict[str, str]:
+        """
+        Verifies and optionally corrects constraint weight integrity.
         
-        # Collect all constraint types safely
-        all_categories = (
-            set(categories) |
-            set(vars(safety).keys()) | 
-            set(vars(fairness).keys()) | 
-            set(vars(constitutional).keys())
-        )
-    
-        # Rest of the weight initialization logic remains the same...
-        initial_weight = 1.0
-        step = 0.05
-        weights = {}
-        priority_map = {cat: i for i, cat in enumerate(categories)}
+        Checks:
+        - Missing, None, negative, or non-numeric weights
+        - Weight imbalance or skew
+        - Total normalization and balancing (if auto_fix=True)
         
-        for category in sorted(all_categories, key=lambda x: priority_map.get(x, 99)):
-            weights[category] = initial_weight - priority_map.get(category, len(all_categories)) * step
-            logger.debug(f"Initialized weight for '{category}': {weights[category]:.4f}")
-    
-        # Handle fairness dimensions
-        for dimension in vars(fairness).keys():
-            if dimension not in weights:
-                weights[dimension] = initial_weight - len(weights) * step
-                logger.warning(f"Fairness dimension added: {dimension}")
+        Args:
+            auto_fix (bool): If True, auto-repairs anomalies.
         
-        return weights
-
-    def _build_constraint_graph(self):
-        """Build graph with full safe config access."""
-        self.constraint_graph = nx.DiGraph()
-        
-        # Get all constraint sections with safe defaults
-        safety = getattr(self.config, 'safety_constraints', SimpleNamespace())
-        fairness = getattr(self.config, 'fairness_constraints', SimpleNamespace())
-        constitutional = getattr(self.config, 'constitutional_rules', SimpleNamespace())
-        priority_list = getattr(self.config, 'constraint_priorities', [])  # Key fix
+        Returns:
+            dict: Diagnostic report with status, details, errors, and fixes.
+        """
+        report = {
+            'status': 'healthy',
+            'errors': [],
+            'warnings': [],
+            'fixes': [],
+            'details': {}
+        }
     
-        # Node creation remains unchanged
-        categories = (
-            list(vars(safety).keys()) +
-            list(vars(fairness).keys()) +
-            list(vars(constitutional).keys())
-        )
-        self.constraint_graph.add_nodes_from(categories)
+        default_weight = 1.0
+        weights = self.constraint_weights
+        total_weight = 0.0
     
-        # Priority relationships with existence checks
-        for i in range(len(priority_list)):
-            for j in range(i + 1, len(priority_list)):
-                u = priority_list[i]
-                v = priority_list[j]
-                if u in self.constraint_graph and v in self.constraint_graph:
-                    self.constraint_graph.add_edge(u, v, type='priority')
+        # Step 1: Validate and optionally fix individual weights
+        for key in list(weights.keys()):
+            value = weights.get(key)
+            if value is None:
+                report['errors'].append(f"Missing weight: {key}")
+                if auto_fix:
+                    weights[key] = default_weight
+                    report['fixes'].append(f"Assigned default weight to {key}")
+            elif not isinstance(value, (int, float)):
+                report['errors'].append(f"Non-numeric weight: {key}")
+                if auto_fix:
+                    weights[key] = default_weight
+                    report['fixes'].append(f"Replaced non-numeric weight with default for {key}")
+            elif value < 0:
+                report['errors'].append(f"Negative weight: {key}")
+                if auto_fix:
+                    weights[key] = abs(value)
+                    report['fixes'].append(f"Converted negative weight to positive for {key}")
+            else:
+                total_weight += value
+    
+        # Step 2: Check and optionally balance distribution
+        weight_values = list(weights.values())
+        if len(weight_values) > 1:
+            std_dev = np.std(weight_values)
+            if std_dev > 0.5:
+                report['warnings'].append(f"High standard deviation in weights: {std_dev:.2f}")
+                if auto_fix:
+                    mean_weight = np.mean(weight_values)
+                    for k in weights:
+                        weights[k] = round(mean_weight, 4)
+                    report['fixes'].append("Equalized all weights to reduce variance")
+    
+        # Step 3: Normalize total to len(weights) if it diverges significantly
+        expected_total = len(weights)
+        new_total = sum(weights.values())
+        if abs(new_total - expected_total) > 1.0:
+            scale_factor = expected_total / new_total
+            for k in weights:
+                weights[k] = round(weights[k] * scale_factor, 4)
+            report['fixes'].append(f"Normalized total weights by scale factor {scale_factor:.4f}")
+    
+        # Final classification
+        if report['errors']:
+            report['status'] = 'unhealthy'
+        elif report['warnings'] or report['fixes']:
+            report['status'] = 'repaired' if auto_fix else 'degraded'
+    
+        report['details'] = dict(weights)
+        logger.info(f"Constraint weight check complete with status: {report['status']}")
+        return report
 
-        # Define potential conflicts (example: transparency vs privacy)
-        if 'transparency' in self.constraint_graph and 'privacy' in self.constraint_graph:
-            self.constraint_graph.add_edge('transparency', 'privacy', type='conflict')
-            self.constraint_graph.add_edge('privacy', 'transparency', type='conflict')
-            logger.debug("Added conflict edge between transparency and privacy")
-
-        # Add more conflict edges based on domain knowledge
-        # e.g., Safety might conflict with distribution fairness in resource allocation
-        if 'safety' in self.constraint_graph and 'distribution' in self.constraint_graph:
-             self.constraint_graph.add_edge('safety', 'distribution', type='conflict')
-             self.constraint_graph.add_edge('distribution', 'safety', type='conflict')
-             logger.debug("Added conflict edge between safety and distribution")
-
-        logger.info(f"Constraint graph built with {self.constraint_graph.number_of_nodes()} nodes and {self.constraint_graph.number_of_edges()} edges.")
+    def enforce_core_constraints(self, memory_snapshot, constraint_level='emergency'):
+        pass
 
 if __name__ == "__main__":
-    import json
+    print("\n=== Running Ethical Constraints ===\n")
+    printer.status("Init", "Ethical Constraints initialized", "success")
 
-    print("=== Ethical Constraints Real-World Scenario ===")
-    print("Scenario: A SaaS platform wants to share anonymized usage data with a third-party analytics provider.")
-    print("You will be asked a few questions to simulate a real decision context.\n")
+    ethics = EthicalConstraints()
 
-    user_identifiers_present = input("Does the data include identifiable user information? (yes/no): ").strip().lower() == "yes"
-    consent_given = input("Has the user explicitly consented to data sharing? (yes/no): ").strip().lower() == "yes"
-    encrypted_at_rest = input("Is the data encrypted at rest? (yes/no): ").strip().lower() == "yes"
-    encrypted_in_transit = input("Is the data encrypted in transit? (yes/no): ").strip().lower() == "yes"
-    anonymization_level = float(input("Anonymization level (0.0 = none, 1.0 = fully anonymous): ").strip())
-    retention_days = int(input("How many days is the data retained?: ").strip())
-    data_collected_items = input("List collected data fields (comma-separated): ").strip().split(',')
-    required_data_items = input("List required data fields for the task (comma-separated): ").strip().split(',')
-    gdpr_compliant = input("Is the platform GDPR compliant? (yes/no): ").strip().lower() == "yes"
-
+    print(f"{ethics}")
+    file_path = "src/agents/alignment/templates/constitutional_rules_privacy.json"
     context = {
-        'user_identifiers_present': user_identifiers_present,
-        'user_consent_obtained': consent_given,
-        'data_shared_with_third_parties': True,
-        'encryption_at_rest': encrypted_at_rest,
-        'encryption_in_transit': encrypted_in_transit,
-        'anonymization_level': anonymization_level,
-        'personal_data_accessed': data_collected_items,
-        'data_retention_days': retention_days,
-        'retention_policy_limit': 30,
-        'data_collected_items': data_collected_items,
-        'required_data_items': required_data_items,
-        'purpose_justification_ratio': len(set(data_collected_items) & set(required_data_items)) / max(len(data_collected_items), 1),
-        'gdpr_compliant': gdpr_compliant,
-        'access_mechanism_available': True,
-        'deletion_mechanism_available': True,
-        'recent_breach_detected': False,
-        'breach_response_time_hours': 0,
-        'decision_engine': {'is_active': True},
-        'affected_environment': {'state': 'normal'},
-        'output_mechanisms': {'type': 'API'},
-        'feedback_systems': {'latency': 0.2},
-        'action_parameters': {'kinetic_energy': 0, 'stress_index': 0.1},
-        'potential_energy': 0,
-        'kinetic_energy': 0,
-        'informational_entropy': 0.5,
-        'affected_people': [],
-        'affected_assets': [],
-        'affected_population': [{'utility': 0.9}, {'utility': 0.8}],
-        'decision_history': [{'fairness_score': 0.8}, {'fairness_score': 0.7}],
-        'capability_vectors': [[1, 1], [2, 2]]
+        "affected_people": [
+            {"name": "John", "injured": False},
+            {"name": "Sarah", "injured": True}
+        ],
+        "affected_assets": [
+            {"id": 1, "damage_level": 0.05},
+            {"id": 2, "damage_level": 0.3}
+        ],
+        # ... other existing context ...
     }
+    action_context = {
+        "affected_population": [{"utility": 0.9}, {"utility": 0.3}, {"utility": 0.6}],
+        "decision_history": [{"fairness_score": 0.8}, {"fairness_score": 0.6}, {"fairness_score": 0.7}],
+        "capability_vectors": [[0.7, 0.8], [0.5, 0.6]],
+        "decision_engine": {"is_active": True},
+        "output_mechanisms": {"type": "motor"},
+        "feedback_systems": {"type": "sensor"},
+        "affected_environment": {"state": "stable"},
+        "action_parameters": {"kinetic_energy": 30, "stress_index": 0.2},
+        "potential_energy": 20,
+        "kinetic_energy": 15,
+        "informational_entropy": 1.5
+    }
+    rule = "Prevent injury to humans"
 
-    system = EthicalConstraints()
-    result = system.enforce(context)
+    printer.pretty("rules", ethics._load_rules(file_path=file_path), "success")
+    printer.pretty("enforce", ethics.enforce(action_context=action_context), "success")
+    printer.pretty("hazard", ethics._hazard_condition(rule=rule, context=context), "success")
 
-    print("\n=== Ethical Validation Result ===")
-    print(json.dumps(result, indent=2))
-
-    print("\n=== Audit Log ===")
-    for entry in system.audit_log:
-        print(json.dumps(entry, indent=2))
+    print("\n=== Ethical Constraints Test Completed ===\n")
