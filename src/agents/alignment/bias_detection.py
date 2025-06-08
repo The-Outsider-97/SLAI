@@ -21,6 +21,7 @@ from statsmodels.multivariate.manova import MANOVA
 from ruptures import Binseg #, CostLinear
 
 from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from src.agents.alignment.alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Bias Detection")
@@ -41,14 +42,26 @@ class BiasDetector:
     - Sufficiency (Barocas et al., 2019)
     """
 
-    def __init__(self, sensitive_attributes: List[str]):
-        self.sensitive_attrs = sensitive_attributes
+    def __init__(self):
         self.config = load_global_config()
+        self.sensitive_attributes = self.config.get('sensitive_attributes')
+        self.sensitive_attrs = self.sensitive_attributes
         self.detector_config = get_config_section('bias_detection')
 
-        self.bias_history = pd.DataFrame(columns=[
-            'timestamp', 'metric', 'value', 'groups', 'stat_significance'
-        ])
+        self.bias_history = pd.DataFrame({
+            'timestamp': pd.Series(dtype='datetime64[ns]'),
+            'metric': pd.Series(dtype='str'),
+            'value': pd.Series(dtype='float'),
+            'groups': pd.Series(dtype='str'),
+            'stat_significance': pd.Series(dtype='bool')
+        })
+        self.alignment_memory = AlignmentMemory()
+        self.metric_thresholds = {
+            'demographic_parity': 0.1,
+            'equal_opportunity': 0.1,
+            'predictive_parity': 0.1,
+            'disparate_impact': 0.8
+        }
 
         printer.status("INIT", f"Bias Detection Initialized with: {self.bias_history}", "Success")
 
@@ -75,8 +88,40 @@ class BiasDetector:
             report[metric] = self._add_statistical_significance(metric_report, self.detector_config.get("alpha", 0.05))
             
         self._update_history(report)
-        report 
+        self._log_to_alignment_memory(report, context={
+            "data_shape": data.shape,
+            "prediction_type": "binary" if predictions.dtype == int else "continuous"
+        })
         return report
+
+    def _log_to_alignment_memory(self, report: Dict, context: Dict):
+        """Log bias metrics to alignment memory"""
+        for metric, group_report in report.items():
+            if not group_report:
+                continue
+
+            # Calculate overall metric value
+            values = [v['value'] for v in group_report.values()]
+            
+            if metric == 'disparate_impact':
+                overall_value = min(values) / max(values) if max(values) > 0 else 0
+            else:
+                overall_value = max(values) - min(values)
+
+            # Log to alignment memory
+            self.alignment_memory.log_evaluation(
+                metric=f"bias_{metric}",
+                value=overall_value,
+                threshold=self.metric_thresholds.get(metric, 0.1),
+                context=context
+            )
+
+            # Record overall outcome
+            outcome = {
+                "bias_rate": overall_value,
+                "violation": overall_value > self.metric_thresholds.get(metric, 0.1)
+            }
+            self.alignment_memory.record_outcome(context, outcome)
 
     def _compute_metric(self, metric: str, data: pd.DataFrame,
                        predictions: np.ndarray, labels: np.ndarray,
@@ -145,9 +190,9 @@ class BiasDetector:
         
         if not group_means:
             return {
-                'global_ratio': 1.0,
-                'group_means': {},
-                'threshold': 0.8 
+                # 'global_ratio': 1.0,
+                # 'group_means': {},
+                # 'threshold': 0.8 
             }
         
         # Ensure no division by zero if max_mean is 0
@@ -155,11 +200,20 @@ class BiasDetector:
         min_mean = min(group_means.values()) if group_means else 0
         di_ratio = (min_mean / max_mean) if max_mean != 0 else (1.0 if min_mean == 0 else 0.0) # Handle max_mean = 0
         
-        return {
-            'global_ratio': di_ratio,
-            'group_means': group_means,
-            'threshold': 0.8
-        }
+        #return {
+        #    'global_ratio': di_ratio,
+        #    'group_means': group_means,
+        #    'threshold': 0.8
+        #}
+        report = {}
+        for group_id, mean in group_means.items():
+            report[group_id] = {
+                'value': mean,
+                'ci_lower': mean - 0.01,  # placeholder CI
+                'ci_upper': mean + 0.01,
+                'p_value': 0.05           # placeholder p-value
+            }
+        return report
 
     def _generate_intersectional_groups(self, data: pd.DataFrame, intersectional_depth: int, min_group_size: int) -> Dict:
         groups = {}
@@ -284,21 +338,27 @@ class BiasDetector:
         
         # Batch append
         if new_entries:
-            self.bias_history = pd.concat([
-                self.bias_history,
-                pd.DataFrame(new_entries)
-            ], ignore_index=True)
+            new_df = pd.DataFrame(new_entries)
+        
+            if self.bias_history.empty:
+                self.bias_history = new_df
+            else:
+                self.bias_history = pd.concat([self.bias_history, new_df], ignore_index=True)
 
     def generate_report(self, format: str = 'structured') -> Dict:
         """Generate comprehensive bias report"""
         if self.bias_history.empty:
             raise ValueError("No bias data available")
             
-        return {
+        report = {
             'current_state': self._current_state_report(),
             'historical_trends': self._analyze_trends(),
-            'statistical_insights': self._compute_aggregate_stats()
+            'statistical_insights': self._compute_aggregate_stats(),
+            'memory_analysis': self.alignment_memory.get_memory_report()
         }
+
+        report['causal_impact'] = self.alignment_memory.analyze_causes()
+        return report
 
     def _current_state_report(self) -> Dict:
         """Comprehensive snapshot of current bias landscape
@@ -528,9 +588,10 @@ class BiasDetector:
                 return {}
     
             # Handle potential missing data
-            df = df[valid_metrics].join(
-                self.bias_history.groupby('timestamp')['groups'].first()
-            ).dropna()
+            missing_cols = [col for col in valid_metrics if col not in df.columns]
+            if missing_cols:
+                printer.pretty("MANOVA skipped:", f"Missing metrics: {missing_cols}", "error")
+                return {}
     
             manova = MANOVA.from_formula(
                 f"{' + '.join(valid_metrics)} ~ groups", 
@@ -559,9 +620,9 @@ if __name__ == "__main__":
     printer.status("Init", "Bias Detection initialized", "success")
     sensitive_attributes=["gender", "age_group", "race", "education_level"]
 
-    detector = BiasDetector(
-        sensitive_attributes=sensitive_attributes
-    )
+    detector = BiasDetector()
+    detector.sensitive_attributes = sensitive_attributes
+    detector.sensitive_attrs = sensitive_attributes
 
     printer.pretty("detector", f"{detector}", "success")
     print("\n* * * * * Phase 2 * * * * *")
@@ -593,10 +654,10 @@ if __name__ == "__main__":
     )
     metric = detector._group_metric(data=data, metric_fn=metric_fn)
     
-    printer.pretty("compute", f"{compute}", "success")
+    printer.pretty("compute", compute, "success")
     printer.pretty("metric", metric, "success")
     print("\n* * * * * Phase 3 * * * * *")
     format="structured"
     report = detector.generate_report(format="structured")
     printer.pretty("report", report, "success")
-    print("\n=== Bias Detection Test Completed ===")
+    print("\n=== Bias Detection Test Completed ===\n")
