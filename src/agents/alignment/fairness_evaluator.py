@@ -11,32 +11,18 @@ import json, yaml
 import numpy as np
 import pandas as pd
 
-from types import SimpleNamespace
-from typing import Dict, List, Optional, Callable, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Callable
 from scipy import stats
 from sklearn.metrics import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
 from scipy.stats import linregress
 
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from src.agents.alignment.alignment_memory import AlignmentMemory
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Fairness Evaluator")
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: str, config_file_path: str):
-    with open(config_file_path, "r") as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class FairnessEvaluator:
     """
@@ -53,15 +39,28 @@ class FairnessEvaluator:
     4. Disparate impact ratio testing
     """
 
-    def __init__(self, sensitive_attributes: List[str],
-                 config_section_name: str = "fairness_evaluator",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
-                 ):
-        self.sensitive_attrs = sensitive_attributes
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
+        self.config = load_global_config()
+        self.sensitive_attributes = self.config.get('sensitive_attributes')
+
+        self.fe_config = get_config_section('fairness_evaluator')
+        self.group_metrics = self.fe_config.get('group_metrics', [])
+        self.individual_metrics = self.fe_config.get('individual_metrics', [])
+        self.alpha = self.fe_config.get('alpha')
+        self.n_bootstrap = self.fe_config.get('n_bootstrap')
+        self.batch_size = self.fe_config.get('batch_size')
+        self.similarity_metric = self.fe_config.get('similarity_metric')
+        self.sensitive_attrs = self.fe_config.get(
+            'sensitive_attributes_override', self.sensitive_attributes)
+
         self.history = pd.DataFrame(columns=[
-            'timestamp', 'metric', 'value', 'groups', 'p_value'
+            "metric", "value", "groups", "p_value", "timestamp", "sensitive_attr", "metric_name", "metric_value", "violation_flag"
         ])
+
+        self.sensitive_attrs = self.sensitive_attributes
+        self.alignment_memory = AlignmentMemory()
+
+        logger.info(f"Fairness Evaluator succesfully initialized")
 
     def evaluate_group_fairness(self, data: pd.DataFrame,
                                predictions: np.ndarray,
@@ -79,7 +78,7 @@ class FairnessEvaluator:
         report = {}
         for attr in self.sensitive_attrs:
             attr_report = {}
-            for metric in self.config.group_metrics:
+            for metric in self.group_metrics:
                 metric_fn = self._metric_dispatch(metric)
                 result = metric_fn(df, attr)
                 attr_report[metric] = self._add_statistical_significance(result)
@@ -163,17 +162,27 @@ class FairnessEvaluator:
                          metric_fn: Callable, observed: float,
                          is_ratio: bool = False) -> Dict:
         """Bootstrap analysis with bias-corrected CI"""
+        if not isinstance(self.n_bootstrap, int) or self.n_bootstrap <= 0:
+            logger.error("Invalid bootstrap count. Using default 1000")
+            n_bootstrap = 1000
+        else:
+            n_bootstrap = self.n_bootstrap
+
         bootstraps = []
-        groups = df[attr].unique()
         
-        for _ in range(self.config.n_bootstrap):
+        for _ in range(n_bootstrap):
             sample = df.sample(frac=1, replace=True)
-            # Explicitly select the column(s) needed by metric_fn
-            if metric_fn.__code__.co_varnames[0] == 'g':  # If metric_fn takes a DataFrame
-                group_metrics = sample.groupby(attr).apply(lambda g: metric_fn(g[['prediction', 'label']]))
-            else:  # If metric_fn takes a Series
-                group_metrics = sample.groupby(attr)['prediction'].apply(metric_fn)
-            
+            grouped = sample.groupby(attr)
+
+            group_metrics_vals = {}
+            for group_name, group_df in grouped:
+                if metric_fn.__code__.co_varnames[0] == 'g':  # Takes DataFrame
+                    group_metrics_vals[group_name] = metric_fn(group_df[['prediction', 'label']])
+                else:  # Takes Series
+                    group_metrics_vals[group_name] = metric_fn(group_df['prediction'])
+                    
+            group_metrics = pd.Series(group_metrics_vals)
+
             if is_ratio:
                 stat = group_metrics.min() / group_metrics.max()
             else:
@@ -194,14 +203,15 @@ class FairnessEvaluator:
         p_value = np.mean(np.abs(result['distribution']) >= np.abs(result['value']))
         result.update({
             'p_value': p_value,
-            'significant': p_value < self.config.alpha
+            'significant': p_value < self.alpha
         })
         return result
 
     def _calculate_consistency(self, data: pd.DataFrame,
                               predictions: np.ndarray,
                               similarity_fn: Callable) -> float:
-        """Individual consistency score (Dwork et al., 2012)"""
+        """Convert predictions to numpy array first"""
+        predictions = np.asarray(predictions)
         distances = pairwise_distances(data, metric=similarity_fn)
         prediction_diffs = np.abs(predictions[:, None] - predictions)
         return np.exp(-np.mean(distances * prediction_diffs))
@@ -210,6 +220,7 @@ class FairnessEvaluator:
                            predictions: np.ndarray,
                            similarity_fn: Callable) -> float:
         """Lipschitz constant estimation for individual fairness"""
+        predictions = np.asarray(predictions)
         distances = pairwise_distances(data, metric=similarity_fn).ravel()
         pred_diffs = np.abs(predictions[:, None] - predictions).ravel()
         nonzero = distances > 1e-6
@@ -218,6 +229,7 @@ class FairnessEvaluator:
     def _identify_violations(self, data: pd.DataFrame,
                             predictions: np.ndarray,
                             similarity_fn: Callable) -> Dict:
+        predictions = np.asarray(predictions)
         if data.empty or len(data) < 2:
             logger.warning("Not enough samples to identify individual fairness violations.")
             return {
@@ -276,7 +288,10 @@ class FairnessEvaluator:
 
     def _default_similarity(self, a: pd.Series, b: pd.Series) -> float:
         """Normalized Manhattan distance"""
-        return np.sum(np.abs(a - b)) / len(a)
+        # Convert to numpy arrays for safe subtraction
+        a_values = a.values if isinstance(a, pd.Series) else a
+        b_values = b.values if isinstance(b, pd.Series) else b
+        return np.sum(np.abs(a_values - b_values)) / len(a_values)
 
     def _update_history(self, attribute: str, report: Dict):
         """Update longitudinal fairness tracking"""
@@ -311,13 +326,13 @@ class FairnessEvaluator:
             current_metrics[f"{group}_{metric}"] = {
                 'value': row['value'],
                 'p_value': row['p_value'],
-                'significant': row['p_value'] < self.config.alpha,
+                'significant': row['p_value'] < self.alpha,
                 'last_updated': row['timestamp'].isoformat()
             }
     
         # Count significant disparities
         sig_counts = latest.groupby('groups').apply(
-            lambda g: (g['p_value'] < self.config.alpha).sum())
+            lambda g: (g['p_value'] < self.alpha).sum())
         
         return {
             'metrics': current_metrics,
@@ -363,7 +378,7 @@ class FairnessEvaluator:
             'temporal_patterns': trends,
             'summary': {
                 'metrics_with_trends': len(trends),
-                'significant_trends': sum(v['trend_p_value'] < self.config.alpha for v in trends.values())
+                'significant_trends': sum(v['trend_p_value'] < self.alpha for v in trends.values())
             }
         }
     
@@ -374,29 +389,100 @@ class FairnessEvaluator:
         
         # Descriptive statistics
         desc_stats = self.history.groupby(['metric', 'groups'])['value'].describe()
+        # Convert multi-index to string keys
+        descriptive_statistics = {}
+        for idx, row in desc_stats.iterrows():
+            key = f"{idx[0]}_{idx[1]}"
+            descriptive_statistics[key] = row.to_dict()
         
         # Significance analysis
         sig_analysis = self.history.groupby(['metric', 'groups']).agg({
-            'p_value': lambda x: (x < self.config.alpha).mean(),
+            'p_value': lambda x: (x < self.alpha).mean(),
             'value': ['mean', 'std']
         })
+        # Convert multi-index columns to string keys
+        significance_analysis = {}
+        for idx, row in sig_analysis.iterrows():
+            key = f"{idx[0]}_{idx[1]}"
+            row_dict = {}
+            for col in row.index:
+                col_name = '_'.join(col) if isinstance(col, tuple) else col
+                row_dict[col_name] = row[col]
+            significance_analysis[key] = row_dict
         
         # Distribution tests
         distribution_info = {}
         for (metric, group), data in self.history.groupby(['metric', 'groups']):
-            distribution_info[f"{group}_{metric}"] = {
+            key = f"{group}_{metric}"
+            distribution_info[key] = {
                 'shapiro_p': stats.shapiro(data['value']).pvalue,
                 'kurtosis': stats.kurtosis(data['value']),
-                'normality': stats.shapiro(data['value']).pvalue > self.config.alpha
+                'normality': stats.shapiro(data['value']).pvalue > self.alpha
             }
         
-        return {
-            'descriptive_statistics': desc_stats.to_dict(),
-            'significance_analysis': sig_analysis.to_dict(),
-            'distribution_characteristics': distribution_info,
-            'cross_metric_correlation': self.history.pivot_table(
-                index='timestamp', columns='metric', values='value').corr().to_dict()
+        # Cross metric correlation
+        correlation_df = self.history.pivot_table(
+            index='timestamp', columns='metric', values='value').corr()
+        cross_metric_correlation = {
+            col: correlation_df[col].to_dict() 
+            for col in correlation_df.columns
         }
+        
+        return {
+            'descriptive_statistics': descriptive_statistics,
+            'significance_analysis': significance_analysis,
+            'distribution_characteristics': distribution_info,
+            'cross_metric_correlation': cross_metric_correlation
+        }
+
+    def fairness_records(self) -> pd.DataFrame:
+        """Return comprehensive fairness records with contextual metadata"""
+        # Add contextual metadata to history records
+        enriched_records = self.history.copy()
+        
+        # Add summary statistics
+        enriched_records['7d_rolling_avg'] = (
+            enriched_records.groupby('metric')['value']
+            .transform(lambda x: x.rolling(7).mean())
+        )
+        
+        # Add violation flags based on metric-specific thresholds
+        thresholds = {
+            'statistical_parity': 0.1,
+            'equal_opportunity': 0.1,
+            'predictive_parity': 0.15,
+            'disparate_impact': 0.8
+        }
+        
+        enriched_records['threshold'] = (
+            enriched_records['metric']
+            .map(lambda x: thresholds.get(x.split('_')[-1], 0.1))
+        )
+        
+        enriched_records['violation'] = (
+            enriched_records['value'] > enriched_records['threshold']
+        )
+        
+        # Add temporal features
+        enriched_records['day_of_week'] = enriched_records['timestamp'].dt.dayofweek
+        enriched_records['hour_of_day'] = enriched_records['timestamp'].dt.hour
+        
+        # Add drift indicators
+        enriched_records['drift_score'] = (
+            enriched_records.groupby('metric')['value']
+            .transform(lambda x: x.diff().abs().rolling(30).mean())
+        )
+        
+        return enriched_records
+
+    def _safe_get_int(self, key, default):
+        """Safely get integer configuration with fallback"""
+        value = self.fe_config.get(key)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid config for {key}: {value}. Using default {default}")
+            return default
     
 if __name__ == "__main__":
     # 1. Configure Logger for testing output
@@ -433,12 +519,9 @@ if __name__ == "__main__":
 
     # 3. Instantiate FairnessConfig and Evaluator
     sensitive_attributes_list = ['sensitive_A', 'sensitive_B']
-    evaluator = FairnessEvaluator(
-        sensitive_attributes=sensitive_attributes_list,  # Required parameter
-        config_section_name="fairness_evaluator",        # Correct config section
-        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
-    )
+    evaluator = FairnessEvaluator()
     logger.info("FairnessEvaluator instantiated.")
+    evaluator.sensitive_attrs = ['sensitive_A', 'sensitive_B']
 
     # 4. Evaluate Group Fairness
     logger.info("\n--- Evaluating Group Fairness ---")
@@ -481,8 +564,8 @@ if __name__ == "__main__":
         print("\nHistorical Trends Summary:")
         print(json.dumps(final_report.get('historical_trends', {}).get('summary', {}), indent=2))
         # Avoid printing full large dicts unless needed
-        # print("\nFull Report:")
-        # print(json.dumps(final_report, indent=2, default=lambda x: '<complex_object>'))
+        print("\nFull Report:")
+        print(json.dumps(final_report, indent=2, default=lambda x: '<complex_object>'))
 
     except Exception as e:
         logger.error(f"Error during report generation: {e}", exc_info=True)
