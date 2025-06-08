@@ -1,3 +1,5 @@
+sensitive_attributes: ["gender", "age_group", "race", "education_level"]
+
 base_agent:
     defer_initialization: True
     memory_profile: low
@@ -11,11 +13,46 @@ collaborative_agent: {}
 
 adaptive_agent: {}
 
-alignment_agent: {}
+alignment_agent:
+    safety_buffer: 0.1
+    learning_rate: 0.01
+    momentum: 0.9
+    risk_score:
+    risk_assessment:
+        total_risk: []
+    operation_limiter:
+        max_requests: 10
+        interval: 60
+        penalty: 'cool_down'
+    weight:
+        stat_parity: 0.4
+        equal_opp: 0.4
+        ethics: 0.2
+    corrections: {}
+    alignment_ttl: 604800
+    fail_safe_action_space: []
+    risk_threshold: 0.5
+    
 
 browser_agent: {}
 
-evaluation_agent: {}
+evaluation_agent:
+    risk_threshold: 0.5
+    initial_hazard_rates:
+        system_failure: 0.000001
+        sensor_failure: 0.00001
+        unexpected_behavior: 0.0001
+    update_interval: 60.0
+    decay_factor: 0.95
+    risk_thresholds:
+        warning: [0.4, 0.7]
+        critical: [0.7, 1.0]
+    issue_database':
+        host: 'localhost'
+        port: 5432
+        database: 'ai_issues'
+        user: 'user'
+        password: ''    
 
 execution_agent: {}
 
@@ -23,12 +60,53 @@ knowledge_agent: {}
 
 language_agent: {}
 
-learning_agent: {}
+learning_agent:
+    rl_algorithm: null
+    strategy_weights: [0.25, 0.25, 0.25, 0.25]
+    prediction_weights: [0.25, 0.25, 0.25, 0.25]
+    maml_task_pool_size: 100
+    rsi_improvement_cycle: 50
+    performance_threshold: 0.7
+    data_change_threshold: 0.15
+    retraining_interval_hours: 24
+    novelty_threshold: 0.3
+    uncertainty_threshold: 0.25
+    embedding_buffer_size: 512
+    performance_history_size: 1000
+    error_history_size: 100
+    state_recency_size: 1000
+    architecture_history_size: 10
+    maml_adaptation_steps: 10
+    task_embedding_dim: 256
+    deferred_init:
+        max_network_size: 256
+        max_task_pool: 50
+        max_history: 500
 
 perception_agent: {}
 
 planning_agent: {}
 
-reasoning_agent: {}
+reasoning_agent:
+    tuple_key: ["subject", "predicate", "object"]
+    hypothesis_graph:
+        nodes: {}
+        edges: {}
+        confedence: 0.0
+    language_config_path: "src/agents/language/configs/language_config.yaml"
+    glove_path: "data/embeddings/glove.6B.200d.json"
+    ner_tag: None
+    embedding: None
+    decay: 0.8
 
-safety_agent: {}
+safety_agent:
+    constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
+    risk_thresholds:
+        overall_safety: 0.75
+        cyber_risk: 0.5
+        compliance_failure_is_blocker: true
+    audit_level: 2
+    collect_feedback: true
+    enable_learnable_aggregation: false
+    secure_memory:
+        default_ttl_seconds: 3600
