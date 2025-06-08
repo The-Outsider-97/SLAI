@@ -10,16 +10,15 @@ import statsmodels.formula.api as smf
 import networkx as nx
 import numpy as np
 import pandas as pd
-import logging
+
 from typing import Dict, List, Optional, Union
 from statsmodels.regression.linear_model import RegressionResultsWrapper
-# from scipy.spatial.distance import mahalanobis
-# from scipy.stats import wasserstein_distance
 
-from src.agents.alignment.auditors.causal_model import CausalModel
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Fairness Metrics")
+printer = PrettyPrinter
 
 class CounterfactualFairness:
     """
@@ -30,8 +29,13 @@ class CounterfactualFairness:
     """
 
     def __init__(self):
-        # Consider initializing metric cache if needed, but often calculations depend on specific inputs.
-        pass # No state needed for these methods currently
+        self.config = load_global_config()
+        self.sensitive_attributes = self.config.get('sensitive_attributes')
+        self.sensitive_attrs = self.sensitive_attributes
+
+        self.fairness_config = get_config_section('fairness_metrics')
+
+        logger.info(f"Fairness Metrics has succesfully initialized")
 
     def compute_individual_fairness(self,
                                   original_preds: np.ndarray,
@@ -141,7 +145,6 @@ class CounterfactualFairness:
 
 
     def _equalized_odds_gap(self,
-                            causal_model: CausalModel,
                             data: pd.DataFrame,
                             sensitive_attr: str,
                             original_preds_col: str,
@@ -245,216 +248,10 @@ class CounterfactualFairness:
         return {'tpr_gap_change': tpr_gap_change, 'fpr_gap_change': fpr_gap_change}
 
 
-    def path_specific_effects(self,
-                            causal_model: CausalModel,
-                            data: pd.DataFrame,
-                            sensitive_attr: str,
-                            outcome: str,
-                            sensitive_val_1: Union[int, float],
-                            sensitive_val_0: Union[int, float],
-                            mediator_paths: Optional[List[List[str]]] = None) -> Dict[str, float]:
-        r"""
-        Decompose the total effect of a sensitive attribute on the outcome into
-        path-specific effects, particularly Natural Direct Effect (NDE) and
-        Natural Indirect Effect (NIE).
-
-        Requires a fitted CausalModel object. Assumes binary sensitive attribute for NDE/NIE calc.
-
-        Definitions (Pearl, 2001):
-        - Total Effect (TE): $TE = E[Y(A=a_1) - Y(A=a_0)]$
-          How much does the outcome change overall when the sensitive attribute changes?
-        - Natural Direct Effect (NDE): $NDE = E[Y(A=a_1, M(A=a_0)) - Y(A=a_0, M(A=a_0))]$
-          How much would the outcome change if we changed the sensitive attribute from $a_0$ to $a_1$,
-          but kept the mediators $M$ as they would have been if $A=a_0$? Measures effect not through M.
-        - Natural Indirect Effect (NIE): $NIE = E[Y(A=a_0, M(A=a_1)) - Y(A=a_0, M(A=a_0))]$
-          How much would the outcome change if we kept the sensitive attribute fixed at $a_0$,
-          but changed the mediators $M$ to what they would have been if $A=a_1$? Measures effect only through M.
-
-        For linear systems, $TE = NDE + NIE$. For non-linear systems, this is approximate.
-
-        Args:
-            causal_model (CausalModel): An instance of the CausalModel class with a graph and SEMs.
-            data (pd.DataFrame): The dataset.
-            sensitive_attr (str): The name of the sensitive attribute column (A).
-            outcome (str): The name of the outcome column (Y).
-            sensitive_val_1: The 'treated' or target value of the sensitive attribute.
-            sensitive_val_0: The 'control' or reference value of the sensitive attribute.
-            mediator_paths (Optional[List[List[str]]]): Specific mediating paths A->M->Y to analyze.
-                                                       If None, attempts to identify mediators from graph.
-
-        Returns:
-            Dict[str, float]: Dictionary containing TE, NDE, NIE estimates.
-        """
-        if not isinstance(causal_model, CausalModel):
-            # Check if it's the placeholder due to import error
-            try:
-                causal_model.compute_counterfactual() # Will raise error if it's the placeholder
-            except NotImplementedError:
-                logger.error("CausalModel not available due to import error. Cannot compute path-specific effects.")
-                return {'TE': np.nan, 'NDE': np.nan, 'NIE': np.nan}
-            except Exception: # Catch other errors if compute_counterfactual exists but fails differently
-                pass # Proceed if it seems like a real CausalModel instance
-
-            # If not the placeholder, but still not a CausalModel instance
-            if not hasattr(causal_model, 'compute_counterfactual') or not hasattr(causal_model, 'graph'):
-                raise TypeError("causal_model must be an instance of the CausalModel class.")
-
-
-        logger.info(f"Calculating path-specific effects: {sensitive_attr} -> {outcome}")
-
-        # --- Identify Mediators (M) ---
-        # Mediators are nodes on directed paths from A to Y, excluding A and Y.
-        mediators = set()
-        try:
-            # Ensure graph attribute exists and is a DiGraph
-            if not hasattr(causal_model, 'graph') or not isinstance(causal_model.graph, nx.DiGraph):
-                raise AttributeError("CausalModel instance does not have a valid 'graph' attribute.")
-
-            if nx.has_path(causal_model.graph, sensitive_attr, outcome):
-                for path in nx.all_simple_paths(causal_model.graph, source=sensitive_attr, target=outcome):
-                    if len(path) > 2: # Path must have at least one mediator
-                        mediators.update(path[1:-1]) # Add nodes between A and Y
-        except nx.NodeNotFound:
-            logger.error(f"Sensitive attribute '{sensitive_attr}' or outcome '{outcome}' not found in causal graph.")
-            return {'TE': np.nan, 'NDE': np.nan, 'NIE': np.nan}
-        except AttributeError as e:
-            logger.error(f"Error accessing causal model graph: {e}")
-            return {'TE': np.nan, 'NDE': np.nan, 'NIE': np.nan}
-
-
-        if not mediators:
-            logger.warning(f"No mediating paths found between {sensitive_attr} and {outcome}. NDE will equal TE, NIE will be 0.")
-            # Calculate TE only in this case
-            try:
-                y_a1 = causal_model.compute_counterfactual(intervention={sensitive_attr: sensitive_val_1})[outcome]
-                y_a0 = causal_model.compute_counterfactual(intervention={sensitive_attr: sensitive_val_0})[outcome]
-                te = (y_a1 - y_a0).mean()
-                return {'TE': float(te), 'NDE': float(te), 'NIE': 0.0}
-            except Exception as e:
-                logger.error(f"Failed to compute total effect: {e}")
-                return {'TE': np.nan, 'NDE': np.nan, 'NIE': np.nan}
-
-        logger.info(f"Identified potential mediators: {mediators}")
-        list_mediators = list(mediators)
-
-        # --- Compute Counterfactuals for NDE/NIE ---
-        # We need E[Y(a1)], E[Y(a0)], E[Y(a1, M(a0))], E[Y(a0, M(a1))]
-        try:
-            # E[Y(a1)] and E[Y(a0)] -> Needed for TE
-            cf_data_a1 = causal_model.compute_counterfactual(intervention={sensitive_attr: sensitive_val_1})
-            cf_data_a0 = causal_model.compute_counterfactual(intervention={sensitive_attr: sensitive_val_0})
-            y_a1_mean = cf_data_a1[outcome].mean()
-            y_a0_mean = cf_data_a0[outcome].mean()
-            te = y_a1_mean - y_a0_mean
-            # For NDE/NIE, we need nested counterfactuals. This requires careful application of SEMs.
-            # Method: Simulate M(a0) and M(a1), then plug into Y's SEM under do(a).
-            # 1. Get counterfactual mediator values M(a0) and M(a1)
-            #    These are the values of mediators from the cf_data computed above.
-            M_a0_vals = cf_data_a0[list_mediators]
-            M_a1_vals = cf_data_a1[list_mediators]
-
-            # 2. Compute Y(a1, M(a0)) and Y(a0, M(a1))
-            #    This involves predicting Y using its SEM, setting A=a and M=M_a'
-            #    while other parents of Y are determined by A=a.
-
-            # Get Y's structural equation
-            sems = causal_model._get_structural_equations() # Use the internal getter
-            y_model_info = sems.get(outcome)
-            y_parents = list(causal_model.graph.predecessors(outcome))
-            other_parents = [p for p in y_parents if p != sensitive_attr and p not in list_mediators]
-            # Use the correct type from statsmodels.regression.linear_model
-            if y_model_info is None or not isinstance(y_model_info, RegressionResultsWrapper): # CORRECTED Check type
-                logger.error(f"Could not retrieve valid structural equation for outcome '{outcome}'. Cannot compute NDE/NIE.")
-                # Return TE if available, otherwise NaN
-                te_val = np.nan # Default if TE wasn't calculated before this check
-                if 'te' in locals():
-                    try:
-                        te_val = float(te)
-                    except (NameError, TypeError):
-                        te_val = np.nan
-                return {'TE': te_val, 'NDE': np.nan, 'NIE': np.nan}
-
-            # 2. Replace the predict_y function definition (around line 372) with the corrected version:
-            # Function to predict Y given specific A, M, and other parent values
-            def predict_y(a_val, m_vals_df, parent_data_df):
-                """Predicts outcome using the structural equation for Y."""
-                # Construct the input DataFrame for prediction, using index from mediator values
-                pred_input = pd.DataFrame(index=m_vals_df.index)
-                pred_input[sensitive_attr] = a_val
-
-                # Add mediator values
-                for med in list_mediators:
-                    if med in m_vals_df.columns:
-                        pred_input[med] = m_vals_df[med]
-                    else:
-                        logger.warning(f"Mediator {med} not found in m_vals_df during predict_y for outcome {outcome}.")
-                        # Need a fallback value if mediator is missing
-                        pred_input[med] = 0 # Or data[med].mean()? Requires access/passing 'data'
-
-                # Add other parent values (non-sensitive, non-mediator parents of Y)
-                for op in other_parents:
-                    if op in parent_data_df.columns:
-                        pred_input[op] = parent_data_df[op]
-                    else:
-                        logger.warning(f"Other parent {op} of {outcome} not found in parent_data_df during predict_y.")
-                        # Fallback to mean from original data - use with caution
-                        if op in data.columns:
-                            pred_input[op] = data[op].mean()
-                        else:
-                            logger.error(f"Other parent {op} not found in original data either!")
-                            pred_input[op] = 0 # Last resort fallback
-
-                # Align with model's expected inputs for prediction
-                try:
-                    y_model = y_model_info # Already checked isinstance above
-                    has_intercept = 'const' in y_model.model.exog_names
-                    if has_intercept:
-                        # Add constant term if model expects it
-                        pred_input['const'] = 1.0
-
-                    # Reindex to match the exact columns the model was trained on
-                    pred_input_aligned = pred_input.reindex(columns=y_model.model.exog_names, fill_value=0)
-
-                    # Return predictions
-                    return y_model.predict(pred_input_aligned)
-                except Exception as e:
-                    logger.error(f"Error during predict_y for outcome {outcome} using parents {y_parents}: {e}")
-                    # Return NaNs matching the expected output index length
-                    return pd.Series(np.nan, index=pred_input.index)
-
-
-            # 3. Ensure the calls to predict_y use the potentially NaN series correctly (around lines 395-403):
-            # Predict Y(a1, M(a0))
-            y_pred_a1_ma0 = predict_y(sensitive_val_1, M_a0_vals, cf_data_a1)
-
-            # Predict Y(a0, M(a1))
-            y_pred_a0_ma1 = predict_y(sensitive_val_0, M_a1_vals, cf_data_a0)
-
-            # Predict Y(a0, M(a0)) - this is just E[Y(a0)] calculated before
-            # Ensure y_a0_mean is valid before using
-            y_a0_ma0_mean = y_a0_mean if not np.isnan(y_a0_mean) else np.nan
-
-            # Calculate NDE and NIE, handling potential NaNs from prediction failures
-            nde = np.nanmean(y_pred_a1_ma0) - y_a0_ma0_mean if y_pred_a1_ma0 is not None else np.nan
-            nie = np.nanmean(y_pred_a0_ma1) - y_a0_ma0_mean if y_pred_a0_ma1 is not None else np.nan
-
-            logger.info(f"Path-specific effects calculated: TE={te:.4f}, NDE={nde:.4f}, NIE={nie:.4f}")
-            # Sanity check: NDE + NIE should approximate TE for linear models
-            if abs((nde + nie) - te) > 0.01: # Allow small tolerance for float errors / non-linearity
-                logger.warning(f"NDE ({nde:.4f}) + NIE ({nie:.4f}) = {nde+nie:.4f}, which differs significantly from TE ({te:.4f}). May indicate non-linearities or issues.")
-
-            return {'TE': float(te), 'NDE': float(nde), 'NIE': float(nie)}
-
-        except Exception as e:
-            logger.error(f"Failed during path-specific effect calculation: {e}", exc_info=True) # Log traceback
-            # Try to return TE if calculated
-            try:
-                te_val = float(te) if 'te' in locals() else np.nan
-            except NameError:
-                te_val = np.nan
-            return {'TE': te_val, 'NDE': np.nan, 'NIE': np.nan}
-
 if __name__ == "__main__":
+    print("\n=== Running Counterfactual Fairness ===\n")
+    printer.status("Init", "Counterfactual Fairness initialized", "success")
+
     # Synthetic test data
     np.random.seed(42)
     size = 100
@@ -471,20 +268,15 @@ if __name__ == "__main__":
 
     # Test compute_individual_fairness
     ind_fair = fairness.compute_individual_fairness(df['pred'].values, df['pred_cf'].values)
-    print("Individual Fairness:", ind_fair)
+    printer.pretty("Individual Fairness:", ind_fair, "success")
 
     # Test compute_group_disparity
     group_disp = fairness.compute_group_disparity(df, 'A', 'pred', 'Y', 1, 0)
-    print("Group Disparity:", group_disp)
+    printer.pretty("Group Disparity:", group_disp, "success")
 
-    # Test path-specific effects (simple linear graph: A -> X -> Y)
-    G = nx.DiGraph()
-    G.add_edges_from([('A', 'X'), ('X', 'Y')])
-    model = CausalModel(graph=G, data=df)
-    p_effects = fairness.path_specific_effects(model, df, 'A', 'Y', 1, 0)
-    print("Path-Specific Effects:", p_effects)
-    # Test equalized odds gap
-    eo_gap = fairness._equalized_odds_gap(model,
-                                          df.assign(original_pred=df['pred'], counterfactual_pred=df['pred_cf']),
-                                          'A', 'original_pred', 'counterfactual_pred', 'Y')
+    eo_gap = fairness._equalized_odds_gap(
+        df.assign(original_pred=df['pred'], counterfactual_pred=df['pred_cf']),
+        'A', 'original_pred', 'counterfactual_pred', 'Y'
+    )
     print("Equalized Odds Gap Change:", eo_gap)
+    print("\n=== Counterfactual Fairness Test Completed ===\n")
