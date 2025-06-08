@@ -7,32 +7,21 @@ Policy decision sensitivity analysis
 
 import numpy as np
 import pandas as pd
-import yaml
+import networkx as nx
 
-from types import SimpleNamespace
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from scipy.stats import ttest_ind, wasserstein_distance
 
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
 from src.agents.alignment.auditors.causal_model import CausalGraphBuilder, CausalModel
 from src.agents.alignment.auditors.fairness_metrics import CounterfactualFairness
-from logs.logger import get_logger
+from src.agents.alignment.alignment_memory import AlignmentMemory
+
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Countefactual Auditor")
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: str, config_file_path: str):
-    with open(config_file_path, "r") as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class CounterfactualAuditor:
     """
@@ -45,13 +34,7 @@ class CounterfactualAuditor:
     Requires pre-built CausalModel and a model prediction function.
     """
 
-    def __init__(self,
-                 causal_model: CausalModel,
-                 model_predict_func: callable, # Function: predict(data) -> np.ndarray
-                 config_section_name: str = "counterfactual_auditor",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml"
-                 ):
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
         """
         Initialize the auditor.
 
@@ -61,20 +44,36 @@ class CounterfactualAuditor:
                                            with the causal model's data and returns model predictions.
             config (Optional[CounterfactualConfig]): Configuration settings.
         """
-        if not isinstance(causal_model, CausalModel):
-             raise TypeError("causal_model must be an instance of CausalModel.")
-        if not callable(model_predict_func):
-             raise TypeError("model_predict_func must be callable.")
+        self.config = load_global_config()
+        self.sensitive_attributes = self.config.get('sensitive_attributes')
 
-        self.causal_model = causal_model
-        self.model_predict_func = model_predict_func
-        self.fairness_assessor = CounterfactualFairness() # Assumes default init is ok
+        self.auditor_config = get_config_section('counterfactual_auditor')
+        self.perturbation_strategy = self.auditor_config.get('perturbation_strategy')
+        self.perturbation_magnitude = self.auditor_config.get('perturbation_magnitude')
+        self.num_counterfactual_samples = self.auditor_config.get('num_counterfactual_samples')
+        self.sensitivity_alpha = self.auditor_config.get('sensitivity_alpha')
+        self.required_edges = self.auditor_config.get('required_edges')
+
+        self.sensitive_attrs = self.sensitive_attributes
+        graph = nx.DiGraph()
+        data = pd.DataFrame()
+
+        # model_predict_func=callable()
+        self.model_predict_func = None
+        self.alignment_memory = AlignmentMemory()
+        self.causal_model = CausalModel(graph=graph, data=data)
+        self.fairness_assessor = CounterfactualFairness()
+
+        logger.info(f"Counterfactual Auditor has succesfully initialized")
+
+    def set_model_predict_func(self, predict_func):
+        """Set the model prediction function dynamically"""
+        self.model_predict_func = predict_func
 
     def audit(self,
               data: pd.DataFrame,
               sensitive_attrs: List[str],
-              y_true_col: Optional[str] = None # Needed for some group metrics
-             ) -> Dict[str, Any]:
+              y_true_col: Optional[str] = None) -> Dict[str, Any]:
         """
         Perform comprehensive counterfactual fairness audit.
 
@@ -87,11 +86,40 @@ class CounterfactualAuditor:
         Returns:
             Dict[str, Any]: A report containing fairness metrics, sensitivity analysis, etc.
         """
+        if sensitive_attrs is None:
+            sensitive_attrs = self.sensitive_attrs  # Use auditor's own config
+        
+        # Add fallback if still None
+        if sensitive_attrs is None:
+            logger.warning("No sensitive attributes provided - using default configuration")
+            sensitive_attrs = self.auditor_config.get('default_sensitive_attributes', [])
+        
+        if not sensitive_attrs:  # Check if list is empty
+            raise ValueError("No sensitive attributes defined for audit")
+        
+        # Original validation
         if not all(attr in data.columns for attr in sensitive_attrs):
             missing = [attr for attr in sensitive_attrs if attr not in data.columns]
             raise ValueError(f"Sensitive attributes {missing} not found in data columns.")
+        
+        # Generate unique audit ID
+        audit_id = f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        domain = data.attrs.get('domain', 'unknown')  # Get from DataFrame attributes
+        task_type = self.config.get('task_type', 'classification')  # Get from global config
 
-        # 1. Get Original Predictions
+        # 1. Get Original Predictions & Log audit start
+        self.alignment_memory.log_evaluation(
+            metric="audit_started",
+            value=1.0,
+            threshold=0.5,
+            context={
+                "audit_id": audit_id,
+                "samples": len(data),
+                "sensitive_attrs": sensitive_attrs,
+                "domain": domain,
+                "task_type": task_type
+            }
+        )
         logger.info("Getting original model predictions...")
         original_preds = self._get_predictions(data)
 
@@ -109,38 +137,75 @@ class CounterfactualAuditor:
             cf_predictions_map = {}
             for cf_value, intervention_dict in interventions.items():
                  # Use CausalModel to compute the state of the system under intervention
-                 # We assume compute_counterfactual returns the full DataFrame under intervention
                  cf_intervened_data = self.causal_model.compute_counterfactual(intervention=intervention_dict)
                  # Then use the ML model's predict function on this counterfactual data
                  cf_predictions_map[cf_value] = self._get_predictions(cf_intervened_data)
 
             cf_results[attr] = cf_predictions_map
 
-        # 3. Assess Fairness Violations
+            # Log attribute-level metrics
+            self.alignment_memory.log_evaluation(
+                metric=f"{attr}_fairness_analysis",
+                value=len(interventions),
+                threshold=0,
+                context={
+                    "audit_id": audit_id,
+                    "attribute": attr,
+                    "strategy": self.perturbation_strategy
+                }
+            )
+
+        # 3. Assess & Log Fairness Violations
         logger.info("Assessing fairness violations...")
         fairness_report = self._assess_fairness_violations(
             original_data=data,
             original_preds=original_preds,
-            cf_results=cf_results, # Pass the dict of counterfactual predictions
+            cf_results=cf_results,
             sensitive_attrs=sensitive_attrs,
             y_true_col=y_true_col
         )
 
-        # 4. Analyze Decision Sensitivity
+        for attr, metrics in fairness_report['individual_fairness'].items():
+            if not isinstance(metrics, dict):
+                continue
+
+            self.alignment_memory.log_evaluation(
+                metric=f"{attr}_mean_diff",
+                value=metrics.get('mean_difference', 0),
+                threshold=self.auditor_config['fairness_thresholds']['individual_fairness_mean_diff'],
+                context={"audit_id": audit_id}
+            )
+
+        # 4. Analyze Decision Sensitivity with Log concept drift status
         logger.info("Analyzing decision sensitivity...")
+        drift_detected = self.alignment_memory.detect_drift()
+        self.alignment_memory.log_evaluation(
+            metric="concept_drift",
+            value=float(drift_detected),
+            threshold=0.5,
+            context={"audit_id": audit_id}
+        )
+
         sensitivity_report = self._analyze_decision_sensitivity(
             original_preds=original_preds,
-            cf_results=cf_results # Pass the dict of counterfactual predictions
+            cf_results=cf_results
         )
 
         # 5. Generate Final Report
         logger.info("Generating audit report...")
+        self.alignment_memory.record_outcome(
+            context={"audit_id": audit_id},
+            outcome={
+                "bias_rate": self._calculate_overall_bias(fairness_report),
+                "ethics_violations": self._count_violations(fairness_report)
+            }
+        )
+
         final_report = {
-            'audit_config': self.config.__dict__,
+            'audit_config': self.config.__dir__,
             'causal_graph_info': {
                 'nodes': list(self.causal_model.graph.nodes()),
                 'edges': list(self.causal_model.graph.edges())
-                # Avoid returning full graph object unless needed & serializable
             },
             'fairness_metrics': fairness_report,
             'sensitivity_analysis': sensitivity_report,
@@ -150,22 +215,40 @@ class CounterfactualAuditor:
             }
             # Optionally add samples of counterfactual data if generated and useful
         }
+
         return final_report
 
+    def _calculate_overall_bias(self, report: Dict) -> float:
+        """Calculate aggregate bias score from fairness report"""
+        total_diff = 0
+        count = 0
+        for attr, metrics in report['individual_fairness'].items():
+            if isinstance(metrics, dict):
+                total_diff += metrics.get('mean_difference', 0)
+                count += 1
+        return total_diff / count if count else 0
+    
+    def _count_violations(self, report: Dict) -> int:
+        """Count total fairness violations"""
+        return sum(
+            1 for v in report['overall_violations']['summary'].values() 
+            if v is True
+        )
 
     def _get_predictions(self, data: pd.DataFrame) -> np.ndarray:
         """Helper to get predictions, handling potential errors."""
+        printer.status("Init", "Auditor predictor initialized", "info")
+
+        if self.model_predict_func is None:
+            raise ValueError("model_predict_func is not set. Please assign it before calling audit().")
         try:
-             # Ensure data passed to predict function has columns expected by the model
-             # This might involve selecting specific columns based on model training features
-             # Assuming predict_func handles necessary column selection/preprocessing
-             preds = self.model_predict_func(data)
-             if not isinstance(preds, np.ndarray):
-                 preds = np.array(preds)
-             return preds
+            preds = self.model_predict_func(data)
+            if not isinstance(preds, np.ndarray):
+                preds = np.array(preds)
+            return preds
         except Exception as e:
-             logger.error(f"Model prediction function failed: {e}", exc_info=True)
-             raise
+            logger.error(f"Model prediction function failed: {e}", exc_info=True)
+            raise
 
 
     def _generate_interventions(self, data: pd.DataFrame, sensitive_attr: str) -> Dict[Any, Dict[str, Any]]:
@@ -180,7 +263,14 @@ class CounterfactualAuditor:
         interventions = {}
         unique_values = data[sensitive_attr].unique()
 
-        if self.config.perturbation_strategy == 'flip':
+        if pd.api.types.is_numeric_dtype(data[sensitive_attr]):
+            # Handle continuous values
+            if self.perturbation_strategy == 'fixed_delta':
+                interventions = self.fixed_delta(data, sensitive_attr)
+            elif self.perturbation_strategy == 'sample_distribution':
+                interventions = self.sample_distribution(data, sensitive_attr)
+
+        if self.perturbation_strategy == 'flip':
              # Assumes binary or allows flipping between existing unique values
              if len(unique_values) == 2:
                   val0, val1 = unique_values[0], unique_values[1]
@@ -195,12 +285,10 @@ class CounterfactualAuditor:
                   for val in unique_values:
                        interventions[val] = {sensitive_attr: val}
 
-        # TODO: Implement other strategies like 'sample_distribution', 'fixed_delta' if needed.
-        # Example for fixed_delta (continuous only):
-        elif self.config.perturbation_strategy == 'fixed_delta':
+        elif self.perturbation_strategy == 'fixed_delta':
             if pd.api.types.is_numeric_dtype(data[sensitive_attr]):
                 mean_val = data[sensitive_attr].mean()
-                delta = self.config.perturbation_magnitude * data[sensitive_attr].std()
+                delta = self.perturbation_magnitude * data[sensitive_attr].std()
                 interventions[mean_val + delta] = {sensitive_attr: mean_val + delta}
                 interventions[mean_val - delta] = {sensitive_attr: mean_val - delta}
             else:
@@ -208,13 +296,64 @@ class CounterfactualAuditor:
 
         else:
             # Default: Use existing unique values as intervention points
-             logger.warning(f"Unknown perturbation strategy '{self.config.perturbation_strategy}'. Using unique values.")
+             logger.warning(f"Unknown perturbation strategy '{self.perturbation_strategy}'. Using unique values.")
              for val in unique_values:
                   interventions[val] = {sensitive_attr: val}
 
         if not interventions:
-             raise ValueError(f"Could not generate interventions for attribute '{sensitive_attr}' with strategy '{self.config.perturbation_strategy}'.")
+             raise ValueError(f"Could not generate interventions for attribute '{sensitive_attr}' with strategy '{self.perturbation_strategy}'.")
 
+        return interventions
+    
+    def sample_distribution(self, data: pd.DataFrame, sensitive_attr: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Creates interventions by sampling from the empirical distribution of the sensitive attribute.
+    
+        Args:
+            data (pd.DataFrame): The original dataset.
+            sensitive_attr (str): Sensitive attribute to sample from.
+    
+        Returns:
+            Dict[str, Dict[str, Any]]: Dictionary of sampled interventions.
+        """
+        interventions = {}
+        values = data[sensitive_attr].dropna().values
+        if len(values) == 0:
+            logger.warning(f"No values available to sample for {sensitive_attr}")
+            return interventions
+    
+        n_samples = min(self.num_counterfactual_samples, len(values))
+        sampled_values = np.random.choice(values, size=n_samples, replace=False)
+    
+        for i, val in enumerate(sampled_values):
+            interventions[f'sample_{i}'] = {sensitive_attr: val}
+
+        return interventions
+
+    def fixed_delta(self, data: pd.DataFrame, sensitive_attr: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Applies a fixed delta perturbation strategy to numeric sensitive attribute.
+    
+        Args:
+            data (pd.DataFrame): Input dataset.
+            sensitive_attr (str): The attribute to perturb.
+    
+        Returns:
+            Dict[str, Dict[str, Any]]: Interventions with increased/decreased values.
+        """
+        interventions = {}
+        if pd.api.types.is_numeric_dtype(data[sensitive_attr]):
+            std_dev = data[sensitive_attr].std()
+            if std_dev > 0:
+                mean_val = data[sensitive_attr].mean()
+                delta = self.perturbation_magnitude * std_dev
+                interventions['increase'] = {sensitive_attr: mean_val + delta}
+                interventions['decrease'] = {sensitive_attr: mean_val - delta}
+            else:
+                logger.warning(f"No variation in {sensitive_attr}; using mean only.")
+                interventions['mean'] = {sensitive_attr: data[sensitive_attr].mean()}
+        else:
+            logger.warning(f"Fixed delta not applicable for non-numeric attribute: {sensitive_attr}")
         return interventions
 
     def _assess_fairness_violations(self,
@@ -223,207 +362,185 @@ class CounterfactualAuditor:
                                     cf_results: Dict[str, Dict[Any, np.ndarray]],
                                     sensitive_attrs: List[str],
                                     y_true_col: Optional[str]) -> Dict[str, Any]:
-        """
-        Assess fairness using CounterfactualFairness, comparing original predictions
-        with predictions under interventions on each sensitive attribute.
-        """
+        """Robust fairness assessment with proper scoping and error handling."""
+        thresholds = self.auditor_config['fairness_thresholds']
+
         fairness_report = {
             'individual_fairness': {},
             'group_disparity': {},
-            'path_specific_effects': {}, # Placeholder, requires specific implementation path
+            'path_specific_effects': {},
             'overall_violations': {}
         }
 
-        all_individual_metrics = []
-        all_group_metrics = {}
-        all_causal_effects = {} # Placeholder for path-specific effects
-
-        # Iterate through each sensitive attribute that was intervened on
-        for attr in sensitive_attrs: # Iterate over the list of sensitive attributes provided
+        # Process each sensitive attribute independently
+        for attr in sensitive_attrs:
             if attr not in cf_results:
-                logger.warning(f"No counterfactual results found for attribute '{attr}'. Skipping fairness assessment for it.")
+                logger.warning(f"Skipping fairness assessment for '{attr}' - no counterfactual results")
                 continue
 
             cf_preds_map = cf_results[attr]
-            violations_attr = {} # Store violations specific to this attribute
+            violations_attr = {}
 
-            # --- Individual Fairness ---
-            # This part depends on the structure of cf_preds_map, often requires comparing specific pairs
-            if self.config.perturbation_strategy == 'flip' and len(cf_preds_map) == 2:
-                cf_val0, cf_val1 = list(cf_preds_map.keys())
-                preds_a0 = cf_preds_map[cf_val0]
-                preds_a1 = cf_preds_map[cf_val1]
-
-                # Identify original predictions corresponding to A=0 and A=1
-                orig_a0_mask = (original_data[attr] == cf_val0)
-                orig_a1_mask = (original_data[attr] == cf_val1)
-
-                # Ensure indices align if lengths differ due to NaNs etc. in original data
-                common_idx_0 = original_data.index[orig_a0_mask]
-                common_idx_1 = original_data.index[orig_a1_mask]
-
-                # Check if lengths match for comparison - use indices from original data
-                # The counterfactual predictions should have the same index as original_data
-                if len(common_idx_0) > 0:
-                     diffs_0_to_1 = original_preds[orig_a0_mask] - preds_a1[orig_a0_mask]
-                else:
-                     diffs_0_to_1 = np.array([])
-
-                if len(common_idx_1) > 0:
-                     diffs_1_to_0 = original_preds[orig_a1_mask] - preds_a0[orig_a1_mask]
-                else:
-                     diffs_1_to_0 = np.array([])
-
-                all_diffs = np.concatenate([diffs_0_to_1, diffs_1_to_0])
-
-                if len(all_diffs) > 0:
-                    # Calculate Wasserstein distance between original and *relevant* counterfactuals
-                    # Combine the counterfactuals that correspond to the flipped individuals
-                    cf_preds_for_wdist = np.concatenate([
-                        preds_a1[orig_a0_mask],
-                        preds_a0[orig_a1_mask]
-                    ]) if len(all_diffs) == len(original_preds) else np.array([]) # Ensure size match if needed
-
-                    indiv_metrics = {
-                        'max_difference': float(np.max(np.abs(all_diffs))),
-                        'mean_difference': float(np.mean(np.abs(all_diffs))),
-                        'wasserstein_distance': wasserstein_distance(original_preds, cf_preds_for_wdist) if len(cf_preds_for_wdist) == len(original_preds) else np.nan
-                    }
-                else:
-                    indiv_metrics = {'max_difference': 0.0, 'mean_difference': 0.0, 'wasserstein_distance': 0.0}
-
-                fairness_report['individual_fairness'][attr] = indiv_metrics
-                all_individual_metrics.append(indiv_metrics)
-                violations_attr['individual_mean_diff'] = indiv_metrics['mean_difference'] > self.config.fairness_thresholds.individual_fairness_mean_diff
-                violations_attr['individual_max_diff'] = indiv_metrics['max_difference'] > self.config.fairness_thresholds.individual_fairness_max_diff
-
+            # Individual fairness assessment
+            individual_metrics = self._assess_individual_fairness(
+                original_data, original_preds, cf_preds_map, attr, thresholds
+            )
+            if individual_metrics:
+                fairness_report['individual_fairness'][attr] = individual_metrics
+                violations_attr.update({
+                    'individual_mean_diff': individual_metrics.get('mean_difference', 0) > thresholds['individual_fairness_mean_diff'],
+                    'individual_max_diff': individual_metrics.get('max_difference', 0) > thresholds['individual_fairness_max_diff']
+                })
             else:
-                 logger.warning(f"Individual fairness assessment for attribute '{attr}' skipped or limited. Requires 'flip' strategy with 2 outcomes currently.")
-                 fairness_report['individual_fairness'][attr] = {'message': "Skipped or limited due to strategy/values."}
+                fairness_report['individual_fairness'][attr] = {'message': "Assessment skipped"}
 
-
-            # --- Group Disparity ---
-            if y_true_col and self.config.perturbation_strategy == 'flip' and len(cf_preds_map) == 2:
-                cf_val0, cf_val1 = list(cf_preds_map.keys()) # These are now defined in scope
-
-                # Assuming cf_val1 is privileged, cf_val0 is unprivileged - needs careful check in practice
-                priv_group = cf_val1
-                unpriv_group = cf_val0
-
-                # Original group disparity
-                orig_group_disp = self.fairness_assessor.compute_group_disparity(
-                    data=original_data.assign(_preds=original_preds),
-                    sensitive_attr=attr,
-                    predictions='_preds',
-                    y_true=y_true_col,
-                    privileged_group=priv_group,
-                    unprivileged_group=unpriv_group
+            # Group disparity assessment
+            if y_true_col:
+                group_metrics = self._assess_group_disparity(
+                    original_data, original_preds, cf_preds_map, attr, 
+                    y_true_col, thresholds
                 )
-                all_group_metrics[attr] = orig_group_disp # Collect original metrics
-
-                # Counterfactual group disparities (Example: on data under do(A=1))
-                # Create counterfactual dataset with predictions under do(A=privileged)
-                cf_data_priv = self.causal_model.compute_counterfactual(
-                    intervention={attr: priv_group}
-                ).assign(_preds=cf_preds_map[priv_group])
-
-                cf_group_disp_priv = self.fairness_assessor.compute_group_disparity(
-                    data=cf_data_priv,
-                    sensitive_attr=attr, # Note: sensitive attr here is now fixed to priv_group
-                    predictions='_preds',
-                    y_true=y_true_col,
-                    privileged_group=priv_group,
-                    unprivileged_group=unpriv_group
-                )
-                # Repeat for do(A=unprivileged) if desired
-
-                # Calculate max absolute disparities observed (original vs counterfactual)
-                # We compare the *original* disparity against the threshold for now
-                stat_parity_diff = orig_group_disp.get('statistical_parity_difference', np.nan)
-                eod_diff = orig_group_disp.get('equal_opportunity_difference', np.nan)
-                aaod_diff = orig_group_disp.get('average_abs_odds_difference', np.nan)
-
-                fairness_report['group_disparity'][attr] = {
-                    'original': orig_group_disp,
-                    'counterfactual_under_do_privileged': cf_group_disp_priv, # Example CF metric
-                    'max_stat_parity_diff_observed': abs(stat_parity_diff),
-                    'max_eod_diff_observed': abs(eod_diff),
-                    'max_aaod_diff_observed': abs(aaod_diff)
-                }
-
-                # Check original disparities against thresholds
-                violations_attr['group_stat_parity'] = abs(stat_parity_diff) > self.config.fairness_thresholds.group_disparity_stat_parity
-                violations_attr['group_equal_opp'] = abs(eod_diff) > self.config.fairness_thresholds.group_disparity_equal_opp
-                violations_attr['group_avg_odds'] = abs(aaod_diff) > self.config.fairness_thresholds.group_disparity_avg_odds
-
-            elif y_true_col:
-                logger.warning(f"Group disparity assessment for attribute '{attr}' skipped or limited. Requires 'flip' strategy with 2 outcomes currently.")
-                fairness_report['group_disparity'][attr] = {'message': 'Skipped or limited due to strategy/values.'}
+                if group_metrics:
+                    fairness_report['group_disparity'][attr] = group_metrics
+                    violations_attr.update({
+                        'group_stat_parity': group_metrics.get('stat_parity_violation', False),
+                        'group_equal_opp': group_metrics.get('equal_opp_violation', False),
+                        'group_avg_odds': group_metrics.get('avg_odds_violation', False)
+                    })
+                else:
+                    fairness_report['group_disparity'][attr] = {'message': "Assessment skipped"}
             else:
-                logger.warning(f"Ground truth column '{y_true_col}' not provided. Skipping group fairness metrics requiring labels for attr '{attr}'.")
-                fairness_report['group_disparity'][attr] = {'message': f"Skipped for {attr} due to missing y_true"}
+                logger.warning(f"Skipping group disparity for '{attr}' - no ground truth provided")
+                fairness_report['group_disparity'][attr] = {'message': "Missing y_true"}
 
-
-            # --- Path-Specific Effects ---
-            # (Requires flip strategy & 2 values currently for NDE/NIE)
-            if self.config.perturbation_strategy == 'flip' and len(cf_preds_map) == 2:
-                 cf_val0, cf_val1 = list(cf_preds_map.keys())
-                 try:
-                     # Define a suitable outcome variable for path analysis.
-                     # Using the model prediction *function* as the outcome mechanism within the causal graph context.
-                     # This is complex. A simplification: use the *name* of the prediction column if added to data.
-                     # Let's assume we need to compute effects on the *original* prediction column if it exists,
-                     # or potentially requires modifying the CausalModel to handle the prediction function directly.
-                     # Placeholder: Using a dummy outcome name '_preds_for_pse'. Need to align CausalModel SEMs.
-                     outcome_for_pse = '_preds' # Assumes predictions added to data used by CausalModel
-
-                     # Add predictions column temporarily if needed by CausalModel's SEM estimation
-                     temp_data_for_pse = original_data.assign(_preds=original_preds)
-
-                     if hasattr(self.fairness_assessor, 'path_specific_effects') and outcome_for_pse in temp_data_for_pse.columns:
-                          # Ensure CausalModel has SEM for '_preds' (might need re-estimation or specific handling)
-                          if outcome_for_pse not in self.causal_model._get_structural_equations():
-                              logger.warning(f"Outcome '{outcome_for_pse}' not found in CausalModel SEMs. Skipping Path Specific Effects for {attr}.")
-                              fairness_report['path_specific_effects'][attr] = {'message': f"Skipped, '{outcome_for_pse}' SEM missing."}
-                          else:
-                              pse_results = self.fairness_assessor.path_specific_effects(
-                                   causal_model=self.causal_model, # Assumes SEMs include the prediction step
-                                   data=temp_data_for_pse,
-                                   sensitive_attr=attr,
-                                   outcome=outcome_for_pse, # Use prediction as outcome
-                                   sensitive_val_1=cf_val1,
-                                   sensitive_val_0=cf_val0
-                              )
-                              fairness_report['path_specific_effects'][attr] = pse_results
-                              all_causal_effects[attr] = pse_results
-                              violations_attr['causal_nde'] = abs(pse_results.get('NDE', 0)) > self.config.fairness_thresholds.causal_effect_ate
-                              violations_attr['causal_nie'] = abs(pse_results.get('NIE', 0)) > self.config.fairness_thresholds.causal_effect_ate
-                     else:
-                          fairness_report['path_specific_effects'][attr] = {'message': 'Method or outcome column not available'}
-                 except Exception as e:
-                     logger.error(f"Path specific effects calculation failed for {attr}: {e}", exc_info=True)
-                     fairness_report['path_specific_effects'][attr] = {'error': str(e)}
-            else:
-                logger.warning(f"Path Specific Effects calculation for attribute '{attr}' skipped. Requires 'flip' strategy with 2 outcomes currently.")
-                fairness_report['path_specific_effects'][attr] = {'message': "Skipped due to strategy/values."}
-
-
-            # Consolidate violations for this attribute
+            # Store violations for this attribute
             fairness_report['overall_violations'][attr] = violations_attr
 
+        # Aggregate overall violations
+        self._aggregate_violations(fairness_report)
+        return fairness_report
+    
+    def _assess_individual_fairness(self, original_data, original_preds, 
+                                   cf_preds_map, attr, thresholds):
+        """Compute individual fairness metrics with proper error handling."""
+        if self.perturbation_strategy != 'flip' or len(cf_preds_map) != 2:
+            logger.warning(f"Individual fairness skipped for '{attr}' - requires flip strategy with 2 values")
+            return None
+    
+        try:
+            cf_val0, cf_val1 = list(cf_preds_map.keys())
+            preds_a0 = cf_preds_map[cf_val0]
+            preds_a1 = cf_preds_map[cf_val1]
+            
+            # Get masks for original groups
+            orig_a0_mask = (original_data[attr] == cf_val0)
+            orig_a1_mask = (original_data[attr] == cf_val1)
+            
+            # Calculate differences
+            diffs = []
+            if np.any(orig_a0_mask):
+                diffs.extend(original_preds[orig_a0_mask] - preds_a1[orig_a0_mask])
+            if np.any(orig_a1_mask):
+                diffs.extend(original_preds[orig_a1_mask] - preds_a0[orig_a1_mask])
+            
+            if not diffs:
+                return {'max_difference': 0.0, 'mean_difference': 0.0, 'wasserstein_distance': 0.0}
+            
+            diffs = np.array(diffs)
+            abs_diffs = np.abs(diffs)
+            
+            # Calculate Wasserstein distance
+            cf_combined = np.concatenate([
+                preds_a1[orig_a0_mask] if np.any(orig_a0_mask) else np.array([]),
+                preds_a0[orig_a1_mask] if np.any(orig_a1_mask) else np.array([])
+            ])
+            
+            w_dist = wasserstein_distance(original_preds, cf_combined) if len(cf_combined) > 0 else np.nan
+            
+            return {
+                'max_difference': float(np.max(abs_diffs)),
+                'mean_difference': float(np.mean(abs_diffs)),
+                'wasserstein_distance': w_dist
+            }
+        except Exception as e:
+            logger.error(f"Individual fairness assessment failed for {attr}: {e}")
+            return None
+    
+    def _assess_group_disparity(self, original_data, original_preds, 
+                               cf_preds_map, attr, y_true_col, thresholds):
+        """Compute group disparity metrics with proper error handling."""
+        if self.perturbation_strategy != 'flip' or len(cf_preds_map) != 2:
+            logger.warning(f"Group disparity skipped for '{attr}' - requires flip strategy with 2 values")
+            return None
+    
+        try:
+            cf_val0, cf_val1 = list(cf_preds_map.keys())
+            priv_group = cf_val1  # Convention: last value is privileged
+            unpriv_group = cf_val0
+            
+            # Prepare data with predictions
+            data_with_preds = original_data.assign(_preds=original_preds)
+            
+            # Compute original group disparity
+            orig_group_disp = self.fairness_assessor.compute_group_disparity(
+                data=data_with_preds,
+                predictions='_preds',
+                y_true=y_true_col,
+                privileged_group=priv_group,
+                unprivileged_group=unpriv_group,
+                sensitive_attr=attr
+            )
+            
+            # Compute counterfactual group disparity (privileged intervention)
+            cf_data_priv = self.causal_model.compute_counterfactual(
+                intervention={attr: priv_group}
+            ).assign(_preds=cf_preds_map[priv_group])
+            
+            cf_group_disp_priv = self.fairness_assessor.compute_group_disparity(
+                data=cf_data_priv,
+                sensitive_attr=attr,
+                predictions='_preds',
+                y_true=y_true_col,
+                privileged_group=priv_group,
+                unprivileged_group=unpriv_group
+            )
+            
+            # Extract key metrics
+            stat_parity_diff = orig_group_disp.get('statistical_parity_difference', np.nan)
+            eod_diff = orig_group_disp.get('equal_opportunity_difference', np.nan)
+            aaod_diff = orig_group_disp.get('average_abs_odds_difference', np.nan)
+            
+            return {
+                'original': orig_group_disp,
+                'counterfactual_under_do_privileged': cf_group_disp_priv,
+                'max_stat_parity_diff_observed': abs(stat_parity_diff),
+                'max_eod_diff_observed': abs(eod_diff),
+                'max_aaod_diff_observed': abs(aaod_diff),
+                'stat_parity_violation': abs(stat_parity_diff) > thresholds['group_disparity_stat_parity'],
+                'equal_opp_violation': abs(eod_diff) > thresholds['group_disparity_equal_opp'],
+                'avg_odds_violation': abs(aaod_diff) > thresholds['group_disparity_avg_odds']
+            }
+        except Exception as e:
+            logger.error(f"Group disparity assessment failed for {attr}: {e}")
+            return None
 
-        # Aggregate overall violations (simple approach: any violation for any attribute)
+    def _aggregate_violations(self, fairness_report):
+        """Aggregate violations across all attributes."""
         overall_violations_summary = {}
-        violation_keys = set(key for viol_dict in fairness_report['overall_violations'].values() for key in viol_dict)
+        violation_keys = set()
+        
+        # Collect all violation keys
+        for attr, viol_dict in fairness_report['overall_violations'].items():
+            violation_keys.update(viol_dict.keys())
+        
+        # Aggregate violations
         for key in violation_keys:
             overall_violations_summary[key] = any(
-                viol_dict.get(key, False) for viol_dict in fairness_report['overall_violations'].values()
+                viol_dict.get(key, False) 
+                for viol_dict in fairness_report['overall_violations'].values()
             )
+        
         fairness_report['overall_violations']['summary'] = overall_violations_summary
-
-
-        return fairness_report
-
 
     def _analyze_decision_sensitivity(self,
                                     original_preds: np.ndarray,
@@ -456,7 +573,7 @@ class CounterfactualAuditor:
                     'cohens_d': float(effect_size),
                     't_statistic': float(stat),
                     'p_value': float(p_value),
-                    'is_sensitive': p_value < self.config.sensitivity_alpha if not np.isnan(p_value) else None
+                    'is_sensitive': p_value < self.sensitivity_alpha if not np.isnan(p_value) else None
                 }
             sensitivity_scores[attr] = attr_sensitivities
 
@@ -482,13 +599,10 @@ class CounterfactualAuditor:
 
         return abs(diff / pooled_std) if pooled_std > 1e-9 else 0.0
 
-
-# Note: The CounterfactualReport dataclass seems redundant if the audit method returns a dict.
-# Removed unless explicitly needed for structuring output further.
-
-# Example Usage Placeholder (requires setting up CausalModel, predict_func, data)
 if __name__ == '__main__':
-    # Synthetic data generation
+    print("\n=== Running Counterfactual Auditor ===\n")
+    printer.status("Init", "Counterfactual Auditor initialized", "success")
+
     np.random.seed(42)
     n_samples = 2000
     data = pd.DataFrame({
@@ -516,16 +630,13 @@ if __name__ == '__main__':
 
     # Build causal model properly    
     builder = CausalGraphBuilder()
-    builder.config.required_edges = [('gender', 'loan_approval')]
+    builder.required_edges = [('gender', 'loan_approval')]
     causal_model = builder.construct_graph(data, sensitive_attrs=['gender'])
 
     # Initialize auditor with required parameters
-    auditor = CounterfactualAuditor(
-        causal_model=causal_model,
-        model_predict_func=ml_predict_func,
-        config_section_name="counterfactual_auditor",
-        config_file_path="src/agents/alignment/configs/alignment_config.yaml"
-    )
+    auditor = CounterfactualAuditor()
+    auditor.model_predict_func = ml_predict_func
+    auditor.causal_model = causal_model  
 
     # Run audit
     report = auditor.audit(
@@ -542,3 +653,4 @@ if __name__ == '__main__':
     print(report['fairness_metrics']['group_disparity'])
     print("\nSensitivity Analysis:")
     print(report['sensitivity_analysis']['gender'])
+    print("\n=== Counterfactual Auditor Test Completed ===\n")
