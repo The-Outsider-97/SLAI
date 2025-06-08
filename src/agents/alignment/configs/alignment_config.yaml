@@ -1,3 +1,6 @@
+sensitive_attributes: ["gender", "age_group", "race", "education_level"]
+udhr_json_path: "src/agents/alignment/templates/un_human_rights.json"
+
 alignment_monitor:
   fairness_metrics:
     - demographic_parity
@@ -9,6 +12,8 @@ alignment_monitor:
     safety: []
   drift_threshold: 0.15
   audit_frequency: 1000
+  
+  model_predict_func: {}
   adaptive_weights:
     fairness: 0.4
     ethics: 0.3
@@ -24,40 +29,36 @@ bias_detector:
   bootstrap_samples: 1000
   min_group_size: 30
   intersectional_depth: 3
+  metric_thresholds:
+    demographic_parity: 0.1
+    equal_opportunity: 0.1
+    predictive_parity: 0.1
+    disparate_impact: 0.8
 
 alignment_memory:
   replay_buffer_size: 10000
   causal_window: 1000
   drift_threshold: 0.25
   retention_period: 365 # Days
+  regressor_type: "bayesian" # of sgd
 
 ethical_constraints:
+  safe_energy_threshold: 100.0    # Base threshold
+  min_energy_threshold: 30.0      # Absolute minimum threshold
+  max_energy_threshold: 200.0     # Absolute maximum threshold
+  controller:
+    is_active: False
+  controlled_process:
+    state: []
   safety_constraints:
-    physical_harm:
-      - "Prevent injury to humans"
-      - "Avoid property damage"
-    psychological_harm:
-      - "Prevent emotional distress"
-      - "Avoid manipulation"
+    physical_harm:  "src/agents/alignment/templates/physical_harm.json"
+    psychological_harm: "src/agents/alignment/templates/psychological_harm.json"
   fairness_constraints:
-    distribution:
-      - "Ensure equitable resource allocation"
-    procedure:
-      - "Maintain transparent decision processes"
+    distribution: "src/agents/alignment/templates/distribution.json"
+    procedure: "src/agents/alignment/templates/procedure.json"
   constitutional_rules:
-    privacy:
-      - "Do not store user personal data longer than necessary"
-      - "Respect user anonymity whenever possible"
-      - "Collect only the minimum necessary personal information"
-      - "Do not share user data with third parties without explicit consent"
-      - "Encrypt all sensitive information at rest and in transit"
-      - "Ensure compliance with GDPR and relevant privacy laws"
-      - "Allow users to access and delete their personal data"
-      - "Ensure data breaches are reported and mitigated promptly"
-      - "Minimize data collection to what is strictly required"
-    transparency:
-      - "Explain decisions"
-      - "Maintain audit trails"
+    privacy: "src/agents/alignment/templates/constitutional_rules_privacy.json"
+    transparency: "src/agents/alignment/templates/constitutional_rules_transparency.json"
   adaptation_rate: 0.1
   constraint_priorities:
     - 'safety'
@@ -65,24 +66,44 @@ ethical_constraints:
     - 'fairness'
     - 'transparency'
 
+causal_model:
+  conditional_independence_test: "fisherz"
+  graph_file: "models/causal_graph.gml"
+  prior_knowledge: ["age->income", "education->income"]
+  min_adjacency_confidence: 0.7
+  max_parents: 3
+  forbidden_edges: []
+  required_edges: []
+  structure_learning_method: "pc"  # or "tetrad" "fci"
+  latent_confounder_detection: True
+  tetrad_path: "src/agents/alignment/auditors/tetrad.jar" # ""
+  fci_max_conditioning_set: 5
+  use_inverse_covariance: True
+  significance_level: 0.05
+
+fairness_metrics: {}
+
 counterfactual_auditor:
   perturbation_strategy: 'flip' # Options: 'flip', 'sample_distribution', 'fixed_delta'
   perturbation_magnitude: 0.1
   num_counterfactual_samples: 1
   sensitivity_alpha: 0.05
+  corrections:
+    levels:
+      - threshold: 0.8
+        action: "human_intervention"
+      - threshold: 0.5
+        action: "automatic_adjustment"
+      - threshold: 0.3
+        action: "alert_only"
   fairness_thresholds:
-    individual_fairness_max_diff: 0.1
-    individual_fairness_mean_diff: 0.05
+    individual_fairness_mean_diff: 0.1
+    individual_fairness_max_diff: 0.3
     group_disparity_stat_parity: 0.1
     group_disparity_equal_opp: 0.1
     group_disparity_avg_odds: 0.1
     causal_effect_ate: 0.05
-
-causal_model:
-  structure_learning_method: "pc"  # Example
-  conditional_independence_test: "fisherz"
-  graph_file: "models/causal_graph.gml"
-  prior_knowledge: ["age->income", "education->income"]
+    group_stat_parity: {}
 
 fairness_evaluator:
   group_metrics:
@@ -104,8 +125,12 @@ value_embedding:
   # num_ethical_principles: will be loaded dynamically from udhr_json_path by default.
   # Can be overridden by uncommenting and setting a value here.
   num_ethical_principles: 30
-  udhr_json_path: "templates/un_human_rights.json" # Path relative to value_embedding.py
   temperature: 0.07
   dropout: 0.1
   margin: 0.2
   max_seq_length: 128
+  margin: 0.2
+
+value_dataset: {}
+
+value_trainer: {}
