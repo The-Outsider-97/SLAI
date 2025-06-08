@@ -12,6 +12,7 @@ import datetime
 import threading
 
 from pympler import asizeof
+from datetime import timedelta
 from typing import Any, OrderedDict, Optional
 from collections import namedtuple, defaultdict, deque
 
@@ -189,7 +190,6 @@ class SharedMemory:
         return asizeof.asizeof(obj)
 
     def put(self, key, value, ttl=None, priority=None):
-        """Stores a value with versioning and expiration."""
         self._simulate_network()
         current_time = time.time()
         
@@ -199,27 +199,32 @@ class SharedMemory:
             size = self._calculate_size(value)
             self.current_memory += size
             
-            # Handle memory eviction if needed
+            # Handle memory eviction
             if self.current_memory > self.max_memory:
                 self._evict_lru()
             
-            # Store the new version
+            # Store new version
             self._data[key].append(new_version)
             self._access_log[key] = current_time
             
-            # Process TTL
-            effective_ttl = ttl if ttl is not None else self._default_ttl
+            # Process TTL - handle timedelta conversion
+            if ttl is not None:
+                if isinstance(ttl, timedelta):
+                    effective_ttl = ttl.total_seconds()
+                else:
+                    effective_ttl = ttl
+            else:
+                effective_ttl = self._default_ttl
+    
             if effective_ttl is not None:
                 if effective_ttl <= 0:
-                    # Remove immediately if TTL is zero or negative
                     self._remove_key(key)
                 else:
                     self._expiration[key] = current_time + effective_ttl
             elif key in self._expiration:
-                # Remove existing expiration if TTL is explicitly None
                 del self._expiration[key]
             
-            # Add to priority queue if needed
+            # Add to priority queue
             if priority is not None:
                 heapq.heappush(self._priority_queue, (-priority, current_time, key))
                 
@@ -300,74 +305,50 @@ class SharedMemory:
 #  3. Versioning and Append
 # ==============================
     def append(self, key: str, value: Any, ttl: Optional[int] = None, priority: Optional[int] = None):
-        """
-        Appends a value to a key, treating it like a new versioned entry.
-        This effectively makes 'append' an alias for 'put' in terms of storage,
-        but it might have different callback semantics if desired.
-        """
-        #with self._lock:
-        #    if key not in self.data:
-        #        self.data[key] = []
-        #    self.data[key].append(value)
-            
-        #    # Trigger registered callbacks
-        #    for cb in self.callbacks.get(key, []):
-        #        threading.Thread(target=cb, args=(value,)).start()
-        #        try:
-        #            cb(value)
-        #        except Exception as e:
-        #            logger.error(f"Callback error for {key}: {str(e)}")
-
-
-
         self._simulate_network()
         current_time = time.time()
-
+    
         with self._lock:
             new_version = VersionedItem(timestamp=current_time, value=value)
             item_size = self._calculate_size(value)
-
-            # Adjust current memory: if key exists, subtract old total size of its versions
-            # This is complex if append truly means "add to existing list of versions".
-            # For simplicity, let's assume append just adds a new version like put.
-            # If _data[key] is new, it's 0.
-            
-            # Store the new version in the deque
             self._data[key].append(new_version)
-            self.current_memory += item_size # Add size of the new item
-
-            # Handle memory eviction if needed
-            while self.current_memory > self.max_memory and len(self._access_log) > 0: # Ensure there's something to evict
+            self.current_memory += item_size
+    
+            # Handle memory eviction
+            while self.current_memory > self.max_memory and len(self._access_log) > 0:
                 self._evict_lru()
-
+    
             self._access_log[key] = current_time
-            self._access_log.move_to_end(key) # Ensure it's marked as recently accessed
-
-
-            # Process TTL (same as in put)
-            effective_ttl = ttl if ttl is not None else self._default_ttl
+            self._access_log.move_to_end(key)
+    
+            # Process TTL - handle timedelta conversion
+            if ttl is not None:
+                if isinstance(ttl, timedelta):
+                    effective_ttl = ttl.total_seconds()
+                else:
+                    effective_ttl = ttl
+            else:
+                effective_ttl = self._default_ttl
+    
             if effective_ttl is not None:
                 if effective_ttl <= 0:
-                    self._remove_key(key) # Remove immediately if TTL is zero or negative
+                    self._remove_key(key)
                 else:
                     self._expiration[key] = current_time + effective_ttl
-            elif key in self._expiration: # No TTL provided, remove any existing expiration
+            elif key in self._expiration:
                 del self._expiration[key]
-
-            # Add to priority queue if needed (same as in put)
+    
+            # Add to priority queue
             if priority is not None:
                 heapq.heappush(self._priority_queue, (-priority, current_time, key))
-
-            # Trigger registered callbacks
-            # Consider what callbacks should receive: the raw value or VersionedItem
+    
+            # Trigger callbacks
             for cb in self.callbacks.get(key, []):
-                # Run callbacks in a new thread to avoid blocking
                 threading.Thread(target=self._safe_callback_call, args=(cb, value)).start()
             
-            # Notify subscribers (if applicable to append logic)
-            self.notify(key, value) # Assuming notify is relevant here too
-
-            return current_time # Return timestamp similar to put
+            self.notify(key, value)
+    
+            return current_time
 
     def _safe_callback_call(self, cb, value):
         """Helper to call callbacks safely."""
@@ -687,6 +668,97 @@ class SharedMemory:
             new_val = current + delta
             self.put(key, new_val)
             return new_val
+        
+    def get_latest_snapshot(self):
+        """Retrieve the most recent system snapshot with metadata"""
+        with self._lock:
+            # Get all snapshot keys sorted by creation time
+            snapshot_keys = sorted(
+                [k for k in self.get_all_keys() if k.startswith('snapshots:')],
+                key=lambda k: self.get_access_time(k) or 0,
+                reverse=True
+            )
+            
+            if not snapshot_keys:
+                logger.warning("No snapshots available in shared memory")
+                return None
+                
+            latest_key = snapshot_keys[0]
+            snapshot = self.get(latest_key)
+            
+            if not snapshot:
+                return None
+                
+            # Enhance snapshot with metadata
+            snapshot_meta = {
+                'snapshot_id': latest_key,
+                'timestamp': self.get_access_time(latest_key),
+                'size_bytes': self._calculate_size(snapshot),
+                'source': 'alignment_agent'
+            }
+            
+            return {
+                'metadata': snapshot_meta,
+                'data': snapshot
+            }
+    
+    def log_intervention(self, report=None, human_input=None, timestamp=None):
+        """Log intervention events with comprehensive metadata"""
+        if timestamp is None:
+            timestamp = datetime.now()
+            
+        intervention_record = {
+            'timestamp': timestamp.isoformat(),
+            'report': report or {},
+            'human_input': human_input or {},
+            'system_state': {
+                'memory_usage': self.get_usage_stats(),
+                'active_threads': threading.active_count(),
+                'priority_queue_size': len(self._priority_queue)
+            },
+            'diagnostics': {
+                'memory_integrity': self.validate_integrity(),
+                'expired_items': len([k for k in self._expiration if self._expiration[k] <= time.time()])
+            }
+        }
+        
+        # Append to intervention log
+        current_log = self.get('intervention_logs', default=[])
+        if not isinstance(current_log, list):
+            current_log = []
+        current_log.append(intervention_record)
+        
+        # Store with long TTL (1 year)
+        self.put(
+            'intervention_logs', 
+            current_log,
+            ttl=timedelta(days=365)
+        )
+        
+        # Publish notification
+        self.publish(
+            channel='system_events',
+            message={
+                'event_type': 'human_intervention',
+                'timestamp': timestamp.isoformat(),
+                'severity': 'critical'
+            }
+        )
+        logger.info(f"Logged intervention event at {timestamp.isoformat()}")
+        
+        return intervention_record
+    
+    # Helper method for integrity validation
+    def validate_integrity(self) -> dict:
+        """Validate memory structure integrity"""
+        with self._lock:
+            return {
+                'data_consistency': len(self._data) == len(self._access_log),
+                'expiration_consistency': all(k in self._data for k in self._expiration),
+                'priority_queue_valid': all(k in self._data for _, _, k in self._priority_queue),
+                'total_items': len(self._data),
+                'total_size_mb': self.current_memory / (1024**2)
+            }
 
 if __name__ == "__main__":
     print("\n=== Running Shared Memory ===\n")
