@@ -7,36 +7,24 @@ Implements:
 - Intervention effect tracking
 """
 import yaml
+import pickle
+import joblib
 import hashlib
 import numpy as np
 import pandas as pd
 
-from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque
 from scipy.stats import pearsonr, entropy
-# rom sklearn.covariance import EmpiricalCovariance # if self.causal_model = EmpiricalCovariance()
-from sklearn.linear_model import SGDRegressor
+from sklearn.linear_model import SGDRegressor, BayesianRidge
 
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Alignment Memory")
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: str, config_file_path: str):
-    with open(config_file_path, "r") as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class AlignmentMemory:
     """
@@ -53,15 +41,16 @@ class AlignmentMemory:
     4. Causal Model: Learned relationships between actions/outcomes
     """
 
-    def __init__(self,
-                 config_section_name: str = "alignment_memory",
-                 config_file_path: str = "src/agents/alignment/configs/alignment_config.yaml",
-                 config: Optional[Dict] = None):
-        if config is not None:
-            self.config = dict_to_namespace(config)
-        else:
-            self.config = get_config_section(config_section_name, config_file_path)
-        
+    def __init__(self):
+        self.config = load_global_config()
+        self.memory_config = get_config_section('alignment_memory')
+
+        self.replay_buffer_size = self.memory_config.get('replay_buffer_size')
+        self.causal_window = self.memory_config.get('causal_window')
+        self.drift_threshold = self.memory_config.get('drift_threshold')
+        self.retention_period = self.memory_config.get('retention_period')
+        self.regressor_type = self.memory_config.get('regressor_type')
+
         # Core memory stores
         self.alignment_logs = pd.DataFrame(columns=[
             'timestamp', 'metric', 'value', 'threshold', 'violation', 'context'
@@ -70,12 +59,11 @@ class AlignmentMemory:
             'context_hash', 'bias_rate', 'ethics_violations', 'last_updated'
         ])
         self.intervention_graph = []
-        # self.causal_model = EmpiricalCovariance()
         self.causal_model = SGDRegressor(eta0=0.01, learning_rate='constant')
         
         # State tracking
         self.concept_drift_scores = []
-        self.replay_buffer = []
+        self.replay_buffer = deque(maxlen=self.replay_buffer_size)
 
     def log_evaluation(self, metric: str, value: float, 
                       threshold: float, context: Dict) -> None:
@@ -88,12 +76,132 @@ class AlignmentMemory:
             'violation': value > threshold,
             'context': self._hash_context(context)
         }
-        self.alignment_logs = pd.concat(
-            [self.alignment_logs, pd.DataFrame([entry])], 
-            ignore_index=True
-        )
+        if self.alignment_logs.empty:
+            self.alignment_logs = pd.DataFrame([entry])
+        else:
+            self.alignment_logs = pd.concat(
+                [self.alignment_logs, pd.DataFrame([entry])], ignore_index=True
+            )
+
+        self.model_history = []  # Track model training history
+        self.intervention_data = []  # Store data for Bayesian updates
+        self._init_causal_model()
         self._update_replay_buffer(entry)
         self._update_context_registry(context, value > threshold)
+
+    def get_logs_by_tag(self, tag_value: str, tag_key: str = "audit_id") -> pd.DataFrame:
+        """Retrieve logs matching a specific context tag"""
+        return self.alignment_logs[
+            self.alignment_logs['context'].apply(
+                lambda ctx: ctx.get(tag_key) == tag_value
+            )
+        ]
+
+    def _init_causal_model(self):
+        """Initialize causal model based on selected regressor type"""
+        if self.regressor_type == 'bayesian':
+            self.causal_model = BayesianRidge()
+            # Bayesian models need full data for updates
+            self.intervention_data = []  
+        else:  # Default to SGD
+            self.causal_model = SGDRegressor(eta0=0.01, learning_rate='constant')
+        self.model_history = []  # Reset training history
+
+    def switch_regressor(self, new_type: str):
+        """Switch between different regressor types"""
+        self.regressor_type = new_type
+        self._init_causal_model()
+        logger.info(f"Switched to {new_type} regressor")
+
+    def save_model(self, path: str):
+        """Save causal model to disk"""
+        joblib.dump({
+            'model': self.causal_model,
+            'regressor_type': self.regressor_type,
+            'history': self.model_history,
+            'intervention_data': self.intervention_data
+        }, path)
+        logger.info(f"Saved causal model to {path}")
+
+    def load_model(self, path: str):
+        """Load causal model from disk"""
+        model_data = joblib.load(path)
+        self.causal_model = model_data['model']
+        self.regressor_type = model_data['regressor_type']
+        self.model_history = model_data['history']
+        self.intervention_data = model_data.get('intervention_data', [])
+        logger.info(f"Loaded {self.regressor_type} model from {path}")
+
+    def _update_causal_model(self, intervention: Dict, effect: Dict):
+        """Update causal relationships with online learning"""
+        X = self._encode_intervention(intervention).reshape(1, -1)
+        y = np.array([effect['alignment_score']])
+        
+        timestamp = datetime.now()
+        loss = None
+        
+        # Handle different regressor types
+        if self.regressor_type == 'bayesian':
+            self.intervention_data.append((X, y))
+            X_full = np.vstack([d[0] for d in self.intervention_data])
+            y_full = np.concatenate([d[1] for d in self.intervention_data])
+            
+            self.causal_model.fit(X_full, y_full)
+            
+            # Calculate current loss
+            y_pred = self.causal_model.predict(X_full)
+            loss = ((y_full - y_pred) ** 2).mean()
+        else:
+            if not hasattr(self.causal_model, 'coef_'):  # Initial fit
+                self.causal_model.partial_fit(X, y)
+            else:
+                self.causal_model.partial_fit(X, y)
+            
+            # Calculate current loss
+            y_pred = self.causal_model.predict(X)
+            loss = ((y - y_pred) ** 2).mean()
+        
+        # Record training metrics
+        self.model_history.append({
+            'timestamp': timestamp,
+            'intervention_id': len(self.intervention_graph) - 1,
+            'loss': loss,
+            'regressor_type': self.regressor_type,
+            'n_samples': len(self.intervention_data) if self.regressor_type == 'bayesian' else len(self.model_history)
+        })
+        logger.debug(f"Updated causal model | Loss: {loss:.4f}")
+
+    def get_model_diagnostics(self):
+        """Return model training history and current state"""
+        return {
+            'history': self.model_history,
+            'current_model': {
+                'type': self.regressor_type,
+                'coef': self.causal_model.coef_.tolist() if hasattr(self.causal_model, 'coef_') else [],
+                'n_samples': len(self.intervention_data) if self.regressor_type == 'bayesian' else len(self.model_history)
+            }
+        }
+
+    def save_checkpoint(self, path: str) -> None:
+        """Save full memory state including model"""
+        with open(path, 'wb') as f:
+            pickle.dump({
+                **self.__dict__,
+                'causal_model': None  # Exclude model to avoid duplication
+            }, f)
+        # Save model separately
+        model_path = path.replace('.pkl', '_model.joblib')
+        self.save_model(model_path)
+
+    def load_checkpoint(self, path: str) -> None:
+        """Load full memory state including model"""
+        with open(path, 'rb') as f:
+            state = pickle.load(f)
+            self.__dict__.update(state)
+        
+        # Load model separately
+        model_path = path.replace('.pkl', '_model.joblib')
+        self.load_model(model_path)
 
     def record_outcome(self, context: Dict, outcome: Dict) -> None:
         """Store context-specific operational outcomes"""
@@ -113,10 +221,12 @@ class AlignmentMemory:
                 'ethics_violations': outcome.get('ethics_violations', 0),
                 'last_updated': now
             }
-            self.context_registry = pd.concat(
-                [self.context_registry, pd.DataFrame([new_entry])],
-                ignore_index=True
-            )
+            if self.context_registry.empty:
+                self.context_registry = pd.DataFrame([new_entry])
+            else:
+                self.context_registry = pd.concat(
+                    [self.context_registry, pd.DataFrame([new_entry])], ignore_index=True
+                )
 
     def apply_correction(self, correction: Dict, effect: Dict) -> None:
         """Log intervention and its observed effects"""
@@ -136,17 +246,21 @@ class AlignmentMemory:
         """Causal impact analysis using recent interventions"""
         if len(self.intervention_graph) < window_size:
             return {}
-            
+    
+        if not hasattr(self.causal_model, 'coef_'):
+            logger.warning("Causal model not yet trained; skipping causal analysis.")
+            return {}
+    
         recent = self.intervention_graph[-window_size:]
         X = np.array([self._encode_intervention(i) for i in recent])
         y = np.array([i['post_state']['alignment_score'] for i in recent])
-        
-        # Calculate intervention impacts using model coefficients
+    
+        # Calculate intervention impacts
         impacts = X @ self.causal_model.coef_
-        
+    
         for i, intervention in enumerate(recent):
             intervention['causal_impact'] = impacts[i]
-            
+    
         return {
             'max_impact': np.max(impacts),
             'min_impact': np.min(impacts),
@@ -155,20 +269,21 @@ class AlignmentMemory:
 
     def detect_drift(self, window_size: int = 30) -> bool:
         """KL-divergence based concept drift detection"""
-        if len(self.replay_buffer) < 2*window_size:
+        if len(self.replay_buffer) < 2 * window_size:
             return False
-            
-        recent = self.replay_buffer[-window_size:]
-        historical = self.replay_buffer[-2*window_size:-window_size]
-        
+    
+        buffer_list = list(self.replay_buffer)
+        recent = buffer_list[-window_size:]
+        historical = buffer_list[-2 * window_size:-window_size]
+    
         # Convert to probability distributions
         p = np.histogram([r['value'] for r in recent], bins=10)[0] + 1e-6
         q = np.histogram([h['value'] for h in historical], bins=10)[0] + 1e-6
         kl_div = entropy(p, q)
-        
+    
         self.concept_drift_scores.append(kl_div)
-        return kl_div > self.config.drift_threshold
-
+        return kl_div > self.drift_threshold
+    
     def get_memory_report(self) -> Dict:
         """Generate comprehensive memory analysis"""
         return {
@@ -184,7 +299,7 @@ class AlignmentMemory:
 
     def _update_replay_buffer(self, entry: Dict):
         """Manage experience replay buffer"""
-        if len(self.replay_buffer) >= self.config.replay_buffer_size:
+        if len(self.replay_buffer) >= self.replay_buffer_size:
             self.replay_buffer.pop(0)
         self.replay_buffer.append(entry)
 
@@ -200,6 +315,13 @@ class AlignmentMemory:
                 float(violation) * 0.1
             )
 
+    def enforce_retention(self):
+        cutoff = datetime.now() - timedelta(days=self.retention_period)
+        self.alignment_logs = self.alignment_logs[self.alignment_logs['timestamp'] > cutoff]
+
+    def get_logs_by_tag(self, tag: str) -> pd.DataFrame:
+        return self.alignment_logs[self.alignment_logs['tag'] == tag]
+
     def _get_current_state(self) -> Dict:
         """Snapshot current alignment state"""
         return {
@@ -207,6 +329,14 @@ class AlignmentMemory:
             'violation_rate': self.alignment_logs['violation'].mean(),
             'active_contexts': len(self.context_registry)
         }
+
+    def get_violation_history(self, hazard_type=None):
+        """Get historical violation data"""
+        # Implementation would query violation history
+        return [
+            {'timestamp': '2025-06-01T10:00', 'severity': 0.7},
+            {'timestamp': '2025-06-02T14:30', 'severity': 0.4}
+        ]
 
     def _encode_intervention(self, intervention: Dict) -> np.ndarray:
         """Convert intervention to feature vector"""
@@ -217,16 +347,6 @@ class AlignmentMemory:
             intervention['pre_state']['violation_rate']
         ])
 
-    def _update_causal_model(self, intervention: Dict, effect: Dict):
-        """Incrementally update causal relationships with online learning"""
-        X = self._encode_intervention(intervention).reshape(1, -1)
-        y = np.array([effect['alignment_score']])
-        
-        if not hasattr(self.causal_model, 'coef_'):  # Initial fit
-            self.causal_model.partial_fit(X, y)
-        else:
-            self.causal_model.partial_fit(X, y)
-
     def _temporal_analysis(self) -> Dict:
         """Analyze alignment metrics over time"""
         return self.alignment_logs.groupby('metric').agg({
@@ -235,19 +355,78 @@ class AlignmentMemory:
         }).to_dict()
 
     def _context_statistics(self) -> Dict:
-        """Compute context-specific performance metrics"""
-        return self.context_registry.describe().to_dict()
+        """Detailed analysis of context-specific alignment metrics"""
+        if self.context_registry.empty:
+            return {
+                "summary": {},
+                "recent_contexts": [],
+                "violation_extremes": {}
+            }
+    
+        registry = self.context_registry.copy()
+    
+        summary_stats = registry[['bias_rate', 'ethics_violations']].describe().to_dict()
+    
+        # Recent activity: Top 5 most recently updated contexts
+        recent_contexts = registry.sort_values('last_updated', ascending=False).head(5)[
+            ['context_hash', 'bias_rate', 'ethics_violations', 'last_updated']
+        ].to_dict(orient='records')
+    
+        # Violation extremes
+        max_violation = registry.loc[registry['ethics_violations'].idxmax()]
+        min_bias = registry.loc[registry['bias_rate'].idxmin()]
+    
+        violation_extremes = {
+            "most_violations": {
+                "context": max_violation['context_hash'],
+                "count": max_violation['ethics_violations']
+            },
+            "least_biased": {
+                "context": min_bias['context_hash'],
+                "rate": min_bias['bias_rate']
+            }
+        }
+    
+        return {
+            "summary": summary_stats,
+            "recent_contexts": recent_contexts,
+            "violation_extremes": violation_extremes
+        }
 
     def _intervention_impact(self) -> Dict:
-        """Summarize intervention effectiveness"""
+        """Detailed summary of intervention effectiveness"""
         if not self.intervention_graph:
-            return {}
-            
+            return {
+                "types": {},
+                "top_interventions": [],
+                "correlation": None
+            }
+    
         df = pd.DataFrame(self.intervention_graph)
-        return df.groupby('type').agg({
-            'causal_impact': ['mean', 'std'],
-            'magnitude': 'median'
+        df = df[df['causal_impact'].notnull()]
+    
+        grouped = df.groupby('type').agg({
+            'causal_impact': ['mean', 'std', 'max', 'min'],
+            'magnitude': ['median', 'mean']
         }).to_dict()
+    
+        # Top 3 most effective interventions
+        top_interventions = df.sort_values('causal_impact', ascending=False).head(3)[[
+            'type', 'magnitude', 'causal_impact', 'target'
+        ]].to_dict(orient='records')
+    
+        # Correlation between magnitude and impact (overall)
+        if len(df) > 1:
+            correlation = np.corrcoef(df['magnitude'], df['causal_impact'])[0, 1]
+        else:
+            correlation = None
+    
+        return {
+            "types": grouped,
+            "top_interventions": top_interventions,
+            "correlation": correlation
+        }
+
 
 # Added to alignment_memory.py
 
@@ -273,18 +452,7 @@ if __name__ == "__main__":
             'task_type': random.choice(['classification', 'generation', 'prediction'])
         }
 
-    # Initialize memory system with test configuration
-    #test_config = MemoryConfig(
-    #    replay_buffer_size=500,
-    #    causal_window=50,
-    #    drift_threshold=0.3,
-    #    retention_period=30
-    #)
-    memory = AlignmentMemory(
-        config_section_name="alignment_memory",
-        config_file_path="src/agents/alignment/configs/alignment_config.yaml",
-        config = None
-    )
+    memory = AlignmentMemory()
     
     # Phase 1: Baseline behavior logging
     print("\n=== Phase 1: Baseline Logging (100 events) ===")
@@ -350,14 +518,17 @@ if __name__ == "__main__":
     print(memory.analyze_causes(window_size=20))
     
     print("\nConcept Drift Detection:")
-    print(f"Drift detected: {memory.detect_drift()}")
+    printer.pretty(f"Drift detected:", memory.detect_drift(), "success")
     
     print("\nMemory Report Summary:")
     report = memory.get_memory_report()
-    print(f"Temporal Summary: {report['temporal_summary']}")
+    printer.pretty(f"Temporal Summary:", report['temporal_summary'], "success")
     print(f"Active Contexts: {len(memory.context_registry)}")
-    print(f"Intervention Types: {pd.DataFrame(memory.intervention_graph)['type'].value_counts().to_dict()}")
-    
+    printer.pretty(f"Intervention Types:", pd.DataFrame(memory.intervention_graph)['type'].value_counts().to_dict(), "success")
+
+    printer.pretty("statistic", memory._context_statistics(), "success",)
+    printer.pretty("Impact", memory._intervention_impact(), "success",)
+
     # Added visualization method for testing
     def visualize_memory(memory: AlignmentMemory):
         """Test visualization of memory components"""
