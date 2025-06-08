@@ -8,34 +8,31 @@ Implements causal graph operations for counterfactual analysis through:
 
 import statsmodels.formula.api as smf
 import networkx as nx
-import numpy as np
 import pandas as pd
-import math
+import numpy as np
+import subprocess
 import itertools
-
+import tempfile
+import math
+import json, os
 
 from scipy.stats import pearsonr, norm
 from typing import Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
+from sklearn.covariance import GraphicalLasso
+from statsmodels.api import OLS
 from statsmodels.formula.api import ols
 from statsmodels.tools.tools import add_constant
 from statsmodels.regression.linear_model import RegressionResultsWrapper
 from statsmodels.sandbox.regression.gmm import IV2SLS # For Instrumental Variables
 
-from logs.logger import get_logger
+from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Causal Model")
-
-@dataclass
-class CausalGraphConfig:
-    """Configuration for causal graph construction"""
-    min_adjacency_confidence: float = 0.7 # Corresponds to alpha in Fisher-Z
-    max_parents: int = 3
-    forbidden_edges: List[Tuple[str, str]] = field(default_factory=list)
-    required_edges: List[Tuple[str, str]] = field(default_factory=list)
-    significance_level: float = 0.05 # Alpha for CI tests
+printer = PrettyPrinter
 
 class CausalGraphBuilder:
     """
@@ -45,11 +42,24 @@ class CausalGraphBuilder:
     - Confounder detection via latent variable analysis
     """
 
-    def __init__(self, config: Optional[CausalGraphConfig] = None):
-        self.config = config or CausalGraphConfig()
+    def __init__(self):
+        self.config = load_global_config()
+        self.causal_config = get_config_section('causal_model')
+        self.min_adjacency_confidence = self.causal_config.get('min_adjacency_confidence')
+        self.max_parents = self.causal_config.get('max_parents')
+        self.significance_level = self.causal_config.get('significance_level')
+        self.forbidden_edges = self.causal_config.get('forbidden_edges')
+        self.required_edges = self.causal_config.get('required_edges')
+        self.latent_confounder_detection = self.causal_config.get('latent_confounder_detection', True)
+        self.tetrad_path = self.causal_config.get('tetrad_path', '')
+        self.fci_max_conditioning_set = self.causal_config.get('fci_max_conditioning_set', 5)
+        self.pag = None
+
         self.graph = nx.DiGraph()
         self.nodes = []
         self.separating_sets = {} # Store separating sets found by PC
+
+        logger.info(f"Causal Graph Builder succesfully initialized")
 
     def _partial_correlation(self, data: pd.DataFrame, i: str, j: str, conditioning_set: Set[str]) -> Tuple[float, float]:
         """
@@ -114,7 +124,7 @@ class CausalGraphBuilder:
         test_statistic = abs(z_transform * np.sqrt(n - k - 3))
 
         # Critical value from standard normal distribution
-        critical_value = norm.ppf(1 - self.config.significance_level / 2)
+        critical_value = norm.ppf(1 - self.significance_level / 2)
 
         # Check for independence
         is_independent = test_statistic < critical_value
@@ -377,12 +387,12 @@ class CausalGraphBuilder:
              logger.warning("Graph is not directed before enforcing constraints. Constraints might not apply correctly.")
              return # Or attempt conversion
 
-        for (u, v) in self.config.forbidden_edges:
+        for (u, v) in self.forbidden_edges:
             if self.graph.has_edge(u, v):
                 logger.info(f"Removing forbidden edge: {u} -> {v}")
                 self.graph.remove_edge(u, v)
 
-        for (u, v) in self.config.required_edges:
+        for (u, v) in self.required_edges:
             if not self.graph.has_edge(u, v):
                  # Adding required edges might create cycles. Check required.
                  self.graph.add_edge(u, v)
@@ -521,22 +531,201 @@ class CausalGraphBuilder:
         if iteration == max_iterations:
             logger.warning("Greedy BIC Optimization reached max iterations.")
 
+    def _run_fci_algorithm(self, data: pd.DataFrame):
+        """FCI algorithm implementation with latent variable handling"""
+        # Step 1: FCI Skeleton Phase
+        logger.info("Running FCI Skeleton Phase...")
+        self._run_fci_skeleton(data)
+        
+        # Step 2: FCI Orientation Phase
+        logger.info("Running FCI Orientation Phase...")
+        self._run_fci_orientation()
+        
+        # Step 3: Store PAG
+        self.pag = self.graph.copy()
 
-    def _detect_confounders(self,
-                           data: pd.DataFrame,
-                           sensitive_attrs: List[str]):
-        """Latent variable analysis for confounder detection (Placeholder)"""
-        # This is a complex topic. True latent confounder detection often requires
-        # methods beyond standard PC or BIC scores (e.g., FCI algorithm, Tetrad).
-        # A simpler approach might look for v-structures involving sensitive attributes
-        # or use domain knowledge.
-        logger.info("Confounder detection step is a placeholder in this implementation.")
-        for attr in sensitive_attrs:
-            # Example heuristic: Check if 'attr' is a collider in many v-structures,
-            # which might suggest it's influenced by unobserved factors common to its parents.
-            # Or, check if residuals of models involving 'attr' are correlated with residuals
-            # of other models, suggesting shared unobserved causes.
-            pass
+    def _run_fci_skeleton(self, data: pd.DataFrame):
+        """FCI skeleton phase with extended conditioning sets"""
+        # Initialize complete undirected graph
+        self.graph = nx.complete_graph(self.nodes, create_using=nx.Graph())
+        l = 0
+        
+        while l <= self.fci_max_conditioning_set:
+            edges_removed = False
+            current_edges = list(self.graph.edges())
+            
+            for i, j in current_edges:
+                neighbors_i = set(self.graph.neighbors(i)) - {j}
+                neighbors_j = set(self.graph.neighbors(j)) - {i}
+                possible_conditioning_sets = set()
+                
+                # Consider sets from both neighborhoods
+                for k in range(0, min(l, len(neighbors_i)) + 1):
+                    possible_conditioning_sets |= set(itertools.combinations(neighbors_i, k))
+                
+                for k in range(0, min(l, len(neighbors_j)) + 1):
+                    possible_conditioning_sets |= set(itertools.combinations(neighbors_j, k))
+                
+                for cond_set in possible_conditioning_sets:
+                    cond_set = set(cond_set)
+                    if self._fisher_z_test(data, i, j, cond_set):
+                        if self.graph.has_edge(i, j):
+                            self.graph.remove_edge(i, j)
+                            edges_removed = True
+                            self.separating_sets[(i, j)] = cond_set
+                            self.separating_sets[(j, i)] = cond_set
+                            break
+            
+            if not edges_removed or l >= self.fci_max_conditioning_set:
+                break
+            l += 1
+
+    def _run_fci_orientation(self):
+        """FCI orientation rules for PAG construction"""
+        # Initialize PAG with circle marks
+        pag = nx.DiGraph()
+        for u, v in self.graph.edges():
+            pag.add_edge(u, v, mark='o')
+            pag.add_edge(v, u, mark='o')
+        
+        # Rule 0: Orient colliders
+        for node in pag.nodes():
+            neighbors = list(pag.neighbors(node))
+            if len(neighbors) < 2:
+                continue
+                
+            for i, j in itertools.combinations(neighbors, 2):
+                if not pag.has_edge(i, j):
+                    sep_set = self.separating_sets.get((i, j), set())
+                    if node not in sep_set:
+                        # Orient i *-> node <-* j
+                        pag[i][node]['mark'] = '>' if pag[i][node]['mark'] != '<' else '<'
+                        pag[j][node]['mark'] = '>' if pag[j][node]['mark'] != '<' else '<'
+        
+        # Additional FCI orientation rules would be implemented here
+        # (Rules 1-4 for further edge orientation)
+        
+        # Store orientation marks in graph
+        self.graph = pag
+
+    def _detect_confounders(self, data: pd.DataFrame, sensitive_attrs: List[str]):
+        """Enhanced confounder detection with FCI and Tetrad integration"""
+        if not self.latent_confounder_detection:
+            logger.info("Latent confounder detection disabled in config")
+            return
+        
+        # Save the original graph state
+        original_graph = self.graph.copy()
+        
+        try:
+            # Option 1: Use Tetrad if available
+            if self.tetrad_path and self._run_tetrad_fci(data):
+                self._analyze_tetrad_results(sensitive_attrs)
+                return
+                
+            # Option 2: Internal FCI implementation
+            self._run_fci_algorithm(data)
+            self._analyze_pag(sensitive_attrs)
+        except Exception as e:
+            logger.error(f"Confounder detection failed: {e}")
+        finally:
+            # Always restore the original graph after confounder detection
+            self.graph = original_graph
+
+    def _run_tetrad_fci(self, data: pd.DataFrame) -> nx.DiGraph:
+        tetrad_jar_path = self.tetrad_path
+        if not os.path.isfile(tetrad_jar_path):
+            logger.error(f"Tetrad JAR not found at path: {tetrad_jar_path}")
+            raise FileNotFoundError(f"Tetrad JAR not found: {tetrad_jar_path}")
+    
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                data.to_csv(tmp.name, index=False)
+                tmp_path = tmp.name
+    
+            tetrad_cmd = [
+                "java", "-jar", tetrad_jar_path,  # this is where the error likely originated
+                "--algorithm", "fci",
+                "--data", tmp_path
+            ]
+            logger.info(f"Running Tetrad with command: {' '.join(tetrad_cmd)}")
+            result = subprocess.run(tetrad_cmd, capture_output=True, text=True, check=True)
+            # ...parse result.stdout into a graph...
+            return self._parse_tetrad_output(result.stdout)
+    
+        except Exception as e:
+            logger.error(f"Confounder detection failed: {e}")
+            return nx.DiGraph()
+
+    def _analyze_tetrad_results(self, sensitive_attrs: List[str]):
+        """Parse Tetrad output for latent confounders"""
+        confounders = set()
+        graph = self.tetrad_result['graph']
+        
+        for edge in graph['edges']:
+            if edge['endpoint1'] == 'ARROW' and edge['endpoint2'] == 'ARROW':
+                i, j = edge['node1'], edge['node2']
+                confounders.add((i, j))
+                if i in sensitive_attrs or j in sensitive_attrs:
+                    logger.warning(f"Tetrad detected latent confounder involving sensitive attribute: {i} <-> {j}")
+
+        self.graph.potential_latent_confounders = confounders
+        logger.info(f"Tetrad detected {len(confounders)} potential latent confounders")
+
+    def _analyze_pag(self, sensitive_attrs: List[str]):
+        """Analyze PAG for latent confounders"""
+        if not self.pag:
+            return
+            
+        confounders = set()
+        for u, v, data in self.pag.edges(data=True):
+            if data.get('mark', '') == '<' and self.pag[v][u].get('mark', '') == '<':
+                confounders.add((u, v))
+                if u in sensitive_attrs or v in sensitive_attrs:
+                    logger.warning(f"Detected latent confounder involving sensitive attribute: {u} <-> {v}")
+
+        self.graph.potential_latent_confounders = confounders
+        logger.info(f"Detected {len(confounders)} potential latent confounders")
+
+    def _estimate_inverse_covariance(self, data: pd.DataFrame):
+        """Estimate sparse inverse covariance for FCI tests"""
+        try:
+            cov_matrix = data.cov().values
+            model = GraphicalLasso()
+            model.fit(cov_matrix)
+            return model.precision_
+        except Exception as e:
+            logger.error(f"Inverse covariance estimation failed: {str(e)}")
+            return None
+
+    # Update conditional independence test for FCI
+    def _partial_correlation(self, data: pd.DataFrame, i: str, j: str, conditioning_set: Set[str]) -> Tuple[float, float]:
+        """Enhanced with inverse covariance matrix option"""
+        n = len(data)
+        
+        if self.causal_config.get('use_inverse_covariance', False) and n > 50:
+            precision_matrix = self._estimate_inverse_covariance(data)
+            if precision_matrix is not None:
+                idx_i = data.columns.get_loc(i)
+                idx_j = data.columns.get_loc(j)
+                cond_indices = [data.columns.get_loc(c) for c in conditioning_set if c in data.columns]
+                
+                # Calculate partial correlation using precision matrix
+                p_corr = -precision_matrix[idx_i, idx_j] / math.sqrt(
+                    precision_matrix[idx_i, idx_i] * precision_matrix[idx_j, idx_j])
+                
+                # Fisher Z-transform for p-value
+                n = len(data)
+                z = 0.5 * math.log((1 + p_corr) / (1 - p_corr))
+                se = 1 / math.sqrt(n - len(conditioning_set) - 3)
+                z_score = abs(z / se)
+                p_value = 2 * (1 - norm.cdf(z_score))
+                return p_corr, p_value
+            
+        else:
+            # Fallback to original OLS method
+            return super()._partial_correlation(data, i, j, conditioning_set)
+
 
 # ==================================================
 # Causal Model Class (includes IV, Backdoor, etc.)
@@ -576,7 +765,6 @@ class CausalModel:
             raise ValueError("Graph must be a directed acyclic graph")
 
     def _get_structural_equations(self) -> Dict[str, RegressionResultsWrapper]:
-        from statsmodels.api import OLS
         """Estimate and return structural equations (memoized)."""
         if self.structural_equations is None:
             logger.info("Estimating structural equations...")
@@ -1022,100 +1210,76 @@ class CausalModel:
         else:
             raise ValueError(f"Unknown backdoor method specified: {method}")
 
-
     # --- Instrumental Variable (IV) Methods ---
-
     def _check_iv_conditions(self, instrument: str, treatment: str, outcome: str) -> Dict[str, bool]:
-        r"""
-        Checks the graphical conditions for a valid instrument Z relative to (X, Y).
-        1. Relevance: Z is associated with X (path exists). Z -- X. (Cannot check strength here).
-           Graphical check: Is Z an ancestor of X? Is there an unblocked path?
-        2. Exclusion Restriction: Z affects Y *only* through X.
-           All directed paths from Z to Y must pass through X.
-           Equivalently: Z is d-separated from Y in G[V \ {outgoing edges from X}].
-        3. Independence/Exogeneity: Z shares no common causes with Y (that are not mediated by X).
-           All backdoor paths from Z to Y are blocked (often assumed, hard to verify from graph alone if unobserved confounders exist).
-           Check: Is Z d-separated from Y in G with X removed? More simply, check backdoor paths Z <-> Y.
-
-        Returns:
-            Dict[str, bool]: Dictionary indicating if conditions seem met based on the graph.
-        """
-        conditions = {'relevance_path': False, 'exclusion': False, 'independence': False}
-
-        # 1. Relevance: Path Z --> ... --> X ?
-        #    Check if Z is an ancestor of X. A simpler check is just if Z and X are connected.
-        #    A practical check often involves a statistical test (1st stage regression).
-        #    Graphical: Is there *any* active path between Z and X?
-        #    Check for ancestry:
-        if instrument in nx.ancestors(self.graph, treatment):
-             conditions['relevance_path'] = True
-             # Stronger check: Is there an unblocked path Z to X? Usually assumed if ancestor.
-
-
-        # 2. Exclusion: All paths Z --> ... --> Y must go through X.
-        #    Find all directed paths from Z to Y. Check if X is on *all* of them.
-        exclusion_holds = True
-        if nx.has_path(self.graph, instrument, outcome): # Only check if a directed path exists
-             paths_z_y = list(nx.all_simple_paths(self.graph, source=instrument, target=outcome))
-             if not paths_z_y: # No directed path Z->Y
-                 exclusion_holds = True # Vacuously true
-             else:
-                 for path in paths_z_y:
-                     if treatment not in path:
-                         logger.warning(f"IV Exclusion Violation? Path from {instrument} to {outcome} does not contain {treatment}: {path}")
-                         exclusion_holds = False
-                         break
-        conditions['exclusion'] = exclusion_holds
-
-
-        # 3. Independence: Z and Y share no common causes (except via X).
-        #    Check if Z is d-separated from Y conditional on common causes (if observed),
-        #    or more strictly, that there are no backdoor paths Z <-> Y that are *not* blocked by X.
-        #    Find backdoor paths between Z and Y. Ensure they are all blocked (ideally by empty set, or by X).
-        #    Common check: Are there any backdoor paths Z <- U -> Y ?
-        backdoor_paths_zy = self._find_backdoor_paths(instrument, outcome) # Paths starting Z <- ... -> Y
-        # Also need paths Z -> ... <- U -> Y ? This gets complicated.
-        # Simplified check: Are Z and Y d-separated given X's parents (potential confounders of X-Y)?
-        # Strong assumption check: Are Z and Y d-separated given empty set in G? (No confounding path at all)
-        independence_holds = True
-        for path in nx.all_simple_paths(self.graph.to_undirected(), source=instrument, target=outcome):
-             # Check if this path represents confounding between Z and Y *not* via X
-             is_confounding = False
-             if len(path) >= 3:
-                  # Check for Z <- W -> Y type structures
-                  for i in range(len(path) - 2):
-                       u, m, v = path[i], path[i+1], path[i+2]
-                       # Check if m is a common cause creating a backdoor path Z..m..Y
-                       if self.graph.has_edge(m, u) and self.graph.has_edge(m, v): # Fork m -> u, m -> v
-                           # If this fork is part of the Z-Y path not involving X...
-                           # This check is complex. Let's assume independence holds if exclusion holds, common practice unless specific confounders Z-Y known.
-                           pass # Placeholder for more rigorous check
-
-             # If path is active and does NOT exclusively go through X, potential violation
-             # Skipping rigorous check for now. Assume independence if exclusion holds graphically, but warn.
-
-
-        # Placeholder for simplified independence check: No direct edge Z -> Y (part of exclusion), no parent of Z is ancestor of Y (except via X)
-        if not conditions['exclusion']:
-             independence_holds = False # If exclusion fails, independence likely fails too
-
-        # Check if Z has parents that are also ancestors of Y via path not through X
-        parents_z = set(self.graph.predecessors(instrument))
-        for pz in parents_z:
-             if nx.has_path(self.graph, pz, outcome):
-                  for path in nx.all_simple_paths(self.graph, source=pz, target=outcome):
-                       if treatment not in path and instrument not in path:
-                            logger.warning(f"IV Independence Violation? Parent {pz} of IV {instrument} has path to {outcome} not via {treatment}: {path}")
-                            independence_holds = False
-                            break
-             if not independence_holds: break
-
-        conditions['independence'] = independence_holds
-
-
-        logger.info(f"IV ({instrument}) conditions check for ({treatment} -> {outcome}): {conditions}")
+        conditions = {
+            'relevance_path': False,
+            'exclusion': False,
+            'independence': False
+        }
+        
+        # 1. Relevance: Check for active paths between Z and X
+        if nx.has_path(self.graph.to_undirected(), instrument, treatment):
+            conditions['relevance_path'] = True
+        
+        # Create modified graph (remove outgoing edges from X)
+        graph_X = self.graph.copy()
+        for child in list(graph_X.successors(treatment)):
+            graph_X.remove_edge(treatment, child)
+        
+        # 2. Exclusion: No directed paths from Z to Y in modified graph
+        conditions['exclusion'] = not nx.has_path(graph_X, instrument, outcome)
+        
+        # 3. Independence: d-separation in modified graph
+        conditions['independence'] = self._are_d_separated(
+            graph_X, instrument, outcome, set()
+        )
         return conditions
-
+    
+    def _are_d_separated(self, graph, node1, node2, conditioning_set) -> bool:
+        """Check if node1 and node2 are d-separated given conditioning_set."""
+        if node1 not in graph or node2 not in graph:
+            return True
+        
+        # Check connectivity
+        if not nx.has_path(graph.to_undirected(), node1, node2):
+            return True
+        
+        # Examine all simple paths
+        try:
+            paths = nx.all_simple_paths(graph.to_undirected(), node1, node2)
+        except nx.NodeNotFound:
+            return True
+        
+        for path in paths:
+            if not self._is_blocked_path(graph, path, conditioning_set):
+                return False  # Active path exists → d-connected
+        return True  # All paths blocked
+    
+    def _is_blocked_path(self, graph, path: List[str], conditioning_set: Set[str]) -> bool:
+        """Check if a path is blocked by conditioning_set in a given graph."""
+        if len(path) < 3:
+            return True  # Trivially blocked
+        
+        for i in range(len(path) - 2):
+            u, m, v = path[i], path[i+1], path[i+2]
+            
+            # Chain (→ m →) or Fork (← m →)
+            if (graph.has_edge(u, m) and graph.has_edge(m, v)) or \
+               (graph.has_edge(m, u) and graph.has_edge(m, v)):
+                if m in conditioning_set:
+                    return True  # Blocked by conditioning
+            
+            # Collider (→ m ←)
+            elif graph.has_edge(u, m) and graph.has_edge(v, m):
+                descendants = nx.descendants(graph, m) | {m}
+                if not descendants & conditioning_set:  # No conditioning on collider/descendants
+                    return True  # Path blocked
+        return False  # Path not blocked
+    
+    # Update existing method to use new path-based check
+    def _is_blocked(self, path: List[str], conditioning_set: Set[str]) -> bool:
+        return self._is_blocked_path(self.graph, path, conditioning_set)
 
     def _instrumental_variables(self,
                                data: pd.DataFrame,
@@ -1317,6 +1481,8 @@ class CausalModel:
 
 # Example Usage (Optional - Keep commented out or remove for final script)
 if __name__ == '__main__':
+    print("\n=== Running Causal Model ===\n")
+    printer.status("Init", "Causal Model initialized", "success")
     # Create sample data
     np.random.seed(42)
     n_samples = 1000
@@ -1329,11 +1495,10 @@ if __name__ == '__main__':
     data = pd.DataFrame({'Z': Z, 'X': X, 'Y': Y, 'W': W})
 
     # --- Graph Learning ---
-    builder_config = CausalGraphConfig(significance_level=0.05)
-    builder = CausalGraphBuilder(config=builder_config)
+    builder = CausalGraphBuilder()
     # This will run PC, orient, BIC optimize etc.
     # In a real scenario, might need constraints.
-    builder.config.forbidden_edges = [('Y', 'X')] # Example constraint
+    builder.forbidden_edges = [('Y', 'X')] # Example constraint
     learned_model = builder.construct_graph(data, sensitive_attrs=[]) # No sensitive attrs here
 
     print("\nLearned Graph Edges:")
@@ -1376,3 +1541,4 @@ if __name__ == '__main__':
 
     except Exception as e:
         print(f"Counterfactual computation failed: {e}")
+    print("\n=== Causal Model Test Completed ===\n")
