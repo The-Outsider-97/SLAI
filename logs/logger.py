@@ -305,17 +305,19 @@ class RotatingHandler(RotatingFileHandler):
         try:
             if os.path.exists(dfn):
                 os.remove(dfn)
-            os.rename(self.baseFilename, dfn)
+            if os.path.exists(self.baseFilename):
+                os.rename(self.baseFilename, dfn)
+
         except PermissionError:
-            # Graceful fallback: copy+remove, tolerate failure silently            
             try:
-                shutil.copyfile(self.baseFilename, dfn)
-                os.remove(self.baseFilename)
+                if os.path.exists(self.baseFilename):
+                    shutil.copyfile(self.baseFilename, dfn)
+                    os.remove(self.baseFilename)
+
             except Exception:
-                # Last resort: log but suppress crash
                 if self._compress_queue and self._compress_queue[-1] != self.baseFilename:
                     print(f"[LOGGER] Log rotation skipped (still locked): {self.baseFilename}", file=sys.stderr)
-                return  # Prevent further attempts this cycle
+                return
     
         if not self.delay:
             try:
@@ -483,7 +485,7 @@ class PrettyPrinter:
     @classmethod
     def section_header(cls, text):
         print("\n" + cls._style("╒═══════════════════════════════", 'bold', 'magenta'))
-        print(cls._style(f"│ {text.upper()}", 'bold', 'magenta', 'italic'))
+        print(cls._style(f" {text.upper()}", 'bold', 'magenta', 'italic'))
         print(cls._style("╘═══════════════════════════════", 'bold', 'magenta'))
 
     @classmethod
