@@ -1,0 +1,380 @@
+[
+  {
+    "name": "Simple Noun Phrase (Det + Noun)",
+    "pattern": ["DT", "NN"],
+    "description": "A determiner followed by a singular noun.",
+    "example_tags": ["DT", "NN"],
+    "example_sentence_fragment": "the cat"
+  },
+  {
+    "name": "Simple Noun Phrase (Det + Plural Noun)",
+    "pattern": ["DT", "NNS"],
+    "description": "A determiner followed by a plural noun.",
+    "example_tags": ["DT", "NNS"],
+    "example_sentence_fragment": "some dogs"
+  },
+  {
+    "name": "Noun Phrase (Det + Adj + Noun)",
+    "pattern": ["DT", "JJ", "NN"],
+    "description": "Determiner, adjective, and singular noun.",
+    "example_tags": ["DT", "JJ", "NN"],
+    "example_sentence_fragment": "a red car"
+  },
+  {
+    "name": "Noun Phrase (Det + Adj + Plural Noun)",
+    "pattern": ["DT", "JJ", "NNS"],
+    "description": "Determiner, adjective, and plural noun.",
+    "example_tags": ["DT", "JJ", "NNS"],
+    "example_sentence_fragment": "the small houses"
+  },
+  {
+    "name": "Noun Phrase (Adj + Noun)",
+    "pattern": ["JJ", "NN"],
+    "description": "Adjective modifying a singular noun.",
+    "example_tags": ["JJ", "NN"],
+    "example_sentence_fragment": "blue sky"
+  },
+  {
+    "name": "Noun Phrase (Adj + Plural Noun)",
+    "pattern": ["JJ", "NNS"],
+    "description": "Adjective modifying a plural noun.",
+    "example_tags": ["JJ", "NNS"],
+    "example_sentence_fragment": "happy children"
+  },
+  {
+    "name": "Proper Noun (Singular)",
+    "pattern": ["NNP"],
+    "description": "A single proper noun.",
+    "example_tags": ["NNP"],
+    "example_sentence_fragment": "John"
+  },
+  {
+    "name": "Proper Noun Phrase (Multi-word)",
+    "pattern": ["NNP", "NNP"],
+    "description": "Two consecutive proper nouns, often forming a single entity name.",
+    "example_tags": ["NNP", "NNP"],
+    "example_sentence_fragment": "New York"
+  },
+  {
+    "name": "Proper Noun Phrase (Extended)",
+    "pattern": ["NNP", "NNP", "NNP"],
+    "description": "Three consecutive proper nouns.",
+    "example_tags": ["NNP", "NNP", "NNP"],
+    "example_sentence_fragment": "John F. Kennedy"
+  },
+  {
+    "name": "Noun Phrase with Possessive",
+    "pattern": ["DT", "NN", "POS", "NN"],
+    "description": "Noun phrase showing possession (e.g., the cat's toy).",
+    "example_tags": ["DT", "NN", "POS", "NN"],
+    "example_sentence_fragment": "the dog's bone"
+  },
+  {
+    "name": "Noun Phrase with Proper Noun Possessive",
+    "pattern": ["NNP", "POS", "NN"],
+    "description": "Proper noun showing possession (e.g., John's book).",
+    "example_tags": ["NNP", "POS", "NN"],
+    "example_sentence_fragment": "Mary's car"
+  },
+  {
+    "name": "Noun Phrase (Noun + Noun - Compound Noun)",
+    "pattern": ["NN", "NN"],
+    "description": "Two nouns forming a compound noun.",
+    "example_tags": ["NN", "NN"],
+    "example_sentence_fragment": "computer screen"
+  },
+  {
+    "name": "Noun Phrase (Noun + Plural Noun - Compound Noun)",
+    "pattern": ["NN", "NNS"],
+    "description": "Singular noun followed by plural, possibly a compound.",
+    "example_tags": ["NN", "NNS"],
+    "example_sentence_fragment": "apple trees"
+  },
+  {
+    "name": "Noun Phrase (Number + Noun)",
+    "pattern": ["CD", "NNS"],
+    "description": "A cardinal number followed by a plural noun.",
+    "example_tags": ["CD", "NNS"],
+    "example_sentence_fragment": "three apples"
+  },
+  {
+    "name": "Noun Phrase (Number + Adj + Noun)",
+    "pattern": ["CD", "JJ", "NNS"],
+    "description": "Cardinal number, adjective, and plural noun.",
+    "example_tags": ["CD", "JJ", "NNS"],
+    "example_sentence_fragment": "five red balloons"
+  },
+  {
+    "name": "Verb Phrase (Simple Present - 3rd Person)",
+    "pattern": ["VBZ"],
+    "description": "A verb in 3rd person singular present tense.",
+    "example_tags": ["VBZ"],
+    "example_sentence_fragment": "runs"
+  },
+  {
+    "name": "Verb Phrase (Simple Present - Non-3rd Person)",
+    "pattern": ["VBP"],
+    "description": "A verb in non-3rd person singular present tense.",
+    "example_tags": ["VBP"],
+    "example_sentence_fragment": "run"
+  },
+  {
+    "name": "Verb Phrase (Past Tense)",
+    "pattern": ["VBD"],
+    "description": "A verb in past tense.",
+    "example_tags": ["VBD"],
+    "example_sentence_fragment": "ran"
+  },
+  {
+    "name": "Verb Phrase (Present Participle/Gerund)",
+    "pattern": ["VBG"],
+    "description": "A verb as a gerund or present participle.",
+    "example_tags": ["VBG"],
+    "example_sentence_fragment": "running"
+  },
+  {
+    "name": "Verb Phrase (Past Participle)",
+    "pattern": ["VBN"],
+    "description": "A verb as a past participle.",
+    "example_tags": ["VBN"],
+    "example_sentence_fragment": "eaten"
+  },
+  {
+    "name": "Verb Phrase (Modal + Verb)",
+    "pattern": ["MD", "VB"],
+    "description": "A modal verb followed by a base form verb.",
+    "example_tags": ["MD", "VB"],
+    "example_sentence_fragment": "can run"
+  },
+  {
+    "name": "Verb Phrase (Modal + Adverb + Verb)",
+    "pattern": ["MD", "RB", "VB"],
+    "description": "Modal, adverb, then base verb.",
+    "example_tags": ["MD", "RB", "VB"],
+    "example_sentence_fragment": "will surely go"
+  },
+  {
+    "name": "Verb Phrase (To + Verb - Infinitive)",
+    "pattern": ["TO", "VB"],
+    "description": "'to' followed by a base form verb (infinitive).",
+    "example_tags": ["TO", "VB"],
+    "example_sentence_fragment": "to eat"
+  },
+  {
+    "name": "Verb Phrase (Verb + Adverb)",
+    "pattern": ["VBZ", "RB"],
+    "description": "Verb (3rd person singular) followed by an adverb.",
+    "example_tags": ["VBZ", "RB"],
+    "example_sentence_fragment": "runs quickly"
+  },
+  {
+    "name": "Verb Phrase (Verb + Particle)",
+    "pattern": ["VBP", "RP"],
+    "description": "Verb followed by a particle (phrasal verb).",
+    "example_tags": ["VBP", "RP"],
+    "example_sentence_fragment": "look up"
+  },
+  {
+    "name": "Verb Phrase (Progressive Aspect)",
+    "pattern": ["VBZ", "VBG"],
+    "description": "Verb 'to be' (3rd person) + present participle (e.g., is running).",
+    "example_tags": ["VBZ", "VBG"],
+    "example_sentence_fragment": "is singing"
+  },
+  {
+    "name": "Verb Phrase (Perfect Aspect)",
+    "pattern": ["VBP", "VBN"],
+    "description": "Verb 'to have' (non-3rd person) + past participle (e.g., have eaten).",
+    "example_tags": ["VBP", "VBN"],
+    "example_sentence_fragment": "have seen"
+  },
+  {
+    "name": "Verb Phrase (Modal + Perfect Aspect)",
+    "pattern": ["MD", "VB", "VBN"],
+    "description": "Modal + 'have' + past participle (e.g., should have gone).",
+    "example_tags": ["MD", "VB", "VBN"],
+    "example_sentence_fragment": "might have finished"
+  },
+  {
+    "name": "Verb Phrase (Transitive Verb + NP)",
+    "pattern": ["VBD", "DT", "NN"],
+    "description": "Past tense verb followed by a determiner and noun (direct object).",
+    "example_tags": ["VBD", "DT", "NN"],
+    "example_sentence_fragment": "ate the apple"
+  },
+  {
+    "name": "Prepositional Phrase (Prep + NP)",
+    "pattern": ["IN", "DT", "NN"],
+    "description": "Preposition followed by a determiner and noun.",
+    "example_tags": ["IN", "DT", "NN"],
+    "example_sentence_fragment": "in the house"
+  },
+  {
+    "name": "Prepositional Phrase (Prep + Proper Noun)",
+    "pattern": ["IN", "NNP"],
+    "description": "Preposition followed by a proper noun.",
+    "example_tags": ["IN", "NNP"],
+    "example_sentence_fragment": "to London"
+  },
+  {
+    "name": "Prepositional Phrase (Prep + Pronoun)",
+    "pattern": ["IN", "PRP"],
+    "description": "Preposition followed by a personal pronoun.",
+    "example_tags": ["IN", "PRP"],
+    "example_sentence_fragment": "for him"
+  },
+  {
+    "name": "Adjectival Phrase (Adv + Adj)",
+    "pattern": ["RB", "JJ"],
+    "description": "Adverb modifying an adjective.",
+    "example_tags": ["RB", "JJ"],
+    "example_sentence_fragment": "very happy"
+  },
+  {
+    "name": "Adjectival Phrase (Adv + Comparative Adj)",
+    "pattern": ["RB", "JJR"],
+    "description": "Adverb modifying a comparative adjective.",
+    "example_tags": ["RB", "JJR"],
+    "example_sentence_fragment": "much bigger"
+  },
+  {
+    "name": "Adjectival Phrase (Adv + Superlative Adj)",
+    "pattern": ["RB", "JJS"],
+    "description": "Adverb modifying a superlative adjective.",
+    "example_tags": ["RBS", "JJS"],
+    "example_sentence_fragment": "most beautiful"
+  },
+  {
+    "name": "Adjectival Phrase (Comparative Adj + Prep)",
+    "pattern": ["JJR", "IN"],
+    "description": "Comparative adjective followed by a preposition (e.g., 'than').",
+    "example_tags": ["JJR", "IN"],
+    "example_sentence_fragment": "taller than"
+  },
+  {
+    "name": "Adverbial Phrase (Adv + Adv)",
+    "pattern": ["RB", "RB"],
+    "description": "Two adverbs, where the first modifies the second.",
+    "example_tags": ["RB", "RB"],
+    "example_sentence_fragment": "very quickly"
+  },
+  {
+    "name": "Clause (Subject-Verb)",
+    "pattern": ["NNP", "VBD"],
+    "description": "Proper noun subject and a past tense verb.",
+    "example_tags": ["NNP", "VBD"],
+    "example_sentence_fragment": "Alice slept"
+  },
+  {
+    "name": "Clause (Pronoun Subject-Verb)",
+    "pattern": ["PRP", "VBD"],
+    "description": "Pronoun subject and a past tense verb.",
+    "example_tags": ["PRP", "VBD"],
+    "example_sentence_fragment": "She sang"
+  },
+  {
+    "name": "Clause (Subject-Verb-Object)",
+    "pattern": ["NNP", "VBD", "NNP"],
+    "description": "Proper noun subject, verb, and proper noun object.",
+    "example_tags": ["NNP", "VBD", "NNP"],
+    "example_sentence_fragment": "John met Mary"
+  },
+  {
+    "name": "Clause (Subject-Verb-PP)",
+    "pattern": ["PRP", "VBD", "IN", "DT", "NN"],
+    "description": "Pronoun subject, verb, and a prepositional phrase.",
+    "example_tags": ["PRP", "VBD", "IN", "DT", "NN"],
+    "example_sentence_fragment": "He went to the store"
+  },
+  {
+    "name": "Clause (Subject-Verb-Adverb)",
+    "pattern": ["DT", "NN", "VBZ", "RB"],
+    "description": "Noun phrase subject, verb, and adverb.",
+    "example_tags": ["DT", "NN", "VBZ", "RB"],
+    "example_sentence_fragment": "The bird sings loudly"
+  },
+  {
+    "name": "Question (Modal-Subject-Verb)",
+    "pattern": ["MD", "PRP", "VB"],
+    "description": "Modal, pronoun subject, and base verb forming a question.",
+    "example_tags": ["MD", "PRP", "VB"],
+    "example_sentence_fragment": "Can you swim"
+  },
+  {
+    "name": "Question (Wh-Verb-Subject)",
+    "pattern": ["WP", "VBZ", "PRP"],
+    "description": "Wh-pronoun, verb 'to be', and pronoun subject.",
+    "example_tags": ["WP", "VBZ", "PRP"],
+    "example_sentence_fragment": "Who is he"
+  },
+  {
+    "name": "Question (Wh-Modal-Subject-Verb)",
+    "pattern": ["WRB", "MD", "PRP", "VB"],
+    "description": "Wh-adverb, modal, pronoun subject, and base verb.",
+    "example_tags": ["WRB", "MD", "PRP", "VB"],
+    "example_sentence_fragment": "When can they start"
+  },
+  {
+    "name": "Coordinated Nouns",
+    "pattern": ["NN", "CC", "NN"],
+    "description": "Two nouns coordinated by a conjunction.",
+    "example_tags": ["NN", "CC", "NN"],
+    "example_sentence_fragment": "cats and dogs"
+  },
+  {
+    "name": "Coordinated Adjectives",
+    "pattern": ["JJ", "CC", "JJ"],
+    "description": "Two adjectives coordinated by a conjunction.",
+    "example_tags": ["JJ", "CC", "JJ"],
+    "example_sentence_fragment": "big and strong"
+  },
+  {
+    "name": "Coordinated Verbs",
+    "pattern": ["VBP", "CC", "VBP"],
+    "description": "Two verbs coordinated by a conjunction.",
+    "example_tags": ["VBP", "CC", "VBP"],
+    "example_sentence_fragment": "run and jump"
+  },
+  {
+    "name": "List of Nouns",
+    "pattern": ["NN", ",", "NN", "CC", "NN"],
+    "description": "A comma-separated list of nouns with a final conjunction.",
+    "example_tags": ["NN", ",", "NN", "CC", "NN"],
+    "example_sentence_fragment": "apples, bananas, and oranges"
+  },
+  {
+    "name": "Passive Voice (Simple)",
+    "pattern": ["NN", "VBZ", "VBN"],
+    "description": "Noun, form of 'to be', and past participle (e.g., the cake is eaten).",
+    "example_tags": ["NN", "VBZ", "VBN"],
+    "example_sentence_fragment": "the report is written"
+  },
+  {
+    "name": "Passive Voice with Agent",
+    "pattern": ["NN", "VBZ", "VBN", "IN", "NNP"],
+    "description": "Passive construction followed by 'by' and an agent.",
+    "example_tags": ["DT", "NN", "VBZ", "VBN", "IN", "NNP"],
+    "example_sentence_fragment": "The song was sung by Elvis"
+  },
+  {
+    "name": "Adjective as Noun (The + Adj)",
+    "pattern": ["DT", "JJS"],
+    "description": "Determiner 'the' followed by a superlative adjective, often referring to a group (e.g., the best).",
+    "example_tags": ["DT", "JJS"],
+    "example_sentence_fragment": "the poorest"
+  },
+  {
+    "name": "Adverb modifying Verb Phrase",
+    "pattern": ["RB", "VBG"],
+    "description": "Adverb modifying a gerund/present participle.",
+    "example_tags": ["RB", "VBG"],
+    "example_sentence_fragment": "quickly running"
+  },
+  {
+    "name": "Existential There",
+    "pattern": ["EX", "VBZ", "DT", "NN"],
+    "description": "Starts with 'there' (existential), followed by a form of 'to be' and a noun phrase.",
+    "example_tags": ["EX", "VBZ", "DT", "NN"],
+    "example_sentence_fragment": "There is a solution"
+  }
+]
