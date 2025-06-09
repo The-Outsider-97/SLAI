@@ -3,16 +3,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Optional
+
+from torch.optim import optimizer
+
 from src.agents.base.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Base Transformer")
-printer = Prettyprinter
+printer = PrettyPrinter
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer inputs"""
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+    def __init__(self, d_model: int):
         super().__init__()
+        self.config = load_global_config()
+        transform_config = get_config_section('base_transformer')
+        max_len = transform_config.get('max_len')
+        dropout = transform_config.get('dropout')
+
         self.dropout = nn.Dropout(p=dropout)
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
@@ -20,12 +29,7 @@ class PositionalEncoding(nn.Module):
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe)
-  
-        self.config = load_global_config()
-        self.pe_config = get_config_section('positional_encoding')
 
-        self.max_len = self.pe_config.get('max_len', 5000)
-  
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
@@ -34,68 +38,78 @@ class BaseTransformer(nn.Module):
     """Core transformer module with encoder-decoder architecture"""
     def __init__(self):
         super().__init__()
-        self.config = load_global_config()
-        self.src_vocab_size = self.config.get('src_vocab_size')
-        self.tgt_vocab_size = self.config.get('tgt_vocab_size')
+        config = load_global_config()
+        self.src_vocab_size = config.get('src_vocab_size')
+        self.tgt_vocab_size = config.get('tgt_vocab_size')
 
-        self.be_config = get_config_section('base_transformer')
-        self.d_model = self.pe_config.get('d_model', '512')
-        self.nhead = self.pe_config.get('nhead', '8')
-        self.num_encoder_layers = self.pe_config.get('num_encoder_layers', '6')
-        self.num_decoder_layers = self.pe_config.get('num_decoder_layers', '6')
-        self.dim_feedforward = self.pe_config.get('dim_feedforward', '2048')
-        self.dropout = self.pe_config.get('dropout', '0.1')
-        self.activation = self.pe_config.get('activation', 'relu')
-        self.layer_norm_eps = self.pe_config.get('layer_norm_eps', '0.00001')
-        self.batch_first = self.pe_config.get('batch_first', True)
-                   
-        # Embedding layers
-        self.src_embed = nn.Embedding(src_vocab_size, d_model)
-        self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
-        self.pos_decoder = PositionalEncoding(d_model, dropout)
+        transform_config = get_config_section('base_transformer')  # Match config name
         
+        # Set parameters with fallback defaults
+        self.d_model = transform_config.get('d_model', 512)
+        self.nhead = transform_config.get('nhead', 8)
+        self.num_encoder_layers = transform_config.get('num_encoder_layers', 6)
+        self.num_decoder_layers = transform_config.get('num_decoder_layers', 6)
+        self.dim_feedforward = transform_config.get('dim_feedforward', 2048)
+        self.dropout = transform_config.get('dropout', 0.1)
+        self.activation = transform_config.get('activation', 'relu')
+        self.layer_norm_eps = transform_config.get('layer_norm_eps', 1e-5)
+        self.batch_first = transform_config.get('batch_first', True)
+        
+        # Load optimizer params once
+        self.lr = transform_config.get('lr', 0.0001)
+        self.betas = transform_config.get('betas', (0.9, 0.98))
+        self.eps = transform_config.get('eps', 1e-8)
+        self.weight_decay = transform_config.get('weight_decay', 0.0001)
+        self.clip_grad = transform_config.get('clip_grad', 1.0)
+        
+        # Load inference defaults
+        inference_config = get_config_section('inference')
+        self.default_max_len = inference_config.get('max_len', 50)
+        self.default_sos_token = inference_config.get('sos_token', 1)
+        self.default_eos_token = inference_config.get('eos_token', 2)
+        self.default_temperature = inference_config.get('temperature', 1.0)
+
+        # Embedding layers
+        self.src_embed = nn.Embedding(self.src_vocab_size, self.d_model)
+        self.tgt_embed = nn.Embedding(self.tgt_vocab_size, self.d_model)
+        self.pos_encoder = PositionalEncoding(self.d_model)
+        self.pos_decoder = PositionalEncoding(self.d_model)
+
         # Core transformer module
         self.transformer = nn.Transformer(
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation=activation,
-            layer_norm_eps=layer_norm_eps,
-            batch_first=batch_first,
+            d_model=self.d_model,
+            nhead=self.nhead,
+            num_encoder_layers=self.num_encoder_layers,
+            num_decoder_layers=self.num_decoder_layers,
+            dim_feedforward=self.dim_feedforward,
+            dropout=self.dropout,
+            activation=self.activation,
+            layer_norm_eps=self.layer_norm_eps,
+            batch_first=self.batch_first,
             norm_first=True  # Pre-LayerNorm configuration
         )
-        
+
         # Output projection
-        self.fc_out = nn.Linear(d_model, tgt_vocab_size)
-        self.d_model = d_model
+        self.fc_out = nn.Linear(self.d_model, self.tgt_vocab_size)
 
         # Initialize parameters
         self._init_weights()
+
+        printer.status("INIT", f"Base Transformer successfully initialized with d_model: {self.d_model}", "success")
 
     def _init_weights(self) -> None:
         """Initialize weights with Xavier uniform"""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-    
-    def encode(self,
-               src: torch.Tensor,
-               src_mask: torch.Tensor = None,
-               src_key_padding_mask: torch.Tensor = None) -> torch.Tensor:
-        """Encode source sequence
-        
-        Args:
-            src: Input sequence tensor (S, N, E) or (N, S, E) if batch_first
-            src_mask: Source sequence mask
-            src_key_padding_mask: Source padding mask
-            
-        Returns:
-            Encoded memory tensor
-        """
+
+    def encode(
+        self, 
+        src: torch.Tensor, 
+        src_mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Encode source sequence"""
         src_emb = self.pos_encoder(self.src_embed(src) * math.sqrt(self.d_model))
         return self.transformer.encoder(
             src_emb,
@@ -103,26 +117,16 @@ class BaseTransformer(nn.Module):
             src_key_padding_mask=src_key_padding_mask
         )
 
-    def decode(self,
-               tgt: torch.Tensor,
-               memory: torch.Tensor,
-               tgt_mask: torch.Tensor = None,
-               memory_mask: torch.Tensor = None,
-               tgt_key_padding_mask: torch.Tensor = None,
-               memory_key_padding_mask: torch.Tensor = None) -> torch.Tensor:
-        """Decode target sequence using encoder output
-        
-        Args:
-            tgt: Target sequence tensor
-            memory: Encoder output from encode()
-            tgt_mask: Target sequence mask
-            memory_mask: Memory mask
-            tgt_key_padding_mask: Target padding mask
-            memory_key_padding_mask: Memory padding mask
-            
-        Returns:
-            Decoded output tensor
-        """
+    def decode(
+        self, 
+        tgt: torch.Tensor, 
+        memory: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        memory_key_padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Decode target sequence using encoder output"""
         tgt_emb = self.pos_decoder(self.tgt_embed(tgt) * math.sqrt(self.d_model))
         return self.transformer.decoder(
             tgt_emb,
@@ -133,33 +137,26 @@ class BaseTransformer(nn.Module):
             memory_key_padding_mask=memory_key_padding_mask
         )
 
-    def forward(self,
-                src: torch.Tensor,
-                tgt: torch.Tensor,
-                src_mask: torch.Tensor = None,
-                tgt_mask: torch.Tensor = None,
-                memory_mask: torch.Tensor = None,
-                src_key_padding_mask: torch.Tensor = None,
-                tgt_key_padding_mask: torch.Tensor = None,
-                memory_key_padding_mask: torch.Tensor = None) -> torch.Tensor:
-        """Full encoder-decoder forward pass
-        
-        Args:
-            src: Source sequence (N, S) if batch_first
-            tgt: Target sequence (N, T) if batch_first
-            ... (masks as described in encode/decode)
-            
-        Returns:
-            Output logits tensor (N, T, tgt_vocab_size)
-        """
+    def forward(
+        self, 
+        src: torch.Tensor, 
+        tgt: torch.Tensor,
+        src_mask: Optional[torch.Tensor] = None,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        memory_key_padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Full encoder-decoder forward pass"""
         memory = self.encode(src, src_mask, src_key_padding_mask)
         output = self.decode(
             tgt,
             memory,
-            tgt_mask,
-            memory_mask,
-            tgt_key_padding_mask,
-            memory_key_padding_mask
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask
         )
         return self.fc_out(output)
 
@@ -179,13 +176,13 @@ class BaseTransformer(nn.Module):
                 'src_vocab_size': self.src_embed.num_embeddings,
                 'tgt_vocab_size': self.tgt_embed.num_embeddings,
                 'd_model': self.d_model,
-                'nhead': self.transformer.nhead,
-                'num_encoder_layers': self.transformer.num_encoder_layers,
-                'num_decoder_layers': self.transformer.num_decoder_layers,
-                'dim_feedforward': self.transformer.dim_feedforward,
-                'dropout': self.transformer.dropout,
-                'activation': self.transformer.activation,
-                'layer_norm_eps': self.transformer.layer_norm_eps
+                'nhead': self.nhead,
+                'num_encoder_layers': self.num_encoder_layers,
+                'num_decoder_layers': self.num_decoder_layers,
+                'dim_feedforward': self.dim_feedforward,
+                'dropout': self.dropout,
+                'activation': self.activation,
+                'layer_norm_eps': self.layer_norm_eps
             }
         }, path)
 
@@ -282,3 +279,39 @@ class BaseTransformer(nn.Module):
                 generated = torch.cat((generated, next_token.unsqueeze(0)), dim=1)
                 
         return generated
+
+
+if __name__ == "__main__":
+    print(f"===== Testing Base Transformer =============")
+    from torch.utils.data import DataLoader, TensorDataset
+
+    # Initialization
+    transformer = BaseTransformer()
+
+    # Dummy data
+    src_tensor = torch.randint(1, 100, (1, 10))  # (batch_size=1, seq_len=10)
+    tgt_tensor = torch.randint(1, 100, (1, 10))
+
+    # Define a dummy dataloader
+    dataset = TensorDataset(src_tensor, tgt_tensor)
+    dataloader = DataLoader(dataset, batch_size=1)
+
+    # Define optimizer and loss function
+    optimizer = transformer.configure_optimizer(lr=5e-5)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
+
+    # Run training step
+    for batch in dataloader:
+        loss = transformer.training_step(batch, optimizer, criterion)
+        printer.status("Result", f"Training loss: {loss}")
+
+    # Saving
+    transformer.save("model.pth")
+
+    # Loading
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    loaded = BaseTransformer.load("model.pth", device=device)
+
+    # Inference
+    output = transformer.inference(src_tensor, max_len=100)
+    print(f"===== Succesfully ran Base Transformer =====")
