@@ -78,7 +78,7 @@ class KnowledgeAgent(BaseAgent):
         try:
             # Fallback to class-level STOPWORDS
             from src.agents.language.nlp_engine import NLPEngine
-            return NLPEngine.STOPWORDS
+            return NLPEngine.stopwords
         except ImportError:
             logger.warning("Failed to load NLPEngine stopwords; using minimal set")
             return {"a", "an", "the", "is", "in", "on", "at", "to", "for"}
