@@ -1,7 +1,9 @@
 
-
+wordlist_path: "src/agents/language/library/wordlist_en.json"
 main_wordlist_path: "src/agents/language/library/structured_wordlist_en.json"
 cache_size: 1000
+bpe_model_path: "data/bpe_200d_50k_model.json"
+bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
 
 clarification_request:
   template: |
@@ -11,8 +13,26 @@ clarification_request:
   conditions:
     - context.unresolved_issues contains low_confidence_intent
 
+language_tokenizer:
+  end_of_word_suffix: "</w>"
+  normalization_rules:
+    lowercase: True
+    form: "NFKC"
+
+language_transformer:
+  dropout: 0.2
+  max_length: 100
+  beam_width: 5
+  max_len: 50
+  sos_token: 1
+  eos_token: 2
+  temperature: 1.0
+  length_penalty: 0.6
+  norm_first: False
+
 spell_checker:
   wordlist_path: "src/agents/language/library/wordlist_en.json"
+  typo_patterns_path: "src/agents/language/templates/typo_patterns.json"
   max_suggestions: 5
   enable_phonetic: true
   max_edit_distance: 2
@@ -29,13 +49,28 @@ orthography_processor:
   log_errors: true
   auto_correction_confidence: 0.7
   allowed_locales: ["en-US", "en-GB"]
+  enable_contraction_expansion: False
+  enable_compound_handling: true
+  max_context_window: 3
 
 grammar_processor:
+  pos_map_path: "src/agents/language/templates/pos_map.json"
+
+neural_generation:
+  max_retries: 2
+  fallback_after_retries: True
+  max_tokens: 10000
+  temperature: 0.7
 
 nlp:
   gender_list_path: "src/agents/language/templates/gender_list.json"
+  stopwords_list_path: "src/agents/language/templates/stopwords.json"
+  pos_patterns_path: "src/agents/language/templates/pos_patterns.json"
+  irregular_verbs_path: "src/agents/language/templates/irregular_verbs.json"
+  irregular_nouns_path: "src/agents/language/templates/irregular_nouns.json"
 
 nlg:
+  coherence_checker: {}
   templates_path: "src/agents/language/templates/nlg_templates_en.json"
   verbose_phrases: "src/agents/language/templates/verbose_phrases.json"
   style:
@@ -60,7 +95,7 @@ nlu:
   custom_intent_patterns_path: "src/agents/language/templates/intent_patterns.json"
   custom_entity_patterns_path: "src/agents/language/templates/entity_patterns.json"
   morphology_rules_path: "src/agents/language/templates/morphology_rules.json"
-  glove_path: "data/embeddings/glove.6B.100d.json"
+  glove_path: "data/embeddings/glove.6B.200d.txt"
   glove_synonym_threshold: 0.65   # Minimum similarity score to consider as synonym
   glove_top_synonyms: 3           # Number of GloVe-based synonyms to add per word
 
@@ -69,24 +104,28 @@ style:
   verbosity: 1.5
   verbosity_mode: "technical"
 
-dialogue_context_settings:
+dialogue_context:
   memory_limit: 20  # Max history items before summarization
   required_slots: []
+  enable_summarization: true
+  default_initial_history:
+    - "System: Hello! How can I assist you today?"
+  default_initial_summary: "The conversation has just begun."
+  follow_up_patterns_path: "src/agents/language/templates/follow_up_patterns.json"
+  initial_history: [] # Optional: e.g., ["System: Welcome!", "User: Hi"]
+  initial_summary: null # Optional: "A conversation started about topic X."
   slot_validation_rules:
     destination:
       type: "string"
       allowed_values: []  # Optional constraints ["Paris", "London", "Tokyo"]
     travel_dates: 
       type: "date_range"
-  enable_summarization: true
-  initial_history: [] # Optional: e.g., ["System: Welcome!", "User: Hi"]
-  initial_summary: null # Optional: "A conversation started about topic X."
   initial_environment_state:
     current_topic: "general"
     user_id: null
-  default_initial_history:
-    - "System: Hello! How can I assist you today?"
-  default_initial_summary: "The conversation has just begun."
+    conversation_phase: "opening"
+    modality: "text"
+    urgency_level: 1
   default_initial_environment_state:
     session_id: null
     user_preferences: {}
@@ -95,29 +134,25 @@ dialogue_context_settings:
     similarity_threshold: 0.65
     lookback_window: 4
     encoder_model: "text-encoder-v1"
-  follow_up_patterns_path: "src/agents/language/templates/follow_up_patterns.json"
   summarization:
     retain_last_messages: 2
     summary_update_strategy: "accumulate"
     max_summary_length: 500
   persistence:
     auto_save_interval: 300
-    default_save_path: "sessions/"
+    default_save_path: "src/agents/language/sessions/"
     encryption_key: null
   temporal:
     session_timeout: 1800
     time_reference_format: "ISO"
-  initial_environment_state:
-    conversation_phase: "opening"
-    modality: "text"
-    urgency_level: 1
-    current_topic: "general"
-    user_id: null
 
 dialogue_policy:
   low_confidence_threshold: 0.6
 
 language_cache:
-  max_size: 200
+  max_size: 1000
   expiry_seconds: 3600
   cache_path: src/agents/language/cache/language_cache.pkl
+  strategy_name: "LRU" # or "LFU"
+  enable_compression: true
+  enable_encryption: False
