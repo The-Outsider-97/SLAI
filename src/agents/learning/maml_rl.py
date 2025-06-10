@@ -62,31 +62,12 @@ class MAMLAgent:
             NLP_ENGINE_AVAILABLE = True
         except ImportError:
             NLP_ENGINE_AVAILABLE = False
-        nlp_engine = NLPEngine
+        nlp_engine = NLPEngine()
         maml_config = self.config.get('maml', {})
         self.vocab_size = maml_config.get('vocab_size', 50)
         self.max_message_length = maml_config.get('max_message_length', 10)
 
         self.nlp_engine = nlp_engine
-        if self.nlp_engine is None:
-            logger.warning(f"NLPEngine not initialized in agent {self.agent_id}")
-        # Initialize NLPEngine
-        self.nlp_engine = None
-        if NLP_ENGINE_AVAILABLE:
-            nlp_config_path = maml_config.get('nlp_engine_config_path', "src/agents/language/configs/language_config.yaml")
-            try:
-                nlp_config_data = load_global_config(nlp_config_path)
-                if nlp_config_data: # Ensure config was loaded
-                    self.nlp_engine = NLPEngine(config=nlp_config_data)
-                    logger.info(f"Agent {self.agent_id}: NLPEngine initialized from {nlp_config_path}")
-                else:
-                    logger.warning(f"Agent {self.agent_id}: NLPEngine config from {nlp_config_path} was empty. NLPEngine not initialized.")
-            except FileNotFoundError:
-                logger.warning(f"Agent {self.agent_id}: NLPEngine config not found at {nlp_config_path}. NLPEngine not initialized.")
-            except Exception as e:
-                logger.error(f"Agent {self.agent_id}: Error initializing NLPEngine: {e}. NLPEngine not initialized.")
-        else:
-            logger.warning(f"Agent {self.agent_id}: NLPEngine module not available. Communication features will be symbolic.")
 
         logger.info(f"MAMLAgent {self.agent_id} successfully initialized. Policy output size: {action_size}")
 
@@ -788,7 +769,7 @@ if __name__ == "__main__":
     # Example of how one agent might use NLPEngine (if available and initialized)
     if fleet.agents and fleet.agents[0].nlp_engine:
         sample_text = "This is a test sentence for the NLP engine."
-        tokens = fleet.agents[0].nlp_engine.process_text(sample_text)
+        tokens = fleet.agents[0].nlp_engine.process_text(text=sample_text)
         print(f"\nNLPEngine test on agent 0 for text: '{sample_text}'")
         for token in tokens:
             print(f"  Token: {token.text}, POS: {token.pos}, Lemma: {token.lemma}")
