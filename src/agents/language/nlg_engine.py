@@ -20,41 +20,40 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-from src.agents.language.utils.linguistic_frame import LinguisticFrame
-from logs.logger import get_logger
+from src.agents.language.utils.config_loader import load_global_config, get_config_section
+from src.agents.language.utils.linguistic_frame import LinguisticFrame, SpeechActType
+from src.agents.language.utils.language_error import NLGFillingError, NLGValidationError, TemplateNotFoundError, NLGGenerationError
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("NLG Engine")
-
-CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config # ["nlg"]
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return
+printer = PrettyPrinter
 
 class NLGEngine:
-    def __init__(self, config, llm_instance: Optional[Any] = None):
-        self.coherence_checker = None
-        self.config = config if config is not None else load_config()
-        self.llm = llm_instance # uses my local llm called slai_lm
+    def __init__(self):
+        self.config = load_global_config()
+        self.wordlist_path = self.config.get('main_wordlist_path')
+        
+        self.nlg_config = get_config_section('nlg')
+        self.coherence_checker = self.nlg_config.get('coherence_checker')
+        self.templates_path = self.nlg_config.get("templates_path")
+        self.verbose_path = self.nlg_config.get("verbose_phrases")
 
-        templates_path = self.config.get("nlg", {}).get("templates_path")
-        verbose_path = self.config.get("nlg", {}).get("verbose_phrases")
-
-        self.templates = self._load_templates(templates_path)
-        self.verbose_phrases = self._load_verbose_phrases(verbose_path)
+        self.neural_config = get_config_section("neural_generation")
+        self.max_retries = self.neural_config.get("max_retries")
+        self.fallback_after_retries = self.neural_config.get("fallback_after_retries")
+        self.max_tokens = self.neural_config.get("max_tokens")
+        self.temperature = self.neural_config.get("temperature")
 
         # Get style parameters from nlg config
-        self.style = self.config.get("style", {}) # OR self.style = nlg_config.get("style", {})
-        self.verbosity_mode = self.style.get("verbosity_mode", "default")
+        self.style = self.nlg_config.get("style", {
+            'formality', 'verbosity', 'verbosity_mode',
+            'truncation_length', 'allow_slang'
+        })
 
-        logger.info(f"NLGEngine initialized with templates from {templates_path}")
+        self.templates = self._load_templates(self.templates_path)
+        self.verbose_phrases = self._load_verbose_phrases(self.verbose_path)
+
+        logger.info(f"NLG Engine succesfully initialized")
 
     def _load_templates(self, path: str) -> Dict[str, List[str]]:
         """Load and validate response templates from JSON file, ensuring all entries are List[str]."""
@@ -93,7 +92,6 @@ class NLGEngine:
             logger.warning(f"'default' intent in {template_file_path} is malformed or empty. Using fallback default responses.")
             processed_templates["default"] = fallback_default_responses
 
-
         # Process other intents
         for intent_key, data_value in raw_templates.items():
             if intent_key == "default": # Already processed
@@ -110,8 +108,6 @@ class NLGEngine:
             else:
                 logger.warning(f"Templates for intent '{intent_key}' in {template_file_path} are malformed or empty. "
                                f"This intent will use global default responses if called.")
-                # No need to assign default here, as self.templates.get(intent, self.templates["default"]) will handle it in generate()
-
         return processed_templates
 
     def _load_verbose_phrases(self, path: str) -> Dict[str, List[str]]:
@@ -132,71 +128,67 @@ class NLGEngine:
             logger.error(f"Error loading verbose phrases from {verbose_file_path}: {e}")
             return default_verbose
 
-
     def generate(self, frame: LinguisticFrame, context: Optional[Any] = None) -> str:
         """Generate a response given intent, entities, and context."""
         intent = frame.intent
-        entities = frame.entities if frame.entities else {} # Ensure entities is a dict
-        response_text = "Fallback response"
-        if frame.intent == "greeting":
-            response_text = "Hello!"
-
-        if frame.intent == "farewell":
-            response_text = "goodbye!"
-
-        if frame.intent == "acknowledgement":
-            response_text = "understood"
-        # Attempt to get specific template list for the intent
-        # Fallback to "default" templates if specific intent not found or has no valid responses
+        entities = frame.entities if frame.entities else {}
+        sentiment = frame.sentiment
+        modality = frame.modality
+        confidence = frame.confidence
+        context = None
+        
+        # Get templates for intent
         template_list = self.templates.get(intent, self.templates["default"])
-
-        if not template_list: # Should not happen if "default" is always initialized correctly
-            logger.error(f"CRITICAL: No template list found for intent '{intent}' and no default templates available. THIS IS A BUG.")
-            template_list = self.templates["default"] # ["I am truly unable to respond right now due to a configuration error."]
-
-        # Select and format template
-        try:
-            chosen_template_str = random.choice(template_list)
-            flat_entities = {k: str(v[0] if isinstance(v, list) else v) 
-                            for k, v in entities.items()}
-
-            # Flatten entities if they are lists for simple formatting
-            # Ensure all entity values are strings for .format()
-            flat_entities = {k: str(v[0] if isinstance(v, list) and v else v) for k, v in entities.items()}
-            
-            # Add current time if a {time} placeholder is in the template and not in entities
-            if "{time}" in chosen_template_str and "time" not in flat_entities:
-                flat_entities["time"] = time.strftime("%H:%M %Z") # e.g., 14:30 UTC
-
-            response_text = chosen_template_str.format(**flat_entities)
-        except (KeyError, IndexError) as e:
-            logger.warning(f"Error formatting template for intent '{intent}' with entities {flat_entities}. "
-                           f"Template: '{chosen_template_str}'. Error: {e}. Trying without entity formatting.")
-            # Try to find a template for this intent that doesn't require formatting
-            non_entity_templates = [t for t in template_list if '{' not in t]
-            if non_entity_templates:
-                response_text = random.choice(non_entity_templates)
-            else: # If all templates for this intent require formatting, or no plain ones exist, use a plain default
-                default_plain_templates = [t for t in self.templates.get("default", []) if '{' not in t]
-                if default_plain_templates:
-                    response_text = random.choice(default_plain_templates)
-                else: # Ultimate fallback if even plain defaults are missing (should not happen)
-                    response_text = "I seem to be having trouble with my response templates."
+        if not template_list:
+            logger.error(f"No templates available for intent '{intent}'")
+            return "I'm unable to respond to that right now."
+    
+        # Add fallback entities for common cases
+        flat_entities = self._get_flattened_entities(entities)
+        if intent == "weather_inquiry":
+            flat_entities.setdefault("weather_status", "unknown conditions")
+            flat_entities.setdefault("temperature", "N/A")
+    
+        # Try all templates until one works
+        shuffled_templates = random.sample(template_list, len(template_list))
+        response_text = None
         
-        # Neural fallback (if no good template response was generated and LLM is available)
-        # For now, we assume template generation always produces something, even if it's a fallback template.
-        # if not response_text and self.llm and hasattr(self.llm, 'generate'):
-        #     logger.info(f"No template for intent '{intent}'. Attempting neural generation.")
-        #     response_text = self._neural_generation(frame, context)
-        
-        if not response_text: # If after all attempts, response is still empty
-             logger.error(f"NLGEngine failed to produce any response text for intent '{intent}'. Using hardcoded failsafe.")
-             response_text = random.choice(self.templates.get("default", ["I'm unable to respond to that."]))
-
-        # Adapt style (formality, verbosity)
-        response_text = self._adapt_style(response_text)
-
-        return response_text
+        for template_str in shuffled_templates:
+            try:
+                # Add current time if needed
+                if "{time}" in template_str and "time" not in flat_entities:
+                    flat_entities["time"] = time.strftime("%H:%M %Z")
+                    
+                response_text = template_str.format(**flat_entities)
+                break
+            except (KeyError, IndexError) as e:
+                missing = self._find_missing_placeholders(template_str, flat_entities)
+                logger.debug(f"Template failed: {template_str} | Missing: {missing} | Error: {e}")
+    
+        # Final fallback if all templates fail
+        if not response_text:
+            logger.warning(f"All templates failed for intent '{intent}'")
+            plain_templates = [t for t in template_list if '{' not in t]
+            response_text = random.choice(plain_templates) if plain_templates else \
+                random.choice(self.templates["default"])
+    
+        # Adapt style before returning
+        return self._adapt_style(response_text)
+    
+    def _get_flattened_entities(self, entities: dict) -> dict:
+        """Flatten entities ensuring all values are strings"""
+        flat_entities = {}
+        for k, v in entities.items():
+            if isinstance(v, list) and v:
+                flat_entities[k] = str(v[0])
+            else:
+                flat_entities[k] = str(v)
+        return flat_entities
+    
+    def _find_missing_placeholders(self, template: str, entities: dict) -> list:
+        """Identify missing placeholders in template"""
+        placeholders = re.findall(r'\{([^}]+)\}', template)
+        return [p for p in placeholders if p not in entities]
 
     def _match_template(self, frame: LinguisticFrame) -> Optional[str]:
         """
@@ -211,43 +203,188 @@ class NLGEngine:
         return None # No template found for this specific intent directly
 
     def _neural_generation(self, frame: LinguisticFrame, context: Optional[Any]) -> str:
-        """Generate using LLM with controlled prompting"""
-        if not self.llm or not hasattr(self.llm, 'generate'):
-            logger.error("LLM not available or does not have a 'generate' method for neural generation.")
-            return random.choice(self.templates.get("default", ["I cannot generate a response right now."]))
+        """Generate using controlled prompting"""
+        printer.status("INIT", "Neural generation initialized", "info")
 
-        # Construct a prompt
-        prompt_parts = []
-        prompt_parts.append(f"Based on the following understanding of the user's request:")
-        prompt_parts.append(f"- Intent: {frame.intent}")
-        if frame.entities:
-            prompt_parts.append(f"- Key Information (Entities): {json.dumps(frame.entities)}")
-        if frame.sentiment != 0.0:
-             prompt_parts.append(f"- User Sentiment: {'positive' if frame.sentiment > 0.3 else 'negative' if frame.sentiment < -0.3 else 'neutral'} (score: {frame.sentiment:.2f})")
-        prompt_parts.append(f"- Expected Modality/Type of Response: {frame.modality}")
-
-        if context:
-            dialogue_summary = context.get_context_for_nlg()
-        if context and hasattr(context, 'get_context_for_prompt'):
-            dialogue_summary = context.get_context_for_prompt(include_history=True, history_messages_window=5) # Get last 5 messages
-            if dialogue_summary:
-                prompt_parts.append("\nRelevant conversation context:")
-                prompt_parts.append(dialogue_summary)
-        
-        prompt_parts.append("\nGenerate an appropriate and helpful response:")
-        prompt = "\n".join(prompt_parts)
-        
-        logger.info(f"Neural generation prompt: {prompt[:500]}...") # Log a snippet
-        
+        # ===== Prompt Construction =====
+        def build_generation_prompt() -> str:
+            """Construct context-aware prompt with linguistic features"""
+            prompt_parts = [
+                "# Role: Helpful AI Assistant",
+                "## Task: Generate natural response based on:"
+            ]
+            
+            # Core frame information
+            prompt_parts.append(f"- Intent: {frame.intent}")
+            prompt_parts.append(f"- Speech Act Type: {frame.act_type.value}")
+            
+            if frame.illocutionary_force:
+                prompt_parts.append(f"- Illocutionary Force: {frame.illocutionary_force}")
+            if frame.propositional_content:
+                prompt_parts.append(f"- Content Focus: {frame.propositional_content}")
+            
+            # Entities and sentiment
+            if frame.entities:
+                prompt_parts.append(f"- Key Entities: {json.dumps(frame.entities)}")
+            if abs(frame.sentiment) > 0.1:
+                sentiment_label = "positive" if frame.sentiment > 0 else "negative"
+                prompt_parts.append(f"- User Sentiment: {sentiment_label} (confidence: {abs(frame.sentiment):.1f})")
+            
+            # Context integration
+            if context:
+                if hasattr(context, 'get_relevant_context'):
+                    ctx = context.get_relevant_context(
+                        history_window=3,
+                        include_entities=True,
+                        sentiment_threshold=0.3
+                    )
+                    if ctx:
+                        prompt_parts.append("\n## Conversation Context:")
+                        prompt_parts.append(ctx)
+            
+            # Generation instructions
+            prompt_parts.extend([
+                "\n## Response Requirements:",
+                f"- Modality: {frame.modality}",
+                f"- Confidence: {frame.confidence:.1f}",
+                "- Be coherent with conversation history",
+                "- Maintain appropriate tone and style"
+            ])
+            
+            # Add style preferences
+            if self.style:
+                style_notes = []
+                if self.style.get('formality', 0.5) > 0.7:
+                    style_notes.append("Use formal language")
+                elif self.style.get('formality') < 0.3:
+                    style_notes.append("Use casual/informal language")
+                
+                if style_notes:
+                    prompt_parts.append("- Style: " + "; ".join(style_notes))
+            
+            prompt_parts.append("\n## Generated Response:")
+            return "\n".join(prompt_parts)
+    
+        # ===== Response Processing =====
+        def validate_response(response: str) -> bool:
+            """Ensure response meets quality standards"""
+            # Basic sanity checks
+            if not response or len(response) < 2:
+                return False
+                
+            # Check for common error patterns
+            error_patterns = [
+                r"as an AI language model",
+                r"cannot (answer|respond)",
+                r"apologi(es|ze)"
+            ]
+            if any(re.search(p, response, re.IGNORECASE) for p in error_patterns):
+                return False
+                
+            # Check response length constraints
+            word_count = len(response.split())
+            min_words = self.neural_config.get("min_words", 3)
+            max_words = self.neural_config.get("max_words", 100)
+            
+            return min_words <= word_count <= max_words
+    
+        # ===== Main Execution Flow =====
         try:
-            return self.llm.generate(prompt)
+            # Build dynamic prompt
+            prompt = build_generation_prompt()
+            logger.info(f"Neural prompt ({len(prompt)} chars):\n{prompt[:300]}...")
+            
+            # Generate response using template-based method
+            printer.status("FALLBACK", "Using template-based generation instead of neural", "warning")
+            # return self.generate_from_templates(frame) # self.templates_path 
+            return self._match_by_trigger(context if isinstance(context, str) else "")
+            
+        except NLGGenerationError as e:
+            logger.error(f"Neural generation failed: {e}")
+            if fallback_after_retries:
+                printer.status("FALLBACK", "Reverting to basic template generation", "warning")
+                return self._generate_basic_response(frame) #  self.templates_path
+                
         except Exception as e:
-            logger.error(f"Error during LLM generation: {e}")
-            return random.choice(self.templates.get("default", ["An error occurred while generating a response."]))
+            logger.critical(f"Critical neural generation failure: {e}")
+            return "I encountered an issue formulating my response. Could you rephrase your request?"
 
+    def _match_by_trigger(self, user_text: str) -> str:
+        user_text_lower = user_text.lower()
+        user_text_clean = re.sub(r'[^\w\s]', '', user_text_lower)  # Remove punctuation
+        best_score = -1
+        best_responses = []
+    
+        for intent_key, template_entry in self.templates.items():
+            if isinstance(template_entry, dict) and "triggers" in template_entry:
+                for trigger in template_entry["triggers"]:
+                    trigger_lower = trigger.lower()
+                    trigger_clean = re.sub(r'[^\w\s]', '', trigger_lower)
+    
+                    # Smart match: full-word or phrase matching using regex
+                    pattern = r'\b' + re.escape(trigger_clean) + r'\b'
+                    match = re.search(pattern, user_text_clean)
+    
+                    if match:
+                        position_score = 1.0 - (match.start() / max(1, len(user_text_clean)))  # Earlier is better
+                        length_score = len(trigger_clean) / max(1, len(user_text_clean))  # Longer match is better
+                        total_score = position_score + length_score  # Simple heuristic
+    
+                        if total_score > best_score:
+                            best_score = total_score
+                            best_responses = template_entry.get("responses", [])
+    
+        if best_responses:
+            return random.choice(best_responses)
+    
+        # Fallback logic
+        default_templates = self.templates.get("default")
+        if isinstance(default_templates, dict):
+            return random.choice(default_templates.get("responses", ["I'm not sure how to respond."]))
+        elif isinstance(default_templates, list):
+            return random.choice(default_templates)
+        return "I'm not sure how to respond."
+
+    def generate_from_templates(self, frame: LinguisticFrame) -> str:
+        """Generate response using intent-based templates with proper fallback"""
+        # Use intent-based templates if available
+        if frame.intent in self.templates:
+            return self._generate_from_template(frame.intent, frame.entities)
+        
+        # Final fallback to default response
+        return random.choice(self.templates.get("default", ["I'm not sure how to respond."]))
+    
+    def _generate_from_template(self, intent: str, entities: dict) -> str:
+        """Core template generation with proper placeholder handling"""
+        templates = self.templates.get(intent, [])
+        if not templates:
+            return random.choice(self.templates["default"])
+        
+        # Try all templates with proper entity handling
+        shuffled_templates = random.sample(templates, len(templates))
+        flat_entities = self._get_flattened_entities(entities or {})
+        
+        for template in shuffled_templates:
+            try:
+                # Special case: add current time if needed
+                if "{time}" in template and "time" not in flat_entities:
+                    flat_entities["time"] = time.strftime("%H:%M %Z")
+                    
+                return template.format(**flat_entities)
+            except KeyError:
+                continue  # Try next template if entities missing
+        
+        # Fallback to non-parameterized templates
+        for template in templates:
+            if "{" not in template:
+                return template
+        
+        return random.choice(self.templates["default"])
 
     def _adapt_style(self, text: str) -> str:
         """Adjust formality and verbosity based on self.style settings."""
+        printer.status("INIT", "Style adaptor initialized", "info")
+
         # Formality
         formality_level = self.style.get('formality', 0.5)
         # allow_slang = self.style.get('allow_slang', False)
@@ -286,8 +423,9 @@ class NLGEngine:
             # Add informal phrases
             # if random.random() < 0.3:
             #     text = f"{random.choice(self.style.get('informal_phrases', []))} {text}"
-            if self.style.get('informal_phrases') and random.random() < 0.3:
-                text = f"{random.choice(self.style['informal_phrases'])} {text}"
+            informal_phrases = self.style.get('informal_phrases', [])
+            if informal_phrases and random.random() < 0.3:
+                text = f"{random.choice(informal_phrases)} {text}"
     
         # ===== Verbosity Adjustments =====
         verbosity_level = self.style.get('verbosity', 1.0) # Default to normal verbosity
@@ -299,7 +437,8 @@ class NLGEngine:
         elif verbosity_level > 1.3: # More verbose
             if self.verbose_phrases: # Check if loaded
                 # Use verbosity_mode to pick a pool, fallback to "default" pool
-                phrase_pool = self.verbose_phrases.get(self.verbosity_mode, self.verbose_phrases.get("default", []))
+                verbosity_mode = self.style.get('verbosity_mode', 'default')
+                phrase_pool = self.verbose_phrases.get(verbosity_mode, self.verbose_phrases.get("default", []))
                 if phrase_pool and random.random() < 0.4: # Only add if pool is not empty
                     prepend = random.choice(phrase_pool)
                     text = f"{prepend} {text}"
@@ -307,91 +446,42 @@ class NLGEngine:
         return text.strip()
 
 
-class NLGFillingError(Exception):
-    """Custom exception for template filling failures"""
-
-class NLGValidationError(Exception):
-    """Custom exception for response validation failures"""
-
-class TemplateNotFoundError(Exception):
-    """Custom exception for missing templates"""
-
-
 if __name__ == "__main__":
-    print("\n=== Running NLG Engine ===\n")
-    config = load_config()
+    print("\n=== Running Natural Language Generator Engine (NLP Engine) ===\n")
+    printer.status("Init", "NLG Engine initialized", "success")
 
-    engine = NLGEngine(config)
+    engine = NLGEngine()
 
     print(engine)
-    print("\n=== Successfully Ran NLG Engine ===\n")
 
-if __name__ == "__main__":
-    print("\n=== Testing NLG Engine ===\n")
+    print("\n* * * * * Phase 2 * * * * *\n")
+    frame1 = LinguisticFrame(
+        intent="weather_inquiry",
+        entities={
+            "location": "Paris",
+            "temperature": "21",
+            "unit": "C",
+            "weather_status": "partly cloudy",
+            "weather_condition": "cloudy with sunny breaks"
+        },
+        sentiment=0.1,
+        modality="epistemic",
+        confidence=0.95,
+        act_type=SpeechActType.DIRECTIVE
+    )
+    printer.status("GENERATE", engine.generate(frame=frame1), "success")
+    printer.status("TEMPLATE", engine._match_template(frame=frame1), "success")
 
-    from src.agents.language.utils.linguistic_frame import SpeechActType
-
-    # Load configuration
-    config = load_config()
-    
-    # Initialize engine
-    engine = NLGEngine(config)
-    
-    # Print engine config
-    print("Loaded Configuration:")
-    print(f"- Templates Path: {engine.config.get('templates_path')}")
-    print(f"- Verbosity Mode: {engine.verbosity_mode}")
-    print(f"- Style Settings: {engine.style}\n")
-
-    # Test cases
-    test_frames = [
-        LinguisticFrame(
-            intent="weather_inquiry",
-            entities={"location": "Paris", "unit": "Celsius"},
-            sentiment=0.4,
-            modality="informative",
-            confidence=0.9,
-            act_type=SpeechActType.DIRECTIVE  # Add proper act_type
-        ),
-        LinguisticFrame(
-            intent="joke_request",
-            entities={"topic": "programmers"},
-            sentiment=0.7,
-            modality="entertaining",
-            confidence=0.8,
-            act_type=SpeechActType.EXPRESSIVE
-        ),
-        LinguisticFrame(
-            intent="unknown_intent",
-            entities={},
-            sentiment=0.0,
-            modality="neutral",
-            confidence=0.2,
-            act_type=SpeechActType.ASSERTIVE
-        )
-    ]
-
-    # Run test cases
-    for i, frame in enumerate(test_frames, 1):
-        print(f"\n--- Test Case {i} ---")
-        print(f"Intent: {frame.intent}")
-        print(f"Entities: {frame.entities}")
-        response = engine.generate(frame)
-        print(f"\nGenerated Response ({engine.verbosity_mode}):")
-        print(f"> {response}")
-
-    # Test style variations
-    print("\n--- Style Variations ---")
-    sample_text = "I can't tell you how excited we are about this new feature! It's going to really improve user experience."
-    
-    # Formal
-    engine.style['formality'] = 0.9
-    print("\nFormal Version:")
-    print(engine._adapt_style(sample_text))
-    
-    # Informal
-    engine.style['formality'] = 0.1
-    print("\nInformal Version:")
-    print(engine._adapt_style(sample_text))
+    print("\n* * * * * Phase 3 * * * * *\n")
+    text="How are you?"
+    frame2 = LinguisticFrame(
+        intent= "",
+        entities={},
+        sentiment=0.1,
+        modality="epistemic",
+        confidence=0.95,
+        act_type=SpeechActType.DIRECTIVE
+    )
+    printer.status("TEMPLATE", engine._neural_generation(frame=frame2, context=text), "success")
 
     print("\n=== NLG Engine Tests Complete ===\n")
