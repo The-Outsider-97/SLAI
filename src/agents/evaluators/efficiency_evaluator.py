@@ -62,10 +62,9 @@ class EfficiencyEvaluator:
 
     def _initialize_nlp_engine(self):
         """Initialize NLP engine from language config"""
-        from src.agents.language.nlp_engine import NLPEngine, load_config as load_language_config
+        from src.agents.language.nlp_engine import NLPEngine
         try:
-            lang_config = load_language_config()
-            return NLPEngine(lang_config)
+            return NLPEngine()
         except Exception as e:
             logger.error(f"NLP Engine initialization failed: {e}")
             return None
@@ -191,13 +190,80 @@ class EfficiencyEvaluator:
         baseline = self.config.get('nlg', {}).get('avg_token_baseline', 50)
         return baseline / (avg_tokens + sys.float_info.epsilon)
 
-    def _calculate_temporal(self, outputs):
-        """Response latency efficiency"""
-        return 1 / (len(outputs) + sys.float_info.epsilon)
+    def _calculate_temporal(self, outputs: List[Any]) -> float:
+        """Response latency efficiency using generation time metadata.
+        
+        Steps:
+        1. Extract generation time from output metadata
+        2. Use baseline latency per output type
+        3. Calculate efficiency ratio with smoothing
+        """
+        # Fallback if no temporal data exists
+        if not any(isinstance(o, dict) and 'generation_time' in o for o in outputs):
+            logger.warning("Temporal efficiency: No generation_time metadata found")
+            return 0.0  # Missing data penalty
+    
+        total_time = 0.0
+        valid_outputs = 0
+        
+        for output in outputs:
+            if isinstance(output, dict) and 'generation_time' in output:
+                total_time += output['generation_time']
+                valid_outputs += 1
+        
+        # Get baseline from config (per-output or batch)
+        time_baseline = self.baseline_measurements.get('time_per_output', 0.5)
+        if 'time_baseline' in self.baseline_measurements:
+            baseline = self.baseline_measurements['time_baseline']  # Batch baseline
+        else:
+            baseline = time_baseline * valid_outputs  # Per-output baseline
+            
+        # Calculate efficiency ratio with smoothing
+        return baseline / (total_time + sys.float_info.epsilon)
 
-    def _calculate_spatial(self, outputs):
-        """Memory footprint efficiency"""
-        return 1 / (sum(sys.getsizeof(o) for o in outputs) + sys.float_info.epsilon)
+    def _calculate_spatial(self, outputs: List[Any]) -> float:
+        """Memory footprint efficiency with serialization.
+        
+        Steps:
+        1. Measure serialized size of outputs
+        2. Compare against content-aware baselines
+        3. Handle different output types
+        """
+        total_size = 0
+        content_types = defaultdict(int)
+        
+        for output in outputs:
+            # Prefer metadata if available
+            if isinstance(output, dict) and 'serialized_size' in output:
+                total_size += output['serialized_size']
+                content_types[output.get('content_type', 'unknown')] += 1
+                continue
+                
+            try:
+                # Serialize and measure payload size
+                if isinstance(output, (str, bytes)):
+                    serialized = output
+                else:
+                    serialized = json.dumps(output).encode('utf-8')
+                total_size += len(serialized)
+                content_types['structured'] += 1
+            except (TypeError, OverflowError):
+                # Fallback for non-serializable objects
+                total_size += sys.getsizeof(output)
+                content_types['binary'] += 1
+        
+        # Get baseline based on content profile
+        baseline = self.baseline_measurements.get('memory_baseline', 1024)  # Default 1KB
+        if 'memory_per_type' in self.baseline_measurements:
+            # Calculate type-aware baseline
+            type_baselines = self.baseline_measurements['memory_per_type']
+            baseline = sum(
+                type_baselines.get(ctype, type_baselines.get('default', 512)) * count 
+                for ctype, count in content_types.items()
+            )
+        
+        # Calculate efficiency ratio
+        return baseline / (total_size + sys.float_info.epsilon)
 
     def _calculate_computational(self):
         """FLOPs relative to baseline"""
