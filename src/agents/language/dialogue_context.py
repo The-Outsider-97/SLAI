@@ -21,68 +21,70 @@ from typing import Optional, List, Callable, Dict, Any, Union, Tuple
 from datetime import datetime
 from pathlib import Path
 
+from src.agents.language.utils.config_loader import load_global_config, get_config_section
+from src.agents.language.utils.language_transformer import LanguageTransformer
+from src.agents.language.utils.language_tokenizer import LanguageTokenizer
 from src.agents.language.utils.language_cache import LanguageCache
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Dialogue Context")
-
-CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class DialogueContext:
-    def __init__(self, config):
+    def __init__(self):
         """
         Manages dialogue memory.
-
-        Args:
-            user_config_override (Optional[Dict]): User-specific configuration overrides.
-                                                   These are merged with the base config from CONFIG_PATH.
-                                                   Typically, this would be the 'dialogue_context_settings' part
-                                                   of a larger agent configuration.
-            summarizer_fn (Optional[Callable]): Custom summarizer function.
-                                                Expected signature: (history_messages, current_summary) -> new_summary
         """
-        self.config = config
-        merged_cfg = get_merged_config()
-        config = merged_cfg.get("dialogue_context_settings", {})
+        self.config = load_global_config()
+        self.wordlist_path = self.config.get('main_wordlist_path')
+
+        self.dialogue_config = get_config_section('dialogue_context')
+        self.memory_limit = self.dialogue_config.get('memory_limit')
+        self.required_slots = self.dialogue_config.get('required_slots')
+        self.enable_summarization = self.dialogue_config.get('enable_summarization')
+        self.initial_history = self.dialogue_config.get('initial_history')
+        self.initial_summary = self.dialogue_config.get('initial_summary')
+        self.default_initial_history = self.dialogue_config.get('default_initial_history')
+        self.default_initial_summary = self.dialogue_config.get('default_initial_summary')
+        self.follow_up_patterns_path = self.dialogue_config.get('follow_up_patterns_path')
+        self.topic_detection = self.dialogue_config.get('topic_detection', {
+            'similarity_threshold', 'lookback_window', 'encoder_model'
+        })
+        self.summarization = self.dialogue_config.get('summarization', {
+            'retain_last_messages', 'summary_update_strategy', 'max_summary_length'
+        })
+        self.persistence = self.dialogue_config.get('persistence', {
+            'auto_save_interval', 'default_save_path', 'encryption_key'
+        })
+        self.temporal = self.dialogue_config.get('temporal', {
+            'session_timeout', 'time_reference_format'
+        })
+        self.environment_state = self.dialogue_config.get(
+            "initial_environment_state", 
+            self.dialogue_config.get("default_initial_environment_state", 
+                {"session_id": None, "user_preferences": {}, "last_intent": None}
+            )
+        )
+
+        self.cache = LanguageCache()
+
         self.history: List[Dict[str, str]] = []
-        self.intent_history: List[Dict] = []
-        self._initialize_history(config)
-
-        self.summary: Optional[str] = config.get("initial_summary",
-                                                 config.get("default_initial_summary", "The conversation has just begun."))
-        self.environment_state: Dict[str, Any] = config.get("initial_environment_state",
-                                                            config.get("default_initial_environment_state",
-                                                                       {"session_id": None, "user_preferences": {}, "last_intent": None}))
-
-        self.memory_limit = self.config.get("dialogue_context_settings", {}).get("memory_limit")
-        self.enable_summarization = self.config.get("dialogue_context_settings", {}).get("enable_summarization")
         self.summarizer_fn: Optional[Callable[[List[Dict[str, str]], Optional[str]], str]] = {}
 
         # Slot/Entity Tracking System
         self.slot_values: Dict[str, Any] = {}
         self.unresolved_issues: List[Dict] = []
-        self.required_slots = merged_cfg.get("required_slots", [])
+        self.summary = self.initial_summary or self.default_initial_summary or ""
+        self.intent_history = []
 
-        cache_cfg = merged_cfg.get("language_cache", {})
-        self.cache = LanguageCache(config=cache_cfg)
+        self._initialize_history()
 
         logger.info(f"DialogueContext initialized. Memory limit: {self.memory_limit}, Summarization: {self.enable_summarization}")
 
-    def _initialize_history(self, config: Dict):
-        initial_history_raw = config.get("initial_history", [])
+    def _initialize_history(self):
+        initial_history_raw = self.dialogue_config.get("initial_history", [])
         if not initial_history_raw: # If initial_history is explicitly empty or not provided, use default
-             default_history_raw = config.get("default_initial_history", ["System: Hello! How can I assist you today?"])
+             default_history_raw = self.dialogue_config.get("default_initial_history", ["System: Hello! How can I assist you today?"])
              initial_history_raw = default_history_raw
 
         for item in initial_history_raw:
@@ -98,6 +100,11 @@ class DialogueContext:
             else:
                 logger.warning(f"Skipping malformed initial history item: {item}")
 
+    def add_turn(self, user_input: str, agent_response: str):
+        """Adds a user input and agent response as a turn."""
+        self.add_message("user", user_input)
+        self.add_message("agent", agent_response) # Or assistant, bot, etc.
+
     def add_message(self, role: str, content: str):
         """Adds a single message to the history."""
         if not isinstance(role, str) or not isinstance(content, str):
@@ -112,11 +119,6 @@ class DialogueContext:
         user_messages_count = sum(1 for msg in self.history if msg["role"] == "user")
         if self.enable_summarization and self.summarizer_fn and user_messages_count > self.memory_limit:
             self._summarize()
-
-    def add_turn(self, user_input: str, agent_response: str):
-        """Adds a user input and agent response as a turn."""
-        self.add_message("user", user_input)
-        self.add_message("agent", agent_response) # Or assistant, bot, etc.
 
     def _summarize(self):
         """Summarize current history and reset memory if a summarizer function is provided."""
@@ -214,7 +216,11 @@ class DialogueContext:
                                 if issue.get('slot') != slot_name]
 
     def add_unresolved(self, issue: str, slot: Optional[str] = None):
-        """Track pending conversation threads"""
+        """Track pending conversation threads (SINGLE IMPLEMENTATION)"""
+        if not isinstance(issue, str) or len(issue.strip()) == 0:
+            logger.error("Invalid unresolved issue format")
+            return
+            
         self.unresolved_issues.append({
             'description': issue,
             'slot': slot,
@@ -231,30 +237,11 @@ class DialogueContext:
         })
         self.environment_state['last_intent'] = intent
 
-    def _encode_text(self, text: str, encoder) -> torch.Tensor:
-        """Helper to convert string to embedding using encoder"""
-        cached = self.cache.get_embedding(text)
-        if cached is not None:
-            return cached
-        if not encoder.tokenizer:
-            raise ValueError("TextEncoder requires a tokenizer to embed text.")
-        
-        tokens = encoder.tokenizer.encode(text)["input_ids"]
-        token_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0)  # [1, seq_len]
-    
-        with torch.no_grad():
-            encoded, _ = encoder(token_tensor, style_id=0)
-            pooled = torch.mean(encoded, dim=1).squeeze(0)  # Convert to 1D tensor [embed_dim]
-    
-        self.cache.add_embedding(text, pooled)
-        return pooled
-
     def detect_topic_shift(self, current_topic: str, threshold: float = 0.7) -> bool:
         from src.agents.perception.encoders.text_encoder import TextEncoder, load_config as load_perception_config
-        from src.agents.perception.modules.tokenizer import Tokenizer
     
         config = load_perception_config()
-        tokenizer = Tokenizer(config)
+        tokenizer = LanguageTokenizer()
         encoder = TextEncoder(config=config, tokenizer=tokenizer)
         encoder.eval()
     
@@ -266,8 +253,6 @@ class DialogueContext:
             return False
     
         current_vec = self._encode_text(current_topic, encoder)
-    
-        current_vec = self._encode_text(current_topic, encoder)
         similarities = []
         for past in previous_topics:
             past_vec = self._encode_text(past, encoder)
@@ -275,6 +260,31 @@ class DialogueContext:
             similarities.append(sim)
     
         return max(similarities) < threshold
+
+    def _encode_text(self, text: str, encoder) -> torch.Tensor:
+        """Helper to convert string to embedding using encoder"""
+        cached = self.cache.get_embedding(text)
+        if cached is not None:
+            return cached
+        if not encoder.tokenizer:
+            raise ValueError("TextEncoder requires a tokenizer to embed text.")
+        
+        tokens = encoder.tokenizer.encode(text)["input_ids"]
+        token_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0)
+        
+        with torch.no_grad():
+            output = encoder(token_tensor, style_id=0)
+            if isinstance(output, tuple):
+                # output is (hidden_states, hidden_states) — take the actual tensor
+                encoded = output[0]  # shape: [batch_size, seq_len, embed_dim]
+            else:
+                encoded = output
+            if isinstance(encoded, tuple):  # just in case encoded is again a tuple
+                encoded = encoded[0]
+            pooled = torch.mean(encoded, dim=1).squeeze(0)  # shape: [embed_dim]
+    
+        self.cache.add_embedding(text, pooled)
+        return pooled
 
     @property
     def required_slots_filled(self) -> bool:
@@ -306,22 +316,17 @@ class DialogueContext:
             json.dump(state, f)
 
     @classmethod
-    def load_state(cls, config, file_path: Union[str, Path]):
+    def load_state(cls, file_path: Union[str, Path]):
         """Load context from saved state"""
         with open(file_path, 'r') as f:
             state = json.load(f)
         
-        instance = cls(config)
+        instance = cls()
         instance.history = state.get('history', [])
         instance.slot_values = state.get('slots', {})
         instance.intent_history = state.get('intent_history', [])
         instance.summary = state.get('summary', '')
         return instance
-
-    def add_unresolved(self, issue: str, slot: Optional[str] = None):
-        if not isinstance(issue, str) or len(issue.strip()) == 0:
-            logger.error("Invalid unresolved issue format")
-            return
 
     def get_time_since_last_interaction(self) -> float:
         """Returns minutes since last message"""
@@ -331,23 +336,25 @@ class DialogueContext:
         return (datetime.now() - last_msg_time).total_seconds() / 60
 
     def is_follow_up(self, current_utterance: str) -> bool:
-        patterns = self.config.get("dialogue_context_settings", {}).get("follow_up_patterns_path")
+        patterns = self.follow_up_patterns_path 
         return any(re.search(pattern, current_utterance, re.IGNORECASE) 
                for pattern in patterns)
 
     def clear(self):
-        """Clear the history, summary, and optionally reset environment state to defaults."""
+        """Clear the history, summary, and reset environment state and other tracking"""
         self.history = []
-        # Re-fetch default config for summary and env_state to reset them
-        merged_cfg = get_merged_config(None) # No override, just base config
-        config = merged_cfg.get("dialogue_context_settings", {})
-
-        self.summary = config.get("initial_summary", 
-                                  config.get("default_initial_summary", "The conversation has just begun."))
-        self.environment_state = config.get("initial_environment_state", 
-                                            config.get("default_initial_environment_state", 
-                                                       {"session_id": None, "user_preferences": {}, "last_intent": None}))
-        logger.info("DialogueContext cleared (history, summary, environment_state reset to defaults).")
+        self.summary = self.default_initial_summary or ""
+        self.environment_state = self.dialogue_config.get(
+            "initial_environment_state", 
+            self.dialogue_config.get("default_initial_environment_state", 
+                {"session_id": None, "user_preferences": {}, "last_intent": None}
+            )
+        )
+        # Reset other state trackers
+        self.slot_values = {}
+        self.unresolved_issues = []
+        self.intent_history = []   # Reset to empty list
+        logger.info("DialogueContext cleared (full reset)")
  
     def serialize(self):
         return {
@@ -365,77 +372,16 @@ class DialogueContext:
 
 if __name__ == "__main__":
     print("\n=== Running Dialogue Context ===\n")
+    printer.status("Init", "Dialogue Context initialized", "success")
 
-    config =  {}
-
-    context = DialogueContext(config=config)
+    context = DialogueContext()
 
     print(context)
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+    input="What is life about?"
+    output="The meaning of life differse from person to person."
+    printer.status("Init", context.add_turn(user_input=input, agent_response=output), "success")
+    printer.status("Init", context._summarize(), "success")
+
     print("\n=== Finished Running Dialogue Context ===\n")
-
-if __name__ == "__main__":
-    print("=== Dialogue Context Interactive Test ===")
-    
-    # Load test configuration
-    test_config = {
-        "dialogue_context_settings": {
-            "memory_limit": 3,
-            "required_slots": ["destination", "travel_dates", "budget"],
-            "follow_up_patterns_path": "src/agents/language/templates/follow_up_patterns.json",
-            "enable_summarization": True
-        }
-    }
-
-    # Initialize context
-    context = DialogueContext(config=test_config)
-    
-    # Test 1: Basic conversation flow
-    print("\n--- Test 1: Conversation History ---")
-    context.add_turn("I want to plan a trip to Japan", "Great! When would you like to go?")
-    context.add_turn("In spring next year", "Spring is lovely there. For how long?")
-    print("History:")
-    for msg in context.get_history_messages():
-        print(f"{msg['role'].upper()}: {msg['content']}")
-
-    # Test 2: Slot filling
-    print("\n--- Test 2: Slot Management ---")
-    context.update_slot("destination", "Japan")
-    print(f"Filled slots: {context.slot_values}")
-    print(f"Missing slots: {context.get_missing_slots()}")
-
-    # Test 3: Follow-up detection
-    print("\n--- Test 3: Follow-up Detection ---")
-    follow_up_utterance = "Regarding our previous discussion about destinations..."
-    is_follow = context.is_follow_up(follow_up_utterance)
-    print(f"'{follow_up_utterance}'\nIs follow-up? {is_follow}")
-
-    # Test 4: Topic shift detection
-    print("\n--- Test 4: Topic Detection ---")
-    new_topic = "What's the weather forecast for tomorrow?"
-    is_shift = context.detect_topic_shift(new_topic)
-    print(f"'{new_topic}'\nIs topic shift? {is_shift}")
-
-    # Test 5: Summarization
-    print("\n--- Test 5: Summarization ---")
-    # Add mock summarizer
-    context.summarizer_fn = lambda history, summary: f"{summary} [Summarized {len(history)} messages]"
-    # Exceed memory limit
-    context.add_turn("About 2 weeks", "What's your budget?")
-    context.add_turn("Around $5000", "Great! Let's look at options...")
-    print(f"Current summary: {context.get_summary()}")
-    print(f"History length after summarization: {len(context.history)}")
-
-    # Test 6: Persistence
-    print("\n--- Test 6: Save/Load ---")
-    context.save_state("src/agents/language/cache/test_session.json")
-    loaded_context = DialogueContext.load_state(test_config, "src/agents/language/cache/test_session.json")
-    print(f"Loaded history: {len(loaded_context.history)} messages")
-    print(f"Loaded slots: {loaded_context.slot_values}")
-
-    # Test 7: Clear functionality
-    print("\n--- Test 7: Clear Context ---")
-    context.clear()
-    print(f"Summary after clear: {context.get_summary()}")
-    print(f"Slots after clear: {context.slot_values}")
-
-    print("\n=== All Tests Completed ===")
