@@ -16,23 +16,12 @@ import yaml
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass, field
 
-from src.agents.language.utils.rules import Rules #, DependencyRelation
-from logs.logger import get_logger
+from src.agents.language.utils.config_loader import load_global_config, get_config_section
+from src.agents.language.utils.rules import Rules
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Grammar Processor")
-
-CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 @dataclass
 class InputToken:
@@ -71,34 +60,24 @@ class GrammarAnalysisResult:
     #   - original_sentence_token_count: int
 
 class GrammarProcessor:
-    # _UPOS_MAP could be used for internal normalization if NLPEngine POS tags vary
-    _UPOS_MAP = {
-        'noun': 'NOUN', 'propn': 'PROPN', 'verb': 'VERB', 'aux': 'AUX',
-        'adjective': 'ADJ', 'adverb': 'ADV', 'numeral': 'NUM',
-        'determiner': 'DET', 'pronoun': 'PRON', 'preposition': 'ADP',
-        'conjunction': 'CCONJ', 'subord': 'SCONJ', 'particle': 'PART',
-        'interjection': 'INTJ', 'symbol': 'SYM', 'punct': 'PUNCT',
-    }
+    def __init__(self):
+        self.config = load_global_config()
+        self.wordlist_path = self.config.get('main_wordlist_path')
 
-    def __init__(self, config):
+        self.grammar_config = get_config_section('grammar_processor')
+        self.pos_map = self.grammar_config.get('pos_map_path')
 
-        self.config = config
         self.rule_engine = Rules()
-        self.rule_engine._verb_rules()
+        #self.rule_engine._verb_rules()
         logger.info("Grammar Processor initialized...")
-
-    def _reconstruct_sentence_text(self, sentence_tokens: List[InputToken]) -> str:
-        """Reconstructs sentence text from InputToken list for display."""
-        if not sentence_tokens:
-            return ""
-        return " ".join(token.text for token in sentence_tokens)
-
 
     def analyze_text(self, sentences: List[List[InputToken]], full_text_snippet: Optional[str] = None) -> GrammarAnalysisResult:
         """
         Analyzes a list of sentences, where each sentence is a list of InputTokens.
         `full_text_snippet` is optional, used for context in GrammarAnalysisResult.
         """
+        printer.status("INIT", "Text analyzer initialized", "info")
+
         if not sentences:
             logger.warning("Received empty sentence list for analysis.")
             return GrammarAnalysisResult(original_text_snippet=full_text_snippet or "",
@@ -118,7 +97,10 @@ class GrammarProcessor:
             
             sv_agreement_issues = self._check_subject_verb_agreement(sentence_tokens)
             current_sentence_issues.extend(sv_agreement_issues)
-            
+
+            article_issues = self._check_article_usage(sentence_tokens)
+            current_sentence_issues.extend(article_issues)
+
             # TODO: Add calls to other grammar check methods here using sentence_tokens
 
             all_issues_overall.extend(current_sentence_issues)
@@ -136,14 +118,23 @@ class GrammarProcessor:
              display_text = self._reconstruct_sentence_text(sentences[0])
              if len(sentences) > 1: display_text += "..."
 
-
         return GrammarAnalysisResult(
             original_text_snippet=display_text or "N/A",
             is_grammatical=is_overall_grammatical,
             sentence_analyses=sentence_analyses_results
         )
 
+    def _reconstruct_sentence_text(self, sentence_tokens: List[InputToken]) -> str:
+        """Reconstructs sentence text from InputToken list for display."""
+        printer.status("INIT", "Sentence reconstruction initialized", "info")
+
+        if not sentence_tokens:
+            return ""
+        return " ".join(token.text for token in sentence_tokens)
+
     def _classify_sentence_type(self, sentence_tokens: List[InputToken]) -> str:
+        printer.status("INIT", "Sentence classifier initialized", "info")
+
         if not sentence_tokens:
             return "EMPTY"
 
@@ -171,67 +162,11 @@ class GrammarProcessor:
              # A more robust check would involve looking at the main verb structure
              return 'INTERROGATIVE'
 
-
         return 'DECLARATIVE'
 
-    def _get_token_number_and_person(self, token: InputToken) -> Tuple[Optional[str], Optional[str]]:
-        """Infers number and person from token's POS and text. More heuristic than spaCy's morph."""
-        number: Optional[str] = None
-        person: Optional[str] = None
-        
-        # Pronoun checks (most reliable for person/number without full morphology)
-        if token.pos == 'PRON' or token.pos.startswith('PRP'): # PRP is Penn Treebank for Pronoun
-            text_lower = token.text.lower()
-            if text_lower in ["i", "me", "myself"]:
-                number, person = "singular", "1st"
-            elif text_lower in ["we", "us", "ourselves"]:
-                number, person = "plural", "1st"
-            elif text_lower in ["you", "yourself", "yourselves"]:
-                person = "2nd"
-                number = "singular_or_plural" # 'you' is ambiguous
-            elif text_lower in ["he", "him", "himself", "she", "her", "herself", "it", "itself"]:
-                number, person = "singular", "3rd"
-            elif text_lower in ["they", "them", "themselves"]:
-                number, person = "plural", "3rd"
-
-        # Noun checks for number
-        elif token.pos == 'NOUN' or token.pos == 'PROPN':
-            if token.pos == 'NNS' or token.pos == 'NNPS': # Penn Treebank plural tags
-                number = "plural"
-            elif token.text.lower().endswith('s') and not token.lemma.lower().endswith('s') and token.text.lower() != token.lemma.lower() + 's':
-                # Heuristic: ends in 's', lemma doesn't, not just lemma+'s' (e.g. "bus" vs "buses")
-                # This is imperfect (e.g., "series", "news")
-                if token.text.lower() not in ["series", "news", "mathematics", "physics"]: # common exceptions
-                     number = "plural"
-                else:
-                     number = "singular" # assume singular for exceptions
-            else:
-                number = "singular"
-            person = "3rd" # Nouns are typically 3rd person
-
-        # Default to 3rd person singular if unknown, a common case
-        if number is None: number = "singular"
-        if person is None: person = "3rd"
-        
-        return number, person
-
-    def _suggest_verb_form(self, verb_lemma: str, subject_number: Optional[str], subject_person: Optional[str], verb_tense: str = "present") -> str:
-        if verb_tense.lower() == "present":
-            if subject_number == "singular" and subject_person == "3rd":
-                if verb_lemma in self.rule_engine.irregular_verbs_present_singular:
-                    return self.rule_engine.irregular_verbs_present_singular[verb_lemma]
-                if verb_lemma.endswith('y') and len(verb_lemma) > 1 and verb_lemma[-2].lower() not in 'aeiou':
-                    return verb_lemma[:-1] + 'ies'
-                if verb_lemma.endswith(('s', 'x', 'z', 'ch', 'sh')):
-                    return verb_lemma + 'es'
-                return verb_lemma + 's'
-            else:
-                if verb_lemma in self.rule_engine.irregular_verbs_present_plural:
-                    return self.rule_engine.irregular_verbs_present_plural[verb_lemma]
-                return verb_lemma
-        return verb_lemma
-
     def _check_subject_verb_agreement(self, sentence_tokens: List[InputToken]) -> List[GrammarIssue]:
+        printer.status("INIT", "Verb agreement initialized", "info")
+
         issues: List[GrammarIssue] = []
         
         for token_idx, current_token in enumerate(sentence_tokens):
@@ -313,122 +248,143 @@ class GrammarProcessor:
                         ))
         return issues
 
-# Example usage (requires manual setup of InputToken list):
-if __name__ == "__main__":
-    logger.info("Running GrammarProcessor (spaCy-free) standalone example...")
-    
-    test_config_data = load_config() # Load from actual config file
-    gp = GrammarProcessor(config=test_config_data)
+    def _get_token_number_and_person(self, token: InputToken) -> Tuple[Optional[str], Optional[str]]:
+        """Infers number and person from token's POS and text. More heuristic than spaCy's morph."""
+        printer.status("INIT", "Token number initialized", "info")
 
-    # --- Helper to simulate NLPEngine output for testing ---
-    # In a real scenario, NLPEngine would produce this.
-    # This is a very basic mock dependency "parser".
-    def mock_tokenize_and_parse(text: str) -> List[InputToken]:
-        words = text.split()
-        tokens = []
-        char_offset = 0
-        # Simple POS and lemma, basic head assignment (verb is root, others attach to previous or verb)
-        # THIS IS HIGHLY SIMPLIFIED AND NOT A REAL PARSER.
-        root_index = -1
-        for i, word_text in enumerate(words):
-            # Rudimentary POS tagging for testing
-            pos = "NOUN"
-            lemma = word_text.lower()
-            if word_text.lower() in ["is", "are", "was", "were", "am", "has", "have", "do", "does", "goes"]:
-                pos = "VERB" # Actually AUX or VERB
-                if root_index == -1: root_index = i
-            elif word_text.lower() in ["cat", "cats", "fish", "apples", "park", "system", "data", "committee", "friends", "concert"]:
-                pos = "NOUN"
-            elif word_text.lower() in ["i", "she", "they", "he", "my"]:
-                pos = "PRON"
-            elif word_text.endswith("?") or word_text.endswith(".") or word_text.endswith("!"):
-                pos = "PUNCT"
-            
-            # Lemma for common irregulars
-            if word_text.lower() == "eats": lemma = "eat"
-            if word_text.lower() == "goes": lemma = "go"
-            if word_text.lower() == "is": lemma = "be"
-            if word_text.lower() == "are": lemma = "be"
-            if word_text.lower() == "don't": lemma = "do" # and "not" implicitly
-
-
-            # Rudimentary dependency head assignment (highly simplified)
-            head_idx = -1
-            dep_rel = "dep" # generic dependency
-            if pos == "VERB" and i == root_index : # Main verb is root
-                 head_idx = i # root points to self or -1
-                 dep_rel = "root"
-            elif pos == "NOUN" or pos == "PRON":
-                if root_index != -1:
-                    head_idx = root_index
-                    dep_rel = "nsubj" if i < root_index else "obj" # very naive
-                else: # No verb found yet, attach to previous if exists
-                    head_idx = i-1 if i > 0 else i
-            elif pos == "PUNCT":
-                head_idx = i-1 if i > 0 else i
-                dep_rel = "punct"
-            else: # Other tags
-                head_idx = i-1 if i > 0 else i # attach to previous
-
-            if i == 0 and dep_rel != "root": # first word cannot attach to -1
-                if root_index == -1 or root_index == 0 : # if it is the root or no root found yet
-                    head_idx = i
-                    if dep_rel != "root": dep_rel = "root" # make it root if not already
-                elif root_index > 0 :
-                    head_idx = root_index
-
-
-            start_char = char_offset
-            end_char = char_offset + len(word_text) - 1
-            tokens.append(InputToken(
-                text=word_text, lemma=lemma, pos=pos, index=i,
-                head=head_idx, dep=dep_rel,
-                start_char_abs=start_char, end_char_abs=end_char
-            ))
-            char_offset += len(word_text) + 1 # Add 1 for space
-        return tokens
-    # --- End of mock helper ---
-
-    test_sentences_text = [
-        "The quick brown fox jumps over the lazy dog.",
-        "Cats eats fish.", # Error
-        "What time is it?",
-        "Go home now!",
-        "She like apples.", # Error
-        "They goes to the park.", # Error
-        "I am happy.",
-        "An error occur in the system.", # Error
-        "Data were processed.",
-        "The committee decide.", # Error
-        "My friends and I is going to the concert.", # Error (complex subject, simplified mock won't catch well)
-        "He don't know." # Error
-    ]
-
-    for i, text_example in enumerate(test_sentences_text):
-        print(f"\n--- Test Case {i+1} ---")
-        print(f"Input Text: {text_example}")
+        number: Optional[str] = None
+        person: Optional[str] = None
         
-        # Simulate NLPEngine providing a list of sentences (here, each test is one sentence)
-        sentence_as_input_tokens = [mock_tokenize_and_parse(text_example)]
-        
-        analysis_result = gp.analyze_text(sentence_as_input_tokens, full_text_snippet=text_example)
-        
-        if analysis_result:
-            print(f"Overall Grammatical: {analysis_result.is_grammatical}")
-            for sent_analysis in analysis_result.sentence_analyses:
-                print(f"  Sentence: '{sent_analysis['text']}'")
-                print(f"  Type: {sent_analysis['type']}")
-                if sent_analysis['issues']:
-                    print("  Issues Found:")
-                    for issue in sent_analysis['issues']:
-                        issue_text_snippet = text_example[issue.source_text_char_span[0] : issue.source_text_char_span[1]+1]
-                        print(f"    - Desc: {issue.description}")
-                        print(f"      Affected Text: '{issue_text_snippet}', Severity: {issue.severity}")
-                        if issue.suggestion:
-                            print(f"      Suggestion: {issue.suggestion}")
+        # Pronoun checks (most reliable for person/number without full morphology)
+        if token.pos == 'PRON' or token.pos.startswith('PRP'): # PRP is Penn Treebank for Pronoun
+            text_lower = token.text.lower()
+            if text_lower in ["i", "me", "myself"]:
+                number, person = "singular", "1st"
+            elif text_lower in ["we", "us", "ourselves"]:
+                number, person = "plural", "1st"
+            elif text_lower in ["you", "yourself", "yourselves"]:
+                person = "2nd"
+                number = "singular_or_plural" # 'you' is ambiguous
+            elif text_lower in ["he", "him", "himself", "she", "her", "herself", "it", "itself"]:
+                number, person = "singular", "3rd"
+            elif text_lower in ["they", "them", "themselves"]:
+                number, person = "plural", "3rd"
+
+        # Noun checks for number
+        elif token.pos == 'NOUN' or token.pos == 'PROPN':
+            if token.pos == 'NNS' or token.pos == 'NNPS': # Penn Treebank plural tags
+                number = "plural"
+            elif token.text.lower().endswith('s') and not token.lemma.lower().endswith('s') and token.text.lower() != token.lemma.lower() + 's':
+                # Heuristic: ends in 's', lemma doesn't, not just lemma+'s' (e.g. "bus" vs "buses")
+                # This is imperfect (e.g., "series", "news")
+                if token.text.lower() not in ["series", "news", "mathematics", "physics"]: # common exceptions
+                     number = "plural"
                 else:
-                    print("  No issues found in this sentence.")
-        else:
-            print("Analysis failed.")
+                     number = "singular" # assume singular for exceptions
+            else:
+                number = "singular"
+            person = "3rd" # Nouns are typically 3rd person
 
-    print("\nStandalone example finished.")
+        # Default to 3rd person singular if unknown, a common case
+        if number is None: number = "singular"
+        if person is None: person = "3rd"
+        
+        return number, person
+
+    def _suggest_verb_form(self, verb_lemma: str, subject_number: Optional[str], subject_person: Optional[str], verb_tense: str = "present") -> str:
+        if verb_tense.lower() == "present":
+            if subject_number == "singular" and subject_person == "3rd":
+                if verb_lemma in self.rule_engine.irregular_singular_forms: # self.rule_engine.irregular_verbs_present_singular:
+                    return self.rule_engine.irregular_singular_forms[verb_lemma] # self.rule_engine.irregular_verbs_present_singular[verb_lemma]
+                if verb_lemma.endswith('y') and len(verb_lemma) > 1 and verb_lemma[-2].lower() not in 'aeiou':
+                    return verb_lemma[:-1] + 'ies'
+                if verb_lemma.endswith(('s', 'x', 'z', 'ch', 'sh')):
+                    return verb_lemma + 'es'
+                return verb_lemma + 's'
+            else:
+                if verb_lemma in self.rule_engine.irregular_plural_forms: # self.rule_engine.irregular_verbs_present_plural:
+                    return self.rule_engine.irregular_plural_forms[verb_lemma] # self.rule_engine.irregular_verbs_present_plural[verb_lemma]
+                return verb_lemma
+        return verb_lemma
+
+    def _check_article_usage(self, sentence_tokens: List[InputToken]) -> List[GrammarIssue]:
+        issues = []
+        words_using_a = {"university", "union", "user", "euler", "one", "once"}
+        words_using_an = {"hour", "heir", "honest", "honor"}
+    
+        for token in sentence_tokens:
+            if token.pos == 'DET' and token.text.lower() in ['a', 'an']:
+                head_noun = next((t for t in sentence_tokens if t.index == token.head), None)
+                if not head_noun:
+                    continue
+                    
+                head_text = head_noun.text.lower()
+                if not head_text:
+                    continue
+                    
+                first_char = head_text[0]
+                
+                if token.text.lower() == 'a':
+                    if first_char in 'aeiou' and head_text not in words_using_a:
+                        issues.append(GrammarIssue(
+                            description=f"Incorrect article: 'a' used before vowel sound '{head_text}'",
+                            source_text_char_span=(token.start_char_abs, token.end_char_abs),
+                            source_sentence_token_indices_span=(token.index, token.index),
+                            severity="error",
+                            suggestion="Use 'an' instead"
+                        ))
+                    elif head_text in words_using_an:
+                        issues.append(GrammarIssue(
+                            description=f"Article exception: 'a' used before '{head_text}'",
+                            source_text_char_span=(token.start_char_abs, token.end_char_abs),
+                            source_sentence_token_indices_span=(token.index, token.index),
+                            severity="error",
+                            suggestion="Use 'an' instead"
+                        ))
+                        
+                elif token.text.lower() == 'an':
+                    if first_char not in 'aeiou' and head_text not in words_using_an:
+                        issues.append(GrammarIssue(
+                            description=f"Incorrect article: 'an' used before consonant sound '{head_text}'",
+                            source_text_char_span=(token.start_char_abs, token.end_char_abs),
+                            source_sentence_token_indices_span=(token.index, token.index),
+                            severity="error",
+                            suggestion="Use 'a' instead"
+                        ))
+        return issues
+
+if __name__ == "__main__":
+    print("\n=== Running Grammar Processor ===\n")
+    printer.status("Init", "Grammar Processor initialized", "success")
+
+    processor = GrammarProcessor()
+
+    print(processor)
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+    # text="I don't want this to become normal, I want this to be stop!"
+    # text=[[InputToken(text="I don't want this to become normal, I want this to be stop!")]]
+    sentences = [[
+        InputToken(text="I", lemma="I", pos="PRON", index=0, head=1, dep="nsubj", start_char_abs=0, end_char_abs=0),
+        InputToken(text="do", lemma="do", pos="VERB", index=11, head=8, dep="xcomp", start_char_abs=45, end_char_abs=46),
+        InputToken(text="not", lemma="not", pos="VERB", index=11, head=8, dep="xcomp", start_char_abs=45, end_char_abs=46),
+        InputToken(text="want", lemma="want", pos="VERB", index=1, head=1, dep="ROOT", start_char_abs=2, end_char_abs=5),
+        InputToken(text="this", lemma="this", pos="DET", index=2, head=3, dep="det", start_char_abs=7, end_char_abs=10),
+        InputToken(text="to", lemma="to", pos="PART", index=3, head=4, dep="aux", start_char_abs=12, end_char_abs=13),
+        InputToken(text="become", lemma="become", pos="VERB", index=4, head=1, dep="xcomp", start_char_abs=15, end_char_abs=20),
+        InputToken(text="normal", lemma="normal", pos="ADJ", index=5, head=4, dep="attr", start_char_abs=22, end_char_abs=27),
+        InputToken(text=",", lemma=",", pos="PUNCT", index=6, head=1, dep="punct", start_char_abs=28, end_char_abs=28),
+        InputToken(text="I", lemma="I", pos="PRON", index=7, head=8, dep="nsubj", start_char_abs=30, end_char_abs=30),
+        InputToken(text="want", lemma="want", pos="VERB", index=8, head=1, dep="conj", start_char_abs=32, end_char_abs=35),
+        InputToken(text="this", lemma="this", pos="DET", index=9, head=10, dep="det", start_char_abs=37, end_char_abs=40),
+        InputToken(text="to", lemma="to", pos="PART", index=10, head=11, dep="aux", start_char_abs=42, end_char_abs=43),
+        InputToken(text="stop", lemma="stop", pos="VERB", index=12, head=11, dep="xcomp", start_char_abs=48, end_char_abs=51),
+        InputToken(text="?", lemma="?", pos="PUNCT", index=13, head=8, dep="punct", start_char_abs=52, end_char_abs=52),
+    ]]
+    full_text_snippet= None
+    sentence_tokens=[]
+    printer.pretty("ANALYZE", processor.analyze_text(sentences=sentences, full_text_snippet=full_text_snippet), "success")
+    printer.status("RECON", processor._reconstruct_sentence_text(sentence_tokens=sentence_tokens), "success")
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+    print("\n=== Grammar Processor Tests Complete ===\n")
