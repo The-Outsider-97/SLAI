@@ -289,9 +289,17 @@ class RotatingHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._compress_queue = deque(maxlen=5)
-        self.compress_threshold = 2  # Number of backups before compression
+        self.compress_threshold = 5  # Number of backups before compression
+        self.last_rollover_time = 0
+        self.rollover_cooldown = 60  # 60 seconds cooldown between rollover attempts
 
     def doRollover(self):
+        current_time = time.time()
+        if current_time - self.last_rollover_time < self.rollover_cooldown:
+            return  # Skip if we tried recently
+
+        self.last_rollover_time = current_time
+
         if self.stream:
             try:
                 self.stream.flush()
@@ -303,22 +311,36 @@ class RotatingHandler(RotatingFileHandler):
         dfn = self.rotation_filename(self.baseFilename + ".1")
     
         try:
+            # Attempt to rename with lock check
             if os.path.exists(dfn):
-                os.remove(dfn)
+                try:
+                    # Check if file is locked
+                    with open(dfn, 'a') as test_lock:
+                        pass
+                    os.remove(dfn)
+                except (PermissionError, IOError):
+                    logging.debug(f"Backup file {dfn} is locked, skipping removal")
+                    
             if os.path.exists(self.baseFilename):
-                os.rename(self.baseFilename, dfn)
+                try:
+                    # Check if main log is locked
+                    with open(self.baseFilename, 'a') as test_lock:
+                        pass
+                    os.rename(self.baseFilename, dfn)
+                except (PermissionError, IOError):
+                    # Use copy+remove fallback ONLY if file is not locked
+                    try:
+                        with open(self.baseFilename, 'rb') as src, open(dfn, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                        os.remove(self.baseFilename)
+                    except Exception as e:
+                        logging.warning(f"Log rotation fallback failed: {str(e)}")
+                        return
 
-        except PermissionError:
-            try:
-                if os.path.exists(self.baseFilename):
-                    shutil.copyfile(self.baseFilename, dfn)
-                    os.remove(self.baseFilename)
+        except Exception as e:
+            logging.error(f"Log rotation error: {str(e)}")
+            return
 
-            except Exception:
-                if self._compress_queue and self._compress_queue[-1] != self.baseFilename:
-                    print(f"[LOGGER] Log rotation skipped (still locked): {self.baseFilename}", file=sys.stderr)
-                return
-    
         if not self.delay:
             try:
                 self.stream = self._open()
