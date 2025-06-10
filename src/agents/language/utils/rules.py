@@ -11,6 +11,9 @@ class DependencyRelation:
     dependent_index: int
 
 class Rules():
+    def __init__(self):
+        self._verb_rules()
+
     def _verb_rules(self):
         self.irregular_verbs_present_singular = {
             "be": "is", "have": "has", "do": "does", "go": "goes", "say": "says",
@@ -29,6 +32,14 @@ class Rules():
             "forgo": "forgo", "outdo": "outdo", "undergo": "undergo",
             "knife": "knife", "life": "life", "strife": "strife"
         }
+
+    @property
+    def irregular_singular_forms(self):
+        return self.irregular_verbs_present_singular
+
+    @property
+    def irregular_plural_forms(self):
+        return self.irregular_verbs_present_plural
 
     def _apply_rules(self, tokens: List[Dict[str, Any]]) -> List[DependencyRelation]:
         """
