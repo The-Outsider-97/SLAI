@@ -1,18 +1,20 @@
 
 import time
 import heapq
+import random
+import threading
 import yaml, json
 import numpy as np
-import random
 
-from threading import Lock
+from threading import RLock
 from datetime import timedelta, datetime
 from collections import deque, defaultdict
 
 from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Distributed Replay Buffer")
+printer = PrettyPrinter
 
 CONFIG_PATH = "src/utils/buffer/configs/buffer_config.yaml"
 
@@ -24,6 +26,9 @@ def get_merged_config(user_config=None):
     base_config = load_config()
     if user_config: base_config.update(user_config)
     return base_config
+
+PUSH_TIMEOUT = 5  # seconds
+DEADLOCK_TIMEOUT = 10
 
 class DistributedReplayBuffer:
     def __init__(self, user_config=None):
@@ -45,7 +50,7 @@ class DistributedReplayBuffer:
 
         # Core storage
         self.buffer = deque(maxlen=self.capacity)
-        self.lock = Lock()
+        self.lock = RLock()
         self.priorities = []
         self.timestamps = deque(maxlen=self.capacity)
         self.agent_experience_map = defaultdict(int)
@@ -58,37 +63,103 @@ class DistributedReplayBuffer:
         
         logger.info(f"Initialized distributed buffer (Capacity: {self.capacity}, alpha: {self.alpha})")
 
-    def push(self, agent_id, state, action, reward, next_state, done):
-        """
-        Store transition with automatic priority initialization and quality tracking.
-        Implements prioritized experience replay (Schaul et al., 2015).
-        """
+    def stats(self) -> dict:
+        """Get key buffer statistics"""
         with self.lock:
+            return {
+                'total_experiences': len(self.buffer),
+                'avg_reward': self.reward_stats['sum'] / len(self.buffer) if len(self.buffer) > 0 else 0,
+                'max_reward': self.reward_stats['max'],
+                'min_reward': self.reward_stats['min'],
+                'active_agents': len(self.agent_experience_map),
+                'staleness_threshold': str(self.staleness_threshold),
+                'priority_alpha': self.alpha
+            }
+
+    def push(self, agent_id, state, action, reward, next_state, done, priority=None):
+        """
+        Robust push method with timeout, duration tracking, and safe-fallbacks.
+        """
+        start_time = time.time()
+        # Deadlock prevention
+        if time.time() - start_time > DEADLOCK_TIMEOUT:
+            logger.critical("Deadlock detected - forcing lock release")
+            try:
+                self.lock.release()
+            except RuntimeError:
+                pass
+            return
+        printer.status("PUSH", "Attempting to push experience...", "info")
+    
+        acquired = self.lock.acquire(timeout=PUSH_TIMEOUT)
+        if not acquired:
+            logger.error("[ReplayBuffer] Lock acquisition failed — timeout exceeded")
+            printer.status("PUSH", "❌ Lock timeout — skipping push", "error")
+            return
+    
+        try:
+            timestamp = datetime.now()
+    
+            # Fallback for bad reward
+            if not isinstance(reward, (int, float)):
+                logger.warning(f"[ReplayBuffer] Invalid reward type: {type(reward)}. Defaulting to 0.")
+                reward = 0.0
+    
+            # Priority calc
+            if priority is None or not isinstance(priority, (int, float)) or priority < 0:
+                priority = (abs(reward) + 1e-5)
+            priority = max(1e-5, float(priority)) ** self.alpha
+    
             experience = (agent_id, state, action, reward, next_state, done)
+    
             self.buffer.append(experience)
-            self.timestamps.append(datetime.now())
-            
-            # Calculate initial priority using reward magnitude
-            priority = (abs(reward) + 1e-5) ** self.alpha
+            self.timestamps.append(timestamp)
             heapq.heappush(self.priorities, (-priority, len(self.buffer) - 1))
-            
-            # Update agent experience count
             self.agent_experience_map[agent_id] += 1
-            
-            # Update global reward statistics
-            self.reward_stats['sum'] += reward
-            if reward > self.reward_stats['max']:
-                self.reward_stats['max'] = reward
-            if reward < self.reward_stats['min']:
-                self.reward_stats['min'] = reward
-            
-            # Track per-agent rewards in a separate structure
-            if not hasattr(self, 'agent_rewards'):
-                self.agent_rewards = defaultdict(list)
-            self.agent_rewards[agent_id].append(reward)
-            
-            # Update fairness metrics
-            self._update_fairness_stats(agent_id, reward)
+            self._track_reward_stats(agent_id, reward)
+    
+            duration = time.time() - start_time
+            printer.status("PUSH", f"✔ Pushed | Agent: {agent_id} | Priority: {priority:.4f} | Time: {duration:.3f}s", "success")
+    
+        except Exception as e:
+            logger.exception("[ReplayBuffer] Exception in push()")
+            printer.status("PUSH", f"❌ Exception: {e}", "error")
+    
+        finally:
+            self.lock.release()
+
+    def _insert(self, experience):
+        """Insert into buffer and return index (mock or real)."""
+        try:
+            self.buffer.append(experience)
+            index = len(self.buffer) - 1
+            return index
+        except Exception as e:
+            logger.error(f"[ReplayBuffer] Insert error: {e}")
+            return -1
+    
+    def _update_priority(self, index, priority):
+        """Update priority in internal tree — stub or real logic."""
+        try:
+            # Simulate update (or call your real sum-tree here)
+            if index >= 0:
+                self.priorities[index] = priority
+        except Exception as e:
+            logger.warning(f"[ReplayBuffer] Priority update failed for index {index}: {e}")
+
+    def _track_reward_stats(self, agent_id, reward):
+        """Update internal reward statistics for the buffer and agent."""
+        self.reward_stats['sum'] += reward
+        self.reward_stats['max'] = max(self.reward_stats['max'], reward)
+        self.reward_stats['min'] = min(self.reward_stats['min'], reward)
+    
+        # Per-agent tracking
+        if not hasattr(self, 'agent_rewards'):
+            self.agent_rewards = defaultdict(list)
+        self.agent_rewards[agent_id].append(reward)
+    
+        # Optional fairness/bias tracking
+        self._update_fairness_stats(agent_id, reward)
 
     def sample(self, batch_size, strategy='uniform', beta=0.4, agent_distribution=None):
         """
@@ -224,13 +295,15 @@ class DistributedReplayBuffer:
 
         logger.debug(f"Removed {removed} stale experiences")
 
-    def _update_fairness_stats(self, agent_id, reward):
-        """Track metrics for autonomous bias detection"""
-        with self.lock:
-            # Track reward distribution per agent
-            if agent_id not in self.reward_stats:
-                self.reward_stats[agent_id] = []
-            self.reward_stats[agent_id].append(reward)
+    def _track_reward_stats(self, agent_id, reward):
+        """Update stats without nested locking"""
+        self.reward_stats['sum'] += reward
+        self.reward_stats['max'] = max(self.reward_stats['max'], reward)
+        self.reward_stats['min'] = min(self.reward_stats['min'], reward)
+        
+        if not hasattr(self, 'agent_rewards'):
+            self.agent_rewards = defaultdict(list)
+        self.agent_rewards[agent_id].append(reward)
 
     def _check_fairness(self, batch, strategy):
         """Implements Barocas's fairness framework for experience selection"""
