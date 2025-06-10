@@ -19,25 +19,15 @@ import yaml, json
 from pathlib import Path
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Set
 
+from src.agents.language.utils.config_loader import load_global_config, get_config_section
+from src.agents.language.utils.language_tokenizer import LanguageTokenizer
 from src.agents.language.utils.rules import Rules, DependencyRelation
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("NLP Engine")
-
-CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return
+printer = PrettyPrinter
 
 # --- Coreference Resolution ---
 @dataclass
@@ -65,95 +55,149 @@ class Token:
     # embedding: Optional[List[float]] = None
 
 class NLPEngine:
-
-    STOPWORDS = {
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "should",
-        "can", "could", "may", "might", "must", "and", "but", "or", "nor",
-        "for", "so", "yet", "in", "on", "at", "by", "from", "to", "with",
-        "about", "above", "after", "again", "against", "all", "am", "as",
-        "because", "before", "below", "between", "both", "each", "few",
-        "further", "he", "her", "here", "hers", "herself", "him", "himself",
-        "his", "how", "i", "if", "into", "it", "its", "itself", "just",
-        "me", "more", "most", "my", "myself", "no", "not", "now", "of",
-        "off", "once", "only", "other", "our", "ours", "ourselves", "out",
-        "over", "own", "same", "she", "since", "some", "still", "such",
-        "than", "that", "their", "theirs", "them", "themselves", "then",
-        "there", "these", "they", "this", "those", "through", "too",
-        "under", "until", "up", "very", "we", "what", "when", "where",
-        "which", "while", "who", "whom", "why", "won", "you", "your",
-        "yours", "yourself", "yourselves"
-    }
-
-    def __init__(self, config,
-                 wordlist_data: Optional[Dict[str, Any]] = None,
-                 pos_patterns: Optional[List[Tuple[re.Pattern, str]]] = None,
-                 stopwords: Optional[set] = None):
+    def __init__(self):
         """
         Initializes the NLP Engine.
-
-        Args:
-            wordlist_data (Optional[Dict[str, Any]]): Pre-loaded structured wordlist
-                                                      for POS tagging and lemmatization hints.
-                                                      Format: {'word': {'pos': ['NOUN'], 'lemma': 'word', ...}}
-            pos_patterns (Optional[List[Tuple[re.Pattern, str]]]):
-                                                      List of (regex_pattern, POS_tag) for rule-based tagging.
-            stopwords (Optional[set]): A set of stopwords for the language.
         """
-        self.config = config
-        self.wordlist_data = wordlist_data if wordlist_data else {}
-        self.pos_patterns = pos_patterns if pos_patterns else []
-        self.stopwords = stopwords if stopwords else set()
+        self.config = load_global_config()
+        self.wordlist_path = self.config.get('main_wordlist_path')
+        
+        self.nlp_config = get_config_section('nlp')
+        self.irregular_verbs_path = self.nlp_config.get('irregular_verbs_path')
+        self.irregular_nouns_path = self.nlp_config.get('irregular_nouns_path')
+        self.pos_patterns_path = self.nlp_config.get('pos_patterns_path')
+        self.stopwords_list_path = self.nlp_config.get('stopwords_list_path')
 
-        # Basic English stopwords if none provided
-        if not self.stopwords:
-            self.stopwords = {
-                "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-                "have", "has", "had", "do", "does", "did", "will", "would", "should",
-                "can", "could", "may", "might", "must", "and", "but", "or", "nor",
-                "for", "so", "yet", "in", "on", "at", "by", "from", "to", "with",
-                "about", "above", "after", "again", "against", "all", "am", "as",
-                "because", "before", "below", "between", "both", "each", "few",
-                "further", "he", "her", "here", "hers", "herself", "him", "himself",
-                "his", "how", "i", "if", "into", "it", "its", "itself", "just",
-                "me", "more", "most", "my", "myself", "no", "not", "now", "of",
-                "off", "once", "only", "other", "our", "ours", "ourselves", "out",
-                "over", "own", "same", "she", "since", "some", "still", "such",
-                "than", "that", "their", "theirs", "them", "themselves", "then",
-                "there", "these", "they", "this", "those", "through", "too",
-                "under", "until", "up", "very", "we", "what", "when", "where",
-                "which", "while", "who", "whom", "why", "won", "you", "your",
-                "yours", "yourself", "yourselves"
-            }
+        self._stopwords = self._load_stopwords(self.stopwords_list_path)
+
+        # Load resources
+        self.wordlist = self._load_wordlist(self.wordlist_path)
+        self._stopwords = self._load_stopwords(self.stopwords_list_path)
+        self.irregular_verbs = self._load_json(self.irregular_verbs_path)
+        self.irregular_nouns = self._load_json(self.irregular_nouns_path)
+        self._pos_patterns = self._load_pos_patterns(self.pos_patterns_path)
+
         logger.info("NLP Engine initialized...")
+
+    @property
+    def stopwords(self):
+        return self._stopwords
+    
+    @stopwords.setter
+    def stopwords(self, value):
+        self._stopwords = value
+
+    @property
+    def pos_patterns(self):
+        return self._pos_patterns
+    
+    @pos_patterns.setter
+    def pos_patterns(self, value):
+        self._pos_patterns = value
+
+    def process_text(self, text: str) -> List[Token]:
+        """
+        Processes a raw text string into a list of Token objects using the Perception Agent's Tokenizer.
+        """
+        printer.status("INIT", "Text processor initialized", "info")
+
+        self.tokenizer = LanguageTokenizer()
+        
+        # Tokenize text using the Tokenizer's internal method
+        raw_tokens = self.tokenizer.tokenize(text)
+        
+        processed_tokens: List[Token] = []
+        for i, word_text in enumerate(raw_tokens):
+            pos_tag = self._get_pos_tag(word_text)
+            lemma = self._get_lemma(word_text, pos_tag)
+            is_stop = word_text.lower() in self.stopwords
+            is_punct_flag = pos_tag == "PUNCT"
+    
+            token_obj = Token(
+                text=word_text,
+                lemma=lemma,
+                pos=pos_tag,
+                index=i,
+                is_stop=is_stop,
+                is_punct=is_punct_flag
+            )
+            processed_tokens.append(token_obj)
+    
+        logger.debug(f"Processed text into {len(processed_tokens)} tokens.")
+        return processed_tokens
+
+    def _get_pos_tag(self, word: str) -> str:
+        """
+        Assigns a Part-of-Speech tag to a word using wordlist and regex patterns.
+        Tags should ideally conform to a standard set (e.g., Universal Dependencies).
+        """
+        printer.status("INIT", "Part-of-Speech tag initialized", "info")
+
+        word_lower = word.lower()
+
+        # 1. Check wordlist (highest priority)
+        if self.wordlist and word_lower in self.wordlist:
+            entry = self.wordlist[word_lower]
+            if isinstance(entry, dict):
+                pos_tags = entry.get("pos", [])
+            else:
+                pos_tags = []
+            if pos_tags:
+                # Prioritize more specific tags if multiple exist, or just take the first one.
+                # Example: if 'NOUN' and 'VERB' are present, context might be needed.
+                # For simplicity, take the first. Could be more sophisticated.
+                return pos_tags[0].upper() # Ensure consistent case, e.g., NOUN, VERB
+
+        # 2. Rule-based POS tagging using regex patterns (fallback)
+        for pattern, tag in self.pos_patterns:
+            if pattern.fullmatch(word): # Use fullmatch for patterns designed for whole words
+                return tag.upper()
+
+        # 3. Default/heuristic POS tagging (very basic)
+        if re.fullmatch(r'[.,!?;:()"\[\]{}]', word): return "PUNCT"
+        if word.isnumeric(): return "NUM"
+        if word_lower in {"i", "you", "he", "she", "they", "we", "it", "me", "him", "her", "us", "them"}: return "PRON"
+        if word_lower in {"is", "are", "was", "were", "be", "am", "been", "being", "has", "have", "had", "do", "does", "did"}: return "AUX" # Or VERB
+        if word_lower.endswith("ing"): return "VERB" # Gerund or present participle
+        if word_lower.endswith("ed"): return "VERB" # Past tense or past participle
+        if word_lower.endswith("ly"): return "ADV"
+        if word_lower.endswith("tion") or word_lower.endswith("sion") or word_lower.endswith("ment") or \
+           word_lower.endswith("ness") or word_lower.endswith("ity"): return "NOUN"
+        if word_lower.endswith("al") or word_lower.endswith("ous") or word_lower.endswith("ful") or \
+           word_lower.endswith("less") or word_lower.endswith("able") or word_lower.endswith("ible"): return "ADJ"
+        if word[0].isupper() and word_lower not in self.stopwords_list_path: return "PROPN" # Proper Noun (heuristic)
+
+        return "X" # Unknown or default to NOUN if it's a common fallback
 
     def _get_lemma(self, word: str, pos: str) -> str:
         """
         Enhanced rule-based lemmatization without external libraries.
         Uses POS hints and pattern matching for verbs, nouns, adjectives, and adverbs.
         """
+        printer.status("INIT", "Rule-based lemmatization initialized", "info")
+
+        if pos == "PUNCT":
+            return word
+
         word_lower = word.lower()
         
         # 1. Check wordlist first (highest priority)
-        if self.wordlist_data and word_lower in self.wordlist_data:
-            lemma_from_wordlist = self.wordlist_data[word_lower].get("lemma")
+        if word_lower in self.wordlist:
+            entry = self.wordlist[word_lower]
+            if isinstance(entry, dict):
+                lemma_from_wordlist = entry.get('lemma')
+            else:
+                lemma_from_wordlist = entry
+                
             if lemma_from_wordlist:
                 return lemma_from_wordlist
     
         # 2. Linguistic pattern matching based on POS tag
         # Common irregular verbs (base form -> past/past participle)
-        irregular_verbs = {
-            'ran': 'run', 'ate': 'eat', 'came': 'come', 'went': 'go',
-            'was': 'be', 'were': 'be', 'had': 'have', 'did': 'do',
-            'saw': 'see', 'found': 'find', 'spoke': 'speak', 'took': 'take'
-        }
+        self.irregular_verbs
     
         # Irregular plurals (plural -> singular)
-        irregular_nouns = {
-            'children': 'child', 'geese': 'goose', 'mice': 'mouse',
-            'teeth': 'tooth', 'feet': 'foot', 'oxen': 'ox',
-            'men': 'man', 'women': 'woman', 'people': 'person'
-        }
+        self.irregular_nouns
     
         # Handle possessives first
         if word_lower.endswith(("'s", "s'", "’s", "s’")):
@@ -163,8 +207,8 @@ class NLPEngine:
         # Verb handling
         if pos.startswith('VB'):
             # Check irregular verbs first
-            if word_lower in irregular_verbs:
-                return irregular_verbs[word_lower]
+            if word_lower in self.irregular_verbs:
+                return self.irregular_verbs[word_lower]
             
             # Present participle (running -> run)
             if word_lower.endswith('ing'):
@@ -192,8 +236,8 @@ class NLPEngine:
         # Noun handling
         elif pos.startswith('NN'):
             # Check irregular plurals
-            if word_lower in irregular_nouns:
-                return irregular_nouns[word_lower]
+            if word_lower in self.irregular_nouns:
+                return self.irregular_nouns[word_lower]
                 
             # Standard plural endings
             if word_lower.endswith('ies') and len(word_lower) > 3:  # cities -> city
@@ -226,81 +270,13 @@ class NLPEngine:
         # Final fallback: lowercase with basic stemming
         return word_lower
 
-    def _get_pos_tag(self, word: str) -> str:
-        """
-        Assigns a Part-of-Speech tag to a word using wordlist and regex patterns.
-        Tags should ideally conform to a standard set (e.g., Universal Dependencies).
-        """
-        word_lower = word.lower()
-
-        # 1. Check wordlist (highest priority)
-        if self.wordlist_data and word_lower in self.wordlist_data:
-            pos_tags = self.wordlist_data[word_lower].get("pos", [])
-            if pos_tags:
-                # Prioritize more specific tags if multiple exist, or just take the first one.
-                # Example: if 'NOUN' and 'VERB' are present, context might be needed.
-                # For simplicity, take the first. Could be more sophisticated.
-                return pos_tags[0].upper() # Ensure consistent case, e.g., NOUN, VERB
-
-        # 2. Rule-based POS tagging using regex patterns (fallback)
-        for pattern, tag in self.pos_patterns:
-            if pattern.fullmatch(word): # Use fullmatch for patterns designed for whole words
-                return tag.upper()
-
-        # 3. Default/heuristic POS tagging (very basic)
-        if re.fullmatch(r'[.,!?;:()"\[\]{}]', word): return "PUNCT"
-        if word.isnumeric(): return "NUM"
-        if word_lower in {"i", "you", "he", "she", "they", "we", "it", "me", "him", "her", "us", "them"}: return "PRON"
-        if word_lower in {"is", "are", "was", "were", "be", "am", "been", "being", "has", "have", "had", "do", "does", "did"}: return "AUX" # Or VERB
-        if word_lower.endswith("ing"): return "VERB" # Gerund or present participle
-        if word_lower.endswith("ed"): return "VERB" # Past tense or past participle
-        if word_lower.endswith("ly"): return "ADV"
-        if word_lower.endswith("tion") or word_lower.endswith("sion") or word_lower.endswith("ment") or \
-           word_lower.endswith("ness") or word_lower.endswith("ity"): return "NOUN"
-        if word_lower.endswith("al") or word_lower.endswith("ous") or word_lower.endswith("ful") or \
-           word_lower.endswith("less") or word_lower.endswith("able") or word_lower.endswith("ible"): return "ADJ"
-        if word[0].isupper() and word_lower not in self.stopwords: return "PROPN" # Proper Noun (heuristic)
-
-        return "X" # Unknown or default to NOUN if it's a common fallback
-
-    def process_text(self, text: str) -> List[Token]:
-        """
-        Processes a raw text string into a list of Token objects using the Perception Agent's Tokenizer.
-        """
-        from src.agents.perception.modules.tokenizer import Tokenizer, load_config as load_perception_config
-        
-        # Load config and initialize tokenizer
-        config = load_perception_config()
-        tokenizer = Tokenizer(config)
-        
-        # Tokenize text using the Tokenizer's internal method
-        raw_tokens = tokenizer._tokenize(text)
-        
-        processed_tokens: List[Token] = []
-        for i, word_text in enumerate(raw_tokens):
-            pos_tag = self._get_pos_tag(word_text)
-            lemma = self._get_lemma(word_text, pos_tag)
-            is_stop = word_text.lower() in self.stopwords
-            is_punct_flag = pos_tag == "PUNCT"
-    
-            token_obj = Token(
-                text=word_text,
-                lemma=lemma,
-                pos=pos_tag,
-                index=i,
-                is_stop=is_stop,
-                is_punct=is_punct_flag
-            )
-            processed_tokens.append(token_obj)
-    
-        logger.debug(f"Processed text into {len(processed_tokens)} tokens.")
-        return processed_tokens
-
     def apply_dependency_rules(self, tokens: List['Token']) -> List[DependencyRelation]:
         """
         Applies handcrafted grammatical rules to extract syntactic dependencies
         from a list of processed Token objects.
         """
+        printer.status("INIT", "Syntactic dependencies initialized", "info")
+
         rule_engine = Rules()
 
         # Convert Token objects to dict format expected by Rules
@@ -313,6 +289,56 @@ class NLPEngine:
 
         dependencies = rule_engine._apply_rules(token_dicts)
         return dependencies
+
+    def resolve_coreferences(self, sentences: List[List[Token]]) -> List[Entity]:
+        """Coreference resolution with multiple matching strategies."""
+        printer.status("INIT", "Coreference resolution initialized", "info")
+    
+        entity_clusters = defaultdict(list)
+        all_entities = []
+        coref_id_counter = 0
+    
+        # Flat list of all entities for candidate matching
+        prior_entities: List[Entity] = []
+    
+        for sent_idx, sentence in enumerate(sentences):
+            entities = self._extract_entities(sentence, sent_idx)
+    
+            for entity in entities:
+                matched = False
+    
+                # Try exact text match (if it's a non-pronoun and named entity)
+                if entity.type == "PERSON" and entity.text.lower() not in {"he", "she", "they", "it", "them", "him", "her", "us", "we"}:
+                    for prev in reversed(prior_entities):
+                        if prev.text.lower() == entity.text.lower():
+                            entity.coref_id = prev.coref_id
+                            entity_clusters[prev.coref_id].append(entity)
+                            matched = True
+                            break
+    
+                # Try pronoun resolution by gender, number, and distance
+                if not matched and entity.text.lower() in {"he", "she", "they", "it", "them", "him", "her", "us", "we"}:
+                    for prev in reversed(prior_entities):
+                        if (
+                            entity.gender == prev.gender and
+                            entity.number == prev.number and
+                            abs(sent_idx - prev.sentence_index) <= 2
+                        ):
+                            entity.coref_id = prev.coref_id
+                            entity_clusters[prev.coref_id].append(entity)
+                            matched = True
+                            break
+    
+                # If still unmatched, create a new coreference cluster
+                if not matched:
+                    entity.coref_id = coref_id_counter
+                    entity_clusters[coref_id_counter].append(entity)
+                    coref_id_counter += 1
+    
+                prior_entities.append(entity)
+                all_entities.append(entity)
+    
+        return all_entities
 
     def _extract_entities(self, tokens: List[Token], sentence_idx: int) -> List[Entity]:
         """Identify entities in a sentence using POS and patterns."""
@@ -349,54 +375,29 @@ class NLPEngine:
                 
         return entities
 
-    def resolve_coreferences(self, sentences: List[List[Token]]) -> List[Entity]:
-        """Main coreference resolution method."""
-        entity_clusters = defaultdict(list)
-        all_entities = []
-        coref_id = 0
-        
-        for sent_idx, sentence in enumerate(sentences):
-            entities = self._extract_entities(sentence, sent_idx)
-            
-            for entity in entities:
-                # Check for matching antecedents
-                matched = False
-                for cluster in entity_clusters.values():
-                    last_ent = cluster[-1]
-                    
-                    # Match based on gender/number/proximity
-                    if (entity.gender == last_ent.gender and 
-                        entity.number == last_ent.number and
-                        sent_idx - last_ent.sentence_index <= 2):
-                        cluster.append(entity)
-                        entity.coref_id = last_ent.coref_id
-                        matched = True
-                        break
-                        
-                if not matched:
-                    entity.coref_id = coref_id
-                    entity_clusters[coref_id].append(entity)
-                    coref_id += 1
-                
-                all_entities.append(entity)
-        
-        return all_entities
-
     # --- Sarcasm/Irony Detection Additions ---
     def detect_sarcasm(self, tokens: List[Token]) -> float:
         """Returns a sarcasm confidence score between 0-1 using lexicon features."""
-        text = ' '.join([t.text.lower() for t in tokens])
-        lexicon_path = self.config.get("nlu", {}).get("sentiment_lexicon_path")
-        if not lexicon_path:
-            logger.error("Sentiment lexicon path not configured!")
-            return 0.0
-            
+        printer.status("INIT", "Entity extractor initialized", "info")
+
+        self.nlu_config = get_config_section('nlu')
+        lexicon = self.nlu_config.get('sentiment_lexicon_path')
         try:
-            with open(Path(lexicon_path), 'r', encoding='utf-8') as f:
+            with open(Path(lexicon), 'r', encoding='utf-8') as f:
                 lexicon = json.load(f)
         except Exception as e:
             logger.error(f"Failed to load sentiment lexicon: {e}")
             return 0.0
+        #if not self.sentiment_lexicon_path:
+        #    logger.error("Sentiment lexicon path not configured!")
+        #    return 0.0
+            
+        #try:
+        #    with open(Path(self.sentiment_lexicon_path), 'r', encoding='utf-8') as f:
+        #        lexicon = json.load(f)
+        #except Exception as e:
+        #    logger.error(f"Failed to load sentiment lexicon: {e}")
+        #    return 0.0
 
         text = ' '.join([t.text.lower() for t in tokens])
         score = 0.0
@@ -466,8 +467,8 @@ class NLPEngine:
     
         # 4. Lexicon-boosted pattern matching
         sarcastic_phrases = {
-            'oh great', 'big surprise', 'what a joy', 'as if',
-            'yeah right', 'tell me more', 'perfect just perfect'
+            'oh great', 'big surprise', 'what a joy', 'as if', 'yeah yeah'
+            'yeah right', 'tell me more', 'perfect, just perfect', 'what a shocker'
         }
         
         # Add common sarcastic combinations from lexicon
@@ -495,99 +496,89 @@ class NLPEngine:
     
         # Normalize and clamp score
         return min(max(score, 0.0), 1.0)
+    
+    def _load_wordlist(self, path: str) -> Dict:
+        """Load structured wordlist dictionary"""
+        if not path:
+            return {}
+        try:
+            with open(Path(path), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get('words', {})
+        except Exception as e:
+            logger.error(f"Failed to load wordlist: {e}")
+            return {}
+    
+    def _load_stopwords(self, path: str) -> Set:
+        """Load stopwords as a set"""
+        if not path:
+            return set()
+        try:
+            with open(Path(path), 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception as e:
+            logger.error(f"Failed to load stopwords: {e}")
+            return set()
+        
+    def _load_json(self, path: str) -> Dict:
+        if not path:
+            return {}
+        try:
+            with open(Path(path), 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load JSON: {e}")
+            return {}
+        
+    def _load_pos_patterns(self, path: str) -> List[Tuple[re.Pattern, str]]:
+        """Load and compile POS regex patterns from JSON file."""
+        if not path:
+            return []
+        
+        try:
+            with open(Path(path), 'r', encoding='utf-8') as f:
+                patterns = json.load(f)
+            compiled = []
+            for p in patterns:
+                # Handle both string and list patterns
+                pattern_str = p.get('pattern')
+                if isinstance(pattern_str, list):
+                    # Skip grammar patterns (not word-level)
+                    continue
+                if pattern_str:
+                    regex = re.compile(p['pattern'])
+                    # Use first tag from example if available
+                    tag = p.get('example_tags', [''])[0]
+                    compiled.append((regex, tag))
+            return compiled
+        except Exception as e:
+            logger.error(f"Failed to load POS patterns: {e}")
+            return []
 
 # --- Example Usage (for testing) ---
 if __name__ == "__main__":
-    print("\n=== Running NLP Engine ===\n")
+    print("\n=== Running Natural Language Processor Engine (NLP Engine) ===\n")
+    printer.status("Init", "NLP Engine initialized", "success")
 
-    config = load_config()
-    engine = NLPEngine(config)
+    engine = NLPEngine()
     print(engine)
-    print("\n=== Finished Running NLP Engine ===\n")
 
-# --- Interactive Usage ---
-if __name__ == "__main__":
-    from pathlib import Path
-    
-    print("""←[36m
-    #############################################
-    #   NLP Engine Interactive Mode            #
-    #   Commands:                              #
-    #   /tokens - Show tokenization            #
-    #   /deps   - Show dependencies            #
-    #   /sarcasm - Analyze sarcasm             #
-    #   /coref  - Multi-sentence coreference   #
-    #   /exit   - Quit                         #
-    #############################################←[0m
-    """)
-    
-    config = load_config()
-    engine = NLPEngine(config)
-    session_history = []
-    
-    while True:
-        try:
-            user_input = input("\n←[33mEnter text or command:←[0m ").strip()
-            
-            if user_input.lower() in ('/exit', '/quit'):
-                print("Exiting...")
-                break
-                
-            elif user_input == '/tokens':
-                if not session_history:
-                    print("←[31mNo text in session history!←[0m")
-                    continue
-                last_text = ' '.join(session_history[-1])
-                tokens = engine.process_text(last_text)
-                print(f"\n←[34mToken analysis for: '{last_text}':←[0m")
-                for token in tokens:
-                    print(f"{token.text:<15} {token.pos:<5} {token.lemma}")
-                    
-            elif user_input == '/deps':
-                if not session_history:
-                    print("←[31mNo text in session history!←[0m")
-                    continue
-                last_text = ' '.join(session_history[-1])
-                tokens = engine.process_text(last_text)
-                deps = engine.apply_dependency_rules(tokens)
-                print(f"\n←[34mDependencies for: '{last_text}':←[0m")
-                for dep in deps:
-                    print(f"{dep.relation.upper():<15} {dep.head} → {dep.dependent}")
-                    
-            elif user_input == '/sarcasm':
-                if not session_history:
-                    print("←[31mNo text in session history!←[0m")
-                    continue
-                last_text = ' '.join(session_history[-1])
-                tokens = engine.process_text(last_text)
-                score = engine.detect_sarcasm(tokens)
-                print(f"\n←[34mSarcasm analysis for: '{last_text}':←[0m")
-                print(f"Confidence score: ←[35m{score:.2f}/1.0←[0m")
-                print("Interpretation:")
-                if score > 0.75: print("←[31mStrong sarcasm detected←[0m")
-                elif score > 0.5: print("←[33mLikely sarcastic←[0m")
-                else: print("←[32mNo strong sarcasm indicators←[0m")
-                
-            elif user_input == '/coref':
-                if len(session_history) < 2:
-                    print("←[31mNeed at least 2 sentences for coreference!←[0m")
-                    continue
-                all_tokens = [engine.process_text(text) for text in session_history]
-                entities = engine.resolve_coreferences(all_tokens)
-                print("\n←[34mCoreference chains:←[0m")
-                clusters = defaultdict(list)
-                for ent in entities:
-                    clusters[ent.coref_id].append(ent)
-                for cid, ents in clusters.items():
-                    mentions = [f"'{e.text}' (sentence {e.sentence_index+1})" for e in ents]
-                    print(f"Group {cid}: {', '.join(mentions)}")
-                    
-            else:
-                # Store raw text input
-                session_history.append(user_input)
-                tokens = engine.process_text(user_input)
-                print(f"←[32mProcessed {len(tokens)} tokens←[0m")
-                
-        except Exception as e:
-            print(f"←[31mError: {str(e)}←[0m")
-            logger.error(f"Interactive session error: {str(e)}")
+    print("\n* * * * * Phase 2 * * * * *\n")
+    text1="There aren't any resources where we are going, so get packing friend."
+    tokens = engine.process_text(text=text1)
+    batch = [
+        engine.process_text("We can start training as soon as I'm done eating"),
+        engine.process_text("Where are the kids going? I'm not even heading there!")
+    ]
+
+    printer.pretty("Init", tokens, "success")
+    printer.pretty("rules", engine.apply_dependency_rules(tokens=tokens), "success")
+    printer.pretty("resolve", engine.resolve_coreferences(sentences=batch), "success")
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+    text2="Eric: 'Did you know sounds are waves? Me: 'You don't say, what a shocker!'"
+    tokens2=engine.process_text(text=text2)
+
+    printer.pretty("resolve", engine.detect_sarcasm(tokens=tokens2), "success")
+
+    print("\n=== Finished Running NLP Engine ===\n")
