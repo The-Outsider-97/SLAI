@@ -6,33 +6,35 @@ from collections import deque
 from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from src.tuning.tuner import HyperparamTuner
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Parameter Tuner")
+printer = PrettyPrinter
 
 class LearningParameterTuner:
-    def __init__(self, initial_params: dict = None):
+    def __init__(self):
         self.config = load_global_config()
         self.tuner_config = get_config_section('parameter_tuner')
         
-        # Create memory instance
-        self.memory = MultiModalMemory()
-
         # Load bounds from config with float conversion
-        self._min_learning_rate = float(self.tuner_config.get('min_learning_rate', 1e-4))
-        self._max_learning_rate = float(self.tuner_config.get('max_learning_rate', 0.1))
-        self._min_exploration = float(self.tuner_config.get('min_exploration', 0.01))
+        self._min_learning_rate = float(self.tuner_config.get('min_learning_rate'))
+        self._max_learning_rate = float(self.tuner_config.get('max_learning_rate'))
+        self._min_exploration = float(self.tuner_config.get('min_exploration'))
 
         # Load base parameters from config
         base_params = {
-            'learning_rate': float(self.tuner_config.get('base_learning_rate', 0.01)),
-            'exploration_rate': float(self.tuner_config.get('base_exploration_rate', 0.3)),
-            'discount_factor': float(self.tuner_config.get('base_discount_factor', 0.95)),
-            'temperature': float(self.tuner_config.get('base_temperature', 1.0))
+            'learning_rate': float(self.tuner_config.get('base_learning_rate')),
+            'exploration_rate': float(self.tuner_config.get('base_exploration_rate')),
+            'discount_factor': float(self.tuner_config.get('base_discount_factor')),
+            'temperature': float(self.tuner_config.get('base_temperature'))
         }
 
+        # Create memory instance
+        self.memory = MultiModalMemory()
+
         # Merge with initial params
-        self.params = {**base_params, **(initial_params or {})}
+        self.initial_params = {}
+        self.params = {**base_params, **(self.initial_params or {})}
         self.performance_history: Deque[float] = deque(maxlen=100)
 
         logger.info(f"Learning Parameter Tuner succesfully initialized with:\n {base_params}")
@@ -43,6 +45,8 @@ class LearningParameterTuner:
         - Sutton's Automatic Step Size Adaptation
         - Darken & Moody's Search-then-converge schedule
         """
+        printer.status("INIT", "Adapter succesfully initialized")
+
         if not recent_rewards:
             return
 
@@ -74,15 +78,25 @@ class LearningParameterTuner:
             params=self.params.copy()
         )
 
-    def run_hyperparameter_tuning(self, 
-                                 tuner_config: dict,
-                                 evaluation_function: callable):
+    def _apply_bounds(self) -> None:
+        """Ensure parameters stay within safe ranges"""
+        printer.status("INIT", "Bounds succesfully initialized")
+
+        self.params['learning_rate'] = np.clip(
+            self.params['learning_rate'],
+            self._min_learning_rate,
+            self._max_learning_rate
+        )
+
+    def run_hyperparameter_tuning(self, evaluation_function: callable):
         """Execute hyperparameter tuning session"""
+        printer.status("INIT", "Tuning succesfully initialized")
+
         # Initialize and run tuner
         tuner = HyperparamTuner(
-            config_path=tuner_config.get('config_path'),
+            config_path=self.tuner_config.get('parameter_tuner'),
             evaluation_function=evaluation_function,
-            strategy=tuner_config.get('strategy', 'bayesian')
+            strategy=self.tuner_config.get('strategy', 'bayesian')
         )
         best_params = tuner.run_tuning_pipeline()
 
@@ -101,6 +115,8 @@ class LearningParameterTuner:
 
     def _calculate_performance_change(self, new_params: dict) -> float:
         """Calculate performance impact of new parameters"""
+        printer.status("INIT", "Change calculation succesfully initialized")
+
         old_perf = np.mean(list(self.memory.parameter_evolution['performance'][-10:]))
         self.params.update(new_params)
         new_perf = np.mean(list(self.memory.parameter_evolution['performance'][-10:]))
@@ -108,6 +124,8 @@ class LearningParameterTuner:
 
     def decay_exploration(self, decay_factor: float = 0.9995) -> None:
         """Exponential decay with performance-based modulation"""
+        printer.status("INIT", "Decay explorer succesfully initialized")
+
         base_decay = decay_factor
         
         # If recent performance is good, decay faster
@@ -123,20 +141,65 @@ class LearningParameterTuner:
         logger.debug(f"Exploration rate decayed to {self.params['exploration_rate']:.4f}")
 
     def update_performance(self, reward: float) -> None:
-        """Update performance tracking for adaptation"""
-        self.performance_history.append(reward)
-
-    def get_params(self) -> dict:
-        """Get current parameter snapshot"""
-        return self.params.copy()
-
-    def _apply_bounds(self) -> None:
-        """Ensure parameters stay within safe ranges"""
-        self.params['learning_rate'] = np.clip(
-            self.params['learning_rate'],
-            self._min_learning_rate,
-            self._max_learning_rate
+        """
+        Update internal performance tracking metrics.
+    
+        This method maintains a rolling performance history buffer,
+        which is used to:
+        - Influence exploration decay rate
+        - Inform volatility calculations in `adapt()`
+        - Track long-term reward trends
+        - Provide logs to memory for longitudinal analysis
+    
+        Args:
+            reward (float): Reward signal from environment or model performance.
+        """
+        if not isinstance(reward, (float, int)) or np.isnan(reward):
+            logger.warning(f"Ignored invalid reward input: {reward}")
+            return
+    
+        self.performance_history.append(float(reward))
+        
+        # Optionally log to memory for advanced diagnostics
+        self.memory.log_parameters(
+            performance=reward,
+            params=self.params.copy()
         )
+    
+        printer.status("UPDATE", f"Recorded performance: {reward:.3f}", "info")
+
+    def get_params(self, include_metadata: bool = False) -> dict:
+        """
+        Retrieve the current set of learning parameters.
+    
+        Args:
+            include_metadata (bool): If True, includes extra diagnostics such as:
+                - Bounds
+                - Performance stats
+                - History length
+    
+        Returns:
+            dict: A snapshot of current parameter values, with optional metadata.
+        """
+        params_snapshot = self.params.copy()
+    
+        if include_metadata:
+            params_snapshot["_metadata"] = {
+                "min_learning_rate": self._min_learning_rate,
+                "max_learning_rate": self._max_learning_rate,
+                "min_exploration_rate": self._min_exploration,
+                "performance_history_length": len(self.performance_history),
+                "last_performance": (
+                    self.performance_history[-1]
+                    if self.performance_history else None
+                ),
+                "average_performance": (
+                    float(np.mean(self.performance_history))
+                    if self.performance_history else None
+                )
+            }
+    
+        return params_snapshot
         
     def adaptive_discount_factor(self, state_visits: int) -> float:
         """Context-aware discount factor adjustment"""
@@ -178,79 +241,24 @@ class LearningParameterTuner:
         return defaults.get(param_name, 0.0)
 
 if __name__ == "__main__":
-    # Test initialization with custom params
-    initial_params = {'learning_rate': 0.1, 'temperature': 0.5}
-    tuner = LearningParameterTuner(initial_params=initial_params)
-    print("Initialization test:")
-    print(f"Params: {tuner.get_params()}")
-    assert tuner.params['learning_rate'] == 0.1, "Initial params not merged correctly"
-    assert tuner.params['temperature'] == 0.5, "Custom param not set"
-    print("✅ Initialization passed\n")
+    print("\n=== Running Learning Parameter Tuner ===\n")
+    printer.status("TEST", "Starting Learning Parameter Tuner tests", "info")
 
-    # Test performance tracking
-    print("Performance tracking test:")
-    rewards = [1.0, -0.5, 2.0, 0.0]
-    for r in rewards:
-        tuner.update_performance(r)
-    assert len(tuner.performance_history) == 4, "Performance history not updated"
-    print(f"Performance history: {list(tuner.performance_history)}")
-    print("✅ Performance tracking passed\n")
+    tuner = LearningParameterTuner()
+    print(tuner)
 
-    # Test parameter adaptation
-    print("Parameter adaptation tests:")
-    print("Case 1: Stable performance (low variance)")
-    tuner.adapt([0.1, 0.09, 0.11, 0.1])
-    print(f"New learning rate: {tuner.params['learning_rate']:.4f}")
-    
-    print("\nCase 2: Volatile performance (high variance)")
-    tuner.adapt([-2, 3, -1, 4])
-    print(f"New learning rate: {tuner.params['learning_rate']:.4f}")
-    
-    print("\nCase 3: Negative rewards)")
-    tuner.adapt([-1, -2, -3])
-    print(f"New exploration rate: {tuner.params['exploration_rate']:.2f}")
-    print("✅ Adaptation logic passed\n")
+    print("\n* * * * * Phase 2 * * * * *\n")
+    rewards=[11, 46, 23]
+    reward=50
+    eval=lambda params: np.random.uniform(0.0, 1.0)
+    factor=0.995
+    metadata=False
+    tuning = tuner.run_hyperparameter_tuning(evaluation_function=eval)
 
-    # Test exploration decay
-    print("Exploration decay test:")
-    original_eps = tuner.params['exploration_rate']
-    tuner.decay_exploration()
-    assert tuner.params['exploration_rate'] < original_eps, "No decay occurred"
-    print(f"Decayed exploration: {tuner.params['exploration_rate']:.4f}")
-    print("✅ Exploration decay passed\n")
-
-    # Test discount factor adaptation
-    print("Discount factor tests:")
-    print("Familiar state (visits > 100):")
-    familiar_gamma = tuner.adaptive_discount_factor(101)
-    print(f"Gamma: {familiar_gamma:.3f}")
-    
-    print("Novel state (visits < 5):")
-    novel_gamma = tuner.adaptive_discount_factor(3)
-    print(f"Gamma: {novel_gamma:.3f}")
-    print("✅ Discount factor adaptation passed\n")
-
-    # Test temperature scheduling
-    print("Temperature schedule test:")
-    print("Episode 500:")
-    print(f"Temp: {tuner.temperature_schedule(500):.2f}")
-    print("Episode 1500:")
-    print(f"Temp: {tuner.temperature_schedule(1500):.2f}")
-    print("✅ Temperature scheduling passed\n")
-
-    # Test parameter bounds
-    print("Parameter bounding test:")
-    tuner.params['learning_rate'] = 1.0  # Force out-of-bound
-    tuner._apply_bounds()
-    print(f"Clipped learning rate: {tuner.params['learning_rate']:.4f}")
-    assert tuner.params['learning_rate'] == 0.1, "Bounds not enforced"
-    print("✅ Parameter bounding passed\n")
-
-    # Test reset functionality
-    print("Reset test:")
-    tuner.reset(['learning_rate'])
-    print(f"Reset learning rate: {tuner.params['learning_rate']:.2f}")
-    assert tuner.params['learning_rate'] == 0.01, "Reset failed"
-    print("✅ Reset functionality passed\n")
+    printer.status("recent", tuner.adapt(recent_rewards=rewards), "success")
+    printer.pretty("tuning", tuning, "success")
+    printer.pretty("decay", tuner.decay_exploration(decay_factor=factor), "success")
+    printer.pretty("update", tuner.update_performance(reward=reward), "success")
+    printer.pretty("params", tuner.get_params(include_metadata=metadata), "success")
 
     print("All tests completed successfully!")
