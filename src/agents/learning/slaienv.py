@@ -334,9 +334,28 @@ class SLAIEnv(gym.Env):
         logger.info("Environment closed")
 
     def get_state_embedding(self, state):
-        return self.novelty_detector.predictor(
-            torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-        )
+        """
+        Generates a state embedding using the novelty detector.
+        Handles conversion from raw input to tensor.
+        """
+        if isinstance(state, str):
+            # Example: convert string to fixed-size embedding using hash
+            hashed = hash(state) % (10**8)
+            embedding_dim = self.novelty_detector.predictor[0].in_features  # Get expected input dim
+            digits = [int(x) % 10 for x in str(abs(hash(state)))]
+            padded = (digits + [0] * embedding_dim)[:embedding_dim]
+            state_vector = np.array(padded, dtype=np.float32) / 10.0
+            state_tensor = torch.tensor(state_vector, dtype=torch.float32).unsqueeze(0)
+        elif isinstance(state, list):
+            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        elif isinstance(state, np.ndarray):
+            state_tensor = torch.from_numpy(state).float().unsqueeze(0)
+        elif isinstance(state, torch.Tensor):
+            state_tensor = state.float().unsqueeze(0)
+        else:
+            raise TypeError(f"Unsupported state type: {type(state)}")
+    
+        return self.novelty_detector.predictor(state_tensor)
     
     def get_metrics(self):
         return {
