@@ -2,6 +2,7 @@ adaptive_memory:
   episodic_capacity: 1000
   experience_staleness_days: 7
   semantic_decay_rate: 0.9
+  semantic_threshold: 0.5
   min_memory_strength: 0.1
   replay_capacity: 50000
   drift_threshold: 0.4
@@ -28,27 +29,66 @@ parameter_tuner:
   base_exploration_rate: 0.3
   base_discount_factor: 0.95
   base_temperature: 1.0
-  min_learning_rate: 1e-4
+  min_learning_rate: 0.0001
+  base_learning_rate: 0.001
   max_learning_rate: 0.1
   min_exploration: 0.01
+  weight_decay_lambda: 0.0001
   exploration_decay: 0.9995
   target_update_interval: 100  # Hard update frequency
   base_tau: 0.005              # Soft update mixing factor
+  strategy: 'bayesian'
+
+rl:
+  state_dim: 10
+  action_dim: 2
+  num_actions: 2
+  batch_size: 64
+
+sgd_regressor:
+  eta0: 0.01
+  learning_rate: 'constant'
+  alpha: 0.0001
+  power_t: 0.25
+  max_iter: 1000
+  tol: 0.0001
+
+neuron:
+  activation_name: 'sigmoid'
+  initialization_method: 'uniform_scaled'
+  activation_alpha: 0.01
+
+neural_layer:
+  dropout_rate: 0.0
+  use_batch_norm: False
+  bn_momentum: 0.9
+  bn_epsilon: 0.00001
+  is_training: False
+
+neural_network:
+  loss_function_name: 'cross_entropy' # or 'mse'
+  optimizer_name: 'adam' # New: 'sgd_momentum_adagrad', 'adam'
+  initialization_method_default: 'he_normal'
+  problem_type: 'multiclass_classification'  # or 'binary_classification', 'multiclass_classification'
+  input_dim: 10
+  layer_config:
+    - neurons: 64
+      activation: relu
+      dropout: 0.2
+      batch_norm: true
+    - neurons: 32
+      activation: relu
+    - neurons: 2  # or the number of output classes for classification
+      activation: linear
 
 reward_normalization: True
 reward_clip_range: [-5.0, 5.0]
 reward_scale: 1.0
 reward_bias: 0.0
 reward_momentum: 0.99
-
 reward_shaping:
   potential_type: 'goal_based'  # [l2_norm, goal_based, feature_based, learned]
   potential_features: [0, 2, 4]  # For feature_based
   learned_potential_layers: [32, 16]  # For learned potential
 potential_scale: 0.1
 potential_discount: 0.95
-
-rl:
-  state_dim: 4
-  num_actions: 2
-  batch_size: 64
