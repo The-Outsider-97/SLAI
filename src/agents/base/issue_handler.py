@@ -142,6 +142,46 @@ def handle_timeout_error(agent, task_data: Any, error_info: Dict) -> Any:
     
     return {"status": "failed", "reason": "Timeout recovery failed"}
 
+def handle_runtime_error(agent, task_data: Any, error_info: Dict) -> Any:
+    """
+    Handles RuntimeError, including shape mismatch in tensor ops.
+    """
+    logger = logging.getLogger(f"{agent.name}.RuntimeErrorHandler")
+    error_msg = error_info.get("error_message", "").lower()
+
+    logger.warning("RuntimeError detected. Attempting minimal recovery...")
+
+    # Detect shape mismatch in matrix multiplication
+    if "shapes cannot be multiplied" in error_msg and "mat1" in error_msg and "mat2" in error_msg:
+        logger.warning("Detected matrix shape mismatch. Attempting to adjust input dimensions.")
+
+        try:
+            # Use agent's built-in reshaping
+            if hasattr(agent, "reshape_input_for_model"):
+                reshaped_task = agent.reshape_input_for_model(task_data)
+                if reshaped_task.get("is_reshaped"):
+                    return agent.perform_task(reshaped_task)
+        except Exception as e:
+            logger.error(f"Reshape-based recovery failed: {e}")
+
+    # Generic retry
+    try:
+        time.sleep(1)
+        return agent.perform_task(task_data)
+    except Exception as e:
+        logger.error(f"Retry after RuntimeError failed: {e}")
+
+    # Fallback to simplified input
+    try:
+        if isinstance(task_data, dict) and "data" in task_data:
+            simplified = {"data": str(task_data["data"])[:100]}
+            logger.info("Trying simplified input fallback.")
+            return agent.perform_task(simplified)
+    except Exception as e:
+        logger.error(f"Simplified fallback also failed: {e}")
+
+    return {"status": "failed", "reason": "RuntimeError recovery attempts failed"}
+
 def handle_common_dependency_error(agent, task_data: Any, error_info: Dict) -> Any:
     """
     Handles common dependency errors (missing modules, version conflicts).
@@ -279,6 +319,7 @@ def handle_similar_past_error(agent, task_data: Any, error_info: Dict) -> Any:
 
 # Registry of default issue handlers
 DEFAULT_ISSUE_HANDLERS = {
+    "RuntimeError": handle_runtime_error,
     "unicode": handle_unicode_emoji_error,
     "emoji": handle_unicode_emoji_error,
     "UnicodeEncodeError": handle_unicode_emoji_error,
@@ -291,5 +332,6 @@ DEFAULT_ISSUE_HANDLERS = {
     "dependency": handle_common_dependency_error,
     "ImportError": handle_common_dependency_error,
     "resource": handle_resource_constraint,
-    "past_error": handle_similar_past_error
+    "past_error": handle_similar_past_error,
+    "Exception": handle_similar_past_error  # catch-all
 }
