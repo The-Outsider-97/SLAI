@@ -1,10 +1,15 @@
 
 import numpy as np
 
+from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
+
+logger = get_logger("SGD Regressor")
+printer = PrettyPrinter
+
 class SGDRegressor:
     """Online linear regression with SGD and adaptive learning rates"""
-    def __init__(self, eta0=0.01, learning_rate='constant', alpha=0.0001, 
-                 power_t=0.25, max_iter=1000, tol=1e-4, random_state=None):
+    def __init__(self):
         """
         Args:
             eta0: Initial learning rate
@@ -15,24 +20,31 @@ class SGDRegressor:
             tol: Stopping tolerance for weight updates
             random_state: Random seed for weight initialization
         """
-        self.eta0 = eta0
-        self.learning_rate = learning_rate
-        self.alpha = alpha
-        self.power_t = power_t
-        self.max_iter = max_iter
-        self.tol = tol
-        self.random_state = random_state
+        self.config = load_global_config()
+        self.sgd_config = get_config_section('sgd_regressor')
+        self.eta0 = self.sgd_config.get('eta0')
+        self.learning_rate = self.sgd_config.get('learning_rate')
+        self.alpha = self.sgd_config.get('alpha')
+        self.power_t = self.sgd_config.get('power_t')
+        self.max_iter = self.sgd_config.get('max_iter')
+        self.tol = self.sgd_config.get('tol')
+
         self.coef_ = None
         self.intercept_ = 0.0
         self.n_samples_seen = 0
         self.t_ = 0  # Time step counter
         self.loss_history = []
-        
-        if random_state is not None:
-            np.random.seed(random_state)
+
+        self.random_state = None
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+
+        logger.info(f"SGD Regressor succesfully initialized...")
 
     def partial_fit(self, X, y, sample_weight=None):
         """Incremental fit on batch of samples"""
+        printer.status("INIT", "Partial fit succesfully initialized", "info")
+
         X = np.asarray(X)
         y = np.asarray(y)
         
@@ -61,6 +73,8 @@ class SGDRegressor:
 
     def _sgd_step(self, X, y, sample_weight):
         """Single SGD epoch over all samples"""
+        printer.status("INIT", "SGD step succesfully initialized", "info")
+
         converged = True
         indices = np.arange(X.shape[0])
         np.random.shuffle(indices)
@@ -110,6 +124,8 @@ class SGDRegressor:
 
     def _update_learning_rate(self):
         """Update time counter for learning rate schedules"""
+        printer.status("INIT", "Learning rate updater succesfully initialized", "info")
+
         self.t_ += 1
         if self.learning_rate == 'adaptive' and self.t_ % 100 == 0:
             # Reset learning rate periodically
@@ -117,12 +133,16 @@ class SGDRegressor:
 
     def predict(self, X):
         """Make predictions"""
+        printer.status("INIT", "Predicor succesfully initialized", "info")
+
         if self.coef_ is None:
             raise RuntimeError("Model not fitted yet")
         return np.dot(X, self.coef_) + self.intercept_
 
     def score(self, X, y):
         """Compute R^2 score"""
+        printer.status("INIT", "Scorer succesfully initialized", "info")
+
         y_pred = self.predict(X)
         u = ((y - y_pred) ** 2).sum()
         v = ((y - y.mean()) ** 2).sum()
@@ -130,6 +150,8 @@ class SGDRegressor:
 
     def get_feature_importance(self):
         """Return normalized feature importance"""
+        printer.status("INIT", "Normalizer initialized", "info")
+
         if self.coef_ is None:
             return None
         importance = np.abs(self.coef_)
@@ -137,7 +159,29 @@ class SGDRegressor:
 
     def reset(self):
         """Reset model for new training"""
+        printer.status("INIT", "Reseter initialized", "info")
+
         self.coef_ = None
         self.n_samples_seen = 0
         self.t_ = 0
         self.loss_history = []
+
+if __name__ == "__main__":
+    print("\n=== Running SGD Regressor ===\n")
+    printer.status("TEST", "Starting SGD Regressor tests", "info")
+
+    regressor = SGDRegressor()
+    print(regressor)
+
+    print("\n* * * * * Phase 2 * * * * *\n")
+    X=np.array([[2]]) 
+    y=np.array([3])
+    sample_weight=None
+
+    printer.status("FIT", regressor.partial_fit(X=X, y=y, sample_weight=sample_weight), "success")
+    printer.status("predict", regressor.predict(X=X), "success")
+    printer.status("score", regressor.score(X=X, y=y), "success")
+    printer.status("feature", regressor.get_feature_importance(), "success")
+    printer.status("reset", regressor.reset(), "success")
+
+    print("\n=== Successfully Ran SGD Regressor ===\n")
