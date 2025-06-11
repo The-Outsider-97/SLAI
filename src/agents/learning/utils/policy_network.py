@@ -147,7 +147,7 @@ class NoveltyDetector(nn.Module):
         pred_features = self.predictor(x)
         return torch.norm(pred_features - target_features, dim=1)
 
-class PolicyNetwork(nn.Module):
+class PolicyNetwork(torch.nn.Module):
     """
     Manually implemented Policy Network for Reinforcement Learning.
     Outputs action probabilities (e.g., via Softmax) or action parameters (e.g., via Tanh/Linear).
