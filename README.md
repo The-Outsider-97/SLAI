@@ -170,6 +170,7 @@ Note: If you see an error about execution policy:
    pip install gymnasium
    pip install opencv-python
    pip install pyperclip
+   pip install psutil
    ```
 
 5. Run Model:
