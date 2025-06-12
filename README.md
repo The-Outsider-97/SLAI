@@ -176,6 +176,8 @@ Note: If you see an error about execution policy:
    pip install pyyaml
    pip install pandas
    pip install dotenv
+   pip install textblob
+   python -m pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
    ```
 
 5. Run Model:
