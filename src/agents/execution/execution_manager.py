@@ -10,7 +10,7 @@ printer = PrettyPrinter
 class ExecutionManager:
     def __init__(self):
         self.config = load_global_config()
-        self.manager_config = get_config_section('')
+        self.manager_config = get_config_section('execution_manager')
 
         logger.info(f"Execution Manager succesfully initialized")
 
