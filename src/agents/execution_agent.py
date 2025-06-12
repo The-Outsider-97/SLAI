@@ -1,82 +1,35 @@
 """
-Execution Agent with Advanced Web Interaction Capabilities
+Enhanced Execution Agent with Advanced Web Interaction Capabilities
 Key Academic References:
 - Cookie Management: Barth (2011) "HTTP State Management Mechanism" (RFC 6265)
 - Caching: Fielding et al. (1999) "Hypertext Transfer Protocol - HTTP/1.1" (RFC 2616)
 - Retry Strategies: Thaler & Ravishankar (1998) "Using Name-Based Mappings to Increase Hit Rates"
 - Rate Limiting: Floyd & Jacobson (1993) "Random Early Detection Gateways"
-
-Real-World Applications:
-- Automated research assistants
-- Compliance-aware data pipelines
-- Incident response systems
-- IoT device management
 """
 
 import os
 import re
+import json
 import time
 import urllib
-import shelve
-import hashlib
-import json, yaml
 
 from json import JSONDecodeError
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 from urllib.parse import urlparse, urlencode
 from urllib.error import URLError, HTTPError
 from http.cookiejar import CookieJar
-from html.parser import HTMLParser
 from collections import deque
 from threading import Lock
-from typing import Dict, Callable, Optional
+from typing import Dict, Callable
 
-from src.agents.base_agent import BaseAgent
-from src.agents.safety.security_error import SecurityError, UnauthorizedAccessError, SystemIntegrityError
-from logs.logger import get_logger
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.execution.execution_manager import ExecutionManager
+from src.agents.execution.web_browser import WebBrouwser
+from src.agents.execution.html_parser import HTMLParser
+from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger(__name__)
-
-class EnhancedHTMLParser(HTMLParser):
-    """Extended HTML parser with support for common semantic elements"""
-    def __init__(self):
-        super().__init__()
-        self.structure = {
-            'title': '',
-            'links': [],
-            'metadata': {},
-            'headings': {f'h{i}': [] for i in range(1, 7)},
-            'scripts': [],
-            'images': []
-        }
-        self.current_tag = None
-    
-    def handle_starttag(self, tag, attrs):
-        self.current_tag = tag
-        attrs = dict(attrs)
-        
-        if tag == 'title':
-            pass
-        elif tag == 'a' and 'href' in attrs:
-            self.structure['links'].append(attrs['href'])
-        elif tag in self.structure['headings']:
-            pass
-        elif tag == 'meta' and ('name' in attrs or 'property' in attrs):
-            key = attrs.get('name') or attrs.get('property')
-            self.structure['metadata'][key] = attrs.get('content', '')
-        elif tag == 'script' and 'src' in attrs:
-            self.structure['scripts'].append(attrs['src'])
-        elif tag == 'img' and 'src' in attrs:
-            self.structure['images'].append(attrs['src'])
-    
-    def handle_data(self, data):
-        if self.current_tag == 'title':
-            self.structure['title'] += data
-        elif self.current_tag in self.structure['headings']:
-            self.structure['headings'][self.current_tag].append(data.strip())
-    
-    def handle_endtag(self, tag):
-        self.current_tag = None
+logger = get_logger("Execution Agent")
+printer = PrettyPrinter
 
 class ToolLibrary:
     """Tool selector using cosine similarity (simplified for minimal dependencies)"""
@@ -127,13 +80,8 @@ class SafeEnvironment:
         if any(restricted in path for restricted in self.restricted_paths):
             raise SecurityError(f"Restricted file path: {path}")
 
-class ExecutionAgent(BaseAgent):
-    def __init__(self, agent_factory, shared_memory, config=None):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config
-        )
+class ExecutionAgent:
+    def __init__(self, agent_factory, shared_memory, config=None, args=(), kwargs={}):
         """
         Initialize with comprehensive configuration
         
@@ -148,38 +96,17 @@ class ExecutionAgent(BaseAgent):
         self.execute_safe_action = ExecutionAgent
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        with open("config.yaml", "r") as f:
-            config = yaml.safe_load(f)
-        config = config
+        config = config or {}
         self.timeout = config.get('timeout', 10)
         self.user_agent = config.get('user_agent', "EnhancedExecutionAgent/2.0")
         self.safety = SafeEnvironment()
         self.toolbox = ToolLibrary()
         self.thought_stack = deque()
-
-        # Browser integration
-        self.browser_mode = config.get('browser_integration', 'basic')
-        self.browser_agent = None
-        self.direct_browser = None
         
-        if self.browser_mode != 'basic':
-            self.browser_agent = self.agent_factory.create(
-                config.get('browser_agent', 'browser'),
-                config={
-                    'headless': True,
-                    'timeout': config.get('browser_timeout', 30)
-                }
-            )
-
         # Cookie management
         self.cookie_jar = CookieJar()
         self.cookie_processor = HTTPCookieProcessor(self.cookie_jar)
-        self.opener = build_opener(self.cookie_processor)
-        
-        # Caching system
-        self.cache_dir = config.get('cache_dir')
-        self.cache = self._init_cache()
-        
+
         # Rate limiting
         self.rate_limit = config.get('rate_limit', 5)
         self.request_times = deque(maxlen=self.rate_limit)
@@ -190,115 +117,16 @@ class ExecutionAgent(BaseAgent):
         self.retry_delays = [0.5, 1, 2]  # Exponential backoff
         
         # Alternative parsers registry
-        self.parsers = {'html': EnhancedHTMLParser, 'json': json.loads}
+        self.parsers = {
+            'html': HTMLParser,
+            'json': json.loads
+        }
 
         # Register core tools
-        self.toolbox.register_tool('web_search', self.browse_web, 
+        self.toolbox.register_tool('web_search', self.WebBrouwser.browse_web, 
                                  {'rate_limit': 2, 'cache_ttl': 3600})
         self.toolbox.register_tool('call_api', self.call_api,
                                  {'allowed_endpoints': self.safety.allowlisted_domains})
-
-    def _init_cache(self):
-        """Initialize persistent cache if configured"""
-        if not self.cache_dir:
-            return {}
-        
-        os.makedirs(self.cache_dir, exist_ok=True)
-        return shelve.open(os.path.join(self.cache_dir, 'agent_cache'))
-
-    def _enforce_rate_limit(self):
-        """Implement token bucket rate limiting algorithm"""
-        with self.rate_lock:
-            now = time.time()
-            if len(self.request_times) >= self.rate_limit:
-                elapsed = now - self.request_times[0]
-                if elapsed < 1.0:
-                    time.sleep(1.0 - elapsed)
-                self.request_times.popleft()
-            self.request_times.append(time.time())
-
-    def _cache_key(self, url, params=None):
-        """Generate consistent cache key using SHA-256 hashing"""
-        key_data = url + (urlencode(params) if params else '')
-        return hashlib.sha256(key_data.encode()).hexdigest()
-
-    def _make_request(self, url, method='GET', headers=None, data=None, use_cache=True):
-        """Core request handler with all enhanced features"""
-        # Check cache first
-        cache_key = self._cache_key(url, data if method == 'GET' else None)
-        if use_cache and cache_key in self.cache:
-            return self.cache[cache_key]
-        
-        # Rate limiting
-        self._enforce_rate_limit()
-        
-        # Prepare request
-        headers = headers or {}
-        headers.setdefault('User-Agent', self.user_agent)
-        
-        if data and not isinstance(data, bytes):
-            data = urlencode(data).encode('utf-8')
-        
-        req = Request(url, data=data, headers=headers, method=method.upper())
-        
-        # Retry logic
-        last_error = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = self.opener.open(req, timeout=self.timeout)
-                content = response.read()
-                result = {
-                    'status': response.status,
-                    'headers': dict(response.headers),
-                    'content': content,
-                    'url': response.url
-                }
-                
-                # Cache successful responses
-                if use_cache and response.status == 200:
-                    self.cache[cache_key] = result
-                return result
-                
-            except (HTTPError, URLError) as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delays[min(attempt, len(self.retry_delays)-1)])
-                    continue
-                raise ConnectionError(f"Request failed after {self.max_retries} attempts: {str(e)}")
-
-    def browse_web(self, url, config, parse=True, parser='html', use_cache=True, **kwargs):
-        """Hybrid browser implementation"""
-        try:
-            if self.browser_agent and self._requires_js(url):
-                result = self._browser_based_fetch(url, kwargs)
-            else:
-                result = self._direct_fetch(url, use_cache)
-                
-            return self._process_content(result, parse, parser)
-            
-        except Exception as e:
-            if config.get('fallback_to_direct'):
-                return self._direct_fetch(url, use_cache)
-            raise
-
-    def _browser_based_fetch(self, url, params):
-        """Use BrowserAgent for complex pages"""
-        self.browser_agent.navigate(url)
-        
-        if params.get('interaction_script'):
-            self.browser_agent.execute_workflow(
-                params['interaction_script']
-            )
-            
-        return {
-            'status': 200,
-            'content': self.browser_agent.get_rendered_content(),
-            'url': url
-        }
-
-    def _requires_js(self, url):
-        """Determine if page needs browser rendering"""
-        return any(re.match(pattern, url) for pattern in self.js_dependent_patterns)
 
     def handle_file(self, file_path, mode='r', content=None, encoding='utf-8'):
         """
@@ -340,70 +168,6 @@ class ExecutionAgent(BaseAgent):
                     os.remove(tmp_path)
                 raise e
 
-    def call_api(self, endpoint, method='GET', headers=None, data=None, params=None, use_cache=True):
-        """
-        Enhanced API interaction with intelligent caching
-        
-        Args:
-            endpoint: Target API URL
-            method: HTTP method
-            headers: Additional headers
-            data: Request body
-            params: Query parameters
-            use_cache: Utilize caching system
-            
-        Returns:
-            Parsed response (automatic JSON detection)
-        """
-        result = self._make_request(
-            endpoint,
-            method=method,
-            headers=headers,
-            data=data,
-            params=params,
-            use_cache=use_cache
-        )
-        
-        try:
-            return json.loads(result['content'].decode('utf-8'))
-        except json.JSONDecodeError:
-            return result['content']
-
-    def clear_cache(self, expired_after=None):
-        """Clear cache entries, optionally older than specified timestamp"""
-        if not self.cache_dir:
-            return
-            
-        if expired_after is None:
-            self.cache.clear()
-            return
-            
-        now = time.time()
-        to_delete = []
-        for key, entry in self.cache.items():
-            if now - entry.get('timestamp', 0) > expired_after:
-                to_delete.append(key)
-        
-        for key in to_delete:
-            del self.cache[key]
-
-    def save_cookies(self, path):
-        """Persist cookies to disk"""
-        self.cookie_jar.save(path, ignore_discard=True)
-
-    def load_cookies(self, path):
-        """Load cookies from disk"""
-        self.cookie_jar.load(path, ignore_discard=True)
-
-    def register_parser(self, name, parser_func):
-        """Add custom parser to the parser registry"""
-        self.parsers[name] = parser_func
-
-    def __del__(self):
-        """Cleanup resources"""
-        if hasattr(self, 'cache') and not isinstance(self.cache, dict):
-            self.cache.close()
-
     def generate_react_loop(self, task: str, max_steps: int = 5):
         """
         ReAct framework implementation (Yao et al., 2022)
@@ -421,29 +185,18 @@ class ExecutionAgent(BaseAgent):
     
     def execute_safe_action(self, action: dict):
         """Amodei-style safety validation"""
-        try:
-            tool = self.toolbox.select_tool(action['type'])
-            if not tool:
-                raise SecurityError(f"Blocked unauthorized tool: {action['type']}")
-
-            # Validate parameters
-            if action.get('file_path'):
-                self.safety.validate_file_path(action['file_path'])
-
-            if action.get('url'):
-                domain = urlparse(action['url']).netloc
-                if domain not in self.safety.allowlisted_domains:
-                    raise UnauthorizedAccessError(
-                        resource=action['url'],
-                        policy="Domain Allowlisting"
-                    )
-
-            return tool(**action['params'])
-
-        except SecurityError as e:
-            self.logger.security_alert(e.to_audit_format())
-            raise
-
+        tool = self.toolbox.select_tool(action['type'])
+        if not tool:
+            raise SecurityError(f"Blocked unauthorized tool: {action['type']}")
+        
+        # Validate parameters
+        if action.get('url'):
+            self.safety.validate_request(action['url'])
+        if action.get('file_path'):
+            self.safety.validate_file_path(action['file_path'])
+        
+        return tool(**action['params'])
+    
     def _generate_thought(self, task: str) -> str:
         """
         Hybrid neural-symbolic thought generator based on:
@@ -493,7 +246,7 @@ class ExecutionAgent(BaseAgent):
             action_template = {
                 'web_search': {
                     'params': {
-                        'url': self._build_scholarly_url(task),
+                        'url': self.WebBrouwser._build_scholarly_url(task),
                         'max_results': 10
                     }
                 },
@@ -510,25 +263,6 @@ class ExecutionAgent(BaseAgent):
             return f"Thought: {model_response['thought']}\n{action_str}"
     
         return f"Thought: {model_response['thought']} [NEED MORE INFO]"
-
-    def _build_scholarly_url(self, query: str) -> str:
-        """Build validated academic search URL based on configurable endpoints"""
-        # Academic search endpoints (RFC 3986-compliant URI construction)
-        endpoints = {
-            'crossref': 'https://api.crossref.org/works?query=',
-            'semantic_scholar': 'https://api.semanticscholar.org/graph/v1/paper/search?query=',
-            'arxiv': 'http://export.arxiv.org/api/query?search_query='
-        }
-    
-        # Select endpoint based on safety configuration
-        selected = next((e for e in endpoints if urlparse(endpoints[e]).netloc in self.safety.allowlisted_domains), None)
-
-        if not selected:
-            raise SecurityError("No allowlisted academic endpoints available")
-    
-        return f"{endpoints[selected]}{urllib.parse.quote(query)}&rows=10"
-
-
 
     def _parse_action(self, thought: str) -> dict:
         """Parse action details from thought string"""
@@ -551,3 +285,15 @@ class ExecutionAgent(BaseAgent):
 class SecurityError(Exception):
     """Custom exception for safety violations"""
     pass
+
+# Example usage
+#if __name__ == "__main__":
+#    agent = ExecutionAgent(config={
+#        'cache_dir': '.slaicache',
+#        'rate_limit': 3
+#    })
+    
+#    result = agent.generate_react_loop(
+#        "Find recent papers about AI safety from trusted sources"
+#    )
+#    print(result)
