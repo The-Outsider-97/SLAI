@@ -1,102 +1,32 @@
-import yaml
+
 import psutil
-import statistics
 
-from datetime import datetime
-from enum import Enum
-from typing import List, Dict, Any, Optional, Union, Callable
-from types import SimpleNamespace
+from typing import List, Dict, Any
 
-from logs.logger import get_logger
+from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.planning_types import Task, TaskType, TaskStatus
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Metrics")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
-
-
-# === Added TaskType Enum ===
-class TaskType(Enum):
-    """Differentiates between primitive actions and abstract goals."""
-    PRIMITIVE = 0
-    ABSTRACT = 1
-
-class TaskStatus(Enum):
-    """Enhanced Task Status enumeration matching planning_types.py"""
-    PENDING = 0
-    EXECUTING = 1
-    SUCCESS = 2
-    FAILED = 3
-
-class Task:
-    """Expanded Task class with planning-related properties"""
-    def __init__(self, 
-                 name: str,
-                 task_type: TaskType = TaskType.PRIMITIVE,
-                 status: TaskStatus = TaskStatus.PENDING,
-                 cost: float = 1.0,
-                 start_time: Optional[float] = None,
-                 end_time: Optional[float] = None,
-                 parent: Optional['Task'] = None,
-                 methods: List[List['Task']] = None,
-                 preconditions: List[Callable] = None,
-                 effects: List[Callable] = None):
-        self.name = name
-        self.task_type = task_type
-        self.status = status
-        self.cost = cost
-        self.start_time = start_time
-        self.end_time = end_time
-        self.parent = parent
-        self.methods = methods or []
-        self.preconditions = preconditions or []
-        self.effects = effects or []
-
-    def copy(self) -> 'Task':
-        return Task(
-            name=self.name,
-            task_type=self.task_type,
-            status=self.status,
-            cost=self.cost,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            parent=self.parent,
-            methods=self.methods.copy(),
-            preconditions=self.preconditions.copy(),
-            effects=self.effects.copy()
-        )
-
+printer = PrettyPrinter
 
 class PlanningMetrics(Task):
     """
     Calculates and tracks various metrics related to planning performance.
     Inspired by metrics used in the International Planning Competition (IPC).
     """
-    def __init__(self, name, agent=None,
-                 config_section_name: str = "planning_metrics",
-                 config_file_path: str = CONFIG_PATH,
-                 status=TaskStatus.SUCCESS,
-                 cost = 1):
-        super().__init__(name, status, cost)
-        self.agent=agent
-        self.config = get_config_section(config_section_name, config_file_path)
+    def __init__(self):
+        super().__init__(name="Metrics", status=TaskStatus.SUCCESS, cost=0.0)
+        self.config = load_global_config()
+        self.task_config = get_config_section('planning_metrics')
+        self.enable_timing = self.task_config.get('enable_timing')
+        self.default_task_cost = self.task_config.get('default_task_cost')
+        self.default_task_duration = self.task_config.get('default_task_duration')
+        self.use_length_fallback = self.task_config.get('use_length_fallback')
+        self.metrics_weights = self.task_config.get('metrics_weights', {
+            'success', 'cost', 'time'
+        })
+        self.agent={}
 
     @staticmethod
     def plan_length(plan: List[Task]) -> int:
@@ -116,12 +46,12 @@ class PlanningMetrics(Task):
 
         valid_tasks = [t for t in plan if t.start_time and t.end_time]
         
-        if self.config.enable_timing and len(valid_tasks) != len(plan):
+        if self.enable_timing and len(valid_tasks) != len(plan):
             logger.warning(f"Missing timing data for {len(plan)-len(valid_tasks)} tasks")
 
         if not valid_tasks:
-            if self.config.use_length_fallback:
-                return len(plan) * self.config.default_task_duration
+            if self.use_length_fallback:
+                return len(plan) * self.default_task_duration
             return 0.0
 
         start_times = [t.start_time for t in valid_tasks]
@@ -177,13 +107,13 @@ class PlanningMetrics(Task):
                              planning_end_time: float,
                              final_status: TaskStatus) -> Dict[str, Any]:
         """Comprehensive metrics calculation with config integration"""
-        metrics = cls(name="DefaultMetrics")
+        metrics = cls()
         config = metrics.config
 
         return {
             "plan_length": cls.plan_length(plan),
             "plan_makespan": metrics.plan_makespan(plan),
-            "plan_cost": cls.plan_cost(plan, config.default_task_cost),
+            "plan_cost": cls.plan_cost(plan),
             "planning_time": planning_end_time - planning_start_time,
             "success_rate": 1.0 if final_status == TaskStatus.SUCCESS else 0.0,
             "resource_usage": {
@@ -191,36 +121,30 @@ class PlanningMetrics(Task):
                 "memory": psutil.virtual_memory().percent
             },
             "efficiency_score": (
-                config.metrics_weights.success * (1.0 if final_status == TaskStatus.SUCCESS else 0.0) +
-                config.metrics_weights.cost * (1 / (cls.plan_cost(plan) + 1e-6)) +
-                config.metrics_weights.time * (1 / (planning_end_time - planning_start_time + 1e-6))
+                metrics.metrics_weights.get("success", 1.0) * (1.0 if final_status == TaskStatus.SUCCESS else 0.0) +
+                metrics.metrics_weights.get("cost", 1.0) * (1 / (cls.plan_cost(plan) + 1e-6)) +
+                metrics.metrics_weights.get("time", 1.0) * (1 / (planning_end_time - planning_start_time + 1e-6))
             )
         }
 
 if __name__ == "__main__":
-    print("")
-    print("\n=== Running Planning Metrics ===")
-    print("")
-    from unittest.mock import Mock
+    print("\n=== Running Planning Metrics Test ===\n")
+    printer.status("Init", "Planning Metrics initialized", "success")
+
     tasks = [
         Task("Prim1", TaskType.PRIMITIVE, start_time=0, end_time=2),
         Task("Abstract1", TaskType.ABSTRACT),
         Task("Prim2", TaskType.PRIMITIVE, start_time=2, end_time=5)
     ]
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    
-    metrics = PlanningMetrics(name=None, agent=mock_agent)
+
+    metrics = PlanningMetrics()
     print(f"\n  Plan length: {metrics.plan_length(tasks)}")  # Should be 2
     print(f"Makespan: {metrics.plan_makespan(tasks)}")   # Should be 5-0=5
-    print("")
-    print("\n=== Successfully Ran Planning Metrics ===\n")
 
-if __name__ == "__main__":
-    print("\n=== Kitchen Planning Metrics Demo ===")
+    print("\n=== Kitchen Planning Metrics Demo ===\n")
 
     # Initialize metrics calculator
-    metrics = PlanningMetrics(name="KitchenMetrics")
+    name="KitchenMetrics"
 
     # Create realistic cooking tasks with timing and cost data
     tasks = [
@@ -304,3 +228,5 @@ if __name__ == "__main__":
     print("5. Resource usage reflects actual system performance")
 
     print("\n=== Metric Demo Complete ===")
+
+    print("\n=== Successfully Ran Planning Metrics ===\n")
