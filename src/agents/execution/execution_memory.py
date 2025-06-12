@@ -17,7 +17,22 @@ class ExecutionMemory:
         self.config = load_global_config()
         self.manager_config = get_config_section('execution_memory')
 
+        self.cache = self._init_cache()
+
         logger.info(f"Execution Manager succesfully initialized")
+
+    def _init_cache(self):
+        """Initialize persistent cache if configured"""
+        if not self.cache_dir:
+            return {}
+        
+        os.makedirs(self.cache_dir, exist_ok=True)
+        return shelve.open(os.path.join(self.cache_dir, 'agent_cache'))
+
+    def _cache_key(self, url, params=None):
+        """Generate consistent cache key using SHA-256 hashing"""
+        key_data = url + (urlencode(params) if params else '')
+        return hashlib.sha256(key_data.encode()).hexdigest()
 
     def clear_cache(self, expired_after=None):
         """Clear cache entries, optionally older than specified timestamp"""
