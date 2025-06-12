@@ -7,15 +7,17 @@ from typing import Dict, Any, List, Optional, Callable, Union
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 
-from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Task Scheduler")
+printer = PrettyPrinter
 
 class TaskScheduler(ABC):
     """Abstract scheduler interface"""
     def __init__(self):
         super().__init__()
+        logger.info(f"Abstract scheduler interface succesfully initialized")
         
     @abstractmethod
     def schedule(self,
@@ -27,14 +29,18 @@ class TaskScheduler(ABC):
 
 class DeadlineAwareScheduler(TaskScheduler):
     """Earliest Deadline First scheduler with capability matching"""
-    def __init__(self, agent=None):
+    def __init__(self):
         super().__init__()
-        self.agent = agent
         self.config = load_global_config()
         self.task_config = get_config_section('task_scheduler')
 
-        self.risk_threshold = self.task_config.get('risk_threshold', 0.7)
-        self.retry_policy = self.task_config.get('retry_policy', {})
+        self.risk_threshold = self.task_config.get('risk_threshold')
+        self.base_duration_per_requirement = self.task_config.get('base_duration_per_requirement')
+        self.efficiency_attribute = self.task_config.get('efficiency_attribute')
+        self.retry_policy = self.task_config.get('retry_policy', {
+            'max_retries', 'max_attempts', 'backoff_factor', 'delay'
+        })
+        self.agent = {}
         self.task_history = defaultdict(list)
 
         logger.info(f"Task Scheduler succesfully initialized with: {self.task_history}")
@@ -46,38 +52,46 @@ class DeadlineAwareScheduler(TaskScheduler):
                  state: Optional[Dict] = None) -> Dict:
 
         """Main scheduling workflow with integrated risk checks"""
-        
+        printer.status("INIT", "Schedule succesfully initialized", "info")
+
+        self.agents = agents
+        self.state = state
+        self.task_history["current"] = tasks
         validated = self._validate_inputs(tasks, agents)
         if not validated:
             return {}
 
         # Phase 1: Risk assessment and prioritization
         prioritized = self._prioritize_tasks(tasks, risk_assessor)
-        
+
         # Phase 2: Agent capability matching
         candidate_map = self._map_capabilities(prioritized, agents)
-        
+
         # Phase 3: Temporal scheduling with dependencies
         schedule = self._create_schedule(candidate_map, agents, state)
-        
+
         # Phase 4: Risk mitigation and fallback planning
         return self._apply_risk_mitigation(schedule, risk_assessor)
 
     def _validate_inputs(self, tasks, agents):
         """Consistent validation with planning_agent patterns"""
+        printer.status("INIT", "Input validation succesfully initialized", "info")
+
         if not tasks or not agents:
             logger.warning("Scheduling failed: empty tasks or agents")
             return False
-            
+
         required_keys = {'id', 'requirements', 'deadline'}
         if not all(required_keys.issubset(t) for t in tasks):
             logger.error("Invalid task structure")
             return False
-            
+
         return True
 
     def _prioritize_tasks(self, tasks, risk_assessor):
         """Risk-aware prioritization using collaborative agent's assessment"""
+        printer.status("INIT", "Risk-aware prioritization succesfully initialized", "info")
+
         prioritized = []
         for task in tasks:
             risk_score = 0.5
@@ -97,7 +111,9 @@ class DeadlineAwareScheduler(TaskScheduler):
 
     def _calculate_priority(self, deadline, base_priority, risk_score):
         """Hybrid priority calculation"""
-        time_criticality = 1 / (deadline - time.time() + 1e-6)
+        printer.status("INIT", "Priority calculation succesfully initialized", "info")
+
+        time_criticality = 1 / (deadline - time.time() + 0.000001)
         risk_penalty = np.clip(risk_score - self.risk_threshold, 0, 1)
         return (0.6 * base_priority + 
                 0.3 * time_criticality - 
@@ -105,6 +121,8 @@ class DeadlineAwareScheduler(TaskScheduler):
 
     def _map_capabilities(self, tasks, agents):
         """Capability matching with load awareness"""
+        printer.status("INIT", "Map capabilities succesfully initialized", "info")
+
         candidate_map = defaultdict(list)
         for task in tasks:
             for agent_id, details in agents.items():
@@ -113,8 +131,120 @@ class DeadlineAwareScheduler(TaskScheduler):
                     candidate_map[task['id']].append((agent_id, score))
         return candidate_map
 
+    def _apply_risk_mitigation(self, schedule, risk_assessor):
+        """Apply collaborative agent's safety recommendations"""
+        printer.status("INIT", "Risk mitigation succesfully initialized", "info")
+
+        mitigated = {}
+        for task_id, assignment in schedule.items():
+            if risk_assessor and assignment['risk_score'] > self.risk_threshold:
+                alt = self._find_alternative(
+                    task_id, 
+                    assignment,
+                    schedule,
+                    risk_assessor
+                )
+                if alt:
+                    mitigated[task_id] = alt
+                    continue
+            mitigated[task_id] = assignment
+        return mitigated
+    
+    def _find_alternative(self, task_id, assignment, schedule, risk_assessor):
+        """Find safer alternatives for high-risk tasks through reassignment or decomposition"""
+        printer.status("ALT", f"Seeking alternatives for high-risk task {task_id}", "warning")
+        
+        # 1. Try agent reassignment first
+        original_agent = assignment['agent_id']
+        task = next(t for t in self.task_history["current"] if t["id"] == task_id)
+        
+        # Get all eligible agents including previously rejected ones
+        eligible_agents = self._map_capabilities([task], self.agents)[task_id]
+        
+        # Filter and rank agents by risk-adjusted score
+        candidates = []
+        for agent_id, raw_score in eligible_agents:
+            if agent_id == original_agent:
+                continue  # Skip original assignment
+                
+            # Calculate risk-adjusted score
+            agent_details = self.agents[agent_id]
+            risk_factor = self._calculate_agent_risk(task, agent_details)
+            adjusted_score = raw_score * (1 - risk_factor)
+            
+            candidates.append((adjusted_score, agent_id, agent_details))
+        
+        # Sort candidates by descending risk-adjusted score
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        
+        # Select best viable alternative
+        for score, agent_id, details in candidates:
+            if score > 0:  # Viable candidate
+                new_assignment = self._create_assignment(
+                    task_id, agent_id, details, 
+                    details["current_load"], self.state
+                )
+                new_assignment["mitigation_strategy"] = f"Reassigned from {original_agent}"
+                printer.status("ALT-SUCCESS", 
+                              f"Found safer agent {agent_id} (risk: {new_assignment['risk_score']:.2f})",
+                              "success")
+                return new_assignment
+        
+        # 2. Fallback to task decomposition
+        printer.status("ALT-FALLBACK", 
+                      f"No agents found, attempting task decomposition for {task_id}", 
+                      "warning")
+        subtasks = self._decompose_task(task)
+        if subtasks:
+            printer.status("ALT-DECOMPOSE", 
+                          f"Decomposed {task_id} into {len(subtasks)} subtasks", 
+                          "success")
+            return {
+                "task_id": task_id,
+                "subtasks": subtasks,
+                "mitigation_strategy": "Task decomposition",
+                "risk_score": assignment['risk_score'] * 0.7  # Reduced risk
+            }
+        
+        # 3. Final fallback - delay with mitigation
+        printer.status("ALT-DELAY", 
+                      f"Using delay mitigation for {task_id}", 
+                      "warning")
+        return {
+            "task_id": task_id,
+            "agent_id": original_agent,
+            "start_time": assignment["start_time"] + self.retry_policy["delay"],
+            "end_time": assignment["end_time"] + self.retry_policy["delay"],
+            "risk_score": assignment['risk_score'],
+            "mitigation_strategy": f"Delayed by {self.retry_policy['delay']}s with enhanced monitoring"
+        }
+    
+    # Helper methods for risk assessment and decomposition
+    def _calculate_agent_risk(self, task, agent_details):
+        """Calculate agent-specific risk factor (0-1 scale)"""
+        printer.status("INIT", "Calculate agent risk", "info")
+
+        # Agent capability gap risk
+        gap_risk = 1 - (len(set(agent_details['capabilities']) & set(task['requirements'])) / len(task['requirements']))
+        
+        # Historical performance risk
+        perf_risk = agent_details.get("failures", 0) / (agent_details.get("successes", 1) + agent_details.get("failures", 0) + 1e-6)
+        
+        # Composite risk factor
+        return 0.6 * gap_risk + 0.4 * perf_risk
+    
+    def _decompose_task(self, task):
+        """Break complex tasks into simpler subtasks (stub implementation)"""
+        printer.status("INIT", "Task desomposer succesfully initialized", "info")
+
+        # Implementation would use domain-specific decomposition logic
+        # Example: Medical task -> [triage, treatment, evacuation]
+        return None  # Return None for this example
+
     def _agent_is_eligible(self, agent_id, task, details):
         """Check agent capabilities and availability"""
+        printer.status("INIT", "Agent eligibility succesfully initialized", "info")
+
         capabilities = set(details.get('capabilities', []))
         requirements = set(task['requirements'])
         return (
@@ -124,14 +254,42 @@ class DeadlineAwareScheduler(TaskScheduler):
         )
 
     def _calculate_agent_score(self, agent_id, task, agent_details):
-        """Score agents based on capability match and current load."""
-        # Example: Higher success rate and lower load = better score
-        success_rate = agent_details.get("successes", 1) / (agent_details.get("failures", 0) + agent_details.get("successes", 1) + 1e-6)
+        """Score agents based on capability match, current load, efficiency, and specialization."""
+        printer.status("INIT", "Agent score succesfully initialized", "info")
+
+        # 1. Success rate (reliability factor)
+        successes = agent_details.get("successes", 1)
+        failures = agent_details.get("failures", 0)
+        success_rate = successes / (successes + failures + 1e-6)
+        
+        # 2. Efficiency factor (higher = better)
+        efficiency = agent_details.get(self.efficiency_attribute, 1.0)
+        
+        # 3. Load penalty (current utilization)
         load_penalty = agent_details["current_load"] * 0.3
-        return success_rate - load_penalty
+        
+        # 4. Capability specialization bonus
+        capabilities = set(agent_details.get('capabilities', []))
+        requirements = set(task['requirements'])
+        overlap = capabilities & requirements
+        specialization = len(overlap) / len(requirements) if requirements else 1.0
+        
+        # 5. Deadline proximity factor (urgency bonus)
+        time_factor = max(0, 1 - (task['deadline'] - time.time()) / 3600)  # 1hr normalization
+        
+        # Composite score calculation with weighted factors
+        return (
+            0.4 * success_rate +
+            0.3 * efficiency +
+            0.2 * specialization +
+            0.1 * time_factor -
+            load_penalty
+        )
 
     def _create_schedule(self, candidate_map, agents, state):
         """Temporal scheduling with plan optimization"""
+        printer.status("INIT", "Schedule creator succesfully initialized", "info")
+
         schedule = {}
         agent_loads = {a: 0.0 for a in agents}
         dependency_graph = self._build_dependency_graph(state)
@@ -160,6 +318,8 @@ class DeadlineAwareScheduler(TaskScheduler):
 
     def _build_dependency_graph(self, state):
         """Build dependency graph from task dependencies in the state"""
+        printer.status("INIT", "dependencies succesfully initialized", "info")
+
         if state and 'dependency_graph' in state:
             return state['dependency_graph']
         
@@ -179,6 +339,8 @@ class DeadlineAwareScheduler(TaskScheduler):
     
     def _order_by_dependencies(self, candidate_map, dependency_graph):
         """Topological sort using Kahn's algorithm for task dependencies"""
+        printer.status("INIT", "Topological sorter succesfully initialized", "info")
+
         task_ids = list(candidate_map.keys())
         in_degree = defaultdict(int)
         adj = defaultdict(list)
@@ -213,6 +375,8 @@ class DeadlineAwareScheduler(TaskScheduler):
 
     def _create_assignment(self, task_id: str, agent_id: str, agent_details: Dict, current_load: float, state: Dict) -> Dict:
         """Create task assignment with duration based on requirements and agent efficiency."""
+        printer.status("INIT", "Assignment succesfully initialized", "info")
+
         task = next((t for t in (state.get('tasks', [])) if t.get('id') == task_id), None)
         num_requirements = len(task['requirements']) if task else 1
         base_duration = self.task_config.get('base_duration_per_requirement', 5.0) * num_requirements
@@ -227,141 +391,42 @@ class DeadlineAwareScheduler(TaskScheduler):
             'risk_score': task.get('risk_assessment', {}).get('risk_score', 0.5) if task else 0.5
         }
 
-    def _apply_risk_mitigation(self, schedule, risk_assessor):
-        """Apply collaborative agent's safety recommendations"""
-        mitigated = {}
-        for task_id, assignment in schedule.items():
-            if risk_assessor and assignment['risk_score'] > self.risk_threshold:
-                alt = self._find_alternative(
-                    task_id, 
-                    assignment,
-                    schedule,
-                    risk_assessor
-                )
-                if alt:
-                    mitigated[task_id] = alt
-                    continue
-            mitigated[task_id] = assignment
-        return mitigated
-
 if __name__ == "__main__":
-    print("")
-    print("\n=== Running Task Scheduler ===")
-    print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    scheduler = DeadlineAwareScheduler(agent=mock_agent)
-    print("")
-    print("\n=== Successfully Ran Task Scheduler ===\n")
+    print("\n=== Running Task Scheduler Test ===\n")
+    printer.status("Init", "Task Scheduler initialized", "success")
 
-if __name__ == "__main__":
-    print("\n=== Emergency Response Simulation ===")
-    from datetime import datetime, timedelta
-    import time
-
-    # Create mock agents with different capabilities
+    scheduler = DeadlineAwareScheduler()
+    print(scheduler)
+    print("\n* * * * * Phase 2 * * * * *\n")
+    tasks = [{
+        "id": "task1",
+        "requirements": ["leave_prep", "keys", "door_access"],
+        "deadline": time.time() + 30,  # deadline 30 seconds from now
+    }]
     agents = {
-        "medic_team_1": {
-            "capabilities": ["medical", "triage", "evacuation"],
-            "current_load": 0.0,
-            "efficiency": 1.2,
-            "successes": 15,
-            "failures": 2
+        "agent1": {
+            "capabilities": ["leave_prep", "keys", "door_access"],
+            "current_load": 0.2,
+            "successes": 5,
+            "failures": 1,
+            "efficiency": 1.2
         },
-        "fire_team_alpha": {
-            "capabilities": ["firefighting", "search_rescue", "hazmat"],
-            "current_load": 0.3,
-            "efficiency": 0.9,
-            "successes": 20,
-            "failures": 1
-        },
-        "drone_swarm": {
-            "capabilities": ["mapping", "surveillance"],
-            "current_load": 0.1,
-            "efficiency": 2.5,
-            "successes": 45,
-            "failures": 5
+        "agent2": {
+            "capabilities": ["keys", "navigation"],
+            "current_load": 0.4,
+            "successes": 3,
+            "failures": 2,
+            "efficiency": 0.9
         }
     }
+    state = {
+        "tasks": tasks
+    }
 
-    # Create emergency response tasks with dependencies
-    base_time = time.time()
-    tasks = [
-        {
-            "id": "t1",
-            "requirements": ["medical"],
-            "deadline": base_time + 1800,  # 30 minutes
-            "priority": 1,
-            "description": "Immediate first aid"
-        },
-        {
-            "id": "t2",
-            "requirements": ["firefighting"],
-            "deadline": base_time + 3600,  # 1 hour
-            "priority": 2,
-            "dependencies": ["t1"],
-            "description": "Contain chemical fire"
-        },
-        {
-            "id": "t3",
-            "requirements": ["mapping"],
-            "deadline": base_time + 1200,  # 20 minutes
-            "priority": 1,
-            "description": "Map disaster area"
-        },
-        {
-            "id": "t4",
-            "requirements": ["search_rescue"],
-            "deadline": base_time + 2400,  # 40 minutes
-            "priority": 1,
-            "dependencies": ["t3"],
-            "description": "Search for trapped civilians"
-        },
-        {
-            "id": "t5",
-            "requirements": ["hazmat"],
-            "deadline": base_time + 7200,  # 2 hours
-            "priority": 3,
-            "description": "Chemical spill containment"
-        }
-    ]
-
-    # Simple risk assessment function
-    def risk_assessor(task):
-        complexity = len(task.get("requirements", []))
-        return {"risk_score": min(0.2 * complexity + 0.1 * task.get("priority", 1), 1.0)}
-
-    # Initialize scheduler
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {"dependency_graph": {"t3": ["t4"]}}
-    
-    scheduler = DeadlineAwareScheduler(agent=mock_agent)
-    
-    # Run scheduling
-    print("\nInitializing emergency response scheduling...")
-    schedule = scheduler.schedule(
-        tasks=tasks,
-        agents=agents,
-        risk_assessor=risk_assessor,
-        state={"tasks": tasks}
-    )
-
-    # Display results
-    print("\n=== Final Emergency Schedule ===")
-    print(f"{'Task ID':<8}{'Agent':<18}{'Start':<8}{'End':<8}{'Risk':<6}{'Description'}")
-    for task_id, assignment in schedule.items():
-        task = next(t for t in tasks if t["id"] == task_id)
-        print(f"{task_id:<8}{assignment['agent_id']:<18}"
-              f"{assignment['start_time']:.1f}\t{assignment['end_time']:.1f}\t"
-              f"{assignment['risk_score']:.2f}\t{task['description']}")
-
-    # Timeline visualization
-    print("\n=== Timeline ===")
-    for agent_id, details in agents.items():
-        agent_tasks = [t for t in schedule.values() if t["agent_id"] == agent_id]
-        agent_tasks.sort(key=lambda x: x["start_time"])
-        timeline = " | ".join(f"[{t['task_id']} {t['start_time']:.1f}-{t['end_time']:.1f}]" 
-                   for t in agent_tasks)
-        print(f"{agent_id}: {timeline}")
+    plan = scheduler.schedule(tasks=tasks, agents=agents, risk_assessor = None, state=state)
+    task = scheduler._prioritize_tasks(tasks=tasks, risk_assessor = None)
+    map = scheduler._map_capabilities(tasks=tasks, agents=agents)
+    printer.pretty("Planner", plan, "success")
+    printer.pretty("task", task, "success")
+    printer.pretty("task", map, "success")
+    print("\n=== Successfully Ran Task Scheduler ===\n")
