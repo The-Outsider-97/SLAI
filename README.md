@@ -171,6 +171,8 @@ Note: If you see an error about execution policy:
    pip install opencv-python
    pip install pyperclip
    pip install psutil
+   pip install pytz
+   pip install torch
    ```
 
 5. Run Model:
