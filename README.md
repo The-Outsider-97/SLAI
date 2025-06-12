@@ -169,6 +169,7 @@ Note: If you see an error about execution policy:
    pip install gym
    pip install gymnasium
    pip install opencv-python
+   pip install pyperclip
    ```
 
 5. Run Model:
