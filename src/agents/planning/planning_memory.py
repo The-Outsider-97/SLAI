@@ -4,54 +4,86 @@ import time
 import copy
 import json, yaml
 
-from typing import Union, Dict, List, Deque
+from typing import Union, Dict, Any, Deque
 from collections import deque, defaultdict
 from types import SimpleNamespace
 
-from logs.logger import get_logger
+from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Memory")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
-CHECKPOINT_PATH = "src/agents/planning/checkpoint/checkpoint.txt"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str = CONFIG_PATH):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class PlanningMemory:
     """Maintains planning state checkpoints and statistical memory"""
-    def __init__(self, agent=None,
-                 config_section_name: str = "planning_memory",
-                 config_file_path: str = CONFIG_PATH):
-        self.config = get_config_section(config_section_name, config_file_path)
-        self.agent = agent
-        self.checkpoints = deque(maxlen=self.config.max_checkpoints)
+    def __init__(self):
+        self.config = load_global_config()
+        self.memory_config = get_config_section('planning_memory')
+        self.checkpoints_dir = self.memory_config.get('checkpoints_dir')
+        self.max_checkpoints = self.memory_config.get('max_checkpoints')
+        self.history_window = self.memory_config.get('history_window')
+        self.retention_days = self.memory_config.get('retention_days')
+        self.compression = self.memory_config.get('compression')
+        self.auto_save_interval = self.memory_config.get('auto_save_interval')
+
+        self.agent = {}
+        self.checkpoints = deque(maxlen=self.max_checkpoints)
         self._init_default_state()
+        self.ensure_checkpoint_dir()
+        self.load_latest_checkpoint()
 
     def _init_default_state(self):
         """Initialize empty state containers"""
+        printer.status("INIT", "Default state succesfully initialized", "info")
+
         self.base_state = {
             'task_library': {},
             'method_stats': defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}),
             'world_state': {},
-            'execution_history': deque(maxlen=self.config.history_window),
+            'execution_history': deque(maxlen=self.history_window),
             'plan_metrics': defaultdict(list)
         }
+
+    def ensure_checkpoint_dir(self):
+        """Ensures the checkpoint directory exists."""
+        try:
+            if not os.path.exists(self.checkpoints_dir):
+                os.makedirs(self.checkpoints_dir, exist_ok=True)
+                logger.info(f"Created checkpoint directory: {self.checkpoints_dir}")
+        except Exception as e:
+            logger.error(f"Failed to create checkpoint directory: {e}")
+            raise
+
+    def load_latest_checkpoint(self):
+        """Load most recent checkpoint on initialization"""
+        try:
+            if self.checkpoints:
+                self.load_checkpoint(-1)
+        except Exception as e:
+            logger.error(f"Checkpoint load failed: {e}")
+
+    def is_sequential_task(self, task: Dict[str, Any], min_length: int) -> bool:
+        """Check task sequence using execution history"""
+        task_chain = self._get_task_ancestry(task)
+        
+        # Check memory for sequential patterns
+        for entry in self.base_state['execution_history']:
+            if entry.get('task_chain') == task_chain[-min_length:]:
+                return True
+        return False
+
+    def _get_task_ancestry(self, task: Dict[str, Any]) -> list:
+        """Get task hierarchy chain"""
+        chain = []
+        current = task
+        while current:
+            if 'name' not in current:
+                logger.error(f"Missing 'name' in task: {current}")
+                break
+            chain.append(current['name'])
+            current = current.get('parent')
+        return chain[::-1]  # Root-first order
+
 
     def save_checkpoint(self, label: str = None, metadata: dict = None):
         """Capture current planning state with timestamp"""
@@ -61,7 +93,7 @@ class PlanningMemory:
             'state': self._capture_agent_state(),
             'metadata': metadata or {}
         }
-        
+
         self.checkpoints.append(checkpoint)
         logger.info(f"Saved planning checkpoint '{checkpoint['label']}'")
         return checkpoint
@@ -81,7 +113,7 @@ class PlanningMemory:
             logger.error(f"Invalid checkpoint index: {index}")
             return False
 
-    def ensure_checkpoint_access(self, path: str = CHECKPOINT_PATH) -> str:
+    def ensure_checkpoint_access(self, path) -> str:
         """
         Ensures the checkpoint directory exists and the file is accessible.
         If the directory doesn't exist, it is created.
@@ -95,7 +127,7 @@ class PlanningMemory:
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
                 logger.info(f"Created checkpoint directory: {dir_path}")
-            
+
             if not os.path.exists(path):
                 with open(path, 'w', encoding='utf-8') as f:
                     f.write('')  # create empty file
@@ -113,7 +145,7 @@ class PlanningMemory:
         """Deep copy relevant agent state components"""
         if not self.agent:
             return {}
-            
+
         return {
             'task_library': copy.deepcopy(self.agent.task_library),
             'method_stats': copy.deepcopy(self.agent.method_stats),
@@ -130,21 +162,21 @@ class PlanningMemory:
         self.agent.task_library = state['task_library']
         self.agent.method_stats = state['method_stats']
         self.agent.world_state = state['world_state']
-        self.agent.execution_history = deque(state['execution_history'], maxlen=self.config.history_window)
-        
+        self.agent.execution_history = deque(state['execution_history'], maxlen=self.history_window)
+
         if 'plan_metrics' in state:
             self.agent.plan_metrics = state['plan_metrics']
 
     def prune_old_checkpoints(self):
         """Remove checkpoints older than retention period"""
-        if not self.config.retention_days:
+        if not self.retention_days:
             return
 
-        cutoff = time.time() - (self.config.retention_days * 86400)
+        cutoff = time.time() - (self.retention_days * 86400)
         initial_count = len(self.checkpoints)
         self.checkpoints = deque(
             [cp for cp in self.checkpoints if cp['timestamp'] > cutoff],
-            maxlen=self.config.max_checkpoints
+            maxlen=self.max_checkpoints
         )
         logger.debug(f"Pruned {initial_count - len(self.checkpoints)} old checkpoints")
 
@@ -161,7 +193,7 @@ class PlanningMemory:
         """Reconstruct planning memory from JSON"""
         data = json.loads(json_data) if isinstance(json_data, str) else json_data
         memory = cls(agent=agent)
-        memory.checkpoints = deque(data.get('checkpoints', []), maxlen=memory.config.max_checkpoints)
+        memory.checkpoints = deque(data.get('checkpoints', []), maxlen=memory.max_checkpoints)
         return memory
 
     def get_memory_usage(self) -> dict:
@@ -172,15 +204,11 @@ class PlanningMemory:
             'method_stats': len(self.base_state['method_stats']),
             'history_items': len(self.base_state['execution_history'])
         }
-    
 
 if __name__ == "__main__":
-    print("")
-    print("\n=== Running Planning Memory ===")
-    print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    memory = PlanningMemory(agent=mock_agent)
-    print("")
+    print("\n=== Running Planning Memory Test ===\n")
+    printer.status("Init", "Planning Memory initialized", "success")
+
+    memory = PlanningMemory()
+    print(memory)
     print("\n=== Successfully Ran Planning Memory ===\n")
