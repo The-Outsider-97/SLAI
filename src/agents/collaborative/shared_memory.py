@@ -10,19 +10,45 @@ import random
 import fnmatch
 import datetime
 import threading
+import multiprocessing
 
 from pympler import asizeof
 from datetime import timedelta
 from typing import Any, OrderedDict, Optional
 from collections import namedtuple, defaultdict, deque
+from multiprocessing.managers import BaseManager, NamespaceProxy
 
 from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Shared Memory")
+printer=PrettyPrinter
 
 # Using deque for versions allows efficient append and potentially limiting version history size
 VersionedItem = namedtuple('VersionedItem', ['timestamp', 'value'])
+
+class SharedMemoryProxy(NamespaceProxy):
+    """Custom proxy to expose SharedMemoryServer methods"""
+    _exposed_ = (
+        '__contains__', '__len__', 'put', 'set', 'get', 'append', 
+        'get_all_versions', 'get_access_time', 'get_next_prioritized_item',
+        'delete', 'clear_all', 'register_callback', 'publish', 'subscribe',
+        'unsubscribe', 'notify', 'get_usage_stats', 'metrics', 'save_to_file',
+        'load_from_file', 'increment', 'get_latest_snapshot', 'log_intervention',
+        'configure', 'compare_and_swap', 'get_all_keys'
+    )
+    
+    def __contains__(self, key):
+        return self._callmethod('__contains__', (key,))
+    
+    def __len__(self):
+        return self._callmethod('__len__')
+    
+    # Auto-generate proxy methods for exposed functions
+    for method in _exposed_:
+        if method not in ['__contains__', '__len__']:
+            exec(f"def {method}(self, *args, **kwargs):\n"
+                 f"    return self._callmethod('{method}', args, kwargs)")
 
 class SharedMemory:
     """
@@ -62,13 +88,13 @@ class SharedMemory:
         self.ttl_check_interval = self.memory_config.get('ttl_check_interval', 30) # Default time-to-live
         self.network_latency = self.memory_config.get('network_latency', 0.0)
         self._default_ttl = self.memory_config.get('default_ttl', 3600)
-        # self.data = {}
-        self.callbacks = defaultdict(list)
-        self._lock = threading.RLock()
-        self.subscribers = {}
 
-        self._data = defaultdict(lambda: deque(maxlen=self._max_versions))
-        self._expiration = {}  # key -> expiry time
+        self._lock = multiprocessing.RLock()
+        self._data = {}
+        self._expiration = {}
+        self.subscribers = {}
+        self.callbacks = {}
+
         self.current_memory = 0  # Initialize memory usage counter
         self._access_log = OrderedDict()  # key -> last access time
         self._priority_queue = []
@@ -204,6 +230,9 @@ class SharedMemory:
                 self._evict_lru()
             
             # Store new version
+            if key not in self._data:
+                self._data[key] = deque(maxlen=self._max_versions)
+            
             self._data[key].append(new_version)
             self._access_log[key] = current_time
             
@@ -311,6 +340,9 @@ class SharedMemory:
         with self._lock:
             new_version = VersionedItem(timestamp=current_time, value=value)
             item_size = self._calculate_size(value)
+            if key not in self._data:
+                self._data[key] = deque(maxlen=self._max_versions)
+            
             self._data[key].append(new_version)
             self.current_memory += item_size
     
@@ -499,6 +531,8 @@ class SharedMemory:
     def register_callback(self, channel: str, callback: callable):
         """Register a callback for specific key updates"""
         with self._lock:
+            if channel not in self.callbacks:
+                self.callbacks[channel] = []
             self.callbacks[channel].append(callback)
 
     def publish(self, channel, message):
@@ -760,7 +794,61 @@ class SharedMemory:
                 'total_size_mb': self.current_memory / (1024**2)
             }
 
+
+class _SharedMemoryManager(BaseManager):
+        pass
+
+
+_SharedMemoryManager.register(
+    'SharedMemory',
+    callable=SharedMemory,
+    proxytype=SharedMemoryProxy
+)
+
+class SharedMemoryManager:
+    """Manager for shared memory instances"""
+    _instance = None
+    def __new__(cls):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+            cls._instance._manager = None
+            cls._instance._shared_memory = None
+        return cls._instance
+
+    def start(self, address=('127.0.0.1', 8000), authkey=b'secret'):
+        if self._manager:
+            return
+        self._manager = _SharedMemoryManager(address=address, authkey=authkey)
+        self._manager.start()
+        self._shared_memory = self._manager.SharedMemory()
+
+    def get_shared_memory(self):
+        if not self._manager:
+            self.start()
+        return self._shared_memory
+
+    def connect(self, address=('127.0.0.1', 8000), authkey=b'secret'):
+        class _RemoteManager(BaseManager):
+            pass
+
+        _RemoteManager.register('SharedMemory')
+        manager = _RemoteManager(address=address, authkey=authkey)
+        manager.connect()
+        self._shared_memory = manager.SharedMemory()
+        return self._shared_memory
+
+    def shutdown(self):
+        if self._manager:
+            self._manager.shutdown()
+            self._manager = None
+            self._shared_memory = None
+
+# Global access point
+def get_shared_memory():
+    return SharedMemoryManager().get_shared_memory()
+
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     print("\n=== Running Shared Memory ===\n")
     sm = SharedMemory()
     print(f"\n======================================")
@@ -769,17 +857,56 @@ if __name__ == "__main__":
 
     print("\n* * * * * Phase 2 * * * * *\n")
 
-    weights = None
-    sm = SharedMemory()
-    sm.network_latency = 0.5  # Uses property setter
-
-    # Simulates 0.5s ± 0.05s delay during operations
-    sm.put("model_weights", weights) 
+    sm.network_latency = 0.5
+    sm.put("model_weights", None)
 
     print("\n* * * * * Phase 3 * * * * *\n")
-    callback = callable
+    sm.register_callback("default_channel", callable)
 
-    caller = sm.register_callback(channel="default_channel", callback=callback)
+    print("\n* * * * * Phase 4: Testing SharedMemoryManager * * * * *\n")
+    manager = SharedMemoryManager()
+    server_address = ('127.0.0.1', 8000)
 
-    print(caller)
+    try:
+        print(f"Attempting to start SharedMemoryManager server on {server_address}...")
+        # manager.start() uses default authkey b'secret' if not specified
+        manager.start(address=server_address) 
+        print("SharedMemoryManager server running.")
+
+        # Get the proxy to the SharedMemory instance managed by the server
+        sm_managed = manager.get_shared_memory()
+        
+        sm_managed.put('global_config', {'mode': 'production'})
+        config = sm_managed.get('global_config')
+        print(f"Config from managed SharedMemory: {config}")
+
+        # Your original print statement might have a typo, it should be:
+        print("\n=== Successfully Ran Shared Memory Manager Test ===\n")
+
+    except OSError as e:
+        # Check if the error is related to the port being in use
+        # WinError 10048 for "address already in use"
+        if e.winerror == 10048 if hasattr(e, 'winerror') else "already in use" in str(e).lower():
+            print(f"ERROR: Port {server_address[1]} at {server_address[0]} is already in use.")
+            print("Please ensure no other process is using this port (e.g., a previous run of this script).")
+            print("You can check active ports using 'netstat -ano | findstr \"<PORT_NUMBER>\"' on Windows.")
+            print("Or, try changing the port number in the script.")
+        else:
+            print(f"An OS error occurred during manager operation: {e}")
+            import traceback
+            traceback.print_exc() # Print full traceback for other OS errors
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for other errors
+    finally:
+        # Ensure the manager is shut down if it was started
+        if manager._manager is not None and getattr(manager._manager, "_process", None) and manager._manager._process.is_alive():
+            print("Shutting down SharedMemoryManager server...")
+            manager.shutdown()
+            print("SharedMemoryManager server shut down.")
+        elif manager._manager is not None: # Manager object exists but process might not be alive (e.g. start failed)
+            print("SharedMemoryManager server was initialized but might not have started correctly or is already shut down.")
+        else:
+            print("SharedMemoryManager was not started (or start was attempted but failed early).")
     print("\n=== Successfully Ran Shared Memory ===\n")
