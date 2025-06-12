@@ -25,28 +25,25 @@ import math
 import time
 import heapq
 import random
-import numpy as np
 
-from enum import Enum
 from typing import List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
+                                                SafetyMarginError, ResourceViolation, AcademicPlanningError)
 from src.agents.base_agent import BaseAgent
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
+from src.agents.planning.planning_executor import PlanningExecutor
 from src.agents.planning.planning_metrics import PlanningMetrics
-from src.agents.planning.planning_memory import PlanningMemory
-from src.agents.planning.planning_monitor import PlanningMonitor
-from src.agents.planning.safety_planning import SafetyPlanning, SafetyMarginError, TemporalViolation, ResourceViolation
-from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
-from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.planning.heuristic_selector import HeuristicSelector
+from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
+from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
 from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
-from src.tuning.tuner import HyperparamTuner
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Agent")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
+printer = PrettyPrinter
 
 CostProfile = Tuple[float, float]
 StateTuple = Tuple[Tuple[str, Any], ...]
@@ -54,38 +51,41 @@ StateTuple = Tuple[Tuple[str, Any], ...]
 class PlanningAgent(BaseAgent):
     """Enhanced planner with alternative search strategies"""
     def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
-        base_config = {'defer_initialization': True}
-        if config:
-            base_config.update(config)
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=base_config
+            config=config
         )
-        self.memory = PlanningMemory(agent=self, config_file_path=CONFIG_PATH)
-        self.decision_tree_heuristic = DecisionTreeHeuristic()
-        self.gb_heuristic = GradientBoostingHeuristic()
-        self.monitor = PlanningMonitor(agent=self)
-        self.safety_planner = SafetyPlanning(config=config.get('safety_margins', CONFIG_PATH))
-        self.safety_planner.resource_monitor._service_discovery_config = (config.get('service_discovery', CONFIG_PATH))
-        self.plan_history = deque(maxlen=1000)
-        self.shared_memory = self.shared_memory[0] if isinstance(self.shared_memory, tuple) else self.shared_memory
-        self.agent_factory = self.agent_factory[0] if isinstance(self.agent_factory, tuple) else self.agent_factory
+        self.config = load_global_config()
+        self.planning_config = get_config_section('planning_agent')
+
+        self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
 
         self.task_library: Dict[str, Task] = {} # Stores registered task templates
         self.current_plan: List[Task] = [] # The sequence of primitive tasks to execute
         self.world_state: Dict[str, Any] = {} # Current state of the world
         self.execution_history = deque(maxlen=100) # Keep track of recently executed tasks
+        self.plan_history = deque(maxlen=1000)
         self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}) # For Bayesian method selection
+        self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
 
         # Performance tracking
         self._planning_start_time: Optional[float] = None
         self._planning_end_time: Optional[float] = None
 
-        config=config or {}
         self.memo_table = {}
-        self.scheduler = DeadlineAwareScheduler(risk_threshold=config.get('risk_threshold', 0.7))
-        self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
+        self.scheduler = DeadlineAwareScheduler()
+        self.metrics = PlanningMetrics()
+        self.heuristic_selector = HeuristicSelector()
+        self.safety_planner = SafetyPlanning()
+        self.resource_monitor = ResourceMonitor()
+        self.executor = PlanningExecutor()
+        self.safety_planner.resource_monitor = self.resource_monitor
+
+        self.expected_state_projections = {}
+        self.execution_interrupted = False
+        self._node_cache = {}
 
         logger.info(f"PlanningAgent succesfully initialized")
 
@@ -104,36 +104,6 @@ class PlanningAgent(BaseAgent):
         # Get transformer instance from text encoder
         transformer = self.shared_memory['text_encoder'].transformer
         return self.task_heads[task_type](transformer, **kwargs)
-
-    def log_plan_outcome(self, task, success):
-        """Store plan features and outcome for training"""
-        features = self.gb_heuristic.extract_features(
-            task, 
-            self.world_state,
-            self.method_stats
-        )
-        self.plan_history.append((features, success))
-        
-    def _heuristic(self, task: Task) -> float:
-        """Augmented heuristic combining learned models and original"""
-        learned_prob = 0.7 * self.gb_heuristic.predict_success_prob(
-            task, self.world_state, self.method_stats
-        ) + 0.3 * self.decision_tree_heuristic.predict_success_prob(
-            task, self.world_state, self.method_stats
-        )
-        
-        original = len([t for t in self.task_library.values() 
-                       if t.type == TaskType.ABSTRACT])
-        
-        return learned_prob * original
-        
-    def periodic_retraining(self):
-        """Call this periodically (e.g., every 100 plans)"""
-        if len(self.plan_history) > 100:
-            X, y = zip(*self.plan_history)
-            self.decision_tree_heuristic.train(np.array(X), np.array(y))
-            self.gb_heuristic.train(np.array(X), np.array(y))
-            self.plan_history.clear()
 
     def get_current_state_tuple(self) -> WorldState:
         """Returns an immutable representation of the world state for memoization/hashing."""
@@ -190,9 +160,22 @@ class PlanningAgent(BaseAgent):
 
         scores = []
         for i in range(len(library_task.methods)):
-            task_to_decompose.selected_method = i
-            score = self._heuristic(task_to_decompose)
-            scores.append((i, score))
+            # Use HeuristicSelector to get success probability
+            prob = self.heuristic_selector.predict_success_prob(
+                task={
+                    "name": task_to_decompose.name,
+                    "selected_method": i,
+                    "priority": getattr(task_to_decompose, 'priority', 0.5),
+                    "goal_state": getattr(task_to_decompose, 'goal_state', {}),
+                    "parent": getattr(task_to_decompose, 'parent', None),
+                    "creation_time": getattr(task_to_decompose, 'creation_time', None),
+                    "deadline": getattr(task_to_decompose, 'deadline', None)
+                },
+                world_state=self.world_state,
+                method_stats=self.method_stats,
+                method_id=str(i)  # Convert method index to string
+            )
+            scores.append((i, prob))
         
         if not scores:
             logger.error(f"No methods available for task '{task_to_decompose.name}'.")
@@ -231,15 +214,6 @@ class PlanningAgent(BaseAgent):
              # Create a runtime instance of the subtask
              subtask_instance = subtask_template.copy()
              subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
-
-             # Apply effects of previously decomposed tasks in this branch to the simulated state
-             # (This assumes effects are applied *before* checking next subtask's preconditions)
-             # Note: This simple simulation might need refinement for complex interactions
-
-             # Recursively decompose the subtask using the *simulated* state
-             # We need a way to pass the simulated state down or restore it.
-             # For simplicity here, we'll use the main world_state, but this
-             # is a key area for refinement in more complex planners (backtracking needed).
 
              # Check subtask preconditions in the *current* (simulated) world state
              if not subtask_instance.check_preconditions(simulated_world_state):
@@ -280,61 +254,36 @@ class PlanningAgent(BaseAgent):
         """
         library_task = self.task_library.get(task.name)
         if not library_task or task.type != TaskType.ABSTRACT or len(library_task.methods) <= 1:
-            return [] # No alternatives if not abstract, not found, or only one method
-
-        num_methods = len(library_task.methods)
-        current_method_idx = task.selected_method
-
-        # --- Bayesian Method Selection (using UCB1-like approach for exploration/exploitation) ---
-        method_scores = []
-        total_executions = sum(stats['total'] for stats in self.method_stats.values()) + 1 # Avoid div by zero
-
-        for idx in range(num_methods):
-            if idx == current_method_idx: # Skip the failed method initially
-                 continue
-
-            key = (task.name, idx)
-            stats = self.method_stats[key]
-            success_rate = (stats['success'] + 1) / (stats['total'] + 2) # Laplace smoothing
-
-            # Exploration bonus (UCB1)
-            exploration_term = math.sqrt(2 * math.log(total_executions) / (stats['total'] + 1)) if stats['total'] > 0 else float('inf')
-            # Heuristic cost term (lower avg cost is better) - optional
-            # cost_term = 1 / (stats['avg_cost'] + 0.1) if stats['avg_cost'] > 0 else 1.0
-
-            score = success_rate + exploration_term # + cost_term * 0.1 # Add cost heuristic if desired
-            method_scores.append((idx, score))
-
-        # Sort alternatives by score (higher is better)
-        bayesian_alternatives = sorted([idx for idx, score in method_scores], key=lambda idx: next(s for i, s in method_scores if i == idx), reverse=True)
-
-        # --- Grid Search Fallback (systematically try next methods) ---
-        grid_alternatives = []
-        for i in range(1, num_methods):
-            next_idx = (current_method_idx + i) % num_methods
-            if next_idx not in bayesian_alternatives: # Avoid duplicates
-                 grid_alternatives.append(next_idx)
-
-        # Combine: Prioritize Bayesian suggestions, then systematic ones
-        final_alternatives = bayesian_alternatives + grid_alternatives
-        # Ensure the failed method isn't the first one tried again immediately
-        if final_alternatives and final_alternatives[0] == current_method_idx:
-             final_alternatives.pop(0)
-
-        logger.debug(f"Alternatives for task '{task.name}' (failed method {current_method_idx}): {final_alternatives}")
-        return final_alternatives
+            return []
+            
+        # Use HeuristicSelector to get best methods
+        candidate_methods = [str(i) for i in range(len(library_task.methods))]
+        best_method, _ = self.heuristic_selector.select_best_method(
+            task={
+                "name": task.name,
+                "priority": getattr(task, 'priority', 0.5),
+                "goal_state": getattr(task, 'goal_state', {}),
+                "creation_time": getattr(task, 'creation_time', None),
+                "deadline": getattr(task, 'deadline', None)
+            },
+            world_state=self.world_state,
+            candidate_methods=candidate_methods,
+            method_stats=self.method_stats
+        )
+        
+        # Convert string method IDs back to integers
+        return [int(method_id) for method_id in candidate_methods 
+                if method_id != str(task.selected_method)]
 
     def _update_method_stats(self, task: Task, success: bool, cost: float):
         """Updates statistics for the selected decomposition method."""
         if task.type != TaskType.ABSTRACT or task.parent is None:
              # Only update stats for methods chosen for a parent abstract task
              # Or potentially update based on overall plan success if task is the root goal.
-             # Let's assume update happens when a parent's decomposition path is evaluated.
             return
 
         # Find the parent and the method index used to generate this task instance
         # This requires careful tracking during decomposition or execution feedback.
-        # Assuming task.selected_method holds the relevant index for the *parent's* choice.
         parent_task = task.parent
         method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
 
@@ -352,122 +301,32 @@ class PlanningAgent(BaseAgent):
 
         logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
 
-
-    def replan(self, failed_task: Task, current_plan_segment: List[Task]) -> Optional[List[Task]]:
-        """
-        Attempts to replan starting from a failed task.
-
-        Args:
-            failed_task (Task): The task (primitive or abstract) that failed execution.
-            current_plan_segment (List[Task]): The portion of the plan executed so far.
-
-        Returns:
-            Optional[List[Task]]: A new plan segment to replace the failed portion,
-                                  or None if replanning fails.
-        """
+    def replan(self, failed_task: Task) -> Optional[List[Task]]:
+        """Enhanced replanning with alternative method selection"""
         logger.warning(f"Replanning triggered by failed task: {failed_task.name}")
-
-        # 1. Identify the highest-level abstract task in the hierarchy that failed
-        #    This requires navigating up the `parent` links from the `failed_task`.
-        ancestor_to_replan = failed_task
-        while ancestor_to_replan.parent is not None and ancestor_to_replan.parent.status != TaskStatus.FAILED:
-             # Mark ancestors as potentially failed if a subtask failed
-             if ancestor_to_replan.parent.status == TaskStatus.EXECUTING:
-                  ancestor_to_replan.parent.status = TaskStatus.FAILED # Propagate failure up
-             ancestor_to_replan = ancestor_to_replan.parent
-        # `ancestor_to_replan` is now the highest task in the failed branch
-
-        logger.info(f"Replanning from abstract task: {ancestor_to_replan.name}")
-
-        # 2. Find alternative decomposition methods for this ancestor task
-        alternative_method_indices = self._find_alternative_methods(ancestor_to_replan)
-
+        
+        # Find alternative methods
+        alternative_method_indices = self._find_alternative_methods(failed_task)
         if not alternative_method_indices:
-            logger.error(f"No alternative methods found for task '{ancestor_to_replan.name}'. Replanning failed.")
+            logger.error("No alternative methods found")
             return None
-
-        # 3. Try alternative methods one by one
-        original_world_state_tuple = self.get_current_state_tuple() # Save state before trying alternatives
-
+        
+        # Update scheduler state with failure information
+        self._update_scheduler_state(failed_task)
+        
+        # Try alternatives in recommended order
         for method_idx in alternative_method_indices:
-            logger.info(f"Trying alternative method {method_idx} for task '{ancestor_to_replan.name}'")
-            # Reset world state to before the failed branch started *executing*
-            # This might require more sophisticated state logging or restoring from `current_plan_segment` start.
-            # For simplicity, we restore to the state *before* attempting the replan.
-            self.load_state_from_tuple(original_world_state_tuple)
-
-            # Create a copy of the ancestor task and set the new method index
-            task_copy = ancestor_to_replan.copy()
+            task_copy = failed_task.copy()
             task_copy.selected_method = method_idx
-            task_copy.status = TaskStatus.PENDING # Reset status for decomposition attempt
-
-            # Attempt to decompose using the alternative method
-            new_plan_segment = self.decompose_task(task_copy)
-
-            if new_plan_segment:
-                 # 4. Validate the new plan segment (preconditions, potential conflicts)
-                 if self._validate_plan(new_plan_segment):
-                     logger.info(f"Replanning successful using method {method_idx} for task '{ancestor_to_replan.name}'.")
-                     # We need to integrate this new segment into the overall plan.
-                     # This function should return the *new segment* to be executed.
-                     return new_plan_segment
-                 else:
-                     logger.warning(f"Validation failed for new plan segment from method {method_idx}.")
-            else:
-                 logger.warning(f"Decomposition failed for alternative method {method_idx}.")
-
-
-        # 5. If all alternatives fail
-        logger.error(f"All replanning attempts failed for task '{ancestor_to_replan.name}'.")
-        self.load_state_from_tuple(original_world_state_tuple) # Restore original state
+            new_plan = self.decompose_task(task_copy)
+            
+            # Validate plan and check safety
+            if new_plan and self._validate_plan(new_plan) and self.safety_planner.safety_check(new_plan):
+                return new_plan
+        
+        logger.error("All replanning attempts failed")
         return None
 
-    def _validate_plan(self, plan_segment: List[Task]) -> bool:
-        """
-        Validates plan segment by fully simulating task effects and checking
-        all preconditions at each step using Allen's temporal logic foundations.
-        """
-        if not plan_segment:
-            return True  # Empty plan is trivially valid
-    
-        simulated_state = self.world_state.copy()
-        logger.debug(f"Starting validation simulation with initial state: {simulated_state}")
-    
-        for idx, task in enumerate(plan_segment):
-            # Check preconditions against simulated state
-            if not self._check_preconditions(task, simulated_state):
-                logger.warning(
-                    f"Validation failed at step {idx+1}/{len(plan_segment)} "
-                    f"({task.name}): Preconditions not met in simulated state"
-                )
-                return False
-    
-            try:
-                # Apply task effects to simulated state
-                for effect in task.effects:
-                    effect(simulated_state)
-                logger.debug(f"Applied effects of {task.name} | New state: {simulated_state}")
-            except Exception as e:
-                logger.error(
-                    f"Effect application failed for {task.name} at step {idx+1}: {str(e)}",
-                    exc_info=True
-                )
-                return False
-    
-            # Check temporal consistency with Allen's interval algebra
-            if idx > 0:
-                prev_task = plan_segment[idx-1]
-                if not self._check_temporal_constraints(prev_task, task, simulated_state):
-                    logger.warning(
-                        f"Temporal constraint violation between {prev_task.name} "
-                        f"and {task.name} at step {idx+1}"
-                    )
-                    return False
-    
-        logger.debug("Plan segment validation successful with final state: "
-                    f"{simulated_state}")
-        return True
-    
     def _check_preconditions(self, task: Task, state: Dict[str, Any]) -> bool:
         """Formal verification of task preconditions against a state"""
         try:
@@ -530,111 +389,247 @@ class PlanningAgent(BaseAgent):
         return self.shared_memory.get('agent_registry', {})
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
-        """Decomposes the goal task into a plan of primitive tasks."""
         self._planning_start_time = time.time()
         plan = self.decompose_task(goal_task)
+        
         # Integrated safety check
         try:
             if not self.safety_planner.safety_check(plan):
                 raise AcademicPlanningError("Plan failed initial safety validation")
-        except (ResourceViolation, TemporalViolation) as e:
-            logger.error(f"Safety violation in generated plan: {str(e)}")
+        except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
+            logger.error(f"Safety violation: {str(e)}")
             return self._handle_safety_violation(goal_task, e)
-        self._planning_end_time = time.time()
-    
-        if plan is None:
-            goal_task.status = TaskStatus.FAILED
-            logger.error("Failed to generate plan.")
-            return None
-    
-        # Execute scheduling
+        
+        # Schedule with resource awareness
         scheduled_tasks = self._convert_to_schedule_format(plan)
-        risk_assessor = self.shared_memory.get('risk_assessor')
-    
         schedule = self.scheduler.schedule(
             tasks=scheduled_tasks,
             agents=self._get_available_agents(),
-            risk_assessor=risk_assessor,
+            risk_assessor=self.shared_memory.get('risk_assessor'),
             state=self.world_state
         )
-    
-        logger.info(f"Plan generated with {len(plan)} steps.")
-        self.current_plan = plan
-        return self._convert_to_plan(schedule)
+        
+        self._planning_end_time = time.time()
+        self.current_plan = self._convert_to_plan(schedule)
+        
+        # Track planning metrics
+        self.metrics.track_plan_start(self.current_plan)
+
+        # Record planning metrics
+        self.metrics.record_planning_metrics(
+            plan_length=len(plan),
+            planning_time=self._planning_end_time - self._planning_start_time,
+            success_rate=1.0 if plan else 0.0
+        )
+        self.expected_state_projections = self._generate_state_projections(plan)
+        return plan
+
+    def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
+        """Generate expected state after each task execution"""
+        projections = {}
+        sim_state = self.world_state.copy()
+        
+        for task in plan:
+            if task.type == TaskType.PRIMITIVE:
+                # Apply task effects to simulated state
+                for effect in task.effects:
+                    effect(sim_state)
+                projections[task.name] = sim_state.copy()
+        
+        return projections
+
+    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
+        """Handle safety violations during planning"""
+        logger.warning(f"Safety violation detected: {str(error)}")
+        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
+        
+        for candidate in candidates:
+            if self.safety_planner.safety_check(candidate):
+                logger.info("Safety-compliant alternative found")
+                return candidate
+                
+        logger.error("No safe alternatives available")
+        return None
 
     def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
-        """Executes a plan of primitive tasks. Tracks success, updates statistics, and handles failures."""
-        for idx, task in enumerate(plan):
-            try:
-                # Pre-execution safety check
-                self.safety_planner._validate_equipment_constraints(task)
-                self.safety_planner._validate_temporal_constraints(task)
-                
-                # Execute task
-                self._execute_action(task)
-                
-                # Update resource monitor
-                self.safety_planner.resource_monitor.update_allocations(
-                    task.resource_requirements
-                )
-                
-            except SafetyMarginError as e:
-                logger.warning(f"Safety margin exceeded: {str(e)}")
-                recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
-                if recovery_plan:
-                    return self.execute_plan(recovery_plan, goal_task)
-                else:
-                    task.status = TaskStatus.FAILED
-                    break
-
-        self.current_plan = plan
-        executed_successfully = True
-        plan_idx = 0
-
-        # Track plan start
-        plan_meta = self.monitor.track_plan_start(plan)
-
-        task_hierarchy = []
-        current_parent = None
-
-        while plan_idx < len(plan):
-            task = plan[plan_idx]
-
-            if task.parent != current_parent:
-                if current_parent is not None:
-                    self._update_task_success(current_parent, task_hierarchy)
-                current_parent = task.parent
-                task_hierarchy = []
-
-            task.status = TaskStatus.EXECUTING
-            self._execute_action(task)
-            task_hierarchy.append(task)
-            self.execution_history.append(task)
-
-            if task.status == TaskStatus.FAILED:
-                executed_successfully = False
-                if goal_task:
-                    goal_task.status = TaskStatus.FAILED
-                # Trigger health check immediately
-                self.monitor._perform_interval_checks()
-                break
-
-            plan_idx += 1
-
-        if current_parent is not None:
-            self._update_task_success(current_parent, task_hierarchy)
-
-        if executed_successfully and goal_task:
-            goal_task.status = TaskStatus.SUCCESS
-
-        # Track plan completion
-        final_status = goal_task.status if goal_task else (TaskStatus.SUCCESS if executed_successfully else TaskStatus.FAILED)
-        self.monitor.track_plan_completion(plan_meta, final_status)
-
-        return {
-            "status": goal_task.status.name if goal_task else ("SUCCESS" if executed_successfully else "FAILED"),
-            "world_state": self.world_state
+        execution_metrics = {
+            'success_count': 0,
+            'failure_count': 0,
+            'total_cost': 0.0,
+            'resource_usage': defaultdict(float)
         }
+
+        # Start execution monitoring
+        self.executor.start_monitoring(plan, self.expected_state_projections)
+        self.execution_interrupted = False
+        
+        # Track plan start
+        plan_meta = self.metrics.track_plan_start(plan)
+        
+        try:
+            for task in plan:
+                if self.execution_interrupted:
+                    logger.warning("Execution interrupted by monitor")
+                    break
+                    
+                try:
+                    task.status = TaskStatus.EXECUTING    # Update task status
+                    
+                    # Pre-execution safety check
+                    self.safety_planner._validate_equipment_constraints(task)
+                    self.safety_planner._validate_temporal_constraints(task)
+                    
+                    # Execute task
+                    start_time = time.time()
+                    self._execute_action(task)
+                    end_time = time.time()
+                    
+                    # Update execution times
+                    task.start_time = start_time
+                    task.end_time = end_time
+                    task.status = TaskStatus.COMPLETED
+
+                    self.safety_planner.update_allocations(task)    # Update resource allocations
+                    
+                    # Update metrics
+                    execution_metrics['success_count'] += 1
+                    execution_metrics['total_cost'] += task.cost
+                    self._update_resource_metrics(execution_metrics, task)
+                    
+                    # Add to execution history
+                    self.memory.base_state['execution_history'].append({
+                        'task': task.name,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'status': 'success',
+                        'state_snapshot': self.world_state.copy()
+                    })
+                    
+                except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
+                    logger.warning(f"Execution safety violation: {str(e)}")
+                    execution_metrics['failure_count'] += 1
+                    task.status = TaskStatus.FAILED
+                    
+                    # Attempt recovery
+                    recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
+                    if recovery_plan:
+                        recovery_result = self.execute_plan(recovery_plan, goal_task)
+                        if recovery_result.get('status') == 'SUCCESS':
+                            execution_metrics['success_count'] += 1
+                        else:
+                            execution_metrics['failure_count'] += 1
+
+                    self.memory.base_state['execution_history'].append({
+                        'task': task.name,
+                        'start_time': start_time if 'start_time' in locals() else None,
+                        'end_time': end_time if 'end_time' in locals() else None,
+                        'status': 'failed',
+                        'error': str(e),
+                        'state_snapshot': self.world_state.copy()
+                    })
+                    
+        finally:
+            self.executor.stop_monitoring()    # Stop monitoring regardless of outcome
+            
+        # Determine final status
+        final_status = TaskStatus.SUCCESS if execution_metrics['failure_count'] == 0 else TaskStatus.FAILED
+
+        self.metrics.track_plan_completion(plan_meta, final_status)    # Track plan completion
+        
+        # Record execution metrics
+        self.metrics.record_execution_metrics(
+            success_count=execution_metrics['success_count'],
+            failure_count=execution_metrics['failure_count'],
+            resource_usage=execution_metrics['resource_usage']
+        )
+        
+        return {
+            "status": final_status.name,
+            "world_state": self.world_state,
+            "metrics": execution_metrics
+        }
+
+    def replan_from_execution_failure(self, task: Optional[Task], reason: str):
+        """Handle execution failures detected by monitor"""
+        logger.warning(f"Replanning triggered due to: {reason}")
+        self.execution_interrupted = True
+        
+        # Create recovery task based on failure type
+        if reason == "precondition_violation" and task:
+            recovery_plan = self._create_recovery_plan(task)
+        else:
+            # Full replan from current state
+            recovery_plan = self.replan(self.current_goal)
+        
+        if recovery_plan:
+            logger.info("Executing recovery plan")
+            recovery_result = self.execute_plan(recovery_plan, self.current_goal)
+            # Merge results with main execution
+            # ... implementation specific ...
+        else:
+            logger.error("Recovery planning failed")
+
+    def _create_recovery_plan(self, failed_task: Task) -> List[Task]:
+        """Create targeted recovery plan for a specific task failure"""
+        # 1. Attempt alternative methods
+        alternatives = self._find_alternative_methods(failed_task)
+        for method_idx in alternatives:
+            new_task = failed_task.copy()
+            new_task.selected_method = method_idx
+            recovery_plan = self.decompose_task(new_task)
+            if recovery_plan and self._validate_plan(recovery_plan):
+                return recovery_plan
+        
+        # 2. Create precondition satisfaction subplan
+        logger.info("Attempting to repair preconditions")
+        repair_plan = self._create_precondition_repair_plan(failed_task)
+        if repair_plan:
+            repair_plan.append(failed_task.copy())
+            return repair_plan
+        
+        return None
+
+    def _create_precondition_repair_plan(self, task: Task) -> Optional[List[Task]]:
+        """Generate plan to satisfy missing preconditions"""
+        # ... implementation of precondition repair ...
+        # This would use task's precondition gap analysis
+        # and method from the task library to satisfy conditions
+        
+    def adjust_for_resource_violation(self, resource: str, usage: float, limit: float):
+        """Adjust plan based on resource violation"""
+        # 1. Check if we can redistribute tasks
+        if self._redistribute_resource_load(resource):
+            return
+            
+        # 2. Scale back resource-intensive tasks
+        self._scale_back_resource_usage(resource, usage, limit)
+        
+        # 3. If still over, trigger replan
+        if self._check_resource_overload(resource):
+            self.replan_from_execution_failure(None, f"resource_violation_{resource}")
+
+    def adjust_for_temporal_violation(self, task: Task, time_delta: float):
+        """Adjust plan based on temporal violation"""
+        # 1. Attempt to accelerate subsequent tasks
+        if self._accelerate_subsequent_tasks(task, time_delta):
+            return
+            
+        # 2. Reallocate time from less critical tasks
+        if self._reallocate_time(task, time_delta):
+            return
+            
+        # 3. If still behind, trigger replan
+        self.replan_from_execution_failure(task, "temporal_violation")
+
+    def _update_resource_metrics(self, metrics: dict, task: Task):
+        """Track resource consumption metrics"""
+        if hasattr(task, 'resource_requirements'):
+            req = task.resource_requirements
+            metrics['resource_usage']['gpu'] += req.gpu
+            metrics['resource_usage']['ram'] += req.ram
+            if req.specialized_hardware:
+                for hw in req.specialized_hardware:
+                    metrics['resource_usage'][hw] += 1
 
     def _grid_search_alternatives(self, task: Task) -> List[Task]:
         """Systematic exploration of decomposition methods"""
@@ -681,31 +676,6 @@ class PlanningAgent(BaseAgent):
 
         return alternatives[:2]  # Return top 2 alternatives
 
-    def _update_method_stats(self, task: Task, success: bool):
-        """Update Bayesian statistics after execution"""
-        if task.type != TaskType.ABSTRACT:
-            return
-
-        key = (task.name, task.selected_method)
-        self.method_stats[key]['total'] += 1
-        if success:
-            self.method_stats[key]['success'] += 1
-
-    def replan(self, failed_task: Task) -> Optional[List[Task]]:
-        """Enhanced replanning with alternative method selection"""
-        alternatives = self._find_alternative_methods(failed_task)
-        if not alternatives:
-            return None
-        
-        self._update_scheduler_state(failed_task)
-
-        # Try alternatives in recommended order
-        for alt_task in alternatives:
-            new_plan = self.decompose_task(alt_task)
-            if new_plan and self._validate_plan(new_plan):
-                return new_plan
-        return super().replan(failed_task)
-
     def _update_scheduler_state(self, task):
         """Maintain scheduler's view of world state"""
         self.schedule_state['agent_loads'][task.assigned_agent] -= task.cost
@@ -715,10 +685,18 @@ class PlanningAgent(BaseAgent):
         })
 
     def _validate_plan(self, plan: List[Task]) -> bool:
-        """Validate that a plan is executable based on world state and task preconditions.
-        This is a placeholder; you can implement more sophisticated logic here.
-        """
-        return True
+        """Enhanced validation with safety constraints"""
+        # Basic validation
+        if not plan:
+            return False
+            
+        # Safety validation
+        try:
+            self.safety_planner.safety_check(plan)
+            return True
+        except (ResourceViolation, TemporalViolation) as e:
+            logger.warning(f"Plan validation failed: {str(e)}")
+            return False
 
     def _update_task_success(self, parent: Task, children: List[Task]):
         """Update method success statistics for abstract tasks"""
@@ -728,84 +706,66 @@ class PlanningAgent(BaseAgent):
         success = all(t.status == TaskStatus.SUCCESS for t in children)
         self._update_method_stats(parent, success)
 
+    def _update_method_stats(self, task: Task, success: bool, cost: float):
+        """Update Bayesian statistics after execution"""
+        if task.type != TaskType.ABSTRACT or task.parent is None:
+            return
+
+        parent_task = task.parent
+        method_idx = parent_task.selected_method
+        
+        # Use string keys for method_stats
+        key = (parent_task.name, str(method_idx))
+        stats = self.method_stats[key]
+        self.method_stats[key]['total'] += 1
+        if success:
+            self.method_stats[key]['success'] += 1
+
     def _execute_action(self, task: Task):
-        """
-        Execute a primitive task by checking preconditions and applying its effects.
-        This is a basic implementation that you can expand based on your requirements.
-        """
-        # Check preconditions for the task
-        for precondition in task.preconditions:
-            if not precondition(self.world_state):
-                print(f"Precondition failed for task: {task.name}")
-                task.status = TaskStatus.FAILED
-                return
+        """Execute task with resource locking"""
+        # Acquire resources
+        self.resource_monitor.acquire_resources(task.resource_requirements)
+        
+        try:
+            # Execute task
+            super()._execute_action(task)
+        finally:
+            # Release resources
+            self.resource_monitor.release_resources(task.resource_requirements)
 
-        # Execute all effects associated with the task
-        for effect in task.effects:
-            effect(self.world_state)
-
-        print(f"Executed task: {task.name}")
-        task.status = TaskStatus.SUCCESS
-
-    def evaluate_method_combination(self, param_dict: Dict[str, Any], fold: int = 0) -> float:
-        for task_name, method_idx in param_dict.items():
-            if task_name in self.task_library:
-                self.task_library[task_name].selected_method = method_idx
+def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
+    """Full planning-execution cycle with safety and metrics"""
+    # Phase 1: Plan Generation
+    plan = agent.generate_plan(goal_task)
+    if not plan:
+        logger.error("Plan generation failed")
+        return None
     
-        goal = self.shared_memory.get("planning_goal")
-        if not goal:
-            logger.error("No planning goal set.")
-            return 0.0
+    # Phase 2: Safety Validation
+    try:
+        if not agent.safety_planner.safety_check(plan):
+            logger.error("Final plan failed safety validation")
+            return None
+    except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
+        logger.error(f"Safety violation: {str(e)}")
+        return None
     
-        plan = self.generate_plan(goal)
-        if not plan:
-            return 0.0
+    # Phase 3: Plan Execution
+    result = agent.execute_plan(plan, goal_task)
     
-        result = self.execute_plan(plan, goal_task=goal)
-        metrics = PlanningMetrics.calculate_all_metrics(
-            plan, self._planning_start_time, self._planning_end_time, goal.status
-        )
+    # Phase 4: Metrics Collection
+    metrics = PlanningMetrics.calculate_all_metrics(
+        plan=plan,
+        planning_start_time=agent._planning_start_time,
+        planning_end_time=agent._planning_end_time,
+        final_status=goal_task.status
+    )
     
-        planning_time = metrics.get("planning_time", 1.0)
-        plan_cost = metrics.get("total_cost", 1.0)
-        goal_achieved = 1.0 if result.get("status") == "SUCCESS" else 0.0
-    
-        return (
-            0.5 * goal_achieved +
-            0.3 * (1.0 / (plan_cost + 1)) +
-            0.2 * (1.0 / (planning_time + 0.01))
-        )
-
-    def optimize_methods(self, strategy: Optional[str] = None):
-        """Choose tuning strategy based on task domain or past outcomes."""
-        if not strategy:
-            domain = self.shared_memory.get("task_domain") or "default"
-            strategy = self._select_strategy_by_domain(domain)
-            logger.info(f"Auto-selected tuning strategy: {strategy}")
-    
-        tuner = HyperparamTuner(
-            config_path="configs/hyperparam_config.yaml",
-            evaluation_function=self.evaluate_method_combination,
-            strategy=strategy,
-            n_calls=25,
-            n_random_starts=5
-        )
-
-        best_params = tuner.run_tuning_pipeline()
-
-        # Update selected methods with best parameters
-        for task_name, method_idx in best_params.items():
-            if task_name in self.task_library:
-                self.task_library[task_name].selected_method = method_idx
-
-        logger.info(f"Updated task methods using {strategy} search: {best_params}")
-
-    # --- Placeholder for inherited/overridden methods from academic planners ---
-    # Keep the specific planner implementations (HTN, A*, etc.) as separate classes
-    # inheriting from PlanningAgent if they introduce significantly different algorithms
-    # or state management. If they primarily override `decompose_task` or `replan`
-    # with specific strategies, they can potentially stay as methods or inner classes
-    # if the core PlanningAgent structure remains the same.
+    logger.info(f"Planning cycle completed: {metrics}")
+    return {
+        "execution_result": result,
+        "metrics": metrics
+    }
 
 class HTNPlanner(PlanningAgent):
 
@@ -814,7 +774,7 @@ class HTNPlanner(PlanningAgent):
     """Implements Algorithm 1 from Nau et al. (JAIR 2003)"""
     def _ordered_decomposition(self, task: Task) -> Optional[List[Task]]:
         # Tuple-based state representation
-        StateTuple = Tuple[Tuple[str, Any], ...]
+        #StateTuple = Tuple[Tuple[str, Any], ...]
         
         decomposition_stack: List[Tuple[Task, int, StateTuple]] = [
             (task, 0, self._freeze_state())
@@ -824,19 +784,19 @@ class HTNPlanner(PlanningAgent):
 
         while decomposition_stack:
             current_task, method_step, state = decomposition_stack.pop()
-            
+
             if method_step >= len(current_task.methods[current_task.selected_method]):
                 if backtrack_points:
                     # Backtrack to last decision point
                     current_plan, state = backtrack_points.pop()
                 continue
-                
+
             next_subtask = current_task.methods[current_task.selected_method][method_step]
             new_state = self._apply_effects(state, next_subtask)
-            
+
             if not self._check_preconditions(state, next_subtask):
                 continue
-                
+
             if next_subtask.type == TaskType.ABSTRACT:
                 # Record backtrack point (plan, state, method_step)
                 backtrack_points.append((
@@ -851,7 +811,7 @@ class HTNPlanner(PlanningAgent):
                 ))
             else:
                 current_plan.append(next_subtask)
-                
+
         return current_plan
 
     def _freeze_state(self) -> Tuple[Tuple[str, Any], ...]:
@@ -875,12 +835,12 @@ class HTNPlanner(PlanningAgent):
             'relations': defaultdict(set),
             'intervals': {}
         }
-        
+
         # Plan steps with causal links
         plan_steps = []
         open_conditions = []
         ordering_constraints = []
-        
+
         # Initialize with start and goal
         start = Task("start", TaskType.PRIMITIVE)
         goal = self.current_goal.copy()
@@ -889,20 +849,20 @@ class HTNPlanner(PlanningAgent):
             start: (0, 0),
             goal: (float('inf'), float('inf'))
         }
-        
+
         while open_conditions:
             # Select next open condition using LCF strategy
             condition = min(open_conditions, key=lambda c: c[2])  # [step, precondition, criticality]
-            
+
             # Find candidate providers using knowledge base
             candidates = self._find_candidate_steps(condition[1])
-            
+
             for candidate in candidates:
                 # Add causal link and temporal constraints
                 new_constraints = self._add_causal_link(
                     candidate, condition[0], temporal_network
                 )
-                
+
                 if not self._detect_temporal_inconsistencies(temporal_network):
                     # Resolve threats using promotion/demotion
                     self._resolve_threats(plan_steps, temporal_network)
@@ -910,7 +870,7 @@ class HTNPlanner(PlanningAgent):
                 else:
                     # Remove failed constraints
                     self._remove_constraints(new_constraints, temporal_network)
-            
+
             # Update open conditions
             open_conditions = self._identify_new_conditions(plan_steps, temporal_network)
 
@@ -1185,20 +1145,93 @@ class ExplanatoryPlanner(PlanningAgent):
         self.current_plan = self.safety_planner.current_plan
 
 if __name__ == "__main__":
-    print("\n=== Running Planning Agent Demo ===")
+    print("\n=== Running AI Planning Agent Test ===\n")
+    printer.status("Init", "Planning Agent initialized", "success")
+    from src.agents.collaborative.shared_memory import SharedMemory
+    import datetime
 
-    # Mock environment setup
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {
-        'text_encoder': Mock(),
-        'risk_assessor': lambda x: 0.3,
-        'agent_registry': {'chef_agent': {'capabilities': ['food_prep']}}
+    shared_memory = SharedMemory
+    agent_factory = lambda: None
+
+    planner = PlanningAgent(shared_memory, agent_factory, config=None)
+    print(planner)
+    print("\n* * * * * Phase 2 - Heuristic selector * * * * *\n")
+    selector = HeuristicSelector()
+    dummy_method_stats = {
+        ("test_task", "0"): {"success": 3, "total": 5},
+        ("test_task", "1"): {"success": 2, "total": 4},
     }
 
-    planner = PlanningAgent(
-        shared_memory=mock_agent.shared_memory,
-        agent_factory=None,
-        config={'risk_threshold': 0.4}
+    print("\n=== Heuristic Selection Tests ===")
+
+    # Test Case 1: RL (sequential task)
+    rl_task = {
+        "name": "test_task",
+        "priority": 0.8,
+        "goal_state": {"x": 1},
+        "parent": {
+            "name": "sub_task_3",
+            "parent": {
+                "name": "sub_task_2",
+                "parent": {
+                    "name": "sub_task_1",
+                    "parent": None
+                }
+            }
+        },
+        "creation_time": datetime.datetime.now().isoformat(),
+        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=2)).isoformat(),
+    }
+
+    printer.status("1", "Testing RL Heuristic (sequential task):", "success")
+    selector.predict_success_prob(rl_task, world_state={}, method_stats=dummy_method_stats, method_id="0")
+
+    # Test Case 2: DT (deep hierarchy)
+    dt_task = {
+        "name": "test_task",
+        "priority": 0.5,
+        "goal_state": {"x": 1},
+        "parent": {
+            "parent": {
+                "parent": {
+                    "parent": {
+                        "parent": {
+                            "parent": {
+                                "parent": {
+                                    "parent": {
+                                        "parent": {
+                                            "parent": None  # Depth of 10
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "creation_time": datetime.datetime.now().isoformat(),
+        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=5)).isoformat(),
+    }
+
+    printer.status("2", "Testing Decision Tree Heuristic (deep task):", "success")
+    selector.predict_success_prob(dt_task, world_state={}, method_stats=dummy_method_stats, method_id="1")
+
+    # Test Case 3: GB (resource-constrained)
+    gb_task = {
+        "name": "test_task",
+        "priority": 0.4,
+        "goal_state": {"x": 1},
+        "parent": None,
+        "creation_time": datetime.datetime.now().isoformat(),
+        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=3)).isoformat(),
+    }
+
+    printer.status("3", "Testing Gradient Boosting Heuristic (low CPU):", "success")
+    selector.predict_success_prob(
+        gb_task,
+        world_state={"cpu_available": 0.2, "memory_available": 0.3},
+        method_stats=dummy_method_stats,
+        method_id="0"
     )
-    print("\n=== Demo Completed ===\n")
+    print("\n=== Planning Agent Demo Completed ===\n")
