@@ -173,6 +173,9 @@ Note: If you see an error about execution policy:
    pip install psutil
    pip install pytz
    pip install torch
+   pip install pyyaml
+   pip install pandas
+   pip install dotenv
    ```
 
 5. Run Model:
