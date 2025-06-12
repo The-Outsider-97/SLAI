@@ -112,7 +112,7 @@ Note: If you see an error about execution policy:
 
 3. You'll need the latest pip installer
    ```console
-   python -m pip install --upgrade pip
+   python3.10 -m pip install --upgrade pip
    ```
 
 4. Install requirements:
