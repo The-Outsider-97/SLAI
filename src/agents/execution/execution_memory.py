@@ -1,4 +1,5 @@
 
+import shelve
 
 from src.agents.execution.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
