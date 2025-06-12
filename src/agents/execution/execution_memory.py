@@ -19,6 +19,42 @@ class ExecutionMemory:
 
         logger.info(f"Execution Manager succesfully initialized")
 
+    def clear_cache(self, expired_after=None):
+        """Clear cache entries, optionally older than specified timestamp"""
+        if not self.cache_dir:
+            return
+            
+        if expired_after is None:
+            self.cache.clear()
+            return
+            
+        now = time.time()
+        to_delete = []
+        for key, entry in self.cache.items():
+            if now - entry.get('timestamp', 0) > expired_after:
+                to_delete.append(key)
+        
+        for key in to_delete:
+            del self.cache[key]
+
+    def save_cookies(self, path):
+        """Persist cookies to disk"""
+        self.cookie_jar.save(path, ignore_discard=True)
+
+    def load_cookies(self, path):
+        """Load cookies from disk"""
+        self.cookie_jar.load(path, ignore_discard=True)
+
+    def register_parser(self, name, parser_func):
+        """Add custom parser to the parser registry"""
+        self.parsers[name] = parser_func
+
+    def __del__(self):
+        """Cleanup resources"""
+        if hasattr(self, 'cache') and not isinstance(self.cache, dict):
+            self.cache.close()
+
+
 if __name__ == "__main__":
     print("\n=== Running Execution Memory Test ===\n")
     printer.status("Init", "Execution Memory initialized", "success")
