@@ -8,6 +8,12 @@ printer = PrettyPrinter
 
 class ExecutionMemory:
     def __init__(self):
+        """
+        Memory for:
+        - Cookie Management
+        - Caching
+        - Checkpointing and tagging
+        """
         self.config = load_global_config()
         self.manager_config = get_config_section('execution_memory')
 
