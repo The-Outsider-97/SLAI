@@ -15,8 +15,8 @@ class ExecutionMemory:
         - Caching
         - Checkpointing and tagging
         """
-        self.config = load_global_config()
-        self.manager_config = get_config_section('execution_memory')
+        self.memory_config = get_config_section('execution_memory')
+        self.cache_dir = self.memory_config.get('cache_dir')
 
         self.cache = self._init_cache()
 
