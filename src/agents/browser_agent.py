@@ -1,26 +1,26 @@
-import os
+import os, sys
 import time
 import random
-# import pytesseract
-import torch
-
-from PIL import Image
+import requests
+import numpy as np
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from robotexclusionrulesparser import RobotExclusionRulesParser
 
-from src.agents.browser.functions.do_click import DoClick
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.language_agent import LanguageAgent, DialogueContext
 from src.agents.learning_agent import LearningAgent
-from src.agents.browser.security import SecurityFeatures, exponential_backoff
+from src.agents.base_agent import BaseAgent
+from src.agents.browser.security import SecurityFeatures
+from src.agents.browser.content import ContentHandling
 from src.agents.browser.workflow import WorkFlow
 from src.agents.browser.utils import Utility
-from src.agents.base_agent import BaseAgent
-from logs.logger import get_logger
-logger = get_logger("Browser")
 
 # --------------------------
 # Core Configuration
@@ -28,11 +28,6 @@ logger = get_logger("Browser")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SEARCH_DELAY = (0.1, 0.02)
 WINDOW_SIZE = (random.randint(1200, 1400), random.randint(800, 1000))
-SNAPSHOT_DIR = "logs/debug/dom_snapshots"
-CAPTCHA_LOG_DIR = "logs/debug/captcha_logs"
-os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-os.makedirs(CAPTCHA_LOG_DIR, exist_ok=True)
-
 
 # --------------------------
 # Browser Setup & Utilities
@@ -46,175 +41,50 @@ class BrowserAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.driver = self._init_browser()
-        self.do_click_helper = DoClick(self.driver)
         self.robots_parser = RobotExclusionRulesParser()
-
-        # Initialize integrated agents
         shared_llm = slai_lm(shared_memory=self.shared_memory, agent_factory=self.agent_factory)
         self.agent_factory.shared_resources["llm"] = shared_llm
-        self._init_agents()
-        AGENT_CONFIGS = {
-            "reasoning": {
-                "init_args": {
-                    "llm": shared_llm,
-                    "shared_memory": self.shared_memory,
-                    "agent_factory": self.agent_factory
-                }
-            },
-            "language": {
-                "init_args": {
-                    "shared_memory": self.shared_memory,
-                    "agent_factory": self.agent_factory
-                }
-            },
-            "learning": {
-                "init_args": {
-                    "shared_memory": self.shared_memory,
-                    "agent_factory": self.agent_factory
-                }
+
+        # Initialize integrated agents
+        self.reasoning = self.agent_factory.create('reasoning', config={
+            "init_args": {
+                "llm": shared_llm
             }
-        }
-        for agent_name, cfg in AGENT_CONFIGS.items():
-            setattr(self, agent_name, self.agent_factory.create(agent_name, config=cfg))
+        })
+        self.nlp_processor = self.agent_factory.create('language')
+        self.learner = self.agent_factory.create('learner')
 
         # State tracking
         self.session_context = DialogueContext()
         self.knowledge_cache = {}
-        self.last_snapshot = None
-
-    def get_rendered_content(self):
-        return {
-            'html': self.driver.page_source,
-            'text': self.driver.find_element(By.TAG_NAME, 'body').text,
-            'screenshot': self._take_screenshot(),
-            'interactive_elements': self._detect_clickables()
-        }
-    
-    def execute_workflow(self, workflow_script):
-        """Execute predefined interaction patterns"""
-        workflow = WorkFlow(workflow_script)
-        while workflow.has_next():
-            step = workflow.next_step()
-            getattr(self, f"do_{step['action']}")(**step['params'])
-            
-    def do_scroll(self, pixels):
-        self.driver.execute_script(f"window.scrollBy(0, {pixels});")
-    
-    def do_click(self, selector, wait_before_execution=0.0):
-        result = self.do_click_helper._perform_click(selector, wait_before_execution)
-        if result["status"] != "success":
-            self.logger.error(f"Click failed: {result['message']}")
-        else:
-            self.logger.info(f"Click succeeded: {result['message']}")
-        return result
 
     def _init_browser(self):
         options = webdriver.ChromeOptions()
         options.add_argument(f"user-agent={USER_AGENT}")
         options.add_argument(f"window-size={WINDOW_SIZE[0]},{WINDOW_SIZE[1]}")
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        # options.add_argument("--remote-debugging-port=9222")  # Uncomment if needed
+        options.add_argument("--headless")
         return webdriver.Chrome(options=options)
 
     def navigate(self, url):
-        self._capture_dom_snapshot("pre_navigation")
         self.driver.get(url)
-        self._capture_dom_snapshot("post_navigation")
         return self._get_page_state()
 
     # Integrated Processing Pipeline --------------------------------
     def process_page(self, query):
-        try:
-            self.session_context.last_query = query
-            self._capture_dom_snapshot("pre_processing")
-
-            # 1. Language Understanding
-            parsed_query = self.nlp_processor.parse(query)
-            # 2. Execute Browser Actions
-            search_results = self._perform_search(parsed_query)
-            # 3. Reason about Content
-            analyzed_content = self.reasoning.forward_chaining(
-                self._content_to_facts(search_results)
-            )
-            # 4. Learn from Interaction
-            reward = self._calculate_relevance(parsed_query, analyzed_content)
-            self.learner.record_interaction(parsed_query, analyzed_content, reward)
-            self._capture_dom_snapshot("post_processing")
-            return analyzed_content
-
-        except Exception as e:
-            self.logger.error(f"Processing failed at {self.driver.current_url}", exc_info=True)
-            raise
-
-    def scrape(self, query: str) -> list:
-        """Returns raw results with no reasoning/learning for fast data access"""
+        # 1. Language Understanding
         parsed_query = self.nlp_processor.parse(query)
-        return self._perform_search(parsed_query)
-
-    # Debugging & Diagnostics ----------------------------------------------------
-    def _capture_dom_snapshot(self, phase):
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{phase}_{timestamp}.html"
-        path = os.path.join(SNAPSHOT_DIR, filename)
-        
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.driver.page_source)
-            self.last_snapshot = path
-        except Exception as e:
-            self.logger.error(f"Failed to capture DOM snapshot: {str(e)}")
-
-    def _log_captcha_fallback(self, image_path):
-        error_entry = {
-            "timestamp": time.time(),
-            "url": self.driver.current_url,
-            "image_path": image_path,
-            "page_text_snippet": self.driver.page_source[:500],
-            "context": self._get_page_state(),
-            "captcha_type": "image" if os.path.exists(image_path) else "text-based"
-        }
-        self.shared_memory.set("captcha_errors", 
-            self.shared_memory.get("captcha_errors", []) + [error_entry]
+        # 2. Execute Browser Actions
+        search_results = self._perform_search(parsed_query)
+        # 3. Reason about Content
+        analyzed_content = self.reasoning.forward_chaining(
+            self._content_to_facts(search_results)
         )
+        # 4. Learn from Interaction
+        reward = self._calculate_relevance(parsed_query, analyzed_content)
+        self.learner.record_interaction(parsed_query, analyzed_content, reward)
+        return analyzed_content
 
     # Agent Integration Helpers -------------------------------------
-    def _init_agents(self):
-        from src.agents.language.grammar_processor import GrammarProcessor
-        from src.agents.perception.encoders.text_encoder import TextEncoder
-        from models.slai_lm import get_shared_slailm
-        """Initialize all integrated agents in proper order"""
-        shared_llm = self.agent_factory.shared_resources["llm"]
-        
-        self.reasoning = self.agent_factory.create('reasoning', config={
-            "init_args": {"llm": shared_llm}
-        })
-        self.nlp_processor = self.agent_factory.create('language', config={
-            "init_args": {
-                "grammar": GrammarProcessor(),
-                "context": DialogueContext(encoder=TextEncoder()),
-                "slai_lm": get_shared_slailm(self.shared_memory, self.agent_factory)
-            }
-        })
-        self.learner = self.agent_factory.create('learning', config={})
-
-    def _content_to_facts(self, content):
-        return [(element['text'], 'RELATED_TO', self.session_context.last_query)
-                for element in content if element['relevance'] > 0.5]
-
-    def _safe_navigate(self, func, *args, retries=3):
-        for attempt in range(retries):
-            try:
-                return func(*args)
-            except Exception as e:
-                self.logger.warning(
-                    f"Navigation failed attempt {attempt+1}: {str(e)}\n"
-                    f"Current URL: {self.driver.current_url}"
-                )
-                exponential_backoff(attempt)
-        raise RuntimeError(f"Navigation failed after {retries} retries")
-
     def _create_shared_memory(self):
         return {
             'browser_state':self._get_page_state(),
@@ -254,8 +124,6 @@ class BrowserAgent(BaseAgent):
         self._human_like_type(search_box, text)
         search_box.send_keys(Keys.RETURN)
         time.sleep(random.uniform(1, 2))
-        if self._detect_captcha():
-            self._handle_captcha()
 
     # Security & Learning Integration -------------------------------
     def _handle_captcha(self):
@@ -280,18 +148,13 @@ class BrowserAgent(BaseAgent):
         ]
 
     def _analyze_element(self, element):
-        from src.agents.browser.content import ContentHandling
         text = element.text
-        link = element.get_attribute('href')
-        content_handler = ContentHandling()
-        processed_result = content_handler._postprocess_if_special({"link": link}, self.driver)
-        full_text = processed_result.get("text", text)
         return {
-            'text': full_text,
-            'link': link,
-            'key_terms': self.nlp_processor.extract_key_phrases(full_text),
+            'text': text,
+            'link': element.get_attribute('href'),
+            'key_terms': self.nlp_processor.extract_key_phrases(text),
             'relevance': self.reasoning.neuro_symbolic_verify(
-                ('SearchResult', 'matches', full_text)
+                ('SearchResult', 'matches', text)
             )
         }
     
@@ -312,45 +175,34 @@ class BrowserAgent(BaseAgent):
         href = element.get_attribute('href')
         return href and self.robots_parser.is_allowed(USER_AGENT, href)
 
-    def __del__(self):
-        try:
-            if hasattr(self, 'driver') and self.driver:
-                self.driver.quit()
-        except Exception:
-            pass
-
 # --------------------------
 # Execution
 # --------------------------
 if __name__ == "__main__":
     from models.slai_lm import SLAILM
 
-    try:
-        class MinimalFactory:
-            def create(self, agent_type, config=None):
-                if agent_type == 'language':
-                    return LanguageAgent(shared_memory={}, agent_factory=self)
-                elif agent_type == 'reasoning':
-                    return ReasoningAgent(shared_memory={}, agent_factory=self, tuple_key='demo')
-                elif agent_type == 'learning':
-                    return LearningAgent(shared_memory={}, agent_factory=self, slai_lm=self.shared_resources["llm"], safety_agent=None, env=None)
-                else:
-                    raise ValueError(f"Unknown agent type: {agent_type}")
+    class MinimalFactory:
+        def create(self, agent_type, config=None):
+            if agent_type == 'language':
+                return LanguageAgent(shared_memory={}, agent_factory=self)
+            elif agent_type == 'reasoning':
+                return ReasoningAgent(shared_memory={}, agent_factory=self, tuple_key='demo')
+            elif agent_type == 'learner':
+                return LearningAgent(shared_memory={}, agent_factory=self, slai_lm=self.shared_resources["llm"], safety_agent=None, env=None)
+            else:
+                raise ValueError(f"Unknown agent type: {agent_type}")
 
-            def __init__(self):
-                self.shared_resources = {}
+        def __init__(self):
+            self.shared_resources = {}
 
-        factory = MinimalFactory()
-        shared_memory = {}
+    factory = MinimalFactory()
+    shared_memory = {}
 
-        # Instantiate SLAILM once
-        slai_lm = SLAILM(shared_memory=shared_memory, agent_factory=factory)
-        factory.shared_resources["llm"] = slai_lm
+    # Instantiate SLAILM once
+    slai_lm = SLAILM(shared_memory=shared_memory, agent_factory=factory)
+    factory.shared_resources["llm"] = slai_lm
 
-        agent = BrowserAgent(shared_memory=shared_memory, agent_factory=factory, slai_lm=SLAILM)
-        results = agent.process_page("SpaceX Raptor Engine 3 research papers")
-        print("=== RESULTS ===")
-        print(results)
-    except Exception as e:
-        agent.logger.critical(f"Critical failure: {str(e)}")
-        agent.driver.save_screenshot("final_error_state.png")
+    agent = BrowserAgent(shared_memory=shared_memory, agent_factory=factory, slai_lm=SLAILM)
+    results = agent.process_page("SpaceX Raptor Engine 3 research papers")
+    print("=== RESULTS ===")
+    print(results)
