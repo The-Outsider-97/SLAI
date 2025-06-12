@@ -1,57 +1,18 @@
-import math
+
 import os
 import yaml, json
 
 from enum import Enum
-from typing import List, Dict, Optional, Callable, Tuple, Any, Union
-from types import SimpleNamespace
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable, Tuple, Any
 
-from logs.logger import get_logger
+from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
+                                                SafetyMarginError, ResourceViolation, AcademicPlanningError)
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Types")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
-
-class AcademicPlanningError(Exception):
-    """
-    Custom exception for type violations and planning semantics.
-    Loads additional structured error documentation from a JSON file.
-    """
-    _error_metadata_path = os.path.join(os.path.dirname(__file__),
-                                        'templates/academic_planning_error.json')
-    _metadata = None
-
-    @classmethod
-    def get_metadata(cls):
-        """Lazily load and return the JSON metadata for this error class."""
-        if cls._metadata is None:
-            try:
-                with open(cls._error_metadata_path, 'r', encoding='utf-8') as f:
-                    cls._metadata = json.load(f)
-            except Exception as e:
-                cls._metadata = {"error": f"Failed to load metadata: {e}"}
-        return cls._metadata
-
-    def __init__(self, message=None):
-        super().__init__(message or "An academic planning error occurred.")
+printer = PrettyPrinter
 
 class Any:
     """
@@ -189,100 +150,51 @@ class TaskType(Enum):
     PRIMITIVE = 0
     ABSTRACT = 1
 
-class Task(Any):
-    """
-    Represents a task in the planning hierarchy, either primitive or abstract.
-    Includes decomposition methods, preconditions, and effects.
-    """
-    def __init__(self, name: str, task_type: TaskType,
-                 methods: Optional[List[List['Task']]] = None,
-                 preconditions: Optional[List[Callable[[Dict[str, Any]], bool]]] = None,
-                 effects: Optional[List[Callable[[Dict[str, Any]], None]]] = None,
-                 cost: float = 1.0, agent=None,
-                 start_time: Optional[float] = None,
-                 config_section_name: str = "planning_types",
-                 config_file_path: str = CONFIG_PATH,
-                 end_time: Optional[float] = None):
-        super().__init__(value=None, constraints=())
-        """
-        Initializes a Task instance.
 
-        Args:
-            name (str): The unique name identifier for the task.
-            task_type (TaskType): Whether the task is PRIMITIVE or ABSTRACT.
-            methods (Optional[List[List['Task']]]): For ABSTRACT tasks, a list of
-                possible decomposition methods. Each method is a list of subtasks.
-            preconditions (Optional[List[Callable]]): Functions that check if the
-                task can be executed given the current world state. Each callable
-                takes the world state dictionary and returns True/False.
-            effects (Optional[List[Callable]]): Functions that modify the world state
-                upon successful execution of the task. Each callable takes the
-                world state dictionary and modifies it in place.
-            cost (float): The cost associated with executing this task. Default is 1.0.
-            start_time (Optional[float]): The execution start time (for metrics).
-            end_time (Optional[float]): The execution end time (for metrics).
-        """
-        self.name = name
-        self.agent = agent
-        self.config = get_config_section(config_section_name, config_file_path)
-        self.task_type = task_type
-        # Ensure methods is a list of lists, even if empty or None
-        self.methods = methods if methods is not None else ([[]] if task_type == TaskType.ABSTRACT else [])
-        self.preconditions = preconditions or []
-        self.effects = effects or []
-        self.status = TaskStatus.PENDING
-        self.parent: Optional[Task] = None # Track parent task in hierarchy if needed
-        self.selected_method: int = 0 # Index of the method used for decomposition
-        self.cost = cost
-        self.start_time = start_time
-        self.end_time = end_time
-
+@dataclass
+class Task:
+    name: str = "Planning Typers"
+    task_type: TaskType = TaskType.ABSTRACT
+    status: TaskStatus = TaskStatus.PENDING
+    deadline: float = 0
+    priority: int = 1
+    resource_requirements: List = field(default_factory=list)
+    dependencies: List = field(default_factory=list)
+    execution_modes: List = field(default_factory=list)
+    input_data: Any = None
+    output_target: str = None
+    start_time: float = 0
+    end_time: float = 0
+    parent_task: Optional[str] = None
+    processing_stage: Optional[str] = None
+    methods: Optional[List[List['Task']]] = field(default_factory=list)
+    preconditions: List[Callable] = field(default_factory=list)
+    effects: List[Callable] = field(default_factory=list)
+    parent: Optional['Task'] = None
+    selected_method: int = 0
+    cost: float = 1.0
 
     def copy(self) -> 'Task':
-        """
-        Creates a shallow copy of the task, primarily for use in plan generation
-        where the core definition (methods, preconditions, effects) is shared,
-        but runtime state (status, parent, selected_method) might differ.
-        """
-        new_task = Task(
+        return Task(
             name=self.name,
-            task_type=self.type,
-            methods=self.methods, # Shallow copy of methods list is usually sufficient
-            preconditions=self.preconditions, # Shallow copy of functions
-            effects=self.effects, # Shallow copy of functions
+            task_type=self.task_type,
+            methods=self.methods,
+            preconditions=self.preconditions,
+            effects=self.effects,
             cost=self.cost
-            # Runtime state (status, parent, selected_method, times) are NOT copied,
-            # they get set during planning/execution.
         )
-        return new_task
 
     def get_subtasks(self, method_index: Optional[int] = None) -> List['Task']:
-        """
-        Gets the list of subtasks for a specific decomposition method.
-        If method_index is None, uses the task's `selected_method`.
-
-        Args:
-            method_index (Optional[int]): The index of the decomposition method to use.
-
-        Returns:
-            List[Task]: A list of copied subtasks for the specified method.
-                        Returns an empty list if the index is invalid, the task
-                        is primitive, or has no methods.
-        """
         if self.task_type == TaskType.PRIMITIVE or not self.methods:
             return []
-
         idx_to_use = method_index if method_index is not None else self.selected_method
-
         if 0 <= idx_to_use < len(self.methods):
-            # Return copies of the subtasks from the template
             return [subtask.copy() for subtask in self.methods[idx_to_use]]
         else:
             print(f"Warning: Invalid method index {idx_to_use} for task '{self.name}'")
             return []
 
     def check_preconditions(self, world_state: Dict[str, Any]) -> bool:
-        """Checks if all preconditions are met in the given world state."""
         try:
             return all(precond(world_state) for precond in self.preconditions)
         except Exception as e:
@@ -290,32 +202,27 @@ class Task(Any):
             return False
 
     def apply_effects(self, world_state: Dict[str, Any]) -> None:
-        """Applies all effects to the given world state."""
         try:
             for effect in self.effects:
                 effect(world_state)
         except Exception as e:
             print(f"Error applying effects for task '{self.name}': {e}")
 
-
     def __repr__(self):
-        method_info = f", method:{self.selected_method}" if self.type == TaskType.ABSTRACT else ""
-        return f"Task(name='{self.name}', type={self.task_type.name} status={self.status.name}{method_info})"
+        method_info = f", exec_mode={self.execution_modes}" if self.execution_modes else ""
+        task_type = self.task_type.name if self.task_type else "None"
+        status = self.status.name if self.status else "None"
+        return f"Task(name='{self.name}', type={task_type}, status={status}{method_info})"
 
 PlanStep = Tuple[int, Task, MethodSignature] # (step_id, task, method_used)
 
 if __name__ == "__main__":
-    print("")
-    print("\n=== Running Task Scheduler ===")
-    print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    planning = Task(name=None, task_type=None, agent=mock_agent)
-    print("")
-    print("\n=== Successfully Ran Task Scheduler ===\n")
+    print("\n=== Running Planning Types Test ===\n")
+    printer.status("Init", "Planning Types initialized", "success")
 
-if __name__ == "__main__":
+    planning = Task()
+    print(planning)
+
     print("\n=== Kitchen Planning Simulation ===")
     
     # Create world state with initial conditions
@@ -391,7 +298,7 @@ if __name__ == "__main__":
         invalid_task = Task(
             name="InvalidTask",
             task_type="invalid_type",  # Should be TaskType enum
-            agent=mock_agent
+            agent=None
         )
     except Exception as e:
         print(f"\nConstraint Validation Error: {e}")
