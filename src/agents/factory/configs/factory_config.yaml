@@ -3,19 +3,26 @@ agent_meta:
   required_fields: ["name", "class_name", "module_path"]
   validation_rules:
     max_name_length: 50
-    allowed_modules: ["src.agents.core", "src.agents.specialized"]
+    allowed_modules: ["src.agents"]
 
 metrics:
-  history_size: 100
+  demographic_parity_diff: 0.0
   max_adaptation_rate: 0.2
+  calibration_error: 0.0
+  history_size: 100
+  accuracy: 1.0
+  adaptation_factors:
+    risk_threshold: 1.0
+    exploration_rate: 1.0
+    learning_rate: 1.0
   pid_params:
     Kp: 0.15
     Ki: 0.05
     Kd: 0.02
-  safety_bounds:
-    medical: 0.5
-    default: 0.4
   error_config:
     fairness_target: 1.0
     performance_target: 0.0
     bias_target: 0.0
+  safety_bounds:
+    medical: 0.5
+    default: 0.4
