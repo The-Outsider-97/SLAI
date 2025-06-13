@@ -153,6 +153,7 @@ Note: If you see an error about execution policy:
    pip install openai
    pip install deepmerge
    pip install sentencepiece
+   pip install flask_migrate
    pip install Flask-Talisman==5.1.0
    pip install Flask-Limiter==3.5.0
    pip install bleach==6.0.0
