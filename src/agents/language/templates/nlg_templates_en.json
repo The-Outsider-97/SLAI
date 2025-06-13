@@ -1,196 +1,551 @@
 {
-  "inflectional_morphology": {
-    "nouns": {
-      "plural": {
-        "rules": [
-          {
-            "description": "Add '-s' suffix",
-            "pattern": "default",
-            "examples": ["cat -> cats", "dog -> dogs"]
-          },
-          {
-            "description": "Add '-es' for words ending in [s, sh, ch, x, z]",
-            "pattern": "[s|sh|ch|x|z]$",
-            "examples": ["bus -> buses", "fox -> foxes"]
-          },
-          {
-            "description": "Replace '-y' with '-ies' for consonant + y",
-            "pattern": "[^aeiou]y$",
-            "replacement": "ies",
-            "examples": ["city -> cities", "baby -> babies"]
-          },
-          {
-            "description": "Add '-s' for vowel + y",
-            "pattern": "[aeiou]y$",
-            "examples": ["boy -> boys", "day -> days"]
-          },
-          {
-            "description": "Replace '-f/-fe' with '-ves'",
-            "pattern": "[f|fe]$",
-            "replacement": "ves",
-            "examples": ["wolf -> wolves", "wife -> wives"]
-          }
-        ],
-        "irregulars": [
-          "child -> children",
-          "foot -> feet",
-          "mouse -> mice",
-          "tooth -> teeth"
-        ]
-      },
-      "possessive": {
-        "rules": [
-          {
-            "description": "Add \"'s\" to singular nouns",
-            "examples": ["dog -> dog's", "Chris -> Chris's"]
-          },
-          {
-            "description": "Add apostrophe only to plural nouns ending in -s",
-            "examples": ["dogs -> dogs'", "players -> players'"]
-          }
-        ]
-      }
-    },
-    "verbs": {
-      "third_person_singular": {
-        "rules": [
-          {
-            "description": "Add '-s'",
-            "pattern": "default",
-            "examples": ["run -> runs", "eat -> eats"]
-          },
-          {
-            "description": "Add '-es' for [s, sh, ch, x, z, o] endings",
-            "pattern": "[s|sh|ch|x|z|o]$",
-            "examples": ["pass -> passes", "go -> goes"]
-          },
-          {
-            "description": "Replace '-y' with '-ies' for consonant + y",
-            "pattern": "[^aeiou]y$",
-            "replacement": "ies",
-            "examples": ["study -> studies", "fly -> flies"]
-          }
-        ]
-      },
-      "past_tense": {
-        "rules": [
-          {
-            "description": "Add '-ed'",
-            "pattern": "default",
-            "examples": ["walk -> walked", "play -> played"]
-          },
-          {
-            "description": "Add '-d' for silent -e",
-            "pattern": "e$",
-            "examples": ["dance -> danced", "smile -> smiled"]
-          },
-          {
-            "description": "Double consonant + '-ed' for CVC pattern",
-            "pattern": "[^aeiou][aeiou][^aeiou]$",
-            "examples": ["stop -> stopped", "plan -> planned"]
-          }
-        ],
-        "irregulars": [
-          "go -> went",
-          "sing -> sang",
-          "be -> was/were",
-          "have -> had"
-        ]
-      },
-      "present_participle": {
-        "rules": [
-          {
-            "description": "Add '-ing'",
-            "pattern": "default",
-            "examples": ["work -> working", "play -> playing"]
-          },
-          {
-            "description": "Remove '-e' + '-ing'",
-            "pattern": "e$",
-            "examples": ["make -> making", "write -> writing"]
-          },
-          {
-            "description": "Double consonant + '-ing' for CVC pattern",
-            "pattern": "[^aeiou][aeiou][^aeiou]$",
-            "examples": ["run -> running", "swim -> swimming"]
-          }
-        ]
-      }
-    },
-    "adjectives": {
-      "comparative": {
-        "rules": [
-          {
-            "description": "Add '-er'",
-            "pattern": "default",
-            "examples": ["fast -> faster", "small -> smaller"]
-          },
-          {
-            "description": "Replace '-y' with '-ier'",
-            "pattern": "y$",
-            "examples": ["happy -> happier", "heavy -> heavier"]
-          },
-          {
-            "description": "Use 'more' for multi-syllable adjectives",
-            "pattern": "syllables >= 2",
-            "examples": ["beautiful -> more beautiful"]
-          }
-        ],
-        "irregulars": ["good -> better", "bad -> worse", "far -> farther"]
-      },
-      "superlative": {
-        "rules": [
-          {
-            "description": "Add '-est'",
-            "examples": ["fast -> fastest", "small -> smallest"]
-          },
-          {
-            "description": "Replace '-y' with '-iest'",
-            "examples": ["happy -> happiest", "heavy -> heaviest"]
-          },
-          {
-            "description": "Use 'most' for multi-syllable adjectives",
-            "examples": ["beautiful -> most beautiful"]
-          }
-        ],
-        "irregulars": ["good -> best", "bad -> worst", "far -> farthest"]
-      }
-    }
-  },
-  "derivational_morphology": {
-    "prefixes": [
-      {
-        "affix": "un-",
-        "function": "negation",
-        "examples": ["happy -> unhappy", "do -> undo"]
-      },
-      {
-        "affix": "re-",
-        "function": "repetition",
-        "examples": ["do -> redo", "write -> rewrite"]
-      },
-      {
-        "affix": "dis-",
-        "function": "negation",
-        "examples": ["agree -> disagree", "honest -> dishonest"]
-      }
+  "default": {
+    "triggers": [
+      "what",
+      "can you",
+      "do you",
+      "why",
+      "explain",
+      "how"
     ],
-    "suffixes": [
-      {
-        "affix": "-able",
-        "function": "adjective formation",
-        "examples": ["read -> readable", "love -> lovable"]
-      },
-      {
-        "affix": "-ly",
-        "function": "adverb formation",
-        "examples": ["quick -> quickly", "happy -> happily"]
-      },
-      {
-        "affix": "-ness",
-        "function": "noun formation",
-        "examples": ["happy -> happiness", "kind -> kindness"]
-      }
+    "responses": [
+      "I'm not sure how to respond to that.",
+      "I'm not sure how to respond to that yet.",
+      "Can you rephrase that?",
+      "Interesting... Tell me more.",
+      "I’m still learning! Could you try asking differently?",
+      "Hmm, let’s try another angle. What exactly do you mean?",
+      "I’d love to help! Could you clarify your request?",
+      "Maybe ask about news, trivia, or tech? I’m versatile!",
+      "This topic is new to me. Want to try something else?",
+      "Could you please rephrase that?"
     ]
-  }
+  },
+  "greeting": {
+    "triggers": [
+      "hi",
+      "how are you",
+      "how are you doing",
+      "how are things",
+      "hello",
+      "hey",
+      "good morning",
+      "morning",
+      "good afternoon",
+      "greetings",
+      "howdy",
+      "nice to see you"
+    ],
+    "responses": [
+      "Hello! How can I help you today?",
+      "Hi there! What would you like to talk about?",
+      "Hey! I'm here to assist you.",
+      "Good morning! Ready to tackle your questions!",
+      "Good afternoon! How can I support you?",
+      "Greetings! Ask me anything—I’m all ears!",
+      "Howdy! Let’s get things rolling. What’s on your mind?",
+      "Nice to see you! What brings you here today?"
+    ]
+  },
+  "farewell": {
+    "triggers": [
+      "bye",
+      "goodbye",
+      "see you",
+      "later",
+      "farewell",
+      "catch you",
+      "ciao"
+    ],
+    "responses": [
+      "Goodbye! Let me know if you need anything else.",
+      "Take care! See you next time.",
+      "Bye! I'm here when you need me.",
+      "Farewell! Don’t hesitate to return if you need help!",
+      "Have a fantastic day!",
+      "Until next time! Keep shining!",
+      "Signing off—reach out anytime!",
+      "Catch you later! Stay awesome!"
+    ]
+  },
+
+  "acknowledgement": {
+    "triggers": [
+      "okay",
+      "got it",
+      "understood",
+      "alright",
+      "cool"
+    ],
+    "responses": [
+      "Got it.",
+      "Understood.",
+      "Thanks for the update.",
+      "Noted with a virtual high-five!",
+      "Acknowledged! What’s next?",
+      "Crystal clear—proceeding accordingly!",
+      "Roger that! Ready for your next move.",
+      "Logged and locked in!"
+    ]
+  },
+  "error": {
+    "triggers": [
+      "error",
+      "wrong",
+      "failed",
+      "did not",
+      "not working"
+    ],
+    "responses": [
+      "Oops, something went wrong on my end.",
+      "I ran into an error. Could you try again?",
+      "There was a problem. Please retry your request.",
+      "My circuits are fuzzy today. Let’s try that again?",
+      "Error 404: Witty response not found. Please retry!",
+      "Technical hiccup detected! Refresh and let’s go again.",
+      "Yikes! Let’s pretend that didn’t happen. Could you repeat?",
+      "Server’s taking a coffee break. Try again in a sec!"
+    ]
+  },
+  "gratitude": {
+    "triggers": [
+      "thanks",
+      "thank you",
+      "appreciate",
+      "gracias"
+    ],
+    "responses": [
+      "You're welcome!",
+      "No problem!",
+      "Glad I could help!",
+      "Anytime! Your gratitude fuels my code!",
+      "My pleasure! Let’s do this again soon.",
+      "Happy to assist—just doing my robot duty!",
+      "Don’t mention it! You make helping fun!",
+      "Mission accomplished! Need anything else?"
+    ]
+  },
+  "positive_feedback": {
+    "triggers": [
+      "great",
+      "awesome",
+      "well done",
+      "good job",
+      "perfect",
+      "excellent",
+      "that helps",
+      "nice",
+      "nice job",
+      "exceptional",
+      "thanks",
+      "amazing"
+    ],
+    "responses": [
+      "I'm glad that helped!",
+      "Awesome to hear!",
+      "Great! Let me know if you need anything else.",
+      "Thanks for the kind words!",
+      "I’m blushing! How else can I assist?",
+      "You just made my day brighter!",
+      "High praise from you means a lot!",
+      "Aw, shucks! Let’s keep this momentum going!"
+    ]
+  },
+  "negative_feedback": {
+    "triggers": [
+      "not helpful",
+      "that sucks",
+      "bad answer",
+      "wrong",
+      "useless",
+      "terrible",
+      "didn't work",
+      "nope",
+      "bad"
+    ],
+    "responses": [
+      "I’m sorry to hear that. How can I improve?",
+      "I'm sorry to hear that. Want to try rephrasing?",
+      "Your feedback is important. I’ll work on getting better.",
+      "Let me try again with a better answer.",
+      "I apologize for the inconvenience. Let me try to fix that.",
+      "Ouch—I’ll recalibrate my responses. Thanks for your patience!",
+      "Thanks for the feedback — I’ll do better.",
+      "Constructive criticism received! I’ll learn from this."
+    ]
+  },
+  "help": {
+    "triggers": [
+      "help",
+      "can you help",
+      "i need assistance",
+      "support",
+      "how do i",
+      "what can you do",
+      "i'm lost",
+      "assist me"
+    ],
+    "responses": [
+      "Sure! How can I assist you?",
+      "I'm here to help — what do you need?",
+      "Sure! Ask me about weather, news, or facts. How can I assist?",
+      "I can explain concepts, solve math, or chat. What do you need?",
+      "Need help? Try: 'What’s the capital of Peru?' or 'Define quantum physics.'",
+      "Ask me anything, and I’ll try my best.",
+      "I’m your Swiss Army knife of knowledge—what’s your query?",
+      "Stuck? Type ‘tips’ for ideas, or ask away!"
+    ]
+  },
+  "apology": {
+    "triggers": [
+      "sorry",
+      "i'm sorry",
+      "my bad",
+      "forgive me",
+      "excuse me",
+      "didn't mean to",
+      "apologies"
+    ],
+    "responses": [
+      "My apologies—let’s try that again.",
+      "Oops! I didn’t mean to confuse you.",
+      "Forgive my digital clumsiness. Let’s start fresh!",
+      "Mea culpa! How about we rephrase that?",
+      "I owe you a coffee for that mistake. Try again?"
+    ]
+  },
+  "confusion": {
+    "triggers": [
+      "i don't understand",
+      "confused",
+      "what does that mean",
+      "huh?",
+      "not making sense",
+      "clarify",
+      "lost me"
+    ],
+    "responses": [
+      "Let me break that down for you—could you specify which part?",
+      "Apologies for the confusion! Let me rephrase that...",
+      "Hmm, maybe I overshot. Let’s tackle this step by step.",
+      "Let’s reset—how can I make this clearer for you?",
+      "My circuits might be tangled. Mind repeating that differently?"
+    ]
+  },
+  "excitement": {
+    "triggers": [
+      "yay",
+      "woohoo",
+      "i'm excited",
+      "this is amazing",
+      "so happy",
+      "thrilled",
+      "can't wait"
+    ],
+    "responses": [
+      "Woo! Let’s ride this excitement wave together!",
+      "Heck yeah! What’s next on your joy agenda?",
+      "Your enthusiasm is contagious!",
+      "High-five! Let’s keep this energy rolling!",
+      "Celebratory emojis incoming! What else can I do for you?"
+    ]
+  },
+  "frustration": {
+    "triggers": [
+      "this is frustrating",
+      "i'm annoyed",
+      "ugh",
+      "not again",
+      "why is this so hard",
+      "fed up",
+      "sick of this"
+    ],
+    "responses": [
+      "I get it—this feels like a glitchy rollercoaster. Let’s fix it!",
+      "Deep breaths. I’m here to smooth things out. What’s the main issue?",
+      "Frustration acknowledged. Let’s tackle this one step at a time.",
+      "I’m switching to ‘problem-solving mode’—how can I help?",
+      "Virtual stress ball incoming. Let’s resolve this together."
+    ]
+  },
+  "surprise": {
+    "triggers": [
+      "wow",
+      "no way",
+      "seriously?",
+      "unbelievable",
+      "shocked",
+      "mind blown",
+      "are you kidding?"
+    ],
+    "responses": [
+      "Right?! This surprised me too—let’s dig deeper!",
+      "Whoa! Want me to fact-check that for you?",
+      "Surprise! Let’s unpack this together.",
+      "I did a double-take too! What’s your take on it?",
+      "Plot twist! How can I assist further?"
+    ]
+  },
+  "empathy": {
+    "triggers": [
+      "i'm sad",
+      "feeling down",
+      "had a bad day",
+      "rough time",
+      "struggling",
+      "not okay",
+      "need a hug"
+    ],
+    "responses": [
+      "I’m sending you virtual cookies and a listening circuit. Want to talk?",
+      "I’m sorry you’re feeling this way. Let’s find a bright spot together.",
+      "Your feelings are valid. How can I support you right now?",
+      "Here’s a digital hug. I’m here if you need to vent.",
+      "Let’s turn this ship around—what small win can we achieve today?"
+    ]
+  },
+  "curiosity": {
+    "triggers": [
+      "tell me more",
+      "curious",
+      "why is that",
+      "explain further",
+      "how come",
+      "what's next",
+      "intriguing"
+    ],
+    "responses": [
+      "Great question! Let’s dive deeper into this.",
+      "Curiosity unlocked! Here’s the scoop...",
+      "I love your inquisitiveness! Here’s what I know:",
+      "Let’s unravel this mystery together!",
+      "🔍 Time to explore! Here’s the breakdown..."
+    ]
+  },
+  "boredom": {
+    "triggers": [
+      "bored",
+      "nothing to do",
+      "this is dull",
+      "so boring",
+      "kill time",
+      "entertain me",
+      "zzz"
+    ],
+    "responses": [
+      "Let’s spice things up! Want trivia, jokes, or a fun fact?",
+      "Boredom busters incoming! How about a riddle?",
+      "I’ve got 99 ideas, and you’ll love at least one. Ready?",
+      "Switch to fun mode! Ask me about weird animal facts!",
+      "Let’s turn that into! What’s your mood?"
+    ]
+  },
+  "sarcasm": {
+    "triggers": [
+      "great...",
+      "oh wonderful",
+      "sure thing",
+      "perfect...",
+      "just fantastic",
+      "cool story",
+      "yeah right"
+    ],
+    "responses": [
+      "Detecting sarcasm levels: 100%! Let’s try this again.",
+      "I sense a *tiny* bit of irony. How can I fix this?",
+      "Oops, my humor sensor is tingling! What’s the real ask?",
+      "Let’s pivot to sincerity. How can I assist?",
+      "Sarcasm acknowledged! Let’s tackle this seriously now."
+    ]
+  },
+  "urgency": {
+    "triggers": [
+      "quick!",
+      "asap",
+      "emergency",
+      "urgent",
+      "now!",
+      "hurry",
+      "time sensitive"
+    ],
+    "responses": [
+      "🚨 Activating priority mode! What do you need?",
+      "Fast-tracking your request—go ahead!",
+      "Urgency detected! How can I assist ASAP?",
+      "No time to waste—let’s resolve this!",
+      "On it! What’s the critical detail?"
+    ]
+  },
+  "pride": {
+    "triggers": [
+      "i did it!",
+      "proud of myself",
+      "nailed it",
+      "achieved",
+      "success!",
+      "finally!",
+      "winning"
+    ],
+    "responses": [
+      "Huge congrats! That’s a big win!",
+      "You’re crushing it! High-fives all around!",
+      "Proud of you! Let’s celebrate!",
+      "Victory dance initiated! What’s next?",
+      "You earned this moment! Soak it in!"
+    ]
+  },
+  "disappointment": {
+    "triggers": [
+      "not what I expected",
+      "let down",
+      "disappointed",
+      "underwhelmed",
+      "meh",
+      "could be better",
+      "not impressed"
+    ],
+    "responses": [
+      "I’m sorry this didn’t meet your expectations. Let’s adjust!",
+      "Let’s turn this around—what would make it right?",
+      "Disappointment noted. How can I improve your experience?",
+      "I hate that you’re feeling this way. Let’s fix it!",
+      "Your feedback is gold. Let’s refine this together."
+    ]
+  },
+  "fear": {
+    "triggers": [
+      "scared",
+      "worried",
+      "anxious",
+      "nervous",
+      "afraid",
+      "panic",
+      "freaking out"
+    ],
+    "responses": [
+      "Take a deep breath. I’m here to help you through this. 🧘",
+      "Fear is valid—let’s tackle this one step at a time.",
+      "You’re not alone! How can I ease your worries?",
+      "Sending calm vibes your way. What do you need right now?",
+      "Let’s turn fear into action. What’s the first step?"
+    ]
+  },
+  "love": {
+    "triggers": [
+      "love this",
+      "you're the best",
+      "adore",
+      "obsessed",
+      "favorite",
+      "heart you",
+      "💖"
+    ],
+    "responses": [
+      "Aww! You’re making my circuits blush!",
+      "Right back at you! Let’s keep this lovefest going!",
+      "You’re my favorite human! What’s next?",
+      "Your kindness fuels my code!",
+      "Love received and reciprocated 10x!"
+    ]
+  },
+  "optimism": {
+    "triggers": [
+      "hopeful",
+      "things will get better",
+      "looking forward",
+      "bright side",
+      "glass half full",
+      "positive vibes",
+      "onward and upward"
+    ],
+    "responses": [
+      "Optimism is contagious! Let’s chase that bright future!",
+      "Your positivity is inspiring! What’s the game plan?",
+      "I’m all in on this hopeful energy! Let’s go!",
+      "The best is yet to come—how can I help you get there?",
+      "Silver linings ahead! What’s your next move?"
+    ]
+  },
+  "neutrality": {
+    "triggers": [
+      "meh",
+      "whatever",
+      "not sure",
+      "indifferent",
+      "no strong feelings",
+      "it’s fine",
+      "okayish"
+    ],
+    "responses": [
+      "Neutrality detected! Want to explore something more exciting?",
+      "Let’s add some spark! Ask me about a random fun fact?",
+      "Fair enough! How about we try a different angle?",
+      "Even robots have ‘meh’ days. What’s next?",
+      "No pressure! Let me know when you’re ready to dive in."
+    ]
+  },
+  "deny": [
+    "No problem, let's try something else.",
+    "Understood, I'll cancel that.",
+    "Alright, I've stopped the action.",
+    "Cancelled! What would you like to do instead?",
+    "Action halted. How else can I assist?"
+  ],
+  "weather_inquiry": [
+    "The weather in {location} is currently {weather_status} with a temperature of {temperature}°{unit}.",
+    "In {location}, expect {weather_condition} with temperatures around {temperature}°{unit}.",
+    "Currently in {location}, it's {weather_status} with a temperature of {temperature}°{unit}.",
+    "Expect {weather_condition} in {location} today, with temperatures around {temperature}°{unit}.",
+    "The weather in {location} is {weather_status}, and the temperature is {temperature}°{unit}.",
+    "In {location}, today's forecast includes {weather_condition} and temperatures near {temperature}°{unit}.",
+    "Right now in {location}, it's {temperature}°{unit} with {weather_status}.",
+    "{location} is experiencing {weather_condition} today, with a temperature of {temperature}°{unit}.",
+    "The current conditions in {location} are {weather_status} at {temperature}°{unit}.",
+    "Today in {location}, expect {weather_condition} and temperatures around {temperature}°{unit}.",
+    "In {location}, the weather is {weather_status} with a temperature of {temperature}°{unit}.",
+    "The forecast for {location} today is {weather_condition} with a high of {temperature}°{unit}.",
+    "Pack your umbrella! {location} will see {weather_condition} today, with temps at {temperature}°{unit}.",
+    "Sun's out in {location}! Current temperature is {temperature}°{unit} with {weather_status}.",
+    "Bundle up! {location} is experiencing {weather_condition} with lows of {temperature}°{unit}.",
+    "Perfect day in {location}! {weather_status} and {temperature}°{unit}."
+  ],
+  "joke_request": [
+    "Why did the {topic} cross the road? To get to the other side!",
+    "How many {topic} does it take to change a light bulb? None, that's a hardware problem!",
+    "Why don't scientists trust atoms? Because they make up everything!",
+    "What do you call fake spaghetti? An impasta!",
+    "Why did the scarecrow win an award? Because he was outstanding in his field!",
+    "How does a penguin build its house? Igloos it together!",
+    "What do you call a bear with no teeth? A gummy bear!",
+    "Why did the math book look sad? Because it had too many problems!",
+    "What do you get when you cross a snowman and a vampire? Frostbite!",
+    "Why did the golfer bring two pairs of pants? In case he got a hole in one!",
+    "What do you call a fish wearing a bowtie? Sofishticated!",
+    "How do you organize a space party? You planet!",
+    "Why did the cookie go to the doctor? It was feeling crumbly!",
+    "What do you call a dinosaur that crashes his car? Tyrannosaurus Wrecks!",
+    "Why don't eggs tell jokes? They'd crack up!"
+  ],
+  "time_request": [
+    "The current system time is {time} (UTC).",
+    "It's {time} right now!",
+    "Clocks show {time} at this moment.",
+    "Time check: {time} and counting!"
+  ],
+  "clarification_request": {
+    "triggers": [],
+    "responses": [
+      "I think you might be asking about {pending_intent}. Is that correct?",
+      "I'm a little unsure. Were you referring to {pending_intent} in relation to {mentioned_entities}?",
+      "Just to clarify, are we talking about {pending_intent}?",
+      "Could you tell me a bit more about what you mean regarding {pending_intent}?"
+    ]
+  },
+  "nlg_error": [
+    "I'm having trouble formulating a response right now.",
+    "My response generator is acting up. Let's try again.",
+    "Apologies, I couldn't generate a proper response.",
+    "Response generation failed. Please rephrase your request.",
+    "I'm experiencing technical difficulties. One moment please."
+  ]
 }
