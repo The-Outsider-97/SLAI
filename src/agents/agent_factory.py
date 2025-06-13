@@ -1,349 +1,223 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
-
-import threading
 import importlib
-import torch
-import inspect 
+import sys
 
-from contextlib import contextmanager
-# from restricted_env import RestrictedPython
-from collections import defaultdict, deque
-from typing import Any, Dict, Optional, Tuple, List, Type
+from pathlib import Path
+from typing import Any, Dict, Optional, Type
 
-from models.reasoner import BasicZeroReasoner
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
-from profiling_utils import memory_profile, time_profile, start_memory_tracing, display_top_memory_sources
-#from src.utils.system_optimizer import SystemOptimizer
-#from src.agents.adaptive_agent import AdaptiveAgent
-from src.agents.alignment_agent import AlignmentAgent
-#from src.agents.evaluation_agent import EvaluationAgent
-#from src.agents.execution_agent import ExecutionAgent
-#from src.agents.knowledge_agent import KnowledgeAgent
-# from src.agents.language_agent import LanguageAgent
-#from src.agents.learning_agent import LearningAgent
-from src.agents.learning.slaienv import SLAIEnv
-#from src.agents.perception_agent import PerceptionAgent
-#from src.agents.planning_agent import PlanningAgent
-#from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.safety_agent import SafetyAgent
-from src.agents.factory.agent_meta_data import AgentMetaData, load_config
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.factory.agent_meta_data import AgentMetaData, AgentRegistry
 from src.agents.factory.metrics_adapter import MetricsAdapter
-# from models.slai_lm import get_shared_slailm
-from logs.logger import get_logger
+from src.agents.base_agent import BaseAgent
+from logs.logger import get_logger, PrettyPrinter
+
+from src.agents.evaluation_agent import EvaluationAgent
+from src.agents.execution_agent import ExecutionAgent
+from src.agents.alignment_agent import AlignmentAgent
+from src.agents.knowledge_agent import KnowledgeAgent
+from src.agents.language_agent import LanguageAgent
+from src.agents.perception_agent import PerceptionAgent
+from src.agents.learning_agent import LearningAgent
+from src.agents.planning_agent import PlanningAgent
+from src.agents.safety_agent import SafetyAgent
+from src.agents.adaptive_agent import AdaptiveAgent
 
 logger = get_logger("Agent Factory")
+printer = PrettyPrinter
 
 class AgentFactory:
-    def __init__(self, config, shared_resources):
-        self.config = config
-        self.shared_resources = {
-            **shared_resources,
-            "shared_memory": shared_resources.get("shared_memory"),
-            "agent_factory": self
-        }
-        self.registry = {}
-        self.meta_registry = {}
-        self.instance_cache = {}
-        self.metrics_adapter = MetricsAdapter()
-        self.bzr = BasicZeroReasoner()
-        
-        self._register_core_agents(config.get('agent-network', {}))
-        self._validate_agent_metadata()
-        self.lock = threading.RLock()
+    """
+    A dynamic, adaptive factory for creating and managing agents.
+    It uses a metadata registry for dynamic agent loading and a metrics
+    adapter for runtime configuration tuning.
+    """
+    _agent_classes: Dict[str, Type[BaseAgent]] = {
+        'evaluation': EvaluationAgent,
+        'execution': ExecutionAgent,
+        'alignment': AlignmentAgent,
+        'knowledge': KnowledgeAgent,
+        'language': LanguageAgent,
+        'perception': PerceptionAgent,
+        'learning': LearningAgent,
+        'planning': PlanningAgent,
+        'safety': SafetyAgent,
+        'adaptive': AdaptiveAgent,
+    }
 
-    def _register_core_agents(self, agent_network: Dict):
-        """Register agents with metadata validation"""
-        for agent_name, agent_config in agent_network.items():
-            # Create AgentMetaData instance
-            meta = AgentMetaData(
-                name=agent_name,
-                class_name=agent_config['class'],
-                module_path=agent_config['path'],
-                required_params=tuple(agent_config.get('required_params', [])),
-                config=agent_config.get('init_args', {})
-            )
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        Initializes the AgentFactory with global and optional runtime configurations.
 
-            # Store in meta registry
-            self.meta_registry[agent_name] = meta
-
-            # Original registry remains for runtime info
-            self.registry[agent_name] = {
-                'meta': meta,
-                'dependencies': self._resolve_dependencies(agent_config),
-                'instance': None
-            }
-
-    
-    def validate_with_azr(self, triple):
-        result = self.bzr.check_contradiction(triple)
-        return result.get("contradiction_score", 0.0)
-
-    def _validate_agent_metadata(self):
-        """Validate all registered agent metadata"""
-        for agent_name, meta in self.meta_registry.items():
-            try:
-                meta._validate(load_config().get("agent_meta", {}))
-            except ValueError as e:
-                logger.error(f"Invalid metadata for {agent_name}: {str(e)}")
-                raise
-
-    def _initialize_shared_resources(self):
-        shared_resources_config = self.config.get('shared_resources', {})
-        for name, resource_config in shared_resources_config.items():
-            module_path = resource_config.get('path')
-            class_name = resource_config.get('class')
-            init_args = resource_config.get('init_args', {})
-            module = importlib.import_module(module_path)
-            cls = getattr(module, class_name)
-            resource = cls(**init_args)
-            self.shared_resources[name] = resource
-            if name == 'tokenizer': #Add this
-                self.shared_resources['tokenizer'] = resource #Add this
-            if name == 'text_encoder': #Add this
-                self.shared_resources['text_encoder'] = resource #Add this
-
-    def _import_class(self, class_path: str) -> Type:
-        """Dynamic class importer with caching"""
-        module_path, class_name = class_path.rsplit('.', 1)
-        module = importlib.import_module(module_path)
-        return getattr(module, class_name)
-    
-    def _resolve_dependencies(self, config: Dict) -> List[str]:
-        """Identify required dependencies from config"""
-        return [
-            dep for dep in config.get('requires', []) 
-            if dep in self.registry
-        ]
-    
-    def get(self, agent_name: str):
-        with self._get_agent_context(agent_name) as agent:
-            return agent
-        
-    def set(self):
-        pass
-    
-    @contextmanager
-    def _get_agent_context(self, agent_name):
-        """Thread-safe context manager for agent access"""
-        with self.lock:
-            if agent_name not in self.instance_cache:
-                self._initialize_agent(agent_name)
-            yield self.instance_cache[agent_name]
-    
-    def _initialize_agent(self, agent_name):
-        
-
-        agent_info = self.registry[agent_name]
-        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
-        dependencies = {dep: self.instance_cache[dep] for dep in agent_info['dependencies']}
-        config = agent_info.get('config', {})
-        init_params = inspect.signature(cls.__init__).parameters
-
-        general_args = {}
-        if 'shared_memory' in init_params:
-            general_args['shared_memory'] = self.shared_resources['shared_memory']
-        if 'agent_factory' in init_params:
-            general_args['agent_factory'] = self
-        if 'tokenizer' in init_params:
-             general_args['tokenizer'] = self.shared_tokenizer
-        if 'text_encoder' in init_params:
-             general_args['text_encoder'] = self.shared_text_encoder
-    
-        elif agent_name == "language":
-            shared_slailm_instance = get_shared_slailm(
-                self.shared_resources['shared_memory'],
-                shared_tokenizer=self.shared_tokenizer,
-                shared_text_encoder=self.shared_text_encoder,
-                agent_factory=self
-            )
-            # LanguageAgent initializes its own DialogueContext and GrammarProcessor internally
-            agent_instance = cls(
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "knowledge":
-            language_agent = self.get('language')
-            agent_instance = cls(
-                language_agent=language_agent,
-                knowledge_agent_dir="data/knowledge_base",
-                persist_file="data/knowledge_cache.json",
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "safety":
-            safety_config = config(**config)
-            agent_instance = cls(
-                alignment_agent_cls=AlignmentAgent,
-                config=safety_config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "reasoning":
-            language_agent = self.get('language')
-            shared_slailm_instance = get_shared_slailm(
-                self.shared_resources['shared_memory'],
-                shared_tokenizer=self.shared_tokenizer,
-                shared_text_encoder=self.shared_text_encoder,
-                agent_factory=self
-            )
-            agent_instance = cls(
-                language_agent=language_agent,
-                llm=shared_slailm_instance,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "perception":
-            audio_encoder = self._init_audio_encoder(config)
-            agent_instance = cls(
-                audio_encoder=audio_encoder,
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                shared_memory=self.shared_resources['shared_memory'],
-                agent_factory=self,
-                **dependencies
-            )
-        elif agent_name == "planning":
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "execution":
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "browser":
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "adaptive":
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "alignment":
-            from src.agents.alignment.alignment_monitor import MonitorConfig
-            safe_agent_instance = self.get('safety')
-            monitor_conf = MonitorConfig(**config.get('monitor', {}))
-            correction_pol = CorrectionPolicy(**config.get('corrections', {}))
-            
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                monitor_config=monitor_conf,
-                correction_policy=correction_pol,
-                safe_agent=safe_agent_instance,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "evaluation":
-            agent_instance = cls(
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **general_args,
-                **dependencies
-            )
-        elif agent_name == "learning":
-            slai_lm = self.get('language').slai_lm if self.get('language') else None
-            safety_agent = self.get('safety')
-            env = self._init_environment(config.get('env_name', 'CartPole-v1'))
-            agent_instance = cls(
-                shared_memory=self.shared_resources['shared_memory'],
-                agent_factory=self,
-                slai_lm=slai_lm,
-                safety_agent=safety_agent,
-                env=env,
-                text_encoder=self.shared_text_encoder,
-                tokenizer=self.shared_tokenizer,
-                config=config,
-                **dependencies
-            )
-        else:
-            agent_instance = cls(
-                config=config,
-                **general_args,
-                **dependencies
-            )
-    
-        self.instance_cache[agent_name] = agent_instance
-
-    def _init_environment(self, env_name: str):
-        import gymnasium as gym
-        return gym.make(env_name)
-
-    def create(self, agent_name: str, config: Dict = None):
-        agent_info = self.registry[agent_name]
-        cls = self._import_class(f"{agent_info['path']}.{agent_info['class']}")
-        
-        # Get base parameters from factory
-        base_params = {
-            'shared_memory': self.shared_resources.get('shared_memory'),
-            'agent_factory': self
-        }
-        
-        # Merge configurations
-        init_args = agent_info.get('init_args', {}).copy()
-        if config and 'init_args' in config:
-            init_args.update(config['init_args'])
-        
-        # Get valid constructor parameters
-        init_params = inspect.signature(cls.__init__).parameters
-        
-        # Automatically inject required base parameters
-        final_args = {}
-        for param in init_params:
-            if param == 'config':
-                final_args['config'] = config or {}
-            elif param == 'audio_encoder' and agent_name == "perception":
-                final_args['audio_encoder'] = self._init_audio_encoder(config or {})
-            elif param in base_params:
-                final_args[param] = base_params[param]
-            elif param in init_args:
-                final_args[param] = init_args[param]
-        
-        # Preserve explicit config parameters
+        Args:
+            config (Optional[Dict[str, Any]]): A dictionary for runtime configuration
+                                               overrides.
+        """
+        self.global_config = load_global_config()
         if config:
-            final_args.update({k: v for k, v in config.items() if k != 'init_args'})
+            self.global_config.update(config)
+
+        self.metrics_adapter = MetricsAdapter()
+        self.registry = AgentRegistry()
         
-        return cls(**final_args)
+        for name, cls in self._agent_classes.items():
+            self.registry.register(AgentMetaData(
+                name=name,
+                module_path=cls.__module__,
+                class_name=cls.__name__,
+                version="1.9",
+                dependencies=self._get_agent_dependencies(cls)
+            ))
+    
+        self.agent_factory = {}
+    
+        logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
 
-    def _check_text_deps(self) -> bool:
+    def register_agent(self, metadata: AgentMetaData):
+        """
+
+        Registers an agent's metadata, making it available for creation.
+        """
+        if not isinstance(metadata, AgentMetaData):
+            raise TypeError("Can only register objects of type AgentMetaData.")
+        
+        if metadata.name in self.agent_registry:
+            logger.warning(f"Agent '{metadata.name}' is already registered. Overwriting metadata.")
+        
+        self.agent_registry[metadata.name] = metadata
+        logger.info(f"Registered agent: '{metadata.name}' (version {metadata.version})")
+
+    def create(self, agent_type: str, shared_memory: Any, **kwargs: Any) -> BaseAgent:
+        """
+        Creates an instance of a specified agent.
+
+        This method retrieves the appropriate configuration for the agent type,
+        merges it with any runtime arguments, and instantiates the agent class.
+
+        Args:
+            agent_type (str): The type of agent to create (e.g., 'planning', 'learning').
+            shared_memory (Any): The shared memory object to be used by the agent.
+            **kwargs (Any): Additional keyword arguments to be passed to the agent's
+                            constructor, which may include agent-specific dependencies
+                            like 'env' for the LearningAgent.
+
+        Returns:
+            BaseAgent: An instance of the requested agent.
+
+        Raises:
+            ValueError: If the requested agent_type is unknown.
+            TypeError: If the arguments provided do not match the agent's constructor signature.
+        """
+        printer.status("CREATE", f"Request to create agent of type: '{agent_type}'")
+
+        load_order = self.registry.resolve_dependency_tree(agent_type)
+        # Create dependencies first
+        for dep_name in load_order[:-1]:
+            if dep_name not in self.active_agents:
+                self.active_agents[dep_name] = self._create_instance(dep_name, shared_memory)
+
+        if agent_type not in self.registry.agents:
+            logger.error(f"Unknown agent type requested: '{agent_type}'. Ensure it is registered first.")
+            raise ValueError(f"Unknown agent type requested: '{agent_type}'")
+
+        metadata = self.registry.agents[agent_type]
+
         try:
-            import transformers  # noqa
-            return True
-        except ImportError:
-            logger.warning("Transformers not installed, text capabilities limited")
-            return False
+            # Dynamically import the module and get the class
+            module = importlib.import_module(metadata.module_path)
+            agent_class = getattr(module, metadata.class_name)
+        except (ImportError, AttributeError) as e:
+            logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
+            raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
+            
+        # Get the agent-specific configuration and merge with any runtime kwargs
+        agent_config_key = f"{agent_type}_agent"
+        agent_config = get_config_section(agent_config_key)
+        if agent_config:
+            agent_config.update(kwargs)
+        else:
+            agent_config = kwargs
 
-    def _init_text_model(self, config: Dict) -> Any:
-        if self._check_text_deps():
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            model_id = config.get("text_model_id", "gpt2")
-            return AutoModelForCausalLM.from_pretrained(model_id)
-        return None
+        try:
+            constructor_args = {
+                "shared_memory": shared_memory,
+                "agent_factory": self,
+                "config": agent_config,
+                **kwargs
+            }
+            
+            agent_instance = agent_class(**constructor_args)
+            logger.info(f"Successfully created instance of agent: '{agent_type}'")
+            return agent_instance
 
-    def report_memory_usage(self, limit: int = 10):
-        """Display top memory-consuming components"""
-        display_top_memory_sources(limit)
+        except TypeError as e:
+            logger.error(
+                f"Failed to create agent '{agent_type}' due to a TypeError. "
+                f"Check if the constructor signature matches the provided arguments. Error: {e}"
+            )
+            raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
+            raise
+
+    def _get_agent_dependencies(self, cls) -> list[str]:
+        """Stub for future dependency inspection."""
+        return []
+
+    def run_adaptation_cycle(self, metrics: Dict[str, Any], agent_types: list[str]):
+        """
+        Processes metrics through the adapter and applies adjustments to the global config.
+        This affects the configuration of subsequently created agents.
+        """
+        logger.info("Running adaptation cycle based on new metrics...")
+        
+        # 1. Process metrics to get adjustments
+        adjustments = self.metrics_adapter.process_metrics(metrics, agent_types)
+        printer.pretty("Generated Adjustments", adjustments, "info")
+
+        # 2. Apply adjustments to the factory's global configuration
+        for key, adj_value_tensor in adjustments.items():
+            adj_value = adj_value_tensor.item()
+            
+            # Example logic: "fairness_adjustment" -> adapt "risk_threshold"
+            if "fairness_adjustment" in key:
+                # Decrease risk threshold if fairness error is high (positive adjustment)
+                target_param = 'risk_threshold'
+                for agent_name in self.registry.agents.keys():
+                    config_key = f"{agent_name}_agent"
+                    if config_key in self.global_config and target_param in self.global_config[config_key]:
+                        current_val = self.global_config[config_key][target_param]
+                        # Apply adjustment defensively
+                        new_val = max(0.01, current_val - adj_value * 0.1)
+                        self.global_config[config_key][target_param] = new_val
+                        logger.info(f"Adapted '{config_key}.{target_param}' from {current_val:.3f} to {new_val:.3f}")
+
+            # Example logic: "performance_adjustment" -> adapt "learning_rate"
+            if "performance_adjustment" in key:
+                # Decrease learning rate if performance error is high (positive adjustment)
+                target_param = 'learning_rate'
+                for agent_name in self.registry.agents.keys():
+                    config_key = f"{agent_name}_agent"
+                    if config_key in self.global_config and target_param in self.global_config[config_key]:
+                        current_val = self.global_config[config_key][target_param]
+                        # Apply adjustment defensively
+                        new_val = max(1e-6, current_val * (1 - adj_value * 0.05))
+                        self.global_config[config_key][target_param] = new_val
+                        logger.info(f"Adapted '{config_key}.{target_param}' from {current_val:.4f} to {new_val:.4f}")
+
+        logger.info("Adaptation cycle complete. Global config updated.")
+
+if __name__ == "__main__":
+    print("\n=== Running Agent Factory Test ===\n")
+    printer.status("Init", "Agent Factory initialized", "success")
+    from src.agents.collaborative.shared_memory import SharedMemory
+    shared_memory=SharedMemory()
+    agent_type="adaptive"
+
+    factory = AgentFactory()
+    print(factory)
+    printer.status("Init", factory.create(agent_type=agent_type, shared_memory=shared_memory), "success")
+    print("\n=== Successfully Ran Agent Factory ===\n")
