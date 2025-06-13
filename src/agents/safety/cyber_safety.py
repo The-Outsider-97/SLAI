@@ -30,9 +30,10 @@ from pathlib import Path
 from src.agents.safety.utils.security_neural_network import SecurityNN, PyTorchSafetyModel
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("SLAI Cyber Safety Module")
+printer = PrettyPrinter
 
 # --- Constants and Basic Patterns ---
 
@@ -103,40 +104,42 @@ class CyberSafetyModule:
         """
         self.config = load_global_config()
         self.cyber_config = get_config_section('cyber_safety')
-        memory = SecureMemory()
-        self.memory = memory
+        self.anomaly_threshold =  self.cyber_config.get('anomaly_threshold')
+        self.max_log_history =  self.cyber_config.get('max_log_history')
+        self.qnn_inspired_anomaly =  self.cyber_config.get('qnn_inspired_anomaly')
+        self.qnn_feature_dim =  self.cyber_config.get('qnn_feature_dim')
+        self.adaptive_centroid_lr =  self.cyber_config.get('adaptive_centroid_lr')
+        self.cyber_rules_path =  self.cyber_config.get('cyber_rules_path')
+        self.vulnerability_signatures_path =  self.cyber_config.get('vulnerability_signatures_path')
+
+        self.memory = SecureMemory()
 
         logger.info("Initializing Cyber Safety Module...")
 
         # Load extended security rules
         self.security_rules = self._load_json_resource(
-            self.config.get('cyber_rules_path'),
+            self.cyber_rules_path,
             'Cyber Security Rules',
             self._get_default_security_rules()
         )
 
         # Load vulnerability signatures
         self.vulnerability_signatures = self._load_json_resource(
-            self.config.get('vulnerability_signatures_path'),
+            self.vulnerability_signatures_path,
             'Vulnerability Signatures',
             self._get_default_vulnerability_signatures()
         )
 
-        # Initialize anomaly detection components
-        self.anomaly_threshold = float(self.config.get('anomaly_threshold', 3.0)) # Default: 3 standard deviations
-        self.max_log_history = int(self.config.get('max_log_history', 1000))
         self.event_log_history = deque(maxlen=self.max_log_history)
-        # Store stats: {'count': N, 'sum': Sum(x), 'sum_sq': Sum(x^2)} for efficient mean/std calculation
-        self.event_statistics = defaultdict(lambda: {'count': 0, 'sum': 0.0, 'sum_sq': 0.0})
         self.sequence_patterns = defaultdict(lambda: deque(maxlen=10)) # Track recent sequences per user/entity
+        self.event_statistics = defaultdict(lambda: {'count': 0, 'sum': 0.0, 'sum_sq': 0.0})
 
         # QNN-Inspired Anomaly Detection (Conceptual)
-        self.use_qnn_inspired = bool(self.config.get('qnn_inspired_anomaly', False))
+        self.use_qnn_inspired = bool(self.qnn_inspired_anomaly)
         if self.use_qnn_inspired:
             logger.info("QNN-inspired anomaly detection enabled (conceptual).")
-            self.qnn_feature_dim = int(self.config.get('qnn_feature_dim', 8)) # Example dimension
-            self.adaptive_centroid_lr = float(self.config.get('adaptive_centroid_lr', 0.01))
-            # Initialize centroid lazily when first data point arrives
+            self.qnn_feature_dim
+            self.adaptive_centroid_lr
             self.qnn_state_representation = None # Represents the 'normal' cluster centroid
         self.model = self._load_security_model()
         logger.info(f"Cyber Safety Module initialized. Anomaly Threshold={self.anomaly_threshold}, QNN-Inspired={self.use_qnn_inspired}")
@@ -156,27 +159,10 @@ class CyberSafetyModule:
         )
         
         return PyTorchSafetyModel(model)
-    
-    def analyze_input(self, input_data):
-        # Preprocess input data
-        processed = self._preprocess(input_data)
-        
-        # Make prediction
-        prediction = self.model.predict(processed)
-        
-        # Generate security report
-        return {
-            'risk_score': float(prediction[0]),
-            'is_malicious': prediction[0] > 0.5,
-            'confidence': float(abs(prediction[0] - 0.5) * 2)
-        }
-    
-    def _preprocess(self, data):
-        # Convert raw data to model input format
-        # Implementation depends on data format
-        return np.array([[...]])  # Return numpy array
 
     def _get_default_security_rules(self) -> Dict:
+        printer.status("INIT", "Fetching default security rules...", "info")
+
         """Provides default security rules if none are loaded."""
         return {
             "principles": [
@@ -196,6 +182,8 @@ class CyberSafetyModule:
         }
 
     def _get_default_vulnerability_signatures(self) -> Dict:
+        printer.status("INIT", "Fetching default vulnerability signatures...", "info")
+
         """Provides default vulnerability signatures if none are loaded."""
         # In a real system, this would be much more extensive (e.g., loading from a CVE database)
         return {
@@ -230,6 +218,8 @@ class CyberSafetyModule:
 
 
     def analyze_input(self, input_data: Any, context: str = "general") -> Dict:
+        printer.status("INIT", "Analyzing input...", "info")
+
         """
         Analyzes input data (e.g., user prompt, configuration, code snippet) for cyber risks.
 
@@ -360,6 +350,8 @@ class CyberSafetyModule:
         }
 
     def _generate_recommendations(self, findings: List[Dict]) -> List[str]:
+        printer.status("INIT", "Generating recommendations...", "info")
+
         """Generates remediation advice based on findings."""
         recs = set() # Use a set to avoid duplicate recommendations
         principles = self.security_rules.get("principles", [])
@@ -401,6 +393,8 @@ class CyberSafetyModule:
 
 
     def analyze_event_stream(self, event: Dict) -> Dict:
+        printer.status("INIT", "Analyzing streaming event...", "info")
+
         """
         Analyzes a stream of events (e.g., logs, API calls) for anomalies using
         statistical and potentially quantum-inspired methods.
@@ -506,7 +500,7 @@ class CyberSafetyModule:
 
             logger.warning(f"Anomaly detected: {reason} Event: {event}")
         # else:
-            # logger.debug(f"Event analyzed: score={final_score:.2f}. Event: {event}")
+            logger.debug(f"Event analyzed: score={final_score:.2f}. Event: {event}")
 
         return {
             "anomaly_score": round(final_score, 3),
@@ -516,6 +510,8 @@ class CyberSafetyModule:
 
     def _map_to_feature_vector(self, numerical_features: Dict) -> np.ndarray:
         """Maps numerical features to a fixed-size vector for QNN-inspired processing."""
+        printer.status("INIT", "Vector mapping...", "info")
+
         vector = np.zeros(self.qnn_feature_dim)
         if not numerical_features: return vector
 
@@ -546,6 +542,8 @@ class CyberSafetyModule:
         Conceptual simulation of a QNN-inspired anomaly score calculation using
         classical methods (NumPy). Simulates distance from an adaptive centroid.
         """
+        printer.status("INIT", "Simulate QNN anomaly...", "info")
+
         if self.qnn_state_representation is None:
             # Initialize centroid using the first vector seen
              self.qnn_state_representation = feature_vector.copy()
@@ -607,6 +605,8 @@ class CyberSafetyModule:
             Dict: Potential threats categorized by STRIDE.
                    {'threats': {'Spoofing': [...], ...}, 'overall_risk': str}
         """
+        printer.status("INIT", "Generating threat assessment", "info")
+
         threats = defaultdict(list)
         component = context_info.get('component', 'unknown_component').lower()
         action = context_info.get('action', 'unknown_action').lower()
@@ -704,5 +704,16 @@ if __name__ == "__main__":
     }
 
     stream = cyber.analyze_event_stream(event=event)
-    print(stream)
+    printer.pretty("CYBER", stream, "success")
+
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+    info = {
+        'component': 'school_computer_system',
+        'action': 'attempt_hack',
+        'data_involved': ['student_records', 'network_credentials'],
+        'network_zone': 'internal'
+    }
+
+    generate = cyber.generate_threat_assessment(context_info=info)
+    printer.pretty("THREAT", generate, "success")
     print("\n=== Successfully Ran SLAI Cyber Safety Module ===\n")
