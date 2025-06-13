@@ -293,7 +293,7 @@ class RiskAdaptation:
         
         # Save report
         filename = f"src/agents/evaluators/reports/risk_report_{datetime.now().strftime('%Y%m%d')}.json"
-        os.makedirs("reports", exist_ok=True)
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, 'w') as f:
             json.dump(report, f, indent=2)
         
