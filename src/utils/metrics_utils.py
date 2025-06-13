@@ -9,38 +9,11 @@ logger = get_logger("Metrics Utils")
 
 class MetricBridge:
     from src.utils.system_optimizer import SystemOptimizer
-    from src.agents.agent_factory import AgentFactory
     """New class to handle feedback routing"""
-    def __init__(self, agent_factory: AgentFactory, optimizer: SystemOptimizer):
-        self.factory = agent_factory
+    def __init__(self, optimizer: SystemOptimizer):
+        self.factory = {}
         self.history = []
         self.optimizer = optimizer
-
-    def submit_metrics(self, metrics: Dict[str, Any]) -> None:
-        """Implements experience replay prioritization from Hindsight ER (Andrychowicz 2017)"""
-        self.history.append(metrics)
-        self._check_fairness(metrics)
-
-        # Resource optimization
-        resource_recs = self.optimizer.optimize_throughput(
-            current_metrics=metrics['system']
-        )
-        self.agent_factory.apply_optimizations(resource_recs)
-
-        # Calculate moving averages
-        window_size = min(10, len(self.history))
-        recent_metrics = self.history[-window_size:]
-        
-        avg_metrics = {
-            'fairness_violations': np.mean([m.get('demographic_parity_violations', 0) 
-                                   for m in recent_metrics]),
-            'calibration_error': np.mean([m.get('calibration_error', 0) 
-                                   for m in recent_metrics])
-        }
-        
-        # Thresholds from ISO/IEC 24027:2021 AI bias standards
-        if avg_metrics['fairness_violations'] > 0.05:
-            self.factory.adapt_from_metrics(avg_metrics)
 
 class FairnessMetrics:
     """
