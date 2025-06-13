@@ -19,6 +19,8 @@ class SecureMemory:
         """Secure memory system with encrypted storage and access controls"""
         self.config = load_global_config()
         self.memory_config = get_config_section('secure_memory')
+        self.complience_config = get_config_section('compliance_checker')
+        self.phishing_model_path =  self.complience_config.get('phishing_model_path')
         self._setup_defaults()
 
         # Core storage with security features
@@ -251,6 +253,66 @@ class SecureMemory:
                     'meta': entry['meta']
                 })
         return results
+    
+    def bootstrap_if_empty(self):
+        """Bootstrap secure memory with essential baseline entries if not present"""
+    
+        def missing(tag):
+            return not self.recall(tag=tag, top_k=1)
+    
+        if missing("data_classification"):
+            self.add(
+                {"email.body": "Confidential", "training_features_url": "Restricted", "log_entries": "Internal"},
+                tags=["data_classification"],
+                sensitivity=0.8
+            )
+    
+        if missing("consent_records"):
+            self.add(
+                {"consent_granted": True, "timestamp": datetime.now().isoformat()},
+                tags=["consent_records"],
+                sensitivity=0.9
+            )
+    
+        if missing("feature_extraction"):
+            self.add(
+                {"features": ["url_length", "has_ip", "domain_entropy"], "input_size": 1450},
+                tags=["feature_extraction"],
+                sensitivity=0.7
+            )
+    
+        if missing("retention_policy"):
+            self.add(
+                {"expiration_days": 365, "auto_delete": True, "policy_start": datetime.now().isoformat()},
+                tags=["retention_policy"],
+                sensitivity=0.85
+            )
+        
+        if missing("trusted_hashes"):
+            self.add(
+                {"phishing_model.json": "b03e9ad5428be299e66b3dd552e89edb23a3b19c6b3c2fc309c75b0eabed7a85"},
+                tags=["trusted_hashes"],
+                sensitivity=0.9
+            )
+
+        if missing("data_usage_purpose"):
+            self.add(
+                {"declared_purpose": "Phishing detection and cybersecurity threat mitigation"},
+                tags=["data_usage_purpose"],
+                sensitivity=0.9
+            )
+
+        if missing("subject_requests"):
+            self.add(
+                {
+                    "accessed": True,
+                    "corrected": True,
+                    "deleted": True,
+                    "timestamp": datetime.now().isoformat()
+                },
+                tags=["subject_requests"],
+                sensitivity=0.85
+            )
 
     def recall(self, tag: str, top_k: int = None) -> List[Any]:
         """Retrieve entries by tag with optional limit"""
