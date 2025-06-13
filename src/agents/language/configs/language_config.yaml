@@ -95,7 +95,7 @@ nlu:
   custom_intent_patterns_path: "src/agents/language/templates/intent_patterns.json"
   custom_entity_patterns_path: "src/agents/language/templates/entity_patterns.json"
   morphology_rules_path: "src/agents/language/templates/morphology_rules.json"
-  glove_path: "data/embeddings/glove.6B.200d.txt"
+  glove_path: "data/embeddings/glove.6B.200d.json"
   glove_synonym_threshold: 0.65   # Minimum similarity score to consider as synonym
   glove_top_synonyms: 3           # Number of GloVe-based synonyms to add per word
 
