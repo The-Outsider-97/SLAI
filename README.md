@@ -110,12 +110,7 @@ Note: If you see an error about execution policy:
    .\venv\Scripts\Activate.ps1
    ```
 
-3. You'll need the latest pip installer
-   ```console
-   python3.10 -m pip install --upgrade pip
-   ```
-
-4. Install requirements:
+3. Install requirements:
    ```console
    pip install librosa
    pip install music21
@@ -178,6 +173,16 @@ Note: If you see an error about execution policy:
    pip install dotenv
    pip install textblob
    python -m pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
+   ```
+
+4. Heaving trouble with tensosflow?
+   ```console
+   py -3.10 -m venv tfenv
+   .\tfenv\Scripts\activate
+   ```
+   ```console
+   pip install --upgrade pip setuptools wheel
+   pip install tensorflow
    ```
 
 5. Run Model:
