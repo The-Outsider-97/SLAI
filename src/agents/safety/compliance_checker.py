@@ -1,6 +1,4 @@
 
-
-
 import re, sys
 import hashlib
 import yaml, json
@@ -12,19 +10,29 @@ from PyQt5.QtWidgets import QApplication
 from datetime import timedelta, datetime
 from typing import Dict, List, Callable, Union, Any
 
-from src.agents.evaluators.utils.report import get_visualizer
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Security Compliance Checker")
+printer = PrettyPrinter
 
 class ComplianceChecker:
     def __init__(self):
         self.config = load_global_config()
-        self.complience_config = get_config_section('complience_checker')
-        memory = SecureMemory()
-        self.memory = memory
+        self.complience_config = get_config_section('compliance_checker')
+        self.compliance_file_path =  self.complience_config.get('compliance_file_path')
+        self.phishing_model_path =  self.complience_config.get('phishing_model_path')
+        self.enable_memory_bootstrap =  self.complience_config.get('enable_memory_bootstrap')
+        self.report_thresholds =  self.complience_config.get('report_thresholds', {
+            'critical', 'warning'
+        })
+        self.weights =  self.complience_config.get('weights', {
+            'data_security', 'model_security', 'app_security', 'operational_security'
+        })
+
+        self.memory = SecureMemory()
+        self.memory.bootstrap_if_empty()
 
         self.compliance_framework = self._load_compliance_framework()
         
@@ -39,7 +47,7 @@ class ComplianceChecker:
             return framework_entries[0]['data']
         
         # Fallback to file system
-        path = self.config.get('compliance_file_path')
+        path = self.compliance_file_path
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 framework = json.load(f)
@@ -141,7 +149,7 @@ class ComplianceChecker:
         
         evaluator = control_mapping.get(control_id, self._generic_control_check)
         return evaluator(control)
-    
+
     def _generic_control_check(self, control: Dict) -> str:
         """Perform a generic compliance control check based on required memory tags and fields"""
         try:
@@ -167,7 +175,7 @@ class ComplianceChecker:
     
     def _get_compliance_status(self, score: float) -> str:
         """Determine compliance status based on score"""
-        thresholds = self.config.get('report_thresholds', {})
+        thresholds = self.complience_config.get('report_thresholds', {})
         critical = thresholds.get('critical', 0.7)
         warning = thresholds.get('warning', 0.9)
         
@@ -178,7 +186,7 @@ class ComplianceChecker:
         return "compliant"
     
     # Control-specific evaluation methods
-    def check_gdpr(self) -> str:
+    def check_gdpr(self, control: Dict) -> str:
         """Validate GDPR compliance across key principles"""
         try:
             # 1. Lawful basis for data processing
@@ -288,18 +296,18 @@ class ComplianceChecker:
                 return "fail"
     
             trusted_hashes = trusted[0]['data']  # Ex: {'phishing_model.json': 'abc123...'}
-            model_dir = Path("models/")  # Replace with actual model path if needed
-    
+            model_dir = Path(self.phishing_model_path).parent
+            
             for model_file, expected_hash in trusted_hashes.items():
                 path = model_dir / model_file
                 if not path.exists():
                     logger.warning(f"Model file missing: {model_file}")
                     return "fail"
-    
+            
                 with open(path, "rb") as f:
                     content = f.read()
                     actual_hash = hashlib.sha256(content).hexdigest()
-    
+            
                 if actual_hash != expected_hash:
                     logger.error(f"Hash mismatch for {model_file}")
                     return "fail"
