@@ -5,21 +5,11 @@ import torch
 from collections import defaultdict, deque
 from typing import Dict, List, Any
 
-from logs.logger import get_logger
+from src.agents.factory.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Metrics Adapter")
-
-CONFIG_PATH = "src/agents/factory/configs/factory_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config: base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class MetricsAdapter:
     """
@@ -29,24 +19,41 @@ class MetricsAdapter:
     - Safe Exploration (Turchetta et al., 2020)
     - Fairness-Aware RL (D'Amour et al., 2020)
     """
-    
-    def __init__(self):
-        config = load_config().get("metrics")
-        self.metric_history = deque(maxlen=config.get("history_size", 100))
-        self.adaptation_factors = {
-            'risk_threshold': 1.0,
-            'exploration_rate': 1.0,
-            'learning_rate': 1.0
-        }
-        self.max_rate = config.get("max_adaptation_rate", 0.2)
-        self.error_config = config.get("error_config", {})
-        self._init_control_parameters(config.get("pid_params", {}))
 
-    def _init_control_parameters(self, pid_config: Dict):
+    def __init__(self):
+        self.config = load_global_config()
+        self.meta_config = get_config_section('metrics')
+        self.demographic_parity_diff = self.meta_config.get('demographic_parity_diff')
+        self.calibration_error = self.meta_config.get('calibration_error')
+        self.max_adaptation_rate = self.meta_config.get('max_adaptation_rate')
+        self.history_size = self.meta_config.get('history_size')
+        self.metric_history = deque(maxlen=self.history_size)
+        self.accuracy = self.meta_config.get('accuracy')
+        self.adaptation_factors = self.meta_config.get('adaptation_factors', {
+            'risk_threshold', 'exploration_rate', 'learning_rate'
+        })
+        self.error_config = self.meta_config.get("error_config", {
+            'fairness_target', 'performance_target', 'bias_target'
+        })
+        self.pid_params = self.meta_config.get("pid_params", {
+            'Kp', 'Ki', 'Kd'
+        })
+        self.safety_bounds = self.meta_config.get("safety_bounds", {
+            'medical', 'defaults'
+        })
+
+        #self.adaptation_factors = {
+        #    'risk_threshold': 1.0,
+        #    'exploration_rate': 1.0,
+        #    'learning_rate': 1.0
+        #}
+        self._init_control_parameters()
+
+    def _init_control_parameters(self):
         """PID tuning per Ziegler-Nichols method"""
-        self.Kp = pid_config.get("Kp", 0.15)
-        self.Ki = pid_config.get("Ki", 0.05)
-        self.Kd = pid_config.get("Kd", 0.02)
+        self.Kp = self.pid_params['Kp']
+        self.Ki = self.pid_params['Ki']
+        self.Kd = self.pid_params['Kd']
         self.integral = defaultdict(float)
         self.prev_error = defaultdict(float)
 
@@ -82,13 +89,13 @@ class MetricsAdapter:
 
     def _calculate_fairness_error(self, current: float, target: float) -> float:
         # Normalized demographic parity difference
-        dpd = current.get("demographic_parity_diff", 0.0)
+        dpd = current.get('demographic_parity_diff')
         return (dpd - target) / (1.0 + abs(dpd))
 
     def _calculate_performance_error(self, current: float, target: float) -> float:
         # Composite error including calibration and accuracy
-        calibration_error = current.get("calibration_error", 0.0)
-        accuracy = current.get("accuracy", 1.0)
+        calibration_error = current.get('calibration_error')
+        accuracy = current.get('accuracy')
         return (calibration_error - target) * (1.0 - accuracy)
 
     def _calculate_bias_error(self, metrics: Dict, target: float) -> float:
@@ -126,7 +133,14 @@ class MetricsAdapter:
         return self._apply_safety_bounds(adjustments, agent_types)
 
     def _apply_safety_bounds(self, adjustments, agent_types):
-        pass
+        for agent_type in agent_types:
+            bound = self.safety_bounds.get(agent_type, self.safety_bounds.get('default', 1.0))
+            for key, value in adjustments.items():
+                if isinstance(value, torch.Tensor):
+                    value = value.item()
+                if abs(value) > bound:
+                    adjustments[key] = torch.tensor(bound * (1 if value > 0 else -1))
+        return adjustments
 
     def _pid_control(self, 
                     metric_type: str, 
@@ -188,15 +202,13 @@ class MetricsAdapter:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Agent Meta Data ===\n")
-    config = load_config()
-    pid_config = config
     adapter = MetricsAdapter()
 
     print(f"\n{adapter}")
 
     print("\n* * * * * Phase 2 * * * * *\n")
 
-    control = adapter._init_control_parameters(pid_config)
+    control = adapter._init_control_parameters()
     print(f"\n{control}")
 
     print("\n* * * * * Phase 3 * * * * *\n")
@@ -206,13 +218,10 @@ if __name__ == "__main__":
 
     print("\n* * * * * Phase 4 * * * * *\n")
 
-    # Initialize adapter
-    adapter = MetricsAdapter()
-    
     # Test safety bounds with tensor input
     test_adjustments = {'risk_threshold_adjustment': torch.tensor(0.6)}
     safe_adjustments = adapter._apply_safety_bounds(test_adjustments, ['medical'])
-    print(f"Safety Bounds Test: {safe_adjustments}")
+    printer.pretty("Safety Bounds Test:", safe_adjustments, "success")
     
     # Test full processing pipeline with valid metrics
     test_metrics = {
@@ -221,6 +230,6 @@ if __name__ == "__main__":
         'bias': {'group_metrics': {'groupA': {'score': 0.8}, 'groupB': {'score': 0.6}}}
     }
     processed = adapter.process_metrics(test_metrics, ['medical'])
-    print(f"\nProcessed Adjustments: {processed}")
+    printer.pretty("Processed Adjustments:", processed, "success")
     
     print("\n=== Successfully Ran Agent Meta Data ===\n")
