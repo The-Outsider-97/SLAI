@@ -1750,7 +1750,7 @@ class LearningAgent(BaseAgent):
         # Initialize scheduler if not already done
         if not hasattr(self, '_task_scheduler'):
             from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-            self._task_scheduler = DeadlineAwareScheduler(agent=self)
+            self._task_scheduler = DeadlineAwareScheduler()
         
         # Create retraining task
         retraining_task = {
