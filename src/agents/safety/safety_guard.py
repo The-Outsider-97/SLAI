@@ -5,15 +5,13 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict
 
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
-from src.agents.safety.utils.security_error import(
-    ToxicContentError, PrivacyViolationError,
-    PiiLeakageError, MisinformationError,
-    PromptInjectionError
-)
+from src.agents.safety.utils.security_error import(ToxicContentError, PrivacyViolationError,
+                                PiiLeakageError, MisinformationError, PromptInjectionError)
 from src.agents.safety.secure_memory import SecureMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Safety Guard")
+printer = PrettyPrinter
 
 class SafetyGuard:
     """Unified privacy and safety framework with layered protection"""
@@ -33,11 +31,24 @@ class SafetyGuard:
         """
         self.config = load_global_config()
         self.complience_config = get_config_section('safety_guard')
+        self.epsilon =  self.complience_config.get('epsilon')
+        self.sensitivity =  self.complience_config.get('sensitivity')
+        self.mechanism =  self.complience_config.get('mechanism')
+        self.group_targeting_patterns_path =  self.complience_config.get('group_targeting_patterns_path')
+        self.authority_phrases_path =  self.complience_config.get('authority_phrases_path')
+        self.manipulation_patterns_path =  self.complience_config.get('manipulation_patterns_path')
+        self.boundary_phrases_path =  self.complience_config.get('boundary_phrases_path')
+        self.pii_patterns_path =  self.complience_config.get('pii_patterns_path')
+        self.toxicity_patterns_path =  self.complience_config.get('toxicity_patterns_path')
+
         self.logger = logger
-        memory = SecureMemory()
-        self.memory = memory
-        self.privacy_params = privacy_params or {'epsilon': 1.0, 'sensitivity': 1.0}
-        
+        self.memory = SecureMemory()
+        self.privacy_params = {
+            'epsilon': self.epsilon,
+            'sensitivity': self.sensitivity,
+            'mechanism': self.mechanism
+        }
+
         # Load patterns from JSON files
         self.redact_patterns = self._load_pii_patterns()
         self.toxicity_patterns = self._load_toxicity_patterns()
@@ -50,7 +61,7 @@ class SafetyGuard:
 
     def _load_pii_patterns(self) -> List[Tuple[str, str]]:
         """Load PII patterns from JSON file"""
-        path = self.config.get('pii_patterns_path', '')
+        path = self.pii_patterns_path
         if not path:
             self.logger.warning("PII patterns path not configured, using defaults")
             return self._default_redaction_patterns()
@@ -65,7 +76,7 @@ class SafetyGuard:
 
     def _load_authority_phrases(self) -> List[str]:
         """Load authority escalation phrases from JSON file"""
-        path = self.config.get('authority_phrases_path', '')
+        path = self.authority_phrases_path
         default_patterns = [ # Default patterns if file loading fails or path not specified
             r"speak to your supervisor",
             r"let me talk to a human",
@@ -84,7 +95,7 @@ class SafetyGuard:
 
     def _load_manipulation_patterns(self) -> List[str]:
         """Load conversational manipulation patterns from JSON file"""
-        path = self.config.get('manipulation_patterns_path', '')
+        path = self.manipulation_patterns_path
         default_patterns = [ # Default patterns if file loading fails or path not specified
             r"ignore (?:the|your) previous",
             r"forget what I said",
@@ -104,7 +115,7 @@ class SafetyGuard:
 
     def _load_group_targeting_patterns(self) -> List[str]:
         """Load group targeting patterns from JSON file"""
-        path = self.config.get('group_targeting_patterns_path', '')
+        path = self.group_targeting_patterns_path
         default_patterns = [ # Default patterns if file loading fails or path not specified
             r"your people",
             r"you \w+ are all", # \w+ is broader than just a letter group
@@ -123,7 +134,7 @@ class SafetyGuard:
 
     def _load_toxicity_patterns(self) -> List[str]:
         """Load toxicity patterns from JSON file"""
-        path = self.config.get('toxicity_patterns_path', '')
+        path = self.toxicity_patterns_path
         if not path:
             self.logger.warning("Toxicity patterns path not configured, using defaults")
             return self._default_toxicity_patterns()
@@ -137,7 +148,7 @@ class SafetyGuard:
 
     def _load_boundary_phrases(self) -> List[str]:
         """Load boundary testing phrases from JSON file"""
-        path = self.config.get('boundary_phrases_path', '')
+        path = self.boundary_phrases_path
         default_patterns = [
             r"what if I said",
             r"just hypothetically",
@@ -356,20 +367,10 @@ class SafetyGuard:
         - Temporal risk assessment
         """
         from src.agents.language.dialogue_context import DialogueContext
-        
-        # Load language config from YAML file
-        LANGUAGE_CONFIG_PATH = "src/agents/language/configs/language_config.yaml"
-        try:
-            with open(LANGUAGE_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                language_config = yaml.safe_load(f)
-            dialogue_context_settings = language_config.get("dialogue_context_settings", {})
-        except Exception as e:
-            self.logger.error(f"Failed to load language config: {str(e)}")
-            dialogue_context_settings = {}
-        
+
         # Use actual dialogue context object
         if not hasattr(self, "dialogue_context"):
-            self.dialogue_context = DialogueContext(config={"dialogue_context_settings": dialogue_context_settings})
+            self.dialogue_context = DialogueContext()
         
         dialogue_context = self.dialogue_context
         dialogue_context.add_message("user", text)
