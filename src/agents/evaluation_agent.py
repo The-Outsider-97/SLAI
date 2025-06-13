@@ -409,10 +409,10 @@ class EvaluationAgent(BaseAgent):
     def _prepare_statistical_dataset(self) -> Dict[str, List[float]]:
         """Prepare historical data for statistical analysis"""
         return {
-            'current_run': self.shared_memory.get("latest_metrics", {}).get('performance', {}).get('accuracy_history', []),
+            'current_run': (self.shared_memory.get("latest_metrics") or {}).get('performance', {}).get('accuracy_history', []),
             'previous_runs': [
                 entry['performance']['accuracy'] 
-                for entry in self.shared_memory.get("metric_history", [])
+                for entry in self.shared_memory.get("metric_history") or []
                 if 'performance' in entry
             ]
         }
@@ -929,23 +929,10 @@ class AIValidationSuite:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Evaluation Agent ===\n")
-    class SharedMemory:
-        def __init__(self, config=None):
-            self.data = {}
-    
-        def set(self, key, value):
-            self.data[key] = value
-    
-        def append(self, key, value):  # <-- fix here
-            if key not in self.data or not isinstance(self.data[key], list):
-                self.data[key] = []
-            self.data[key].append(value)
-    
-        def get(self, key, default=None):
-            return self.data.get(key, default)
+    from src.agents.collaborative.shared_memory import SharedMemory
     
     config = None
-    shared_memory = SharedMemory(config=None)
+    shared_memory = SharedMemory()
     agent_factory = lambda: None
 
     agent = EvaluationAgent(shared_memory, agent_factory, config={})
