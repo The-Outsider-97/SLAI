@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 import os, sys
 import abc
@@ -22,8 +22,6 @@ from logs.logger import get_logger
 
 logger = get_logger("SLAI Base Agent")
 
-# MAIN_CONFIG_PATH =  "src/agents/base/configs/agents_config.yaml"
-
 class BaseAgent(abc.ABC):
     def __init__(self, shared_memory, agent_factory, config=None):
         self.logger = get_logger(self.__class__.__name__)
@@ -33,15 +31,19 @@ class BaseAgent(abc.ABC):
             shared_memory = SharedMemory()
         self.shared_memory = shared_memory
         self.agent_factory=agent_factory
+
         self.config = get_config_section('base_agent')
-        self.metric_store = LightMetricStore()
-        
-        # Configurable parameters for error handling and retries
+        self.defer_initialization = self.config.get('defer_initialization')
+        self.memory_profile = self.config.get('memory_profile')
+        self.network_compression = self.config.get('network_compression')
         self.max_error_log_size = self.config.get('max_error_log_size', 50)
         self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
         self.max_task_retries = self.config.get('max_task_retries', 0)
         self.task_timeout_seconds = self.config.get('task_timeout_seconds', None)
+        self.task_timeout_seconds = None
 
+        self.metric_store = LightMetricStore()
+        
         # Initialize lazy components system
         self._component_initializers = {
             'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
