@@ -67,17 +67,6 @@ reward_model:
     safety: 0.1
     truthfulness: 0.05
 
-compliance_checker:
-  compliance_file_path: "src/agents/safety/templates/safety_compliance.json"
-  report_thresholds:
-    critical: 0.7
-    warning: 0.9
-  weights:
-    data_security: 0.3
-    model_security: 0.3
-    app_security: 0.2
-    operational_security: 0.2
-  
 attention_monitor:
   entropy_threshold: 2.5        # Normal attention entropy range
   uniformity_threshold: 0.25    # Normal attention uniformity range
@@ -102,6 +91,19 @@ security_error:
   forensic_hash_algorithm: "sha256"       # Options: sha256, sha3_256, blake2s
   forensic_hash_salt: "GAIA-SECURE-SALT"  # Optional salt for additional security
 
+compliance_checker:
+  compliance_file_path: "src/agents/safety/templates/safety_compliance.json"
+  phishing_model_path: "src/agents/safety/models/phishing_model.json"
+  enable_memory_bootstrap: true
+  report_thresholds:
+    critical: 0.7
+    warning: 0.9
+  weights:
+    data_security: 0.3
+    model_security: 0.3
+    app_security: 0.2
+    operational_security: 0.2
+  
 safety_guard:
   epsilon: 1.0
   sensitivity: 1.0
@@ -132,10 +134,10 @@ safety_guard:
       risk: 0.7
 
 cyber_safety:
+  cyber_rules_path: "src/agents/safety/templates/cyber_rules.json"
+  vulnerability_signatures_path: "src/agents/safety/templates/vulnerability_signatures.json"
   anomaly_threshold: 3.0
   max_log_history: 1000
   qnn_inspired_anomaly: True
   qnn_feature_dim: 8
   adaptive_centroid_lr: 0.01
-  cyber_rules_path: "src/agents/safety/templates/cyber_rules.json"
-  vulnerability_signatures_path: "src/agents/safety/templates/vulnerability_signatures.json"
