@@ -86,35 +86,37 @@ class Governor:
     def _init_knowledge_memory(self):
         """Initialize knowledge memory with governor-specific settings"""
         # Load rules from configured sources
-        rule_engine_config = get_config_section('rule_engine')
-        rule_sources = rule_engine_config.get('rule_sources', [])
-        
-        # Store rules in knowledge memory
-        for path in rule_sources:
-            abs_path = os.path.abspath(path)
-            if os.path.exists(abs_path):
+        rule_files = self.knowledge_agent.config.get("rule_files", [])
+        rules = []  # Ensure 'rules' is defined even if loading fails
+
+        for rule_file in rule_files:
+            abs_path = os.path.abspath(rule_file)
+            if not os.path.exists(abs_path):
+                logger.warning(f"Rule file not found: {abs_path}")
+                continue
+
+            with open(abs_path, 'r', encoding='utf-8') as f:
                 try:
-                    if abs_path.endswith((".yaml", ".yml")):
-                        with open(abs_path, 'r', encoding='utf-8') as f:
-                            rules = yaml.safe_load(f)
+                    file_rules = json.load(f)
+                    if isinstance(file_rules, list):
+                        rules.extend(file_rules)
                     else:
-                        with open(abs_path, 'r', encoding='utf-8') as f:
-                            rules = json.load(f)
-                            
-                    rule_id = hashlib.md5(abs_path.encode()).hexdigest()
-                    self.knowledge_memory.update(
-                        key=f"rule_source:{rule_id}",
-                        value=rules,
-                        metadata={
-                            "source": abs_path,
-                            "type": "rule_source",
-                            "timestamp": time.time()
-                        }
-                    )
+                        logger.warning(f"Expected list in {abs_path}, got {type(file_rules)}")
                 except Exception as e:
-                    logger.error(f"Error loading rules from {abs_path}: {str(e)}")
-            else:
-                logger.warning(f"Rule source path not found: {abs_path}")
+                    logger.error(f"Failed to parse rule file {abs_path}: {e}", exc_info=True)
+
+        if not rules:
+            logger.warning("No rules loaded into knowledge memory. Skipping initialization.")
+            return  # Prevent further processing
+
+        # Enforce structure on rules
+        for r in rules:
+            r.setdefault("conditions", [])
+            r.setdefault("description", r.get("name", ""))
+            r.setdefault("id", hashlib.md5(r.get('name', '').encode()).hexdigest())
+            r.setdefault("action", "")
+
+        self.knowledge_memory.add_all(rules)
 
     def _load_guidelines(self) -> Dict[str, list]:
         """Load ethical guidelines from configured paths"""
@@ -215,6 +217,12 @@ class Governor:
 
     def _rule_passes_governance(self, rule: Dict) -> bool:
         """Check if a rule meets governance requirements"""
+        conditions = rule.get("conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+        
+        if len(conditions) > complexity_threshold:
+            return False
         # 1. Check against ethical guidelines
         for principle in self.guidelines["principles"]:
             if "conflicts" in principle.get("tags", []) and any(
@@ -238,6 +246,9 @@ class Governor:
             ):
                 logger.warning(f"Rule {rule.get('id')} violates restriction {restriction['id']}")
                 return False
+            
+        logger.debug(f"Evaluating rule {rule.get('id')} - description: {rule.get('description')}")
+        logger.debug(f"Principles matched: {principle['id']}")  # Inside the matching loop
         
         return True
 
