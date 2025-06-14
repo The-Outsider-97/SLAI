@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 """
 SLAI Learning Agent: Core Component for Autonomous Learning & Improvement
