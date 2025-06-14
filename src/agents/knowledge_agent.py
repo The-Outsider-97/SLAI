@@ -451,6 +451,54 @@ class KnowledgeAgent(BaseAgent):
         for idx, doc in enumerate(self.knowledge_agent[-5:]):
             self.shared_memory.set(f"{tag}:{idx}", doc)
 
+    def discover_rules(self) -> list:
+        """
+        Discover and retrieve governance-approved rules inferred from the agent's knowledge and memory.
+    
+        Returns:
+            list: A list of enriched and governance-filtered rule dictionaries.
+        """
+        if not hasattr(self, 'governor') or not self.governor:
+            logger.warning("Governor not initialized; cannot discover rules.")
+            return []
+    
+        logger.info("Discovering rules using governance subsystem...")
+    
+        try:
+            raw_rules = self.governor.get_approved_rules()
+        except Exception as e:
+            logger.error(f"Error retrieving approved rules: {e}", exc_info=True)
+            return []
+    
+        # Internally use static thresholds/configs (you can refactor later to load from file or memory)
+        min_confidence = 0.7
+        include_confidence = True
+        annotate = True
+    
+        processed_rules = []
+        for rule in raw_rules:
+            if not isinstance(rule, dict):
+                logger.warning(f"Invalid rule format: {rule}")
+                continue
+    
+            confidence = rule.get("confidence", 1.0)
+            if include_confidence and confidence < min_confidence:
+                continue
+    
+            enriched_rule = dict(rule)  # safe copy
+            if annotate:
+                try:
+                    memory_matches = self.recall_memory(filters={"type": "system_rule", "id": rule.get("id")})
+                    if memory_matches:
+                        _, metadata = memory_matches[0]
+                        enriched_rule["metadata"] = metadata
+                except Exception as e:
+                    logger.warning(f"Failed to annotate rule {rule.get('id')}: {e}")
+    
+            processed_rules.append(enriched_rule)
+    
+        logger.info(f"Discovered {len(processed_rules)} governance-compliant rules.")
+        return processed_rules
 
 if __name__ == "__main__":
     print("\n=== Running Knopwledge Agent ===\n")
