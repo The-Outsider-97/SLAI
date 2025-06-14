@@ -1,1 +1,54 @@
 
+
+base_action: {}
+
+idle_action:
+  default_duration: 5.0
+  min_rest_threshold: 0.3
+  max_rest_threshold: 1.0
+
+move_to_action:
+  base_speed: 1.0
+  energy_cost: 0.05
+  replan_threshold: 0.05
+  avoidance_radius: 1.0
+  path_update_interval: 2.0
+
+pick_object_action:
+  grasp_time: 1.0       # Base grasp duration
+  min_distance: 0.5     # Max distance for picking
+  base_success_rate: 0.9 # Base success probability
+  energy_cost: 0.2      # Base energy consumption
+  max_weight: 5.0       # Maximum object weight
+  max_size: 1.0         # Maximum object size
+
+action_selector:
+  strategy: "hybrid"
+  strategy_weights:
+    energy_efficiency: 0.6
+    time_critical: 0.3
+    goal_proximity: 0.8
+
+task_coordinator:
+  default_timeout: 300
+  max_retries: 3
+
+execution_manager:
+  energy_level: 100.0
+
+execution_memory:
+  cache_dir: "src/agents/execution/cache/"
+  checkpoint_dir: "src/agents/execution/checkpointing/"
+  cookie_jar: "src/agents/execution/cookies/cookies.dat"
+  cache_ttl: 86400  # 24 hours
+  max_memory_cache: 500
+  compression: "lz4"
+  compression_threshold: 1024
+  cleanup_interval: 3600
+
+execution_error:
+  forensic_hash_algorithm: "sha256"
+  error_id_hash_algorithm: "sha256"
+  error_id_length: 16
+  report_format: "markdown"
+  forensic_hash_salt: ""
