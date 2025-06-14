@@ -112,6 +112,7 @@ Note: If you see an error about execution policy:
 
 3. Install requirements:
    ```console
+   pip install ConcurrentLogHandler
    pip install librosa
    pip install music21
    pip install mido
