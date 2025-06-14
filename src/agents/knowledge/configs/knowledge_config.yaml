@@ -46,8 +46,8 @@ rule_engine:
   min_rule_confidence: 0.6
   slow_rule_threshold: 0.5
   rule_sources:
-    - "src/agents/knowledge/rules/physics_rules.yaml"
-    - "src/agents/knowledge/rules/logic_rules.json"
+    - "src/agents/knowledge/templates/scientific_rules.json"  # "src/agents/knowledge/rules/physics_rules.yaml"
+    - "src/agents/knowledge/templates/civic_rules.json"
   save_inferred: true
   max_facts_per_rule: 10
 
