@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 """
 Planning Agent with Alternative Method Search Strategies
@@ -21,6 +21,7 @@ Real-World Usage:
 6. Healthcare Coordination: Adaptive treatment plan generation considering patient responses and resource availability
 """
 
+from email.policy import Policy
 import math
 import time
 import heapq
@@ -33,10 +34,11 @@ from src.agents.base.utils.main_config_loader import load_global_config, get_con
 from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                 SafetyMarginError, ResourceViolation, AcademicPlanningError)
 from src.agents.base_agent import BaseAgent
-from src.agents.planning.planning_executor import PlanningExecutor
 from src.agents.planning.planning_metrics import PlanningMetrics
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.planning.planning_executor import PlanningExecutor
 from src.agents.planning.heuristic_selector import HeuristicSelector
+from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.planning.probabilistic_planner import ProbabilisticPlanner
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
 from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
 from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
@@ -81,6 +83,7 @@ class PlanningAgent(BaseAgent):
         self.safety_planner = SafetyPlanning()
         self.resource_monitor = ResourceMonitor()
         self.executor = PlanningExecutor()
+        self.probabilistic_planner = ProbabilisticPlanner()
         self.safety_planner.resource_monitor = self.resource_monitor
 
         self.expected_state_projections = {}
@@ -128,6 +131,12 @@ class PlanningAgent(BaseAgent):
         self.task_library[task.name] = task
         if task.name in self.task_library:
             logger.warning(f"Task '{task.name}' already registered. Overwriting.")
+
+        # Initialize probabilistic actions if applicable
+        if task.is_probabilistic:
+            for action in task.probabilistic_actions:
+                self.probabilistic_planner.register_action(action)
+
         self.task_library[task.name] = task
         logger.debug(f"Registered task: {task.name}")
         # Initialize stats for Bayesian method selection if it's an abstract task
@@ -136,7 +145,7 @@ class PlanningAgent(BaseAgent):
                 key = (task.name, i)
                 self.method_stats[key]
 
-    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
+    def decompose_task(self, task_to_decompose: Task, current_state: Dict) -> Optional[List[Task]]:
         """Recursive decomposition with method selection tracking"""
         logger.debug(f"Decomposing task: {task_to_decompose.name}")
 
@@ -221,7 +230,7 @@ class PlanningAgent(BaseAgent):
                  # Backtracking would happen here: try another method for task_to_decompose
                  return None # Abort this decomposition path
 
-             decomposed_subplan = self.decompose_task(subtask_instance) # Recursive call
+             decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
 
              if decomposed_subplan is None:
                  logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
@@ -390,7 +399,19 @@ class PlanningAgent(BaseAgent):
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
         self._planning_start_time = time.time()
-        plan = self.decompose_task(goal_task)
+
+        # Use probabilistic planner for probabilistic tasks
+        if goal_task.is_probabilistic:
+            task_data = {
+                'initial_state': self.world_state,
+                'goal_state': goal_task.goal_state,
+                'success_threshold': goal_task.success_threshold
+            }
+            policy = self.probabilistic_planner.perform_task(task_data)
+            if policy:
+                return policy
+            return None
+        plan = self.decompose_task(goal_task, self.world_state)
         
         # Integrated safety check
         try:
@@ -451,6 +472,57 @@ class PlanningAgent(BaseAgent):
         logger.error("No safe alternatives available")
         return None
 
+    def _execute_policy(self, policy: Policy, goal_task: Task) -> Dict[str, any]:
+        """Execute probabilistic policy from PPDDL planner"""
+        current_state = self.get_current_state_tuple()
+        execution_path = []
+        success = False
+        
+        for _ in range(100):  # Max 100 steps
+            if current_state not in policy:
+                logger.error(f"No policy defined for state: {current_state}")
+                break
+            
+            action = policy[current_state]
+            if not action.preconditions(dict(current_state)):
+                logger.warning(f"Preconditions failed for {action.name}")
+                break
+            
+            # Sample outcome
+            r = random.random()
+            cumulative_prob = 0
+            for prob, effect in action.outcomes:
+                cumulative_prob += prob
+                if r <= cumulative_prob:
+                    next_state = dict(current_state)
+                    effect(next_state)  # Apply effect
+                    next_state_tuple = tuple(sorted(next_state.items()))
+                    
+                    # Record execution step
+                    execution_path.append({
+                        'action': action.name,
+                        'state': current_state,
+                        'next_state': next_state_tuple,
+                        'outcome_prob': prob
+                    })
+                    
+                    # Update world state
+                    self.world_state = next_state
+                    current_state = next_state_tuple
+                    break
+            
+            # Check goal satisfaction
+            if all(self.world_state.get(k) == v 
+                   for k, v in goal_task.goal_state.items()):
+                success = True
+                break
+        
+        return {
+            'status': 'SUCCESS' if success else 'FAILURE',
+            'execution_path': execution_path,
+            'final_state': self.world_state
+        }
+
     def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
         execution_metrics = {
             'success_count': 0,
@@ -458,6 +530,7 @@ class PlanningAgent(BaseAgent):
             'total_cost': 0.0,
             'resource_usage': defaultdict(float)
         }
+
 
         # Start execution monitoring
         self.executor.start_monitoring(plan, self.expected_state_projections)
@@ -542,12 +615,13 @@ class PlanningAgent(BaseAgent):
             failure_count=execution_metrics['failure_count'],
             resource_usage=execution_metrics['resource_usage']
         )
-        
-        return {
+        execution_summary = {
             "status": final_status.name,
             "world_state": self.world_state,
             "metrics": execution_metrics
         }
+        self._log_performance(execution_summary)
+        return execution_summary
 
     def replan_from_execution_failure(self, task: Optional[Task], reason: str):
         """Handle execution failures detected by monitor"""
@@ -723,6 +797,11 @@ class PlanningAgent(BaseAgent):
 
     def _execute_action(self, task: Task):
         """Execute task with resource locking"""
+        # Handle probabilistic actions differently
+        if task.is_probabilistic:
+            # Probabilistic effects handled in policy execution
+            return
+
         # Acquire resources
         self.resource_monitor.acquire_resources(task.resource_requirements)
         
@@ -732,6 +811,31 @@ class PlanningAgent(BaseAgent):
         finally:
             # Release resources
             self.resource_monitor.release_resources(task.resource_requirements)
+
+    def _log_performance(self, result: Dict[str, Any]):
+        """Logs the result of a planning and execution cycle to shared memory for the MetaController."""
+        # Use self.name to create a unique key for this agent's logs
+        log_key = f"log:performance:{self.name}"
+        
+        log_entry = {
+            'timestamp': time.time(),
+            'status': result.get('status'),
+            'metrics': {
+                'total_cost': result.get('metrics', {}).get('total_cost', 0),
+                'plan_length': len(self.current_plan),
+                'success_count': result.get('metrics', {}).get('success_count', 0),
+                'failure_count': result.get('metrics', {}).get('failure_count', 0),
+            }
+        }
+        
+        # Get the existing log (or a new deque) and append
+        performance_logs = self.shared_memory.get(log_key, default=deque(maxlen=500))
+        if not isinstance(performance_logs, deque):
+             performance_logs = deque(list(performance_logs), maxlen=500)
+
+        performance_logs.append(log_entry)
+        self.shared_memory.set(log_key, performance_logs)
+        logger.debug(f"Logged performance data to '{log_key}'.")
 
 def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
     """Full planning-execution cycle with safety and metrics"""
@@ -1148,10 +1252,11 @@ if __name__ == "__main__":
     print("\n=== Running AI Planning Agent Test ===\n")
     printer.status("Init", "Planning Agent initialized", "success")
     from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
     import datetime
 
-    shared_memory = SharedMemory
-    agent_factory = lambda: None
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
 
     planner = PlanningAgent(shared_memory, agent_factory, config=None)
     print(planner)
