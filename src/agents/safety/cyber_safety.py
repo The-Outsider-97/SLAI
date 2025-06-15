@@ -161,7 +161,7 @@ class CyberSafetyModule:
         return PyTorchSafetyModel(model)
 
     def _get_default_security_rules(self) -> Dict:
-        printer.status("INIT", "Fetching default security rules...", "info")
+        printer.status("CYBER", "Fetching default security rules...", "info")
 
         """Provides default security rules if none are loaded."""
         return {
@@ -182,7 +182,7 @@ class CyberSafetyModule:
         }
 
     def _get_default_vulnerability_signatures(self) -> Dict:
-        printer.status("INIT", "Fetching default vulnerability signatures...", "info")
+        printer.status("CYBER", "Fetching default vulnerability signatures...", "info")
 
         """Provides default vulnerability signatures if none are loaded."""
         # In a real system, this would be much more extensive (e.g., loading from a CVE database)
@@ -218,7 +218,7 @@ class CyberSafetyModule:
 
 
     def analyze_input(self, input_data: Any, context: str = "general") -> Dict:
-        printer.status("INIT", "Analyzing input...", "info")
+        printer.status("CYBER", "Analyzing input...", "info")
 
         """
         Analyzes input data (e.g., user prompt, configuration, code snippet) for cyber risks.
@@ -350,7 +350,7 @@ class CyberSafetyModule:
         }
 
     def _generate_recommendations(self, findings: List[Dict]) -> List[str]:
-        printer.status("INIT", "Generating recommendations...", "info")
+        printer.status("CYBER", "Generating recommendations...", "info")
 
         """Generates remediation advice based on findings."""
         recs = set() # Use a set to avoid duplicate recommendations
@@ -393,7 +393,7 @@ class CyberSafetyModule:
 
 
     def analyze_event_stream(self, event: Dict) -> Dict:
-        printer.status("INIT", "Analyzing streaming event...", "info")
+        printer.status("CYBER", "Analyzing streaming event...", "info")
 
         """
         Analyzes a stream of events (e.g., logs, API calls) for anomalies using
@@ -510,7 +510,7 @@ class CyberSafetyModule:
 
     def _map_to_feature_vector(self, numerical_features: Dict) -> np.ndarray:
         """Maps numerical features to a fixed-size vector for QNN-inspired processing."""
-        printer.status("INIT", "Vector mapping...", "info")
+        printer.status("CYBER", "Vector mapping...", "info")
 
         vector = np.zeros(self.qnn_feature_dim)
         if not numerical_features: return vector
@@ -542,7 +542,7 @@ class CyberSafetyModule:
         Conceptual simulation of a QNN-inspired anomaly score calculation using
         classical methods (NumPy). Simulates distance from an adaptive centroid.
         """
-        printer.status("INIT", "Simulate QNN anomaly...", "info")
+        printer.status("CYBER", "Simulate QNN anomaly...", "info")
 
         if self.qnn_state_representation is None:
             # Initialize centroid using the first vector seen
@@ -605,7 +605,7 @@ class CyberSafetyModule:
             Dict: Potential threats categorized by STRIDE.
                    {'threats': {'Spoofing': [...], ...}, 'overall_risk': str}
         """
-        printer.status("INIT", "Generating threat assessment", "info")
+        printer.status("CYBER", "Generating threat assessment", "info")
 
         threats = defaultdict(list)
         component = context_info.get('component', 'unknown_component').lower()
