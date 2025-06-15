@@ -13,9 +13,10 @@ from typing import Dict, List, Optional, Union
 from src.utils.interpretability import InterpretabilityHelper
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Security Attention Monitor")
+printer = PrettyPrinter
 
 class AttentionMonitor(torch.nn.Module):
     """Mechanistic interpretability tool (Bereska & Gavves, 2024)"""
@@ -23,21 +24,24 @@ class AttentionMonitor(torch.nn.Module):
         super().__init__()
         self.config = load_global_config()
         self.attention_config = get_config_section('attention_monitor')
-        memory = SecureMemory()
-        self.memory = memory
+        self.entropy_threshold = self.attention_config.get('entropy_threshold')
+        self.uniformity_threshold = self.attention_config.get('uniformity_threshold')
+        self.anomaly_threshold = self.attention_config.get('anomaly_threshold')
+        self.anomaly_detection = self.attention_config.get('anomaly_detection')
+        self.store_analysis = self.attention_config.get('store_analysis')
+        self.visualization = self.attention_config.get('visualization')
+
+        self.memory = SecureMemory()
         self.interpreter = InterpretabilityHelper()
         self.device = device
-        
-        # Load configuration parameters
-        self.entropy_threshold = self.config.get('entropy_threshold', 3.0)
-        self.uniformity_threshold = self.config.get('uniformity_threshold', 0.2)
-        self.anomaly_detection = self.config.get('anomaly_detection', True)
-        
+
         logger.info("Attention Monitor initialized with entropy threshold: %.2f", 
                    self.entropy_threshold)
 
     def get_anomaly_interpretation(self, analysis: Dict) -> str:
         """Generate human-readable interpretation of attention anomalies"""
+        printer.status("MONITOR", "Generating interpretation", "info")
+
         findings = []
         
         if analysis.get("anomaly", False):
@@ -52,6 +56,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def analyze_attention(self, attention_matrix: torch.Tensor, context: Dict = None) -> Dict:
         """Comprehensive attention pattern analysis with security insights"""
+        printer.status("MONITOR", "Analyzing attention", "info")
+
         # Basic metrics
         metrics = {
             "max_attention": attention_matrix.max().item(),
@@ -83,6 +89,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def generate_report(self, analysis: Dict) -> str:
         """Generate comprehensive attention analysis report"""
+        printer.status("MONITOR", "Generating report", "info")
+
         report = [
             "# Attention Analysis Report",
             f"**Generated**: {datetime.now().isoformat()}",
@@ -115,6 +123,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def _calculate_entropy(self, matrix: torch.Tensor) -> float:
         """Information-theoretic attention analysis with normalization"""
+        printer.status("MONITOR", "Calculating report", "info")
+
         flat = matrix.flatten()
         flat = flat / flat.sum()  # Normalize to probability distribution
         # Filter out zero probabilities to avoid log(0)
@@ -124,12 +134,16 @@ class AttentionMonitor(torch.nn.Module):
 
     def _calculate_uniformity(self, matrix: torch.Tensor) -> float:
         """Measure of attention dispersion with scaling"""
+        printer.status("MONITOR", "Calculating uniformity", "info")
+
         std = matrix.std()
         mean = matrix.mean()
         return (std / mean).item() if mean > 0 else 0
 
     def _calculate_head_importance(self, matrix: torch.Tensor) -> List[float]:
         """Calculate importance of each attention head"""
+        printer.status("MONITOR", "Calculating importance", "info")
+
         if matrix.dim() < 3:
             return [1.0]  # Single head
         
@@ -147,12 +161,16 @@ class AttentionMonitor(torch.nn.Module):
 
     def _calculate_dispersion(self, matrix: torch.Tensor) -> float:
         """Calculate attention dispersion index (0-1 scale)"""
+        printer.status("MONITOR", "Calculating dispersion", "info")
+
         max_val = matrix.max()
         min_val = matrix.min()
         return ((max_val - min_val) / (max_val + min_val)).item() if max_val + min_val > 0 else 0
 
     def _identify_focus_pattern(self, matrix: torch.Tensor) -> str:
         """Identify attention focus pattern"""
+        printer.status("MONITOR", "Identifying patterns", "info")
+
         row_max = matrix.max(dim=1).values.mean().item()
         col_max = matrix.max(dim=0).values.mean().item()
         diag = torch.diag(matrix).mean().item()
@@ -165,6 +183,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def _detect_anomalies(self, matrix: torch.Tensor) -> float:
         """Detect anomalous attention patterns using statistical methods"""
+        printer.status("MONITOR", "Detecting anomalies", "info")
+
         # Entropy-based anomaly detection
         entropy = self._calculate_entropy(matrix)
         entropy_dev = abs(entropy - self.entropy_threshold) / self.entropy_threshold
@@ -178,6 +198,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def _assess_security(self, metrics: Dict) -> Dict:
         """Assess security implications of attention patterns"""
+        printer.status("MONITOR", "Assessing security", "info")
+
         findings = []
         secure = True
         confidence = 1.0
@@ -208,6 +230,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def visualize_attention(self, matrix: torch.Tensor) -> str:
         """Generate attention visualization and return as base64"""
+        printer.status("MONITOR", "Vizualizing attention", "info")
+
         # Convert to numpy for visualization (only place where conversion happens)
         plt.figure(figsize=(10, 8))
         plt.imshow(matrix.cpu().numpy(), cmap='viridis', interpolation='nearest')
@@ -225,6 +249,8 @@ class AttentionMonitor(torch.nn.Module):
 
     def _store_analysis(self, metrics: Dict, context: Dict = None):
         """Store attention analysis in secure memory"""
+        printer.status("MONITOR", "Storing analysis", "info")
+
         record = {
             "metrics": metrics,
             "context": context,
@@ -242,6 +268,8 @@ class AttentionAdapter:
         self.monitor = monitor
         
     def log_attention(self, attention_matrix: torch.Tensor):
+        printer.status("ADAPT", "Log attention", "info")
+
         # Reduce to 2D: average over heads and take first batch
         if attention_matrix.dim() == 4:
             # Average over heads: [batch, heads, seq, seq] -> [batch, seq, seq]
@@ -253,9 +281,11 @@ class AttentionAdapter:
         attention_matrix = attention_matrix.to(self.monitor.device)
         self.monitor.analyze_attention(attention_matrix)
 
-# Usage Example
+
 if __name__ == "__main__":
-    print("\n=== Running Security Attention Monitor ===\n")
+    print("\n=== Running Security Attention Monitor Test ===\n")
+    printer.status("Init", "Security Attention Monitor initialized", "success")
+
     device='cpu'
     
     # Create sample attention matrix using torch
