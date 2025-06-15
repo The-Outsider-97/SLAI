@@ -173,6 +173,11 @@ class Task:
     parent: Optional['Task'] = None
     selected_method: int = 0
     cost: float = 1.0
+    
+    # New properties for probabilistic tasks
+    is_probabilistic: bool = False
+    probabilistic_actions: List[Any] = field(default_factory=list)  # List of ProbabilisticAction objects
+    success_threshold: float = 0.9  # Default success probability threshold
 
     def copy(self) -> 'Task':
         return Task(
@@ -181,7 +186,11 @@ class Task:
             methods=self.methods,
             preconditions=self.preconditions,
             effects=self.effects,
-            cost=self.cost
+            cost=self.cost,
+            # Copy probabilistic properties
+            is_probabilistic=self.is_probabilistic,
+            probabilistic_actions=self.probabilistic_actions.copy(),
+            success_threshold=self.success_threshold
         )
 
     def get_subtasks(self, method_index: Optional[int] = None) -> List['Task']:
