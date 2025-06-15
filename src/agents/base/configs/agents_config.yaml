@@ -105,12 +105,19 @@ reasoning_agent:
 
 safety_agent:
     constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
+    audit_level: 2
+    collect_feedback: true
+    enable_learnable_aggregation: false
+    system_models: {}
+    known_hazards: []
+    global_losses: []
+    safety_policies: []
+    architecture_map: {}
+    formal_specs: {}
+    fault_tree_config: {}
     risk_thresholds:
         overall_safety: 0.75
         cyber_risk: 0.5
         compliance_failure_is_blocker: true
-    audit_level: 2
-    collect_feedback: true
-    enable_learnable_aggregation: false
     secure_memory:
         default_ttl_seconds: 3600
