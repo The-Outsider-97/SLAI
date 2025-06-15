@@ -23,9 +23,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score
 from datetime import datetime
-from typing import List
+from typing import List, Any, Dict, Tuple
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.base_heuristic import BaseHeuristics
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Decision Tree Heuristic")
@@ -35,7 +36,7 @@ class DotDict(dict):
     def __getattr__(self, item):
         return self.get(item)
 
-class DecisionTreeHeuristic:
+class DecisionTreeHeuristic(BaseHeuristics):
     def __init__(self):
         self.config = load_global_config()
 
@@ -121,7 +122,7 @@ class DecisionTreeHeuristic:
         feature_idx = 0
         
         # Core features
-        features[feature_idx] = self._normalized_task_depth(task)
+        features[feature_idx] = self._calculate_task_depth(task)
         feature_idx += 1
         
         features[feature_idx] = self._calculate_goal_overlap(task, world_state)
@@ -149,60 +150,7 @@ class DecisionTreeHeuristic:
         return features.astype(np.float32)
 
     def _priority_decay_factor(self, task):
-        return 0.95 ** self._normalized_task_depth(task)  # Exponential decay
-
-    def _normalized_task_depth(self, task):
-        depth = 0
-        current = task
-        while current:
-            if isinstance(current, dict):
-                current = current.get("parent")
-            else:
-                current = getattr(current, "parent", None)
-            if current:
-                depth += 1
-        return depth / 20  # Normalized assuming max depth 20
-
-    def _calculate_goal_overlap(self, task, world_state):
-        printer.status("INIT", "Goal overlap calculation succesfully initialized", "info")
-
-        goal_state = task.get("goal_state", {})
-        return len(set(goal_state.keys()) & set(world_state.keys())) / len(goal_state) if goal_state else 0.0
-
-    def _calculate_method_failure_rate(self, task, method_stats):
-        printer.status("INIT", "Failure rate calculation succesfully initialized", "info")
-
-        key = (task.get("name"), task.get("selected_method"))
-        stats = method_stats.get(key, {'success': 1, 'total': 2})
-        return 1 - (stats['success'] / stats['total']) if stats['total'] > 0 else 1.0
-
-    def _calculate_state_diversity(self, world_state):
-        printer.status("INIT", "State diversity calculation succesfully initialized", "info")
-
-        state_vals = [float(v) for v in world_state.values() 
-                     if isinstance(v, (int, float))]
-        return np.std(state_vals) if state_vals else 0
-
-    def _time_since_creation(self, task):
-        creation_time = task.get("creation_time")
-        if creation_time is None:
-            return 0.0
-        if isinstance(creation_time, str):
-            creation_time = datetime.fromisoformat(creation_time)
-        return (datetime.now() - creation_time).total_seconds() / 3600  # Hours
-
-    def _deadline_proximity(self, task):
-        creation_time = task.get("creation_time")
-        deadline = task.get("deadline")
-        if not creation_time or not deadline:
-            return 0.0
-        if isinstance(creation_time, str):
-            creation_time = datetime.fromisoformat(creation_time)
-        if isinstance(deadline, str):
-            deadline = datetime.fromisoformat(deadline)
-        total_time = (deadline - creation_time).total_seconds()
-        elapsed = (datetime.now() - creation_time).total_seconds()
-        return elapsed / total_time if total_time > 0 else 0.0
+        return 0.95 ** self._calculate_task_depth(task)  # Exponential decay
 
     def retrain_model(self):
         """Periodic retraining with new data"""
@@ -398,6 +346,7 @@ if __name__ == "__main__":
     stats = {
         ("navigate_to_room", 0): {"success": 8, "total": 10}
     }
+    id = 2457467
 
     prob = planner01.predict_success_prob(task=task, world_state=state, method_stats=stats)
     features = planner01.extract_features(task=task, world_state=state, method_stats=stats)
