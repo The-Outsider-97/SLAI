@@ -94,6 +94,7 @@ class SharedMemory:
         self._expiration = {}
         self.subscribers = {}
         self.callbacks = {}
+        self._tags = defaultdict(list)
 
         self.current_memory = 0  # Initialize memory usage counter
         self._access_log = OrderedDict()  # key -> last access time
@@ -215,9 +216,12 @@ class SharedMemory:
         """Rough estimate of object size in bytes."""
         return asizeof.asizeof(obj)
 
-    def put(self, key, value, ttl=None, priority=None):
+    def put(self, key, value, ttl=None, priority=None, tags=None, **kwargs):
         self._simulate_network()
         current_time = time.time()
+
+        if tags:
+            self._tags[key] = tags
         
         with self._lock:
             # Create new version
@@ -304,7 +308,18 @@ class SharedMemory:
                         continue
                 return found_version.value if found_version else default
             
-        #return default
+    def get_by_tag(self, tag, limit=None):
+        """Retrieve items by tag with optional limit"""
+        with self._lock:
+            items = []
+            for key in list(self._data.keys()):
+                if tag in self._tags.get(key, []):
+                    items.append({
+                        'key': key,
+                        'value': self.get(key),
+                        'tags': self._tags[key]
+                    })
+            return items[:limit] if limit else items
 
     def save_to_file(self, filename):
         with open(filename, 'wb') as f:
