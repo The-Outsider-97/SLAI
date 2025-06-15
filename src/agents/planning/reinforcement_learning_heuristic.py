@@ -24,6 +24,7 @@ from typing import List, Tuple
 from datetime import datetime
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.base_heuristic import BaseHeuristics
 from src.agents.learning.utils.policy_network import PolicyNetwork
 from logs.logger import get_logger, PrettyPrinter
 
@@ -34,7 +35,7 @@ class DotDict(dict):
     def __getattr__(self, item):
         return self.get(item)
 
-class ReinforcementLearningHeuristic:
+class ReinforcementLearningHeuristic(BaseHeuristics):
     def __init__(self):
         self.config = load_global_config()
 
@@ -178,57 +179,6 @@ class ReinforcementLearningHeuristic:
             return np.zeros(len(self.feature_names))
             
         return features.astype(np.float32)
-
-    def _calculate_task_depth(self, task):
-        depth = 0
-        current = task
-        while current and isinstance(current, dict) and current.get("parent"):
-            depth += 1
-            current = current["parent"]
-        return depth / 10  # Normalized
-
-    def _calculate_goal_overlap(self, task, world_state):
-        printer.status("INIT", "Goal overlap calculation succesfully initialized", "info")
-
-        goal_state = task.get("goal_state", {})
-        return len(set(goal_state.keys()) & set(world_state.keys())) / len(goal_state) if goal_state else 0.0
-
-    def _calculate_method_failure_rate(self, task, method_stats):
-        printer.status("INIT", "Failure rate calculation succesfully initialized", "info")
-
-        key = (task.get("name"), task.get("selected_method"))
-        stats = method_stats.get(key, {'success': 1, 'total': 2})
-        return 1 - (stats['success'] / stats['total']) if stats['total'] > 0 else 1.0
-
-    def _calculate_state_diversity(self, world_state):
-        printer.status("INIT", "State diversity calculation succesfully initialized", "info")
-
-        state_vals = [float(v) for v in world_state.values() 
-                     if isinstance(v, (int, float))]
-        return np.std(state_vals) if state_vals else 0
-
-    def _time_since_creation(self, task):
-        printer.status("INIT", "Creation time", "info")
-
-        creation_time = task.get("creation_time")
-        if not creation_time: return 0.0
-        if isinstance(creation_time, str):
-            creation_time = datetime.fromisoformat(creation_time)
-        return (datetime.now() - creation_time).total_seconds() / 3600  # Hours
-
-    def _deadline_proximity(self, task):
-        printer.status("INIT", "Deadline proximity", "info")
-
-        creation_time = task.get("creation_time")
-        deadline = task.get("deadline")
-        if not creation_time or not deadline: return 0.0
-        if isinstance(creation_time, str):
-            creation_time = datetime.fromisoformat(creation_time)
-        if isinstance(deadline, str):
-            deadline = datetime.fromisoformat(deadline)
-        total_time = (deadline - creation_time).total_seconds()
-        elapsed = (datetime.now() - creation_time).total_seconds()
-        return elapsed / total_time if total_time > 0 else 0.0
 
     def predict_success_prob(self, task, world_state, method_stats, method_id: str) -> float:
         """
