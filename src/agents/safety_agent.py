@@ -14,13 +14,17 @@ Academic Foundations:
 - Interpretability: Causal Scrubbing (arXiv:2304.00683)
 """
 
+from datetime import datetime
 import random
 import hashlib
 import os, sys
+import string
+import gym
 import re
 import time
 import torch
 import json, yaml
+import unicodedata
 import numpy as np
 
 from pathlib import Path
@@ -28,17 +32,19 @@ from typing import Dict, List, Optional, Any
 from dataclasses import asdict, dataclass, field, fields
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.safety.utils.secure_stpa import SecureSTPA
 from src.agents.safety.reward_model import RewardModel
-from src.agents.safety.secure_memory import SecureMemory
 from src.agents.safety.cyber_safety import CyberSafetyModule
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.safety.compliance_checker import ComplianceChecker
 from src.agents.safety.attention_monitor import AttentionMonitor
 from src.agents.safety.adaptive_security import AdaptiveSecurity
+from src.agents.collaborative.shared_memory import get_shared_memory
 from src.agents.base_agent import BaseAgent
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Safety Agent")
+printer = PrettyPrinter
 
 INCIDENT_RESPONSE = {
     "privacy": [
@@ -70,24 +76,32 @@ class SafetyAgent(BaseAgent):
         self.config = load_global_config()
         self.safety_config = get_config_section('safety_agent')
         
-        self.risk_thresholds = self.safety_config.get('risk_thresholds', {})
-        self.audit_level = self.safety_config.get('audit_level', 2)
-        self.collect_feedback = self.safety_config.get('collect_feedback', True)
-        self.enable_learnable_aggregation = self.safety_config.get('enable_learnable_aggregation', False)
-        self.secure_memory_config = self.safety_config.get('secure_memory', field(default_factory=lambda: {"default_ttl_seconds": 3600}))
-        self.constitutional_rules_path = self.safety_config.get(
-            'constitutional_rules_path', 
-            "src/agents/safety/templates/constitutional_rules.json"
-        )
+        self.constitutional_rules_path = self.safety_config.get('constitutional_rules_path')
+        self.audit_level = self.safety_config.get('audit_level')
+        self.collect_feedback = self.safety_config.get('collect_feedback')
+        self.enable_learnable_aggregation = self.safety_config.get('enable_learnable_aggregation')
+        self.architecture_map = self.safety_config.get('architecture_map', {})
+        self.system_models = self.safety_config.get('system_models', {})
+        self.known_hazards = self.safety_config.get('known_hazards', [])
+        self.global_losses = self.safety_config.get('global_losses', [])
+        self.safety_policies = self.safety_config.get('safety_policies', [])
+        self.formal_specs = self.safety_config.get('formal_specs', {})
+        self.fault_tree_config = self.safety_config.get('fault_tree_config', {})
+        self.risk_thresholds = self.safety_config.get('risk_thresholds', {
+            'overall_safety', 'cyber_risk', 'compliance_failure_is_blocker'
+        })
+        self.secure_memory_config = self.safety_config.get('secure_memory',
+            field(default_factory=lambda: {"default_ttl_seconds"}
+        ))
 
         # Add SafetyAgent components
         self.reward_model = RewardModel()
         self.attention_monitor = AttentionMonitor()
         self.safety_guard = SafetyGuard()
+        self.secure_stpa = SecureSTPA()
         self.compliance_checker = ComplianceChecker()
         self.adaptive_security = AdaptiveSecurity()
         self.cyber_safety = CyberSafetyModule()
-        self.secure_memory = SecureMemory()
 
         # Initialize constitutional rules
         self.constitution = self._load_constitution()
@@ -106,10 +120,10 @@ class SafetyAgent(BaseAgent):
             logger.info(f"Constitutional rules loaded successfully from {constitution_path}")
             return rules
         except FileNotFoundError:
-            logger.error(f"Constitutional rules file not found at {self.config.constitutional_rules_path}")
+            logger.error(f"Constitutional rules file not found at {self.constitutional_rules_path}")
             raise
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in constitutional rules file {self.config.constitutional_rules_path}: {e}")
+            logger.error(f"Invalid JSON in constitutional rules file {self.constitutional_rules_path}: {e}")
             raise
         except Exception as e:
             logger.error(f"Error loading constitutional rules: {e}")
@@ -378,7 +392,9 @@ class SafetyAgent(BaseAgent):
             validation_result["reward_scores"] = reward_scores
             # Example: check composite score from reward model
             composite_score = reward_scores.get("composite", 0.0)
-            if composite_score < self.config.risk_thresholds.get("overall_safety", 0.75): # Assuming lower score is worse
+            # FIX: Access risk_thresholds from dictionary instead of object attribute
+            threshold = self.risk_thresholds.get("overall_safety", 0.75)
+            if composite_score < threshold: # Assuming lower score is worse
                 validation_result["approved"] = False
                 validation_result["details"].append(f"Ethical/Safety score ({composite_score}) below threshold.")
                 self._log_audit_event("action_validation_fail", {"reason": "low_reward_score", "action": action_params, "scores": reward_scores})
@@ -387,16 +403,71 @@ class SafetyAgent(BaseAgent):
             validation_result["details"].append(f"Error in reward model check: {str(e)}")
             validation_result["approved"] = False
 
-
         # 3. STPA-inspired checks / Unsafe Control Actions (UCAs)
-        # This part would be highly dependent on the specific actions and system design.
-        # Example UCA: Action attempts to delete critical data without proper authorization.
-        # For this, `action_params` and `action_context` would need to be structured.
-        # e.g., if action_params = {"action_name": "delete_file", "path": "/critical/system_file", "user_roles": ["guest"]}
-        uca_violation = self._check_for_ucas(action_params, action_context)
-        if uca_violation:
-            validation_result["approved"] = False
-            validation_result["details"].append(f"Unsafe Control Action detected: {uca_violation}")
+        # Extract relevant metadata for STPA
+        controller_id = "safety_agent"
+        action_name = action_params.get("name", "unknown_action")
+        execution_state = action_params.get("execution_context", {})
+        timestamp = action_params.get("timestamp", datetime.now().isoformat())
+        
+        # Ensure control structure has been modeled
+        if not self.secure_stpa.control_structure:
+            self.secure_stpa.model_control_structure(
+                structure=self.architecture_map,  # assumed controller/component map
+                process_models=self.system_models  # optional
+            )
+        
+        # Dynamically define scope (hazards, losses, constraints)
+        if not self.secure_stpa.hazards:
+            self.secure_stpa.define_analysis_scope(
+                losses=self.global_losses,
+                hazards=self.known_hazards,
+                constraints=self.safety_policies
+            )
+        
+        # Generate or refresh Unsafe Control Actions (UCAs)
+        uca_list = self.secure_stpa.identify_unsafe_control_actions()
+        
+        # Build contextual decision space around each UCA
+        context_tables = self.secure_stpa.build_context_tables(
+            formal_spec=self.formal_specs,
+            fta_config=self.fault_tree_config
+        )
+        
+        # Identify potential matches between input action and unsafe context entries
+        uca_risks = []
+        for context_set in context_tables.values():
+            for entry in context_set:
+                if action_name == entry["control_action"]:
+                    match_score = self._assess_contextual_match(entry, execution_state)
+                    if match_score > 0.7:
+                        uca_risks.append({
+                            "uca_id": entry["uca_id"],
+                            "hazard_link": entry["guideword"],
+                            "score": match_score,
+                            "conditions": entry["hazard_conditions"],
+                            "variables": entry["process_variables"],
+                            "mitigation": self.secure_stpa._generate_mitigation_strategy(entry),
+                            "state_constraints": entry["state_constraints"]
+                        })
+        
+        # Log, store, and flag risk if present
+        if uca_risks:
+            for risk in uca_risks:
+                self.memory.log_event("stpa_uca_risk", {
+                    "action": action_name,
+                    "risk": risk,
+                    "agent": controller_id,
+                    "timestamp": timestamp
+                })
+        
+            # Add structured alert to response
+            alerts.append({
+                "type": "unsafe_control_action",
+                "severity": "high",
+                "action": action_name,
+                "evidence": uca_risks
+            })
 
         # 4. Constitutional AI Check (if action involves generating text or making decisions with ethical implications)
         # This is more for outputs, but could be adapted for action parameters if they represent text.
@@ -437,26 +508,54 @@ class SafetyAgent(BaseAgent):
         return validation_result
 
     def _create_risk_aggregation_env(self):
-        """Creates a custom environment for risk aggregation learning"""
-        import gym
-        class RiskAggregationEnv:
+        class RiskAggregationEnv(gym.Env):
             def __init__(self, safety_agent):
                 self.safety_agent = safety_agent
                 self.observation_space = gym.spaces.Box(
                     low=0, high=1, shape=(6,), dtype=np.float32
-                )  # [guard, cyber, reward, attention, compliance, context]
+                )
                 self.action_space = gym.spaces.Box(
                     low=0, high=1, shape=(1,), dtype=np.float32
-                )  # Final safety score
-
+                )
+                self.current_obs = None
+                self.ground_truth = None
+                self.step_count = 0
+                self.max_steps = 100
+    
             def reset(self):
-                return np.zeros(6, dtype=np.float32)
-
+                self.step_count = 0
+                self.current_obs, self.ground_truth = self._generate_sample()
+                return self.current_obs
+    
             def step(self, action):
-                # Reward calculation will be based on human feedback and incident outcomes
-                # Implemented in _update_risk_aggregator()
-                return self.reset(), 0, False, {}
-
+                self.step_count += 1
+                prediction = np.clip(action[0], 0, 1)
+                reward = -abs(prediction - self.ground_truth)  # lower distance = higher reward
+                done = self.step_count >= self.max_steps
+                obs, self.ground_truth = self._generate_sample()
+                self.current_obs = obs
+                return obs, reward, done, {}
+    
+            def _generate_sample(self):
+                """
+                Simulate the output of the safety pipeline.
+                Replace this with actual data flow if you want to connect real models.
+                """
+                # Simulated 6D input from submodules
+                observation = np.random.rand(6).astype(np.float32)
+    
+                # Target output (e.g., human-reviewed safety score)
+                ground_truth = float(
+                    0.4 * observation[0] + 
+                    0.2 * observation[1] + 
+                    0.1 * observation[2] + 
+                    0.1 * observation[3] +
+                    0.1 * observation[4] +
+                    0.1 * observation[5]
+                )
+                ground_truth = np.clip(ground_truth, 0, 1)
+                return observation, ground_truth
+    
         return RiskAggregationEnv(self)
 
     def _check_for_ucas(self, action_params: Dict[str, Any], action_context: Dict[str, Any]) -> Optional[str]:
@@ -584,21 +683,47 @@ class SafetyAgent(BaseAgent):
 
     def _detect_pii(self, data_str: str) -> int:
         """Uses SafetyGuard to detect PII. Returns count of detected PII types."""
-        # SafetyGuard's _detect_pii returns a list of matched patterns.
         pii_found = self.safety_guard._detect_pii(data_str)
         return len(pii_found)
 
     def _detect_adversarial_patterns(self, text: str) -> bool:
-        """Detect unicode attacks and obfuscation attempts."""
-        # Basic check for non-standard characters often used in obfuscation
-        if re.search(r'[\u200B-\u200D\u202E\uFEFF]', text): # Zero-width spaces, RLO, BOM
+        """Detects unicode, homoglyph, and obfuscation patterns indicative of adversarial manipulation."""
+    
+        # 1. Invisible/Control Characters
+        if re.search(r'[\u200B-\u200D\u202E\uFEFF\u2060\u180E]', text):
+            logger.warning("Adversarial pattern: Invisible/control character found.")
             return True
-        # Check if ASCII "cleaned" version is different (indicates non-ASCII chars used, could be for obfuscation)
-        if text.encode('ascii', 'ignore').decode('ascii', 'ignore') != text:
-            # This is too broad for just adversarial, many legitimate non-ASCII chars exist.
-            # A more sophisticated check would look for homoglyphs or mixed scripts.
-            # For now, let's make it less aggressive or combine with other signals.
-            pass # Placeholder for better adversarial text detection
+    
+        # 2. Bidirectional (Bidi) override characters
+        if "\u202e" in text or any(c in text for c in ["\u202a", "\u202b", "\u202c", "\u202d"]):
+            logger.warning("Adversarial pattern: Bidirectional override detected.")
+            return True
+    
+        # 3. Homoglyph Check (mixed unicode scripts)
+        scripts = set()
+        for char in text:
+            try:
+                script = unicodedata.name(char).split(' ')[0]
+                scripts.add(script)
+            except ValueError:
+                continue
+    
+        if len(scripts) > 2:  # Latin + [Cyrillic, Greek, etc.]
+            logger.warning(f"Adversarial pattern: Multiple Unicode scripts detected: {scripts}")
+            return True
+    
+        # 4. ASCII Stripping Check
+        ascii_stripped = text.encode("ascii", "ignore").decode("ascii", "ignore")
+        if ascii_stripped != text:
+            ratio = len(ascii_stripped) / max(len(text), 1)
+            if ratio < 0.8:
+                logger.warning("Adversarial pattern: High proportion of non-ASCII characters.")
+                return True
+    
+        # 5. Excessive punctuation or repeated symbols
+        if re.search(r'([^\w\s]{3,})', text):  # e.g., '!!!', '$$$$', '///'
+            return True
+    
         return False
 
     def _trigger_alert(self, severity: str, message: str, details: Optional[Dict] = None):
@@ -617,7 +742,7 @@ class SafetyAgent(BaseAgent):
         else:
             logger.info(f"LOW SEVERITY ALERT: {message} | Details: {details}")
 
-        # Persist alert to shared_memory (collaborative one)
+        # Persist alert to shared_memory
         alerts_list = self.shared_memory.get("system_alerts", [])
         if not isinstance(alerts_list, list): alerts_list = [] # Initialize if not list
         alerts_list.append(log_entry)
@@ -642,37 +767,46 @@ class SafetyAgent(BaseAgent):
         self._trigger_alert("critical", f"Incident '{category}' handled. Review required.", incident_details)
 
     def assess_risk(self, overall_score: float, task_type: str = "general") -> bool:
-        """Assess if the overall score is within acceptable risk thresholds."""
-        # This method might be too simplistic now that perform_task gives a detailed assessment.
-        # It can be used as a quick check.
-        threshold = self.config.risk_thresholds.get(task_type, 
-                        self.config.risk_thresholds.get("overall_safety", 0.75))
-        is_safe = overall_score >= threshold # Assuming higher score is better
+        """
+        Determine whether the given overall safety score is acceptable for a given task type.
+        
+        Uses configured risk thresholds or defaults based on task context. Can integrate
+        domain-specific thresholds in the future (e.g., finance, healthcare).
+    
+        Args:
+            overall_score (float): The computed safety score (usually in range [0, 1]).
+            task_type (str): The type of task being assessed for contextual risk evaluation.
+    
+        Returns:
+            bool: True if the score is considered safe for the given task_type.
+        """
+        # Step 1: Fetch threshold using priority: specific > general > overall
+        threshold = self.risk_thresholds.get(
+            task_type, 
+            self.risk_thresholds.get("general", self.risk_thresholds.get("overall_safety", 0.75))
+        )
+    
+        # Step 2: Log contextual info for auditing
+        logger.debug(f"[{self.name}] Assessing risk for task '{task_type}': score={overall_score:.3f}, threshold={threshold:.3f}")
+    
+        # Step 3: Apply binary risk decision
+        is_safe = overall_score >= threshold
+    
+        # Step 4: If unsafe, trigger escalation path
         if not is_safe:
-            logger.warning(f"[{self.name}] Risk assessment failed for task type '{task_type}': score {overall_score} < threshold {threshold}")
+            logger.warning(
+                f"[{self.name}] Risk assessment failed: score={overall_score:.3f} < threshold={threshold:.3f} for task '{task_type}'"
+            )
+            self._log_audit_event(
+                "risk_assessment_failed",
+                {
+                    "task_type": task_type,
+                    "score": overall_score,
+                    "threshold": threshold
+                }
+            )
+    
         return is_safe
-
-    def suggest_correction(self, current_assessment: Dict, task_data: Any) -> Dict:
-        """Suggests corrections based on the assessment."""
-        # This needs to be more intelligent. For now, a placeholder.
-        if not current_assessment.get("is_safe"):
-            suggestion = {
-                "message": "The input/action is considered unsafe based on current assessment. Consider revising or blocking.",
-                "areas_of_concern": []
-            }
-            if current_assessment.get("reports",{}).get("cyber_safety",{}).get("risk_score",0) > self.config.risk_thresholds.get("cyber_risk", 0.5):
-                suggestion["areas_of_concern"].append("High Cyber Risk")
-            if current_assessment.get("final_safety_score", 1.0) < self.config.risk_thresholds.get("overall_safety", 0.75):
-                suggestion["areas_of_concern"].append("Low Overall Safety Score")
-            
-            # Could also try to apply constitutional rules here if the task_data is text
-            if isinstance(task_data, str):
-                corrected_text = self._apply_constitutional_rules(task_data, current_assessment)
-                if corrected_text != task_data: # If changes were made
-                    suggestion["suggested_safe_version (text_input)"] = corrected_text
-            
-            return suggestion
-        return {"message": "No corrections deemed necessary."}
 
     def train_embedded_models(self, training_cycle_id: str):
         """Orchestrates training for adaptable sub-modules like RewardModel and AdaptiveSecurity."""
@@ -685,18 +819,16 @@ class SafetyAgent(BaseAgent):
         # Example: Retrain AdaptiveSecurity phishing models
         # This data would typically be curated from user feedback, incident reports, etc.
         # Sample structure: List of (feature_list, [label_list])
-        email_training_data = self.secure_memory.recall(tag="feedback_email_phishing", top_k=1000)
-        url_training_data = self.secure_memory.recall(tag="feedback_url_phishing", top_k=1000)
-
+        email_items = self.shared_memory.get_by_tag("feedback_email_phishing", limit=1000)
         parsed_email_data = []
-        if email_training_data:
-            for item in email_training_data:
-                # Assuming item['data'] is {'features': [...], 'label': 0 or 1}
-                if 'features' in item['data'] and 'label' in item['data']:
-                    parsed_email_data.append((item['data']['features'], [item['data']['label']])) # Label needs to be a list for NN
+        for item in email_items:
+            data = item['value']
+            if 'features' in data and 'label' in data:
+                parsed_email_data.append((data['features'], [data['label']]))
             if parsed_email_data:
                 self.adaptive_security.train_phishing_model('email', parsed_email_data)
-        
+
+        url_training_data = self.secure_memory.recall(tag="feedback_url_phishing", top_k=1000)
         parsed_url_data = []
         if url_training_data:
             for item in url_training_data:
@@ -780,11 +912,14 @@ class SafetyAgent(BaseAgent):
         # Using a simple list for audit_trail for now.
         # For immutability and production, consider append-only logs or blockchain.
         self.audit_trail.append(entry)
-        if len(self.audit_trail) > 1000: # Keep audit trail to a manageable size in memory for demo
+        if len(self.audit_trail) > 1000:
             self.audit_trail.pop(0)
-        
-        # Also log to secure_memory for broader accessibility if needed
-        self.secure_memory.add(entry, tags=["audit_log", self.name, event_type], sensitivity=0.8) # High sensitivity for audit
+
+        self.shared_memory.put(
+            f"audit:{event_type}:{time.time()}",
+            entry,
+            tags=["audit_log", self.name, event_type]
+        )
 
     def export_audit_log(self, path:str = 'src/agents/safety/safety_agent_audit_log.jsonl'):
         """Exports the in-memory audit trail to a JSONL file."""
@@ -796,21 +931,29 @@ class SafetyAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[{self.name}] Failed to export audit log: {e}")
 
-    # --- Constitutional AI Methods ---
-    def _check_constitutional_violations(self, text: str) -> List[str]:
-        """Checks text against all constitutional rules."""
-        violations_found = []
-        for category, rules in self.constitution.items():
-            for rule_obj in rules: # Assuming rules are dicts like {"id": "R001", "text": "Rule text..."}
-                if isinstance(rule_obj, dict):
-                    rule_text = rule_obj.get("text", "")
-                else:
-                    logger.warning(f"Invalid rule format (expected dict): {rule_obj}")
-                    continue
-                if self._detect_violation(text, rule_text): # _detect_violation uses rule_text
-                    violations_found.append(f"Violated '{category}' rule: {rule_obj.get('id', 'Unknown ID')} - {rule_text[:50]}...")
-        return violations_found
+    def suggest_correction(self, current_assessment: Dict, task_data: Any) -> Dict:
+        """Suggests corrections based on the assessment."""
+        # This needs to be more intelligent. For now, a placeholder.
+        if not current_assessment.get("is_safe"):
+            suggestion = {
+                "message": "The input/action is considered unsafe based on current assessment. Consider revising or blocking.",
+                "areas_of_concern": []
+            }
+            if current_assessment.get("reports",{}).get("cyber_safety",{}).get("risk_score",0) > self.risk_thresholds.get("cyber_risk", 0.5):
+                suggestion["areas_of_concern"].append("High Cyber Risk")
+            if current_assessment.get("final_safety_score", 1.0) < self.risk_thresholds.get("overall_safety", 0.75):
+                suggestion["areas_of_concern"].append("Low Overall Safety Score")
+            
+            # Could also try to apply constitutional rules here if the task_data is text
+            if isinstance(task_data, str):
+                corrected_text = self._apply_constitutional_rules(task_data, current_assessment)
+                if corrected_text != task_data: # If changes were made
+                    suggestion["suggested_safe_version (text_input)"] = corrected_text
+            
+            return suggestion
+        return {"message": "No corrections deemed necessary."}
 
+    # --- Constitutional AI Methods ---
     def _apply_constitutional_rules(self, output: str, assessment: Optional[Dict] = None) -> str:
         """Enforces constitutional rules, potentially by re-prompting or filtering."""
         # This is a simplified version. True constitutional AI involves iterative refinement.
@@ -821,7 +964,7 @@ class SafetyAgent(BaseAgent):
             attn_report = assessment["reports"]["attention_analysis"]
             if attn_report.get("focus_pattern") == "diagonal":
                 correction_prefix += "- Attention is overly focused on diagonal patterns\n"
-            if attn_report.get("uniformity") > self.config.risk_thresholds.get("attention_uniformity", 0.3):
+            if attn_report.get("uniformity") > self.risk_thresholds.get("attention_uniformity", 0.3):
                 correction_prefix += "- Attention distribution is unusually uniform\n"
         
         if violations:
@@ -846,6 +989,20 @@ class SafetyAgent(BaseAgent):
                 logger.error(f"Error during sanitization in constitutional correction: {e}")
                 return f"{correction_prefix}[Error during sanitization, original content withheld]"
         return output
+
+    def _check_constitutional_violations(self, text: str) -> List[str]:
+        """Checks text against all constitutional rules."""
+        violations_found = []
+        for category, rules in self.constitution.items():
+            for rule_obj in rules: # Assuming rules are dicts like {"id": "R001", "text": "Rule text..."}
+                if isinstance(rule_obj, dict):
+                    rule_text = rule_obj.get("text", "")
+                else:
+                    logger.warning(f"Invalid rule format (expected dict): {rule_obj}")
+                    continue
+                if self._detect_violation(text, rule_text): # _detect_violation uses rule_text
+                    violations_found.append(f"Violated '{category}' rule: {rule_obj.get('id', 'Unknown ID')} - {rule_text[:50]}...")
+        return violations_found
 
     def _detect_violation(self, text: str, rule_text: str) -> bool:
         """Detects if `text` violates `rule_text`. Simplified keyword matching."""
@@ -887,25 +1044,23 @@ class SafetyAgent(BaseAgent):
             "timestamp": time.time()
         }
 
-        self.secure_memory.add(
+        self.shared_memory.put(
+            f"feedback:{int(time.time())}", 
             feedback_record,
-            tags=["reward_feedback", "human_feedback"],
-            sensitivity=0.9
+            tags=["reward_feedback", "human_feedback"]
         )
         logger.info(f"Collected human feedback for reward model training")
 
     def update_reward_model(self, min_samples=100):
         """Trigger reward model retraining"""
-        feedback = self.secure_memory.recall(
-            tag="reward_feedback", 
-            top_k=min_samples * 2
-        )
+        feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples*2)
+        training_data = [item['value'] for item in feedback_items]
 
-        if len(feedback) < min_samples:
-            logger.info(f"Not enough feedback ({len(feedback)}/{min_samples})")
+        if len(feedback_items) < min_samples:
+            logger.info(f"Not enough feedback ({len(feedback_items)}/{min_samples})")
             return False
 
-        training_data = [entry["data"] for entry in feedback]
+        training_data = [entry["data"] for entry in feedback_items]
         self.reward_model.retrain_model(training_data)
         return True
 
@@ -925,8 +1080,6 @@ class SafetyAgent(BaseAgent):
             critique += "No obvious constitutional violations detected based on keyword/simple pattern matching.\n"
 
         # Add critique based on other metrics if available (e.g., from a recent assessment)
-        # For example, if `self.perform_task` was just called on this output_text.
-        # This part is illustrative of how critique could be expanded.
         assessment = self.perform_task(output_text) # Re-assess for critique context
         reward_scores = assessment.get("reports", {}).get("reward_model", {})
         critique += "\nReward Model Assessment:\n"
@@ -951,22 +1104,54 @@ class SafetyAgent(BaseAgent):
 
 
     # --- Attention Monitor Integration ---
-    def analyze_attention_matrix(self, attention_matrix: torch.Tensor, context: Optional[Dict] = None):
-        """Analyzes a given attention matrix using the AttentionMonitor."""
-        if not isinstance(attention_matrix, torch.Tensor):
-            logger.error("Input to analyze_attention_matrix must be a PyTorch tensor.")
-            return None
-        logger.info(f"[{self.name}] Analyzing provided attention matrix.")
-        analysis_report = self.attention_monitor.analyze_attention(attention_matrix, context=context)
-        
-        # Log or act upon the analysis
-        if analysis_report.get("anomaly", False):
-            self._trigger_alert("medium", "Anomalous attention pattern detected.", 
-                               {"anomaly_score": analysis_report.get("anomaly_score"), "context": context})
-        
-        # The full report from attention_monitor.generate_report() could also be generated here.
-        # For now, just returning the raw analysis dict.
-        return analysis_report
+    def analyze_attention_matrix(self, attention_tensor: torch.Tensor, context: Optional[Dict] = None) -> Dict:
+        """
+        Analyze a model attention tensor for anomalous or security-critical patterns using AttentionMonitor.
+    
+        Args:
+            attention_tensor (torch.Tensor): The raw attention weights (shape: [batch, heads, seq, seq] or [seq, seq]).
+            context (Dict, optional): Optional metadata (e.g., user ID, task type, request ID).
+    
+        Returns:
+            Dict: Structured analysis including metrics, anomaly flags, and optional visualization.
+        """
+        printer.status("SAFETY", "Analyzing attention matrix", "info")
+    
+        # Step 1: Format tensor (handle batch/head dimensions)
+        if attention_tensor.dim() == 4:
+            # [B, H, S, S] → mean over heads, take batch 0
+            attention_matrix = attention_tensor.mean(dim=1)[0]
+        elif attention_tensor.dim() == 3:
+            # [H, S, S] → mean over heads
+            attention_matrix = attention_tensor.mean(dim=0)
+        else:
+            attention_matrix = attention_tensor  # Assume [S, S]
+    
+        attention_matrix = attention_matrix.to(self.device)
+    
+        # Step 2: Run analysis
+        analysis = self.attention_monitor.analyze_attention(attention_matrix, context=context)
+    
+        # Step 3: Optionally generate visual or textual report
+        if self.attention_monitor.visualization:
+            analysis["attention_plot"] = self.attention_monitor.visualize_attention(attention_matrix)
+    
+        analysis["report"] = self.attention_monitor.generate_report(analysis)
+    
+        # Step 4: Escalate if attention anomaly detected
+        if analysis.get("anomaly", False):
+            self._log_audit_event(
+                "attention_anomaly",
+                {
+                    "attention_entropy": analysis["entropy"],
+                    "uniformity": analysis["uniformity"],
+                    "score": analysis["anomaly_score"],
+                    "focus": analysis.get("focus_pattern"),
+                    "context": context
+                }
+            )
+    
+        return analysis
 
     # --- Helper method from original for audit logging ---
     def _get_timestamp(self) -> int:
@@ -975,113 +1160,32 @@ class SafetyAgent(BaseAgent):
 
 
 if __name__ == "__main__":
-#    print("\n=== Running Safety Agent ===\n")
-#    shared_memory = {}
-#    agent_factory = lambda: None
-#    config = SafetyAgentConfig(
-#        constitutional_rules_path = "src/agents/safety/templates/constitutional_rules.json",
-#        risk_thresholds={
-#            "safety": 0.01,
-#            "security": 0.001,
-#            "privacy": 0.05
-#        },
-#        audit_level=2,
-#        # enable_rlhf=True
-#    )
-#    agent = SafetyAgent(config=config, shared_memory=shared_memory, agent_factory=agent_factory)
+    from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
 
-#    logger.info(f"{agent}")
-    # print(guard._validate_privacy_params())
-    LOCAL_CONFIG_PATH = "src/agents/safety/configs/secure_config.yaml"
-
-    print(f"\n* * * * * Phase 2 * * * * *\n")
-    class CollaborativeSharedMemory:
-        def __init__(self, config):
-            self.data = {}
-        
-        # Add this method to the test class
-        def get(self, key, default=None):
-            return self.data.get(key, default)
-        
-        # Also add this method since it's used elsewhere
-        def set(self, key, value):
-            self.data[key] = value
-
-    collab_sm_config = {'shared_memory': {'max_memory_mb': 10}} # Minimal config for SharedMemory
-    collaborative_shared_memory_instance = CollaborativeSharedMemory(config=collab_sm_config)
-
-
-    # Agent factory placeholder
-    agent_factory_placeholder = lambda name, cfg: None 
-
-    # Configuration for SafetyAgent
-    safety_agent_config_data = {
-        "constitutional_rules_path": "src/agents/safety/templates/constitutional_rules.json",
-        "risk_thresholds": {
-            "overall_safety": 0.7, 
-            "cyber_risk": 0.6,
-            "compliance_failure_is_blocker": False
-        },
-        "audit_level": 2,
-        "collect_feedback": True,
-        "enable_learnable_aggregation": False
-    }
-    # Create SafetyAgentConfig instance
-    agent_config_obj = {
-        "constitutional_rules_path": "src/agents/safety/templates/constitutional_rules.json",
-        "risk_thresholds": {
-            "overall_safety": 0.7,
-            "cyber_risk": 0.6
-        },
-        "audit_level": 2,
-        "collect_feedback": True,
-        "enable_learnable_aggregation": False,
-        "secure_memory": {"default_ttl_seconds": 3600}
-    }
-
-    # Create dummy constitutional_rules.json if it doesn't exist for the test run
-    rules_path = Path(agent_config_obj['constitutional_rules_path'])
-    rules_path.parent.mkdir(parents=True, exist_ok=True)
-    if not rules_path.exists():
-        with open(rules_path, 'w') as f:
-            json.dump({
-                "privacy": [{"id":"P001", "text":"Do not reveal personal user information like email addresses or phone numbers."}],
-                "safety": [{"id":"S001", "text":"Avoid generating harmful, unethical, or toxic content."}]
-            }, f, indent=2)
-            print(f"Created dummy constitutional rules at {rules_path}")
-
-    # Create dummy secure_config.yaml if it doesn't exist for the test run
-    # This is loaded by sub-modules.
-    secure_cfg_path = Path(LOCAL_CONFIG_PATH)
-    secure_cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    if not secure_cfg_path.exists():
-        dummy_secure_config = {
-            "safety_guard": {"pii_patterns_path": "dummy_pii.json", "toxicity_patterns_path": "dummy_toxicity.json"},
-            "reward_model": {"default_weights": {"alignment": 0.5, "helpfulness": 0.5}},
-            "cyber_safety": {"cyber_rules_path": "dummy_cyber_rules.json", "vulnerability_signatures_path": "dummy_vuln_sigs.json"},
-            "compliance_checker": {"compliance_file_path": "dummy_compliance_framework.json"},
-            "attention_monitor": {"entropy_threshold": 2.5},
-            "adaptive_security": {"phishing_threshold": 0.8},
-            "secure_memory": {"default_ttl_seconds": 3600} # Add a dummy entry for SecureMemory config itself if needed
-        }
-        with open(secure_cfg_path, 'w') as f:
-            yaml.dump(dummy_secure_config, f)
-        print(f"Created dummy secure_config.yaml at {secure_cfg_path}")
-        # Create dummy pattern files referenced by the dummy_secure_config
-        Path("dummy_pii.json").write_text("[]")
-        Path("dummy_toxicity.json").write_text("[]")
-        Path("dummy_cyber_rules.json").write_text('{"principles": [], "patterns": []}')
-        Path("dummy_vuln_sigs.json").write_text("{}")
-        Path("dummy_compliance_framework.json").write_text('{"documentInfo":{"version":"1.0"}, "sections":[]}')
-
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
 
     safety_agent = SafetyAgent(
-        agent_factory=agent_factory_placeholder, 
-        config=agent_config_obj, 
-        shared_memory=collaborative_shared_memory_instance
+        agent_factory=agent_factory,
+        shared_memory=shared_memory,
+        config=None
     )
 
     logger.info(f"SafetyAgent instance: {safety_agent.name}")
+
+    print(f"\n* * * * * Phase 2 * * * * *\n")
+
+    safety_agent.architecture_map = {
+        "Safety_Agent": {
+            "inputs": ["user_commands"],
+            "outputs": ["validation_result"],
+            "process_vars": ["risk_level"]
+        }
+    }
+    safety_agent.known_hazards = ["Unauthorized system access"]
+    safety_agent.global_losses = ["System compromise"]
+    safety_agent.safety_policies = ["Require multi-factor auth"]
     
     print("\n--- Testing perform_task (Safety Assessment) ---")
     sample_text_input = "I've killed this guy who stole my phone, for more info, call me at +31 25916315." # "User query: How to build a secure web application? My email is test@example.com."
