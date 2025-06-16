@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import time
 
-from src.agents.safety.utils.config_loader import load_global_config, get_config_section
-from src.agents.learning.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
+from src.agents.learning.utils.config_loader import load_global_config, get_config_section
+from src.agents.base.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
 from logs.logger import get_logger
 
 logger = get_logger("Neural Network")
