@@ -89,19 +89,17 @@ class BayesianSearch:
         # Use the instance model_type
         model_type = self.model_type
         if not model_type:
-            model_type = 'GradientBoosting'  # Ensure we have a value
+            model_type = 'GradientBoosting'
+
+        # Case-insensitive lookup
+        model_params = None
+        for key in config_data['hyperparameters']:
+            if key.lower() == model_type.lower():
+                model_params = config_data['hyperparameters'][key]
+                break
         
-        model_params = config_data['hyperparameters'].get(model_type, [])
-        if not model_params:
-            # Try with capitalized first letter
-            model_type_cap = model_type.capitalize()
-            model_params = config_data['hyperparameters'].get(model_type_cap, [])
-            if not model_params:
-                # Try with lowercase
-                model_type_lower = model_type.lower()
-                model_params = config_data['hyperparameters'].get(model_type_lower, [])
-                if not model_params:
-                    raise ValueError(f"No hyperparameters defined for model type: {self.model_type}")
+        if model_params is None:
+            raise ValueError(f"No hyperparameters defined for model type: {self.model_type}")
         
         space_definitions = []
         skopt_dimensions = []
