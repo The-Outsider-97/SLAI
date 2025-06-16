@@ -4,6 +4,7 @@ Combines features from both implementations with improved integration
 """
 
 
+from datetime import datetime
 import yaml, json
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,22 +15,11 @@ from skopt.space import Real, Integer, Categorical
 from skopt.utils import use_named_args, OptimizeResult
 from typing import Dict, List, Tuple, Callable, Any, Union, Optional
 
-from logs.logger import get_logger
+from src.tuning.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("BayesianSearch")
-
-CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class BayesianSearch:
     """
@@ -42,9 +32,7 @@ class BayesianSearch:
     - Enhanced visualization and result tracking
     """
     
-    def __init__(self, config,
-                 evaluation_function: Callable[[Dict[str, Any]], float],
-                 output_dir_name: str = "bayesian_search"):
+    def __init__(self, evaluation_function: Callable[[Dict[str, Any]], float], model_type=None):
         """
         Initialize the BayesianSearch instance.
 
@@ -65,25 +53,28 @@ class BayesianSearch:
             output_dir_name (str): Name of the directory to save reports and plots.
                                    Will be created under a 'reports' parent directory.
         """
-        config = load_config() or {}
-        self.config_path = Path(CONFIG_PATH)
-        self.config = config
+        self.config = load_global_config()
+        self.bayesian_config = get_config_section('bayesian_search')
+        self.n_calls = self.bayesian_config.get('n_calls')
+        self.output_dir = self.bayesian_config.get('output_dir')
+        self.summary_dir = self.bayesian_config.get('summary_dir')
+        self.random_state = self.bayesian_config.get('random_state')
+        self.n_initial_points = self.bayesian_config.get('n_initial_points')
+        self.model_type = model_type if model_type is not None else self.bayesian_config.get('model_type', 'GradientBoosting')
+        if not self.model_type:
+            self.model_type = 'GradientBoosting'
 
-        # Extract bayesian_search parameters with fallbacks
-        bayesian_config = self.config.get('bayesian_search', {})
-        self.n_calls = bayesian_config.get('n_calls', 20)
-        self.n_initial_points = bayesian_config.get('n_initial_points', 5)
-        self.random_state = bayesian_config.get('random_state', 42)
-        
+        output_dir_name: str = "bayesian_search"
+
         self.evaluation_function = evaluation_function
         self.search_space_config, self.dimensions = self._load_search_space()
         self.param_names: List[str] = [dim.name for dim in self.dimensions]
-        
+
         self.optimization_history: List[Dict[str, Any]] = []
         self.best_score_so_far: float = np.inf # Assuming minimization; use -np.inf for maximization
         self.best_params_so_far: Optional[Dict[str, Any]] = None
-        
-        self.output_dir = Path("src/tuning/reports") / output_dir_name # Standardize reports location
+
+        self.output_dir = Path() / output_dir_name # Standardize reports location
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"BayesianSearch initialized. Results will be saved to: {self.output_dir.resolve()}")
 
@@ -94,12 +85,28 @@ class BayesianSearch:
             raise ValueError("Config missing 'hyperparameters' section")
         
         config_data = self.config
-        param_configs = config_data['hyperparameters']
+        
+        # Use the instance model_type
+        model_type = self.model_type
+        if not model_type:
+            model_type = 'GradientBoosting'  # Ensure we have a value
+        
+        model_params = config_data['hyperparameters'].get(model_type, [])
+        if not model_params:
+            # Try with capitalized first letter
+            model_type_cap = model_type.capitalize()
+            model_params = config_data['hyperparameters'].get(model_type_cap, [])
+            if not model_params:
+                # Try with lowercase
+                model_type_lower = model_type.lower()
+                model_params = config_data['hyperparameters'].get(model_type_lower, [])
+                if not model_params:
+                    raise ValueError(f"No hyperparameters defined for model type: {self.model_type}")
         
         space_definitions = []
         skopt_dimensions = []
         
-        for param_spec in param_configs:
+        for param_spec in model_params:
             if not isinstance(param_spec, dict) or 'name' not in param_spec or 'type' not in param_spec:
                 raise ValueError("Invalid parameter specification")
                 
@@ -241,10 +248,10 @@ class BayesianSearch:
 
     def _save_results_to_file(self, best_params, best_score, skopt_result):
         """Save comprehensive optimization results to JSON files."""
-        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_summary = {
             'search_configuration': {
-                'config_file': str(self.config_path.resolve()),
+                'model_type': self.model_type,
                 'n_calls': self.n_calls,
                 'n_initial_points': self.n_initial_points,
                 'random_state': self.random_state,
@@ -256,8 +263,7 @@ class BayesianSearch:
             },
             'optimization_history': self.optimization_history
         }
-        stem = self.config_path.stem
-        summary_file_path = self.output_dir / f"bayesian_search_summary_{stem}.json"
+        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.model_type}_{timestamp}.json"
         
         # If skopt_result is available, add more details if serializable
         if skopt_result:
@@ -271,7 +277,7 @@ class BayesianSearch:
 
         # Ensure all parts of the output are JSON serializable
         serializable_output = self._make_dict_json_serializable(output_summary)
-        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.config_path.stem}.json"
+        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.model_type}.json"
         try:
             with open(summary_file_path, 'w') as f:
                 json.dump(serializable_output, f, indent=2)
@@ -295,14 +301,15 @@ class BayesianSearch:
         running_min_scores = np.minimum.accumulate(scores)
         plt.plot(iterations, running_min_scores, marker='.', linestyle='--', color='#d7191c', label="Best Score So Far")
 
-        plt.title(f"Bayesian Optimization Progress ({self.config_path.stem})\nObjective: Minimize Score")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plot_file_path = self.output_dir / f"bayesian_optimization_progress_{self.model_type}_{timestamp}.png"
+        plt.title(f"Bayesian Optimization Progress ({self.model_type})\nObjective: Minimize Score")
         plt.xlabel("Iteration Number")
         plt.ylabel("Objective Function Score")
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.tight_layout()
 
-        plot_file_path = self.output_dir / f"bayesian_optimization_progress_{self.config_path.stem}.png"
         try:
             plt.savefig(plot_file_path)
             logger.info(f"Optimization progress plot saved to: {plot_file_path.resolve()}")
@@ -338,11 +345,10 @@ class BayesianSearch:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Bayesian Search ===\n")
-    config = load_config()
     evaluation_function=None
     output_dir_name = "bayesian_search"
     
-    search1 = BayesianSearch(config, evaluation_function, output_dir_name)
+    search1 = BayesianSearch(evaluation_function)
 
     print(f"{search1}")
 
@@ -351,7 +357,7 @@ if __name__ == "__main__":
         print(f"Evaluating parameters: {params}")
         return np.random.rand()  # Example score
     
-    search2 = BayesianSearch(config, evaluation)
+    search2 = BayesianSearch(evaluation)
     best_params, best_score, _ = search2.run_search()
 
     print(f"Best params: {best_params}")
