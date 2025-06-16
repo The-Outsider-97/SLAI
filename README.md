@@ -165,6 +165,7 @@ Note: If you see an error about execution policy:
    pip install fastapi>=0.85
    pip install lz4
    pip install gym
+   pip install einops
    pip install gymnasium
    pip install opencv-python
    pip install pyperclip
