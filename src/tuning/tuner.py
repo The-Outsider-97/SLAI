@@ -3,25 +3,14 @@ import logging
 import json
 import yaml
 
+# from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
+from src.tuning.utils.config_loader import load_global_config, get_config_section
 from src.tuning.grid_search import GridSearch
 from src.tuning.bayesian_search import BayesianSearch
-from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Hyperparameter Tuner")
-
-CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class HyperparamTuner:
     """
@@ -30,14 +19,7 @@ class HyperparamTuner:
     based on configuration or runtime input.
     """
 
-    def __init__(self,
-                 config_path=None,
-                 evaluation_function=None,
-                 strategy='bayesian',
-                 n_calls=20,
-                 n_random_starts=5,
-                 allow_generate=True,
-                 config_format=None):
+    def __init__(self, model_type=None, evaluation_function=None):
         """
         Initializes the tuner.
 
@@ -50,68 +32,40 @@ class HyperparamTuner:
             allow_generate (bool): Whether to generate config if not provided.
             config_format (str): Format of the config file ('json' or 'yaml').
         """
-        self.evaluation_function = evaluation_function
-        self.strategy = strategy.lower()
-        self.n_calls = n_calls
-        self.n_random_starts = n_random_starts
+        self.config = load_global_config()
+        self.tuning_config = get_config_section('tuning')
+        self.strategy = self.tuning_config.get('strategy')
+        self.n_calls = self.tuning_config.get('n_calls')
+        self.n_random_starts = self.tuning_config.get('n_random_starts')
+        self.allow_generate = self.tuning_config.get('allow_generate')
 
+        self.evaluation_function = evaluation_function
+        if model_type is None:
+            model_type = self.config.get('model_type', 'GradientBoosting')
         if not self.evaluation_function:
             raise ValueError("An evaluation_function is required.")
 
-        # Handle config path
-        if config_path and os.path.exists(config_path):
-            self.config_path = config_path
-            logger.info("Using provided config: %s", self.config_path)
-        elif allow_generate:
-            generator = HyperparamConfigGenerator(output_dir='src/tuning/configs')
-            fmt = config_format or 'json'
-            # Generate from YAML instead of using create_default_config()
-            generator.generate_from_yaml(
-                yaml_path=CONFIG_PATH,
-                name_prefix='generated_config'
-            )
-            self.config_path = os.path.join(
-                generator.output_dir,
-                f'generated_config_{self.strategy}.{fmt}'
-            )
-            logger.info("Generated config at: %s", self.config_path)
-        else:
-            raise FileNotFoundError("No valid config provided.")
-
-        # Load config data from the resolved path
-        self.config_data = self._load_config()
-
         # Update Bayesian parameters
         if self.strategy == 'bayesian':
-            self.config_data.setdefault('bayesian_search', {})
-            self.config_data['bayesian_search']['n_calls'] = self.n_calls
-            self.config_data['bayesian_search']['n_initial_points'] = self.n_random_starts
+            self.bayesian_config = get_config_section('bayesian_search')
+            self.n_calls = self.bayesian_config.get('n_calls')
+            self.n_initial_points = self.bayesian_config.get('n_initial_points')
+            self.random_state = self.bayesian_config.get('random_state')
+
+        # Update Grid parameters
+        if self.strategy == 'grid':
+            self.grid_config = get_config_section('grid_search')
+            self.n_calls = self.grid_config.get('n_calls')
+            self.cross_val_folds = self.grid_config.get('cross_val_folds')
+            self.random_state = self.grid_config.get('random_state')
 
         # Initialize optimizer
         if self.strategy == 'bayesian':
-            self.optimizer = BayesianSearch(
-                config=self.config_data,
-                evaluation_function=self.evaluation_function,
-                output_dir_name="bayesian_search"
-            )
+            self.optimizer = BayesianSearch(evaluation_function=self.evaluation_function, model_type=model_type)
         elif self.strategy == 'grid':
-            self.optimizer = GridSearch(
-                config=self.config_data,
-                evaluation_function=self.evaluation_function
-            )
+            self.optimizer = GridSearch(evaluation_function=self.evaluation_function)
         else:
             raise ValueError(f"Unsupported strategy: {self.strategy}")
-
-    def _load_config(self):
-        """Load YAML/JSON config from the resolved path."""
-        if self.config_path.endswith(('.yaml', '.yml')):
-            with open(self.config_path, 'r') as f:
-                return yaml.safe_load(f)
-        elif self.config_path.endswith('.json'):
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        else:
-            raise ValueError(f"Unsupported config format: {self.config_path}")
 
     def run_tuning_pipeline(self, X_data=None, y_data=None):
         """Execute the tuning pipeline."""
@@ -130,12 +84,10 @@ class HyperparamTuner:
 if __name__ == "__main__":
     import numpy as np
     print("\n=== Running Hyperparameter Tuner ===\n")
-    config = load_config()
 
     print(f"\n* * * * * Phase 1 * * * * *\n")
     tuner = HyperparamTuner(
-        evaluation_function=lambda params: np.random.rand(),
-        strategy='bayesian'
+        evaluation_function=lambda params: np.random.rand()
     )
     tuner.run_tuning_pipeline()
 
