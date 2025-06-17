@@ -17,7 +17,9 @@ class BaseTokenizer:
     """Core tokenizer class with common tokenization operations"""
     def __init__(self):
         self.config = load_global_config()
-        self.vocab_size = self.config.get('src_vocab_size', '30000')
+        self.vocab_size = self.config.get('src_vocab_size')
+        self.bpe_model_path = self.config.get('bpe_model_path')
+        self.bpe_vocab_path = self.config.get('bpe_vocab_path')
 
         self.bt_config = get_config_section('base_tokenizer')
         self.pad_token = self.bt_config.get('pad_token', '[PAD]')
