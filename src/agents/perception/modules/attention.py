@@ -1,40 +1,183 @@
 import torch
 import math
 import yaml
+import torch.nn.functional as F
 
+from functools import partial
+from torch import nn, einsum
+from einops import rearrange
+from torch.utils.checkpoint import checkpoint
 from pathlib import Path
 
+from src.agents.perception.utils.config_loader import load_global_config, get_config_section
 from src.agents.perception.utils.common import TensorOps, Parameter
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Attention")
+printer = PrettyPrinter
 
-CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
+# ===========================
+# helper functions
+# ===========================
+def exists(val):
+    return val is not None
 
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
+def default(val, d):
+    return val if exists(val) else d
 
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+def l2norm(t):
+    return F.normalize(t, p=2, dim=-1)
 
-class EfficientAttention(torch.nn.Module):
-    def __init__(self, config, device='cpu'):
-        super().__init__()
-        cfg = config.get('attention', {})
-        self.dropout_rate = cfg.get('dropout_rate', 0.1)
-        transformer_cfg = config['transformer']
-        self.embed_dim = transformer_cfg['embed_dim']
-        self.num_heads = transformer_cfg['num_heads']
-        self.head_dim = self.embed_dim // self.num_heads
-        self.device = device
-        self.dropout_rate = cfg.get('dropout_rate', 0.1)
-        self.initializer = cfg.get('initializer', 'xavier_uniform')
+# ===========================
+# Attention Mechanisms
+# ===========================
+def scaled_dot_product_attention(q, k, v, mask=None, causal=False, attn_bias=None):
+    scale = q.shape[-1] ** -0.5
+    q = q * scale
+
+    sim = einsum('b h i d, b h j d -> b h i j', q, k)
+
+    if exists(attn_bias):
+        sim = sim + attn_bias
+
+    mask_value = -torch.finfo(sim.dtype).max
+
+    if exists(mask):
+        if mask.ndim == 2:
+            mask = rearrange(mask, 'b j -> b 1 1 j')
+        sim = sim.masked_fill(~mask, mask_value)
+
+    if causal:
+        i, j = sim.shape[-2:]
+        causal_mask = torch.ones(i, j, device=q.device, dtype=torch.bool).triu(j - i + 1)
+        sim = sim.masked_fill(causal_mask, mask_value)
+
+    attn = sim.softmax(dim=-1)
+    return einsum('b h i j, b h j d -> b h i d', attn, v)
+
+def summarize_qkv_chunk(q, k, v, mask, attn_bias_chunk, causal, qk_start_indices, dropout):
+    q_start_index, k_start_index, q_chunk_size, k_chunk_size, device = *qk_start_indices, q.shape[-2], k.shape[-2], q.device
+
+    weight = einsum('b h i d, b h j d -> b h i j', q, k)
+
+    if exists(attn_bias_chunk):
+        weight = weight + attn_bias_chunk
+
+    mask_value = -torch.finfo(weight.dtype).max
+
+    if exists(mask):
+        mask = rearrange(mask, 'b j -> b 1 1 j')
+        weight = weight.masked_fill(~mask, mask_value)
+
+    if causal and q_start_index < (k_start_index + k_chunk_size - 1):
+        causal_mask = torch.ones((q_chunk_size, k_chunk_size), dtype=torch.bool, device=device).triu(q_start_index - k_start_index + 1)
+        weight = weight.masked_fill(causal_mask, mask_value)
+
+    weight_max = weight.amax(dim=-1, keepdim=True).detach()
+    weight = weight - weight_max
+    exp_weight = weight.exp()
+    
+    if dropout > 0:
+        exp_weight = F.dropout(exp_weight, p=dropout)
         
+    weighted_value = einsum('b h i j, b h j d -> b h i d', exp_weight, v)
+    return exp_weight.sum(dim=-1), weighted_value, rearrange(weight_max, '... 1 -> ...')
+
+checkpointed_summarize = partial(checkpoint, summarize_qkv_chunk)
+
+def memory_efficient_attention(q, k, v, mask=None, causal=False, attn_bias=None, 
+                              q_bucket_size=512, k_bucket_size=1024, eps=1e-8, 
+                              dropout=0., training=False):
+    scale = q.shape[-1] ** -0.5
+    q = q * scale
+
+    # Determine if we need gradient checkpointing
+    needs_backward = any(t.requires_grad for t in (q, k, v))
+    summarize_fn = checkpointed_summarize if needs_backward else summarize_qkv_chunk
+
+    # Chunk tensors for memory efficiency
+    q_chunks = q.split(q_bucket_size, dim=-2)
+    k_chunks = k.split(k_bucket_size, dim=-2)
+    v_chunks = v.split(k_bucket_size, dim=-2)
+    mask_chunks = mask.split(k_bucket_size, dim=-1) if exists(mask) else [None] * len(k_chunks)
+
+    if exists(attn_bias):
+        attn_bias_chunks = attn_bias.split(q_bucket_size, dim=-2)
+        attn_bias_chunks = [b.split(k_bucket_size, dim=-1) for b in attn_bias_chunks]
+
+    # Process chunks
+    out = []
+    for q_idx, q_chunk in enumerate(q_chunks):
+        exp_weights, weighted_values, weight_maxes = [], [], []
+
+        for k_idx, (k_chunk, v_chunk, mask_chunk) in enumerate(zip(k_chunks, v_chunks, mask_chunks)):
+            q_start = q_idx * q_bucket_size
+            k_start = k_idx * k_bucket_size
+
+            # Skip computation if masked by causality
+            if causal and k_start > (q_start + q_chunk.shape[-2] - 1):
+                continue
+
+            attn_bias_chunk = attn_bias_chunks[q_idx][k_idx] if exists(attn_bias) else None
+            current_dropout = dropout if training else 0.
+
+            # Compute attention for chunk
+            exp_w, wv, wm = summarize_fn(
+                q_chunk, k_chunk, v_chunk, mask_chunk, 
+                attn_bias_chunk, causal, (q_start, k_start), 
+                current_dropout
+            )
+            exp_weights.append(exp_w)
+            weighted_values.append(wv)
+            weight_maxes.append(wm)
+
+        # Combine results across chunks
+        weight_maxes = torch.stack(weight_maxes, dim=-1)
+        weighted_values = torch.stack(weighted_values, dim=-1)
+        exp_weights = torch.stack(exp_weights, dim=-1)
+
+        global_max = weight_maxes.amax(dim=-1, keepdim=True)
+        renorm = (weight_maxes - global_max).exp().detach()
+
+        exp_weights = exp_weights * renorm
+        weighted_values = weighted_values * rearrange(renorm, '... c -> ... 1 c')
+
+        all_values = weighted_values.sum(dim=-1)
+        all_weights = exp_weights.sum(dim=-1)
+
+        out.append(all_values / (rearrange(all_weights, '... -> ... 1') + eps))
+    
+    return torch.cat(out, dim=-2)
+
+# ===========================
+# Attention Modules
+# ===========================
+class BaseAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = load_global_config()
+        self.embed_dim = self.config.get('embed_dim')
+        self.num_heads = self.config.get('num_heads')
+        self.initializer = self.config.get('initializer')
+        self.device = self.config.get('device')
+        self.dropout_rate = self.config.get('dropout_rate')
+        self.causal = self.config.get('causal')
+
+        self.attention_config = get_config_section('attention')
+        self.dim_head = self.attention_config.get('dim_head')
+        self.q_bucket_size = self.attention_config.get('q_bucket_size')
+        self.k_bucket_size = self.attention_config.get('k_bucket_size')
+        self.memory_efficient = self.attention_config.get('memory_efficient')
+        self.head_dim = self.embed_dim // self.num_heads
+        inner_dim = self.num_heads * self.dim_head
+
+        self.heads = self.num_heads
+        self.dropout = self.dropout_rate
+
+        self.to_q = nn.Linear( self.embed_dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear( self.embed_dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim,  self.embed_dim, bias=False)
+
         # Initialize parameters with proper scaling
         init_fn = getattr(TensorOps, self.initializer) # f"{self.initializer}_init")
         self.q_proj = torch.nn.Parameter(init_fn((self.embed_dim, self.embed_dim), self.embed_dim, device=self.device))
@@ -45,151 +188,38 @@ class EfficientAttention(torch.nn.Module):
         self._cache = {}
         self.observers = []
 
-        logger.info(f"Attention is successfully initialized with:\n- {torch.nn.Module}")
+        logger.info(f"Base Attention is successfully initialized")
 
     def add_observer(self, observer):
         self.observers.append(observer)
 
-    def forward(self, x, context=None, mask=None, causal=False):
-        x = x.to(self.device)
-        if context is None:
-            context = x
-        else:
-            context = context.to(self.device) # Ensure context is on device
+    def forward(self, x, context=None, mask=None, attn_bias=None,
+                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        # Handle optional parameters
+        memory_efficient = default(memory_efficient, self.memory_efficient)
+        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
+        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
+        context = default(context, x)
 
-        q = torch.matmul(x, self.q_proj.data)
-        k = torch.matmul(context, self.k_proj.data)
-        v = torch.matmul(context, self.v_proj.data)
-
-        q = self._split_heads(q)
-        k = self._split_heads(k)
-        v = self._split_heads(v)
-
-        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) / math.sqrt(self.head_dim)
-
-        batch_size, num_heads, seq_len, _ = attn_scores.shape
-
-        if causal:
-            causal_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=self.device))
-            attn_scores = attn_scores.masked_fill(~causal_mask, float('-inf'))
-
-        if mask is not None:
-            mask = mask.to(self.device).bool()  # Enforce boolean type
-            attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
-
-        attn_probs = self.dropout(torch.softmax(attn_scores, dim=-1))
-
-        context_vec = torch.einsum('bhij,bhjd->bhid', attn_probs, v)
-        context_vec = self._combine_heads(context_vec)
-        output = torch.matmul(context_vec, self.out_proj.data)
-
-        # Cache PyTorch tensors
-        self._cache = {'q': q, 'k': k, 'v': v, 'attn_probs': attn_probs}
-        self._cache['x'] = x
-        self._cache['context'] = context
-        self._cache['context_vec'] = context_vec # Cache this for backward pass
-
-        if self.observers:
-            for observer in self.observers:
-                # Pass tensor instead of numpy array
-                observer.log_attention(attn_probs.detach().cpu())
-        return output
-
-    def backward(self, dout):
-        """Manual backpropagation using PyTorch tensors"""
-        # Ensure gradient is on the correct device
-        dout = dout.to(self.device)
-
-        # Retrieve cached tensors from forward pass
-        q = self._cache['q'] # (batch, n_heads, seq_len, head_dim)
-        k = self._cache['k']
-        v = self._cache['v']
-        attn_probs = self._cache['attn_probs'] # (batch, n_heads, seq_len, seq_len)
-        context_vec_combined = self._cache['context_vec'] # (batch, seq_len, embed_dim)
-        x_orig = self._cache['x'] # (batch, seq_len, embed_dim)
-        context_orig = self._cache['context'] # (batch, ctx_len, embed_dim)
-
-        batch_size, num_heads, seq_len, head_dim = q.shape
-        embed_dim = self.embed_dim
-        ctx_len = k.shape[2] # Context sequence length
-
-        # --- Gradient Calculation ---
-
-        # 1. Gradient w.r.t. output projection (d_out_proj) and context_vec
-        d_context_vec = torch.matmul(dout, self.out_proj.data.T) # (batch, seq_len, embed_dim)
-        context_vec_reshaped = context_vec_combined.reshape(-1, embed_dim)
-        dout_reshaped = dout.reshape(-1, embed_dim)
-        d_out_proj = torch.matmul(context_vec_reshaped.T, dout_reshaped) # (embed_dim, embed_dim)
-
-        # Accumulate gradient (assuming Parameter class handles it)
-        if self.out_proj.grad is None: self.out_proj.grad = torch.zeros_like(self.out_proj.data)
-        self.out_proj.grad += d_out_proj
-
-        # 2. Gradient w.r.t. combined heads context_vec -> split heads context_vec (d_context_vec_split)
-        # This reverses the _combine_heads operation
-        # d_context_vec shape: (batch, seq_len, embed_dim)
-        # Need shape: (batch, n_heads, seq_len, head_dim)
-        d_context_vec_split = d_context_vec.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
-
-
-        # 3. Gradient w.r.t. attention probabilities (d_attn_probs) and V (d_v_split)
-        # d_attn_probs = einsum('bhid,bhjd->bhij', d_context_vec_split, v)
-        d_attn_probs = torch.einsum('bhid,bhjd->bhij', d_context_vec_split, v) # (b, h, seq, ctx_len)
-        # d_v = einsum('bhij,bhid->bhjd', attn_probs, d_context_vec_split)
-        d_v_split = torch.einsum('bhij,bhid->bhjd', attn_probs, d_context_vec_split) # (b, h, ctx_len, head_dim)
-
-
-        # 4. Gradient w.r.t. attention scores (d_scores) through softmax
-        # dL/ds_ij = dL/dp_ik * dp_ik/ds_ij
-        # dp_ik/ds_ij = p_ik * (delta_kj - p_ij)
-        # Sum over k: dL/ds_ij = sum_k [ dL/dp_ik * p_ik * (delta_kj - p_ij) ]
-        # dL/ds_ij = p_ij * (dL/dp_ij - sum_k [ dL/dp_ik * p_ik ])
-        # Let S = sum_k [dL/dp_ik * p_ik] (sum over key/ctx dimension)
-        # dL/ds_ij = p_ij * (dL/dp_ij - S_i) where S_i is sum for query i
-        sum_term = torch.einsum('bhij,bhij->bhi', attn_probs, d_attn_probs) # (b, h, seq)
-        d_scores = attn_probs * (d_attn_probs - sum_term.unsqueeze(-1)) # (b, h, seq, ctx_len)
-        d_scores /= math.sqrt(self.head_dim) # Apply scaling factor derivative
-
-
-        # 5. Gradients w.r.t. Q (d_q_split) and K (d_k_split)
-        # d_q = einsum('bhij,bhjd->bhid', d_scores, k)
-        d_q_split = torch.einsum('bhij,bhjd->bhid', d_scores, k) # (b, h, seq, head_dim)
-        # d_k = einsum('bhij,bhid->bhjd', d_scores, q)
-        d_k_split = torch.einsum('bhij,bhid->bhjd', d_scores, q) # (b, h, ctx_len, head_dim)
-
-
-        # 6. Combine head gradients for Q, K, V
-        # Need shape (batch, seq_len/ctx_len, embed_dim)
-        d_q = self._combine_heads(d_q_split) # (b, seq, embed)
-        d_k = self._combine_heads(d_k_split) # (b, ctx_len, embed)
-        d_v = self._combine_heads(d_v_split) # (b, ctx_len, embed)
-
-
-        # 7. Gradients w.r.t. projection weights (d_q_proj, d_k_proj, d_v_proj)
-        # d_q_proj = matmul(x_orig.T, d_q) summed over batch
-        d_q_proj = torch.matmul(x_orig.transpose(1, 2), d_q).sum(dim=0) # (embed, embed)
-        d_k_proj = torch.matmul(context_orig.transpose(1, 2), d_k).sum(dim=0) # (embed, embed)
-        d_v_proj = torch.matmul(context_orig.transpose(1, 2), d_v).sum(dim=0) # (embed, embed)
-
-        # Accumulate gradients
-        if self.q_proj.grad is None: self.q_proj.grad = torch.zeros_like(self.q_proj.data)
-        self.q_proj.grad += d_q_proj
-        if self.k_proj.grad is None: self.k_proj.grad = torch.zeros_like(self.k_proj.data)
-        self.k_proj.grad += d_k_proj
-        if self.v_proj.grad is None: self.v_proj.grad = torch.zeros_like(self.v_proj.data)
-        self.v_proj.grad += d_v_proj
-
-        # 8. Gradient w.r.t. input x (d_x) and context (d_context)
-        d_x = torch.matmul(d_q, self.q_proj.data.T)
-        d_context = torch.matmul(d_k, self.k_proj.data.T) + torch.matmul(d_v, self.v_proj.data.T)
-
-        if self._cache['context'] is self._cache['x']:
-             d_x += d_context
-             return d_x
-        else:
-             # Return gradients separately if needed, or combined if appropriate
-             # Returning d_context might be needed depending on the model structure
-             return d_x # Or return d_x, d_context
+        # Project inputs
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
+        
+        # Rearrange for multi-head attention
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), (q, k, v))
+        
+        # Select attention mechanism
+        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
+        out = attn_fn(
+            q, k, v, 
+            mask=mask, 
+            attn_bias=attn_bias, 
+            causal=self.causal
+        )
+        
+        # Combine heads and project output
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -259,33 +289,307 @@ class EfficientAttention(torch.nn.Module):
         attention_mask = base_mask.unsqueeze(1).unsqueeze(2) # Add head and query seq dims
         return attention_mask
 
+class CosineAttention(BaseAttention):
+    def __init__(self, seq_len):
+        super().__init__()
+        # Learned scale parameter with log initialization
+        scale_init = -math.log(math.log2(seq_len ** 2 - seq_len))
+        self.scale = nn.Parameter(torch.full((1, self.num_heads, 1, 1), scale_init))
+
+    def forward(self, x, context=None, mask=None, attn_bias=None,
+                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        # Handle optional parameters
+        memory_efficient = default(memory_efficient, self.memory_efficient)
+        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
+        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
+        context = default(context, x)
+
+        # Project inputs
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
+        
+        # Rearrange for multi-head attention
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), (q, k, v))
+        
+        # Apply cosine attention modifications
+        q, k = map(l2norm, (q, k))
+        q = q * self.scale.exp()
+        
+        # Select attention mechanism
+        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
+        out = attn_fn(
+            q, k, v, 
+            mask=mask, 
+            attn_bias=attn_bias, 
+            causal=self.causal,
+        )
+        
+        # Combine heads and project output
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+class EfficientAttention(BaseAttention):
+    """
+    Linear-time approximation of attention using kernelized feature maps.
+    Implements the Performer-style mechanism.
+    """
+    def __init__(self):
+        super().__init__()
+        self.epsilon = self.attention_config.get('epsilon')
+        self.num_features = self.attention_config.get('num_features')
+        self.kernel_fn = self._positive_random_features
+
+        # Projections for query, key, value into lower-rank space
+        self.query_proj = nn.Linear(self.embed_dim, self.num_features, bias=False)
+        self.key_proj = nn.Linear(self.embed_dim, self.num_features, bias=False)
+        self.value_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+
+        # Final projection to map back to embed space
+        self.final_proj = nn.Linear(self.embed_dim, self.embed_dim)
+
+        # Random projection matrix for kernel mapping (dim_head → num_features)
+        self.register_buffer("projection_matrix", self._create_random_projection())
+
+    def _create_random_projection(self):
+        """
+        Generates an orthogonal random projection matrix using QR decomposition.
+        Shape: [dim_head, num_features]
+        """
+        ortho = torch.randn((self.num_features, self.dim_head))
+        ortho, _ = torch.linalg.qr(ortho)
+        return ortho.T
+
+    def _positive_random_features(self, x):
+        """
+        Applies FAVOR+ random feature kernel transformation.
+        Ensures positivity and approximates exp(QKᵀ) without full pairwise computation.
+        """
+        x_proj = torch.matmul(x, self.projection_matrix)  # [B, H, T, F]
+        return torch.exp(-x_proj**2 / 2)
+
+    def forward(self, x):
+        B, T, _ = x.shape
+        q = self.query_proj(x)  # [B, T, F]
+        k = self.key_proj(x)
+        v = self.value_proj(x)
+
+        q = self.kernel_fn(q)
+        k = self.kernel_fn(k)
+
+        # Key-Value contraction
+        kv = torch.einsum('bnd,bne->bde', k, v)  # [B, F, E]
+
+        # Normalization: compute inverse denominator (softmax-style)
+        z = 1 / (torch.einsum('bnd,bd->bn', q, k.sum(dim=1)) + self.epsilon).unsqueeze(-1)  # [B, T, 1]
+
+        # Efficient attention output: dot product in feature space, rescaled
+        attn_output = torch.einsum('bnd,bde->bne', q, kv) * z  # [B, T, E]
+        return self.final_proj(attn_output)
+
+class MultiQueryAttention(BaseAttention):
+    """
+    Memory-efficient attention variant that shares key/value projections 
+    across all attention heads. Reduces memory usage and computational cost.
+    """
+    def __init__(self):
+        super().__init__()
+        # Override projections for multi-query setup
+        del self.to_kv  # Remove standard key-value projection
+        
+        # Create separate key and value projections
+        self.to_k = nn.Linear(self.embed_dim, self.dim_head, bias=False)
+        self.to_v = nn.Linear(self.embed_dim, self.dim_head, bias=False)
+        
+        # Initialize new projections
+        init_fn = getattr(TensorOps, self.initializer)
+        for layer in [self.to_k, self.to_v]:
+            if self.initializer == 'he_init':
+                layer.weight.data = init_fn(
+                    layer.weight.shape, 
+                    self.embed_dim,
+                    device=self.device
+                )
+            else:
+                layer.weight.data = init_fn(
+                    layer.weight.shape, 
+                    device=self.device
+                )
+
+    def forward(self, x, context=None, mask=None, attn_bias=None,
+                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        # Handle optional parameters
+        memory_efficient = default(memory_efficient, self.memory_efficient)
+        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
+        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
+        context = default(context, x)
+
+        # Project inputs - queries are head-specific, keys/values are shared
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        
+        # Rearrange tensors for attention
+        q = rearrange(q, 'b n (h d) -> b h n d', h=self.heads)
+        k = rearrange(k, 'b n d -> b 1 n d')  # Add head dimension for broadcasting
+        v = rearrange(v, 'b n d -> b 1 n d')  # Add head dimension for broadcasting
+        
+        # Select attention mechanism
+        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
+        out = attn_fn(
+            q, k, v, 
+            mask=mask, 
+            attn_bias=attn_bias, 
+            causal=self.causal
+        )
+        
+        # Combine heads and project output
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+class CrossAttention(BaseAttention):
+    """
+    Cross-attention layer for encoder-decoder architectures. 
+    Processes queries from one modality against keys/values from another.
+    """
+    def __init__(self):
+        super().__init__()
+        # Separate projections for encoder context
+        self.to_k_enc = nn.Linear(self.embed_dim, self.heads * self.dim_head, bias=False)
+        self.to_v_enc = nn.Linear(self.embed_dim, self.heads * self.dim_head, bias=False)
+        
+        # Initialize encoder projections
+        init_fn = getattr(TensorOps, self.initializer)
+        for layer in [self.to_k_enc, self.to_v_enc]:
+            if self.initializer == 'he_init':
+                layer.weight.data = init_fn(
+                    layer.weight.shape, 
+                    self.embed_dim,
+                    device=self.device
+                )
+            else:
+                layer.weight.data = init_fn(
+                    layer.weight.shape, 
+                    device=self.device
+                )
+
+    def forward(self, x, context, mask=None, attn_bias=None,
+                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        """Requires explicit context tensor from encoder"""
+        if context is None:
+            raise ValueError("CrossAttention requires context input")
+        
+        # Handle optional parameters
+        memory_efficient = default(memory_efficient, self.memory_efficient)
+        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
+        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
+        
+        # Project inputs - queries from decoder, keys/values from encoder
+        q = self.to_q(x)
+        k = self.to_k_enc(context)
+        v = self.to_v_enc(context)
+        
+        # Rearrange for multi-head attention
+        q, k, v = map(
+            lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), 
+            (q, k, v)
+        )
+        
+        # Select attention mechanism
+        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
+        out = attn_fn(
+            q, k, v, 
+            mask=mask, 
+            attn_bias=attn_bias, 
+            causal=self.causal
+        )
+        
+        # Combine heads and project output
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
 if __name__ == "__main__":
-    print("\n=== Running Common ===\n")
+    print("\n=== Running Attention ===\n")
+    printer.status("TEST", "Starting Attention tests", "info")
+    length=16
+    x = torch.randn(4, 128, 512)
 
-    # Test Parameter class with basic initialization
-    data = torch.randn(3, 4)
-    param = Parameter(data, name="test_param")
+    base = BaseAttention()
+    cosine = CosineAttention(seq_len=length)
+    model = EfficientAttention()
+    mqa = MultiQueryAttention()
+    cross = CrossAttention()
 
-    print(f"Initial: {param}")
-    print(f"Data:\n{param.data}")
-    print(f"Grad:\n{param.grad}")
+    print(base)
+    print(cosine)
+    print(model)
+    print(mqa)
+    print(cross)
 
-    # Simulate a gradient
-    param.grad = torch.ones_like(param.data) * 0.5
-    print(f"\nAfter Gradient Simulation:\nGrad:\n{param.grad}")
+    print("\n* * * * * Phase 2 - Base * * * * *\n")
+    context=x.clone() 
+    mask=None
+    attn_bias=None
+    memory_efficient=None
+    q_bucket_size=None
+    k_bucket_size=None
 
-    # Apply a gradient descent step
-    lr = 0.1
-    param.step(lr)
-    print(f"\nAfter Step(lr={lr}):\nData:\n{param.data}")
+    forward1 = base.forward(
+        x=x,
+        mask=mask,
+        attn_bias=attn_bias,
+        memory_efficient=memory_efficient,
+        q_bucket_size=q_bucket_size,
+        k_bucket_size=k_bucket_size
+    )
 
-    # Reset the gradients
-    param.zero_grad()
-    print(f"\nAfter zero_grad():\nGrad:\n{param.grad}")
+    #printer.pretty("BASE", forward1, "success")
+    #printer.pretty("SPLIT", base._split_heads(x=x), "success")
+    split = base._split_heads(x=x)  
+    combined = base._combine_heads(x=split) 
+    #printer.pretty("COMBINED", combined, "success")
 
-    # Move to another device (if available)
-    if torch.cuda.is_available():
-        param.to("cuda")
-        print(f"\nMoved to CUDA:\n{param}")
+    print("\n* * * * * Phase 3 - Cosine * * * * *\n")
+    forward2 = cosine.forward(
+        x=x,
+        mask=mask,
+        attn_bias=attn_bias,
+        memory_efficient=memory_efficient,
+        q_bucket_size=q_bucket_size,
+        k_bucket_size=k_bucket_size
+    )
 
-    print("\n=== Successfully Ran Common ===\n")
+    #printer.pretty("COSINE", forward2, "success")
+
+    print("\n* * * * * Phase 4 - Efficient * * * * *\n")
+    x_heads = rearrange(x, 'b t (h d) -> b h t d', h=model.heads)  # [B, H, T, D]
+
+    #printer.pretty("create", model._create_random_projection(), "success")
+    #printer.pretty("positive", model._positive_random_features(x=x_heads), "success")
+    #printer.pretty("Efficient", model.forward(x=x), "success")
+
+    print("\n* * * * * Phase 5 - Multi Query * * * * *\n")
+    forward3 = mqa.forward(
+        x=x,
+        mask=mask,
+        attn_bias=attn_bias,
+        memory_efficient=memory_efficient,
+        q_bucket_size=q_bucket_size,
+        k_bucket_size=k_bucket_size
+    )
+
+    #printer.pretty("MQA", forward3, "success")
+
+    print("\n* * * * * Phase 6 - Cross * * * * *\n")
+    forward4 = cross.forward(
+        x=x,
+        mask=mask,
+        context=context,
+        attn_bias=attn_bias,
+        memory_efficient=memory_efficient,
+        q_bucket_size=q_bucket_size,
+        k_bucket_size=k_bucket_size
+    )
+
+    printer.pretty("MQA", forward4, "success")
+
+    print("\n=== Successfully Ran Attention ===\n")
