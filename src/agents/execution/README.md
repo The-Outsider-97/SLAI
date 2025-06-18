@@ -93,7 +93,7 @@ flowchart TD
 ---
 
 ### 2. Core Execution Step (`ExecutionAgent._execution_step`)
-```
+```mermaid
 graph TD
     A[Start _execution_step] --> B[_gather_context];
     B --> C{Context Valid?};
