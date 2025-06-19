@@ -1,3 +1,4 @@
+
 import torch 
 import math
 import yaml
@@ -14,47 +15,39 @@ printer = PrettyPrinter
 
 class Parameter(torch.nn.Parameter):
     def __new__(cls, data: torch.Tensor, requires_grad=True, name: Optional[str] = None):
-        if not isinstance(data, torch.Tensor):
-            raise TypeError("data must be a torch.Tensor")
-        param = super().__new__(cls, data.clone().detach(), requires_grad=requires_grad)
+        param = super().__new__(cls, data, requires_grad=requires_grad)
         return param
+
     def __init__(self, data: torch.Tensor, requires_grad: bool = True, name: Optional[str] = None):
-        self.config = load_global_config()
-        self.param_config = get_config_section('parameter')
-        self.data = data.clone().detach().requires_grad_(requires_grad)
-        if self.requires_grad and self.grad is None:
-            pass
-        self.requires_grad = requires_grad
-        self._momentum_buffer = None  
+        # We'll store metadata in a class-level dictionary
+        self._name = name
+        self._momentum_buffer = None
+
+    @property
+    def name(self):
+        return self._name if hasattr(self, '_name') else None
 
     def zero_grad(self) -> None:
-        """Reset the gradient to zero, if gradient tracking is enabled."""
+        """Reset the gradient to zero if gradient tracking is enabled"""
         if self.requires_grad and self.grad is not None:
             self.grad.zero_()
 
     def step(self, lr: float, momentum: float = 0.0, weight_decay: float = 0.0):
-        """
-        Apply in-place parameter update with optional momentum and L2 regularization.
-
-        Args:
-            lr (float): Learning rate.
-            momentum (float): Momentum factor (0 disables momentum).
-            weight_decay (float): L2 regularization factor.
-        """
+        """Apply in-place parameter update with momentum and L2 regularization"""
         if not self.requires_grad or self.grad is None:
             return
 
         with torch.no_grad():
-            # Compute effective gradient with L2 penalty
+            # Compute effective gradient
             grad = self.grad + weight_decay * self.data if weight_decay > 0 else self.grad
-
-            # Initialize or update momentum buffer
+            
+            # Update momentum buffer
             if momentum > 0.0:
                 if self._momentum_buffer is None:
                     self._momentum_buffer = torch.clone(grad).detach()
                 else:
                     self._momentum_buffer.mul_(momentum).add_(grad)
-
+                
                 update = self._momentum_buffer
             else:
                 update = grad
@@ -64,15 +57,16 @@ class Parameter(torch.nn.Parameter):
 
     def __repr__(self) -> str:
         base_repr = super().__repr__()
+        name = self.name or ''
+        
         if "Parameter containing:\n" in base_repr:
             parts = base_repr.split('\n', 1)
-            return f"Parameter(name={self.name}, containing:\n{parts[1]}"
+            return f"Parameter(name={name}, containing:\n{parts[1]}"
         else:
             idx = base_repr.find('(')
             if idx != -1:
-                return f"{base_repr[:idx+1]}name={self.name}, {base_repr[idx+1:]}"
-            return f"Parameter(name={self.name}, {base_repr})"
-
+                return f"{base_repr[:idx+1]}name={name}, {base_repr[idx+1:]}"
+            return f"Parameter(name={name}, {base_repr})"
 
 class TensorOps:
     # --------------------------
@@ -565,7 +559,7 @@ if __name__ == "__main__":
     printer.status("TEST", "Starting Common tests", "info")
     data = torch.tensor([1.0, 2.7, 4.2, 46.0, 32.0])
 
-    param = Parameter(data=data)
+    param = Parameter(data=data, name="test_param")
     t_ops = TensorOps()
     print(param)
     print(t_ops)
