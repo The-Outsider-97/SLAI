@@ -1,1342 +1,1333 @@
 __version__ = "1.9.0"
 
 """
-Planning Agent with Alternative Method Search Strategies
-Implements grid search and Bayesian-inspired decomposition selection
-
-References:
-1. Nau, D., Au, T., Ilghami, O., et al. (2003). SHOP2: A HTN Planning System
-2. Wilkins, D. (1988). SIPE-2: Systematic Initiative Planning Environment
-3. Martelli, A., Montanari, U. (1973). Optimal Efficiency of AO* Algorithm
-4. Bonet, B., Geffner, H. (2001). Heuristic Planning with HSP
-5. Allen, J. (1983). Maintaining Knowledge about Temporal Intervals
-
-Real-World Usage:
-1. Robotics Task Planning: Domestic robots or warehouse robots need to break down complex goals like "prepare breakfast" or "pick 10 items" into primitive tasks: navigate, grip, open, etc.
-2. Game AI / NPC Behavior: Strategy games (RTS) or open-world RPGs require AI to plan goals like "defend base" or "patrol zone" using adaptive strategies.
-3. Workflow Automation in Enterprise Systems: A digital assistant receives a request like “schedule a customer onboarding session,” which it decomposes into tasks like:
-    - Check calendar → Create Zoom link → Email invite → Log session
-4. Military or Disaster Response Simulation: Simulated agents plan missions like “clear building,” which break into “scan,” “enter,” “check room,” etc.
-5. Cognitive Assistants: Personalized assistants adapting through method statistics tracking
-6. Healthcare Coordination: Adaptive treatment plan generation considering patient responses and resource availability
+Perception Agent:
+- Initializes and manages multimodal encoders (text, vision, audio) and decoders.
+- Implements various pretraining objectives:
+    - Masked Language Modeling (MLM)
+    - Masked Patch Modeling (MPM)
+    - Masked Audio Modeling (MAM)
+    - Cross-modal Contrastive Learning
+    - Temporal Coherence Learning
+- Supports loading of pretrained weights, including conversion for custom formats.
+- Integrates with PerceptionMemory for caching and efficient computation.
+- Designed for robustness, flexibility, and consistency with the existing agent architecture.
 """
 
-from email.policy import Policy
-import math
-import time
-import heapq
+from datetime import timedelta
 import random
+import math
+import yaml
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-from typing import List, Dict, Optional, Callable, Tuple, Set
-from collections import defaultdict, deque
+from pathlib import Path
+from collections import OrderedDict
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
-                                                SafetyMarginError, ResourceViolation, AcademicPlanningError)
 from src.agents.base_agent import BaseAgent
-from src.agents.planning.planning_metrics import PlanningMetrics
-from src.agents.planning.planning_executor import PlanningExecutor
-from src.agents.planning.heuristic_selector import HeuristicSelector
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from src.agents.planning.probabilistic_planner import ProbabilisticPlanner
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any
-from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
-from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
+from src.agents.perception.utils.common import Parameter, TensorOps
+from src.agents.perception.modules.transformer import Transformer
+from src.agents.perception.encoders.text_encoder import TextEncoder
+from src.agents.perception.encoders.vision_encoder import VisionEncoder
+from src.agents.perception.encoders.audio_encoder import AudioEncoder
+from src.agents.perception.decoders.text_decoder import TextDecoder
+from src.agents.perception.decoders.vision_decoder import VisionDecoder
+from src.agents.perception.decoders.audio_decoder import AudioDecoder
+from src.agents.perception.modules.tokenizer import Tokenizer
+from src.agents.perception.utils.taskheads import ClassificationHead, RegressionHead, Seq2SeqHead
 from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("Planning Agent")
+logger = get_logger("Perception Agent")
 printer = PrettyPrinter
 
-CostProfile = Tuple[float, float]
-StateTuple = Tuple[Tuple[str, Any], ...]
+class PerceptionAgent(BaseAgent, nn.Module):
+    def __init__(self, shared_memory, agent_factory, config=None):
+        BaseAgent.__init__(self, shared_memory, agent_factory, config=config)
+        nn.Module.__init__(self)
 
-class PlanningAgent(BaseAgent):
-    """Enhanced planner with alternative search strategies"""
-    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config
-        )
-        self.config = load_global_config()
-        self.planning_config = get_config_section('planning_agent')
-
+        self.perceptive_agent = []
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
+        self._init_configs()
+        self._init_components()
+        self._init_shared_memory_keys()
+        #self.optimizer = self._configure_optimizer()
 
-        self.task_library: Dict[str, Task] = {} # Stores registered task templates
-        self.current_plan: List[Task] = [] # The sequence of primitive tasks to execute
-        self.world_state: Dict[str, Any] = {} # Current state of the world
-        self.execution_history = deque(maxlen=100) # Keep track of recently executed tasks
-        self.plan_history = deque(maxlen=1000)
-        self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}) # For Bayesian method selection
-        self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
+        #self.global_projection_param = Parameter(torch.randn(1, device=self.device) * 0.01, name="global_projection_param")
+        assert self.text_encoder.embed_dim == self.embed_dim, "Text encoder dim mismatch!"
+        assert self.audio_encoder.embed_dim == self.embed_dim, "Audio encoder dim mismatch!"
+        assert self.vision_encoder.embed_dim == self.embed_dim, "Vision encoder dim mismatch!"
 
-        # Performance tracking
-        self._planning_start_time: Optional[float] = None
-        self._planning_end_time: Optional[float] = None
+        logger.info(f"PerceptionAgent initialized on device: {self.device}")
 
-        self.memo_table = {}
-        self.scheduler = DeadlineAwareScheduler()
-        self.metrics = PlanningMetrics()
-        self.heuristic_selector = HeuristicSelector()
-        self.safety_planner = SafetyPlanning()
-        self.resource_monitor = ResourceMonitor()
-        self.executor = PlanningExecutor()
-        self.probabilistic_planner = ProbabilisticPlanner()
-        self.safety_planner.resource_monitor = self.resource_monitor
+    def _init_configs(self):
+        """Load global and perception-specific configurations."""
+        self.config = load_global_config()
+        self.perception_config = get_config_section('perception_agent')
 
-        self.expected_state_projections = {}
-        self.execution_interrupted = False
-        self._node_cache = {}
-
-        logger.info(f"PlanningAgent succesfully initialized")
-
-        # Task head registry
-        self.task_heads = {
-            'classification': ClassificationHead,
-            'regression': RegressionHead,
-            'seq2seq': Seq2SeqHead
-        }
-
-    def configure_task_head(self, task_type: str, **kwargs):
-        """Dynamically attach task heads based on current plan"""
-        if task_type not in self.task_heads:
-            raise ValueError(f"Unsupported task type: {task_type}")
-            
-        # Get transformer instance from text encoder
-        transformer = self.shared_memory['text_encoder'].transformer
-        return self.task_heads[task_type](transformer, **kwargs)
-
-    def get_current_state_tuple(self) -> WorldState:
-        """Returns an immutable representation of the world state for memoization/hashing."""
-        # Convert complex objects in state to a hashable representation if needed
-        items = []
-        for k, v in self.world_state.items():
-            try:
-                # Attempt to make the value hashable, convert complex objects to str as fallback
-                hashable_value = v if isinstance(v, (int, float, str, bool, tuple)) else str(v)
-                items.append((k, hashable_value))
-            except Exception:
-                items.append((k, str(v))) # Fallback for unhashable items
-        return tuple(sorted(items))
-
-    def load_state_from_tuple(self, state_tuple: WorldState):
-        """Restores the world state from an immutable tuple (used in backtracking)."""
-        self.world_state = dict(state_tuple)
-        logger.debug(f"World state restored to: {self.world_state}")
-
-    def register_task(self, task: Task):
-        """Register task with possible decomposition methods"""
-        self.task_library[task.name] = task
-        if task.name in self.task_library:
-            logger.warning(f"Task '{task.name}' already registered. Overwriting.")
-
-        # Initialize probabilistic actions if applicable
-        if task.is_probabilistic:
-            for action in task.probabilistic_actions:
-                self.probabilistic_planner.register_action(action)
-
-        self.task_library[task.name] = task
-        logger.debug(f"Registered task: {task.name}")
-        # Initialize stats for Bayesian method selection if it's an abstract task
-        if task.type == TaskType.ABSTRACT:
-            for i in range(len(task.methods)):
-                key = (task.name, i)
-                self.method_stats[key]
-
-    def decompose_task(self, task_to_decompose: Task, current_state: Dict) -> Optional[List[Task]]:
-        """Recursive decomposition with method selection tracking"""
-        logger.debug(f"Decomposing task: {task_to_decompose.name}")
-
-        # Base case: If the task is primitive, it's already decomposed.
-        if task_to_decompose.type == TaskType.PRIMITIVE:
-            if task_to_decompose.check_preconditions(self.world_state):
-                if task_to_decompose.start_time is None:
-                    task_to_decompose.start_time = time.time()
-                return [task_to_decompose]
-            else:
-                logger.warning(f"Preconditions failed for primitive task: {task_to_decompose.name}")
-                task_to_decompose.status = TaskStatus.FAILED
-                return None
-
-        # Retrieve the task template from the library
-        library_task = self.task_library.get(task_to_decompose.name)
-        if not library_task:
-            logger.error(f"Task '{task_to_decompose.name}' not found in library.")
-            task_to_decompose.status = TaskStatus.FAILED
-            return None
-
-        scores = []
-        for i in range(len(library_task.methods)):
-            # Use HeuristicSelector to get success probability
-            prob = self.heuristic_selector.predict_success_prob(
-                task={
-                    "name": task_to_decompose.name,
-                    "selected_method": i,
-                    "priority": getattr(task_to_decompose, 'priority', 0.5),
-                    "goal_state": getattr(task_to_decompose, 'goal_state', {}),
-                    "parent": getattr(task_to_decompose, 'parent', None),
-                    "creation_time": getattr(task_to_decompose, 'creation_time', None),
-                    "deadline": getattr(task_to_decompose, 'deadline', None)
-                },
-                world_state=self.world_state,
-                method_stats=self.method_stats,
-                method_id=str(i)  # Convert method index to string
-            )
-            scores.append((i, prob))
+        self.device = self.perception_config.get('device', 'cpu')
+        self.embed_dim = self.perception_config.get('embed_dim', 512)
+        self.masking_ratio = self.perception_config.get('masking_ratio', 0.15)
+        self.encoder_type  = self.perception_config.get('encoder_type ', 'transformer')
+        self.contrastive_temp = self.perception_config.get('contrastive_temperature', 0.07)
         
-        if not scores:
-            logger.error(f"No methods available for task '{task_to_decompose.name}'.")
-            task_to_decompose.status = TaskStatus.FAILED
-            return None
-        
-        # Select method with highest predicted success
-        method_index_to_try = max(scores, key=lambda x: x[1])[0]
-        task_to_decompose.selected_method = method_index_to_try
+        # Optimizer related configs
+        self.learning_rate = self.perception_config.get('learning_rate', 1e-4)
+        self.weight_decay = self.perception_config.get('weight_decay', 1e-2)
+        self.adam_betas = tuple(self.perception_config.get('adam_betas', [0.9, 0.999]))
+        self.adam_eps = self.perception_config.get('adam_eps', 1e-8)
+        self.training = self.perception_config.get('training', True)
 
-        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
-        if memo_key in self.memo_table:
-            logger.debug(f"Memo hit for {memo_key}")
-            return self.memo_table[memo_key]
+        # Temporal Coherence
+        self.loss_type = self.perception_config.get('loss_type')
+        self.max_scale = self.perception_config.get('max_scale')
+        self.temperature = self.perception_config.get('temperature')
+        self.mse_weight = self.perception_config.get('mse_weight')
+        self.contrastive_weight = self.perception_config.get('contrastive_weight')
 
-        if not (0 <= method_index_to_try < len(library_task.methods)):
-             logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
-             task_to_decompose.status = TaskStatus.FAILED
-             return None
+    def _init_components(self):
+        """Initialize encoders, decoders, tokenizer, memory, and projection heads."""
+        self.tokenizer = Tokenizer() # Uses its own config loading
 
-        # Get the list of subtasks for the selected method
-        subtasks_template = library_task.get_subtasks(method_index_to_try)
-        if not subtasks_template:
-             logger.warning(f"Method {method_index_to_try} for task '{task_to_decompose.name}' has no subtasks or is invalid.")
-             # Optionally, try another method here if implementing replanning/backtracking within decompose
-             task_to_decompose.status = TaskStatus.FAILED
-             return None
+        # Modality Encoders
+        self.text_encoder = TextEncoder().to(self.device)
+        self.vision_encoder = VisionEncoder().to(self.device)
+        self.audio_encoder = AudioEncoder().to(self.device)
 
-        logger.debug(f"Trying method {method_index_to_try} for task '{task_to_decompose.name}' with subtasks: {[st.name for st in subtasks_template]}")
+        # Audio encoder with transformer configured to return hidden states
+        self.audio_encoder = AudioEncoder().to(self.device)
+        if hasattr(self.audio_encoder, 'transformer'):
+            self.audio_encoder.transformer.return_hidden = True  # Force hidden state output
 
-        fully_decomposed_plan: List[Task] = []
-        # Keep track of the world state simulation for this decomposition path
-        simulated_world_state = self.world_state.copy()
+        # Full decoders for generation tasks would be more complex
+        self.text_prediction_head = nn.Linear(self.embed_dim, self.tokenizer.get_vocab_size()).to(self.device)
 
-        for subtask_template in subtasks_template:
-             # Create a runtime instance of the subtask
-             subtask_instance = subtask_template.copy()
-             subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
+        # For Vision, predict flattened patch values.
+        # patch_dim depends on VisionEncoder's patch_size and in_channels
+        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
+        self.vision_prediction_head = nn.Linear(self.embed_dim, vision_patch_dim).to(self.device)
 
-             # Check subtask preconditions in the *current* (simulated) world state
-             if not subtask_instance.check_preconditions(simulated_world_state):
-                 logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
-                 # Backtracking would happen here: try another method for task_to_decompose
-                 return None # Abort this decomposition path
+        # For Audio, predict flattened patch values or features (e.g., MFCCs)
+        # audio_patch_dim depends on AudioEncoder's patch_size and in_channels
+        audio_patch_dim = self.audio_encoder.in_channels * (self.audio_encoder.patch_size ** 2) # If patch-based
+        self.audio_prediction_head = nn.Linear(self.embed_dim, audio_patch_dim).to(self.device)
 
-             decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
+        # Full decoders for generation tasks (optional, can be loaded on demand)
+        self.text_generator = TextDecoder(encoder=self.text_encoder).to(self.device)
+        self.vision_generator = VisionDecoder().to(self.device) # Assumes VisionDecoder can init without encoder
+        self.audio_generator = AudioDecoder().to(self.device)   # Assumes AudioDecoder can init without encoder
 
-             if decomposed_subplan is None:
-                 logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
-                 # Backtracking point: Try a different method for task_to_decompose if possible
-                 return None # Indicate failure for this decomposition path
+        self.global_projection_param = Parameter(torch.randn(self.embed_dim, self.embed_dim), requires_grad=True)
 
-             fully_decomposed_plan.extend(decomposed_subplan)
+        # Projection heads for contrastive learning (to a common dimension)
+        self.contrastive_projection_dim = self.perception_config.get('contrastive_projection_dim', 256)
+        self.text_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
+        self.vision_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
+        self.audio_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
 
-             # Update the simulated world state by applying effects of the *primitive* tasks just added
-             # This is crucial for the preconditions of subsequent subtasks in the *same* method.
-             for primitive_task in decomposed_subplan:
-                  if primitive_task.type == TaskType.PRIMITIVE:
-                      primitive_task.apply_effects(simulated_world_state)
+        # Use each encoder's actual embed_dim for prediction heads
+        self.text_prediction_head = nn.Linear(
+            self.text_encoder.embed_dim,  # Use text encoder's dim
+            self.tokenizer.get_vocab_size()
+        ).to(self.device)
 
-        # If loop completes, the decomposition for this method was successful
-        logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}.")
-        return fully_decomposed_plan
+        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
+        self.vision_prediction_head = nn.Linear(
+            self.vision_encoder.embed_dim,  # Use vision encoder's dim
+            vision_patch_dim
+        ).to(self.device)
 
-    def _find_alternative_methods(self, task: Task) -> List[int]:
-        """
-        Finds alternative decomposition method indices for a failed abstract task.
-        Uses a hybrid strategy: Bayesian optimization and grid search fallback.
+        audio_patch_dim = self.audio_encoder.in_channels * self.audio_encoder.patch_size
+        self.audio_prediction_head = nn.Linear(
+            self.audio_encoder.embed_dim,  # Use audio encoder's dim
+            audio_patch_dim
+        ).to(self.device)
 
-        Args:
-            task (Task): The abstract task that failed decomposition or execution.
-
-        Returns:
-            List[int]: A list of alternative method indices to try, ordered by
-                       estimated likelihood of success.
-        """
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.type != TaskType.ABSTRACT or len(library_task.methods) <= 1:
-            return []
-            
-        # Use HeuristicSelector to get best methods
-        candidate_methods = [str(i) for i in range(len(library_task.methods))]
-        best_method, _ = self.heuristic_selector.select_best_method(
-            task={
-                "name": task.name,
-                "priority": getattr(task, 'priority', 0.5),
-                "goal_state": getattr(task, 'goal_state', {}),
-                "creation_time": getattr(task, 'creation_time', None),
-                "deadline": getattr(task, 'deadline', None)
-            },
-            world_state=self.world_state,
-            candidate_methods=candidate_methods,
-            method_stats=self.method_stats
-        )
-        
-        # Convert string method IDs back to integers
-        return [int(method_id) for method_id in candidate_methods 
-                if method_id != str(task.selected_method)]
-
-    def _update_method_stats(self, task: Task, success: bool, cost: float):
-        """Updates statistics for the selected decomposition method."""
-        if task.type != TaskType.ABSTRACT or task.parent is None:
-             # Only update stats for methods chosen for a parent abstract task
-             # Or potentially update based on overall plan success if task is the root goal.
-            return
-
-        # Find the parent and the method index used to generate this task instance
-        # This requires careful tracking during decomposition or execution feedback.
-        parent_task = task.parent
-        method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
-
-        key = (parent_task.name, method_idx)
-        stats = self.method_stats[key]
-        stats['total'] += 1
-        if success:
-            stats['success'] += 1
-
-        # Update average cost using Welford's online algorithm or simpler moving average
-        # Simple moving average:
-        current_total_cost = stats['avg_cost'] * (stats['total'] -1) # Get previous total cost
-        new_avg_cost = (current_total_cost + cost) / stats['total']
-        stats['avg_cost'] = new_avg_cost
-
-        logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
-
-    def replan(self, failed_task: Task) -> Optional[List[Task]]:
-        """Enhanced replanning with alternative method selection"""
-        logger.warning(f"Replanning triggered by failed task: {failed_task.name}")
-        
-        # Find alternative methods
-        alternative_method_indices = self._find_alternative_methods(failed_task)
-        if not alternative_method_indices:
-            logger.error("No alternative methods found")
-            return None
-        
-        # Update scheduler state with failure information
-        self._update_scheduler_state(failed_task)
-        
-        # Try alternatives in recommended order
-        for method_idx in alternative_method_indices:
-            task_copy = failed_task.copy()
-            task_copy.selected_method = method_idx
-            new_plan = self.decompose_task(task_copy)
-            
-            # Validate plan and check safety
-            if new_plan and self._validate_plan(new_plan) and self.safety_planner.safety_check(new_plan):
-                return new_plan
-        
-        logger.error("All replanning attempts failed")
-        return None
-
-    def _check_preconditions(self, task: Task, state: Dict[str, Any]) -> bool:
-        """Formal verification of task preconditions against a state"""
-        try:
-            return all(precond(state) for precond in task.preconditions)
-        except Exception as e:
-            logger.error(
-                f"Precondition check failed for {task.name}: {str(e)}",
-                exc_info=True
-            )
-            return False
-    
-    def _check_temporal_constraints(self, 
-                                   previous_task: Task,
-                                   current_task: Task,
-                                   state: Dict[str, Any]) -> bool:
-        """
-        Implements Allen's interval algebra checks for temporal consistency
-        between consecutive tasks
-        """
-        # Get temporal constraints from task metadata
-        constraints = getattr(current_task, 'temporal_constraints', [])
-        
-        # Check each constraint against simulated state
-        for constraint in constraints:
-            if not constraint(state):
-                return False
-        
-        # Default temporal relationship checks
-        if previous_task.end_time and current_task.start_time:
-            if previous_task.end_time > current_task.start_time:
-                logger.debug("Temporal overlap detected between "
-                            f"{previous_task.name} and {current_task.name}")
-                return False
-        
-        return True
-
-    def copy(self):
-        new_task = Task(name=self.name, type=self.type)
-        # Copy other attributes like preconditions, effects, etc.
-        new_task.preconditions = self.preconditions.copy()
-        new_task.effects = self.effects.copy()
-        return new_task
-
-    def _convert_to_schedule_format(self, plan):
-        """Map plan tasks to scheduler format"""
-        return [{
-            'id': task.name,
-            'requirements': task.requirements,
-            'deadline': task.deadline,
-            'risk_score': task.risk_score,
-            'dependencies': [t.name for t in task.dependencies]
-        } for task in plan]
-
-    def _convert_to_plan(self, schedule):
-        """Convert scheduler output to executable plan"""
-        return [self._create_task_from_assignment(a) for a in schedule.values()]
-
-    def _get_available_agents(self):
-        """Get agent capabilities from collaborative agent's registry"""
-        return self.shared_memory.get('agent_registry', {})
-
-    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
-        self._planning_start_time = time.time()
-
-        # Use probabilistic planner for probabilistic tasks
-        if goal_task.is_probabilistic:
-            task_data = {
-                'initial_state': self.world_state,
-                'goal_state': goal_task.goal_state,
-                'success_threshold': goal_task.success_threshold
-            }
-            policy = self.probabilistic_planner.perform_task(task_data)
-            if policy:
-                return policy
-            return None
-        plan = self.decompose_task(goal_task, self.world_state)
-        
-        # Integrated safety check
-        try:
-            if not self.safety_planner.safety_check(plan):
-                raise AcademicPlanningError("Plan failed initial safety validation")
-        except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
-            logger.error(f"Safety violation: {str(e)}")
-            return self._handle_safety_violation(goal_task, e)
-        
-        # Schedule with resource awareness
-        scheduled_tasks = self._convert_to_schedule_format(plan)
-        schedule = self.scheduler.schedule(
-            tasks=scheduled_tasks,
-            agents=self._get_available_agents(),
-            risk_assessor=self.shared_memory.get('risk_assessor'),
-            state=self.world_state
-        )
-        
-        self._planning_end_time = time.time()
-        self.current_plan = self._convert_to_plan(schedule)
-        
-        # Track planning metrics
-        self.metrics.track_plan_start(self.current_plan)
-
-        # Record planning metrics
-        self.metrics.record_planning_metrics(
-            plan_length=len(plan),
-            planning_time=self._planning_end_time - self._planning_start_time,
-            success_rate=1.0 if plan else 0.0
-        )
-        self.expected_state_projections = self._generate_state_projections(plan)
-        return plan
-
-    def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
-        """Generate expected state after each task execution"""
-        projections = {}
-        sim_state = self.world_state.copy()
-        
-        for task in plan:
-            if task.type == TaskType.PRIMITIVE:
-                # Apply task effects to simulated state
-                for effect in task.effects:
-                    effect(sim_state)
-                projections[task.name] = sim_state.copy()
-        
-        return projections
-
-    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
-        """Handle safety violations during planning"""
-        logger.warning(f"Safety violation detected: {str(error)}")
-        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
-        
-        for candidate in candidates:
-            if self.safety_planner.safety_check(candidate):
-                logger.info("Safety-compliant alternative found")
-                return candidate
-                
-        logger.error("No safe alternatives available")
-        return None
-
-    def _execute_policy(self, policy: Policy, goal_task: Task) -> Dict[str, any]:
-        """Execute probabilistic policy from PPDDL planner"""
-        current_state = self.get_current_state_tuple()
-        execution_path = []
-        success = False
-        
-        for _ in range(100):  # Max 100 steps
-            if current_state not in policy:
-                logger.error(f"No policy defined for state: {current_state}")
-                break
-            
-            action = policy[current_state]
-            if not action.preconditions(dict(current_state)):
-                logger.warning(f"Preconditions failed for {action.name}")
-                break
-            
-            # Sample outcome
-            r = random.random()
-            cumulative_prob = 0
-            for prob, effect in action.outcomes:
-                cumulative_prob += prob
-                if r <= cumulative_prob:
-                    next_state = dict(current_state)
-                    effect(next_state)  # Apply effect
-                    next_state_tuple = tuple(sorted(next_state.items()))
-                    
-                    # Record execution step
-                    execution_path.append({
-                        'action': action.name,
-                        'state': current_state,
-                        'next_state': next_state_tuple,
-                        'outcome_prob': prob
-                    })
-                    
-                    # Update world state
-                    self.world_state = next_state
-                    current_state = next_state_tuple
-                    break
-            
-            # Check goal satisfaction
-            if all(self.world_state.get(k) == v 
-                   for k, v in goal_task.goal_state.items()):
-                success = True
-                break
-        
-        return {
-            'status': 'SUCCESS' if success else 'FAILURE',
-            'execution_path': execution_path,
-            'final_state': self.world_state
-        }
-
-    def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
-        execution_metrics = {
-            'success_count': 0,
-            'failure_count': 0,
-            'total_cost': 0.0,
-            'resource_usage': defaultdict(float)
-        }
-
-
-        # Start execution monitoring
-        self.executor.start_monitoring(plan, self.expected_state_projections)
-        self.execution_interrupted = False
-        
-        # Track plan start
-        plan_meta = self.metrics.track_plan_start(plan)
-        
-        try:
-            for task in plan:
-                if self.execution_interrupted:
-                    logger.warning("Execution interrupted by monitor")
-                    break
-                    
-                try:
-                    task.status = TaskStatus.EXECUTING    # Update task status
-                    
-                    # Pre-execution safety check
-                    self.safety_planner._validate_equipment_constraints(task)
-                    self.safety_planner._validate_temporal_constraints(task)
-                    
-                    # Execute task
-                    start_time = time.time()
-                    self._execute_action(task)
-                    end_time = time.time()
-                    
-                    # Update execution times
-                    task.start_time = start_time
-                    task.end_time = end_time
-                    task.status = TaskStatus.COMPLETED
-
-                    self.safety_planner.update_allocations(task)    # Update resource allocations
-                    
-                    # Update metrics
-                    execution_metrics['success_count'] += 1
-                    execution_metrics['total_cost'] += task.cost
-                    self._update_resource_metrics(execution_metrics, task)
-                    
-                    # Add to execution history
-                    self.memory.base_state['execution_history'].append({
-                        'task': task.name,
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'status': 'success',
-                        'state_snapshot': self.world_state.copy()
-                    })
-                    
-                except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
-                    logger.warning(f"Execution safety violation: {str(e)}")
-                    execution_metrics['failure_count'] += 1
-                    task.status = TaskStatus.FAILED
-                    
-                    # Attempt recovery
-                    recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
-                    if recovery_plan:
-                        recovery_result = self.execute_plan(recovery_plan, goal_task)
-                        if recovery_result.get('status') == 'SUCCESS':
-                            execution_metrics['success_count'] += 1
-                        else:
-                            execution_metrics['failure_count'] += 1
-
-                    self.memory.base_state['execution_history'].append({
-                        'task': task.name,
-                        'start_time': start_time if 'start_time' in locals() else None,
-                        'end_time': end_time if 'end_time' in locals() else None,
-                        'status': 'failed',
-                        'error': str(e),
-                        'state_snapshot': self.world_state.copy()
-                    })
-                    
-        finally:
-            self.executor.stop_monitoring()    # Stop monitoring regardless of outcome
-            
-        # Determine final status
-        final_status = TaskStatus.SUCCESS if execution_metrics['failure_count'] == 0 else TaskStatus.FAILED
-
-        self.metrics.track_plan_completion(plan_meta, final_status)    # Track plan completion
-        
-        # Record execution metrics
-        self.metrics.record_execution_metrics(
-            success_count=execution_metrics['success_count'],
-            failure_count=execution_metrics['failure_count'],
-            resource_usage=execution_metrics['resource_usage']
-        )
-        execution_summary = {
-            "status": final_status.name,
-            "world_state": self.world_state,
-            "metrics": execution_metrics
-        }
-        self._log_performance(execution_summary)
-        return execution_summary
-
-    def replan_from_execution_failure(self, task: Optional[Task], reason: str):
-        """Handle execution failures detected by monitor"""
-        logger.warning(f"Replanning triggered due to: {reason}")
-        self.execution_interrupted = True
-        
-        # Create recovery task based on failure type
-        if reason == "precondition_violation" and task:
-            recovery_plan = self._create_recovery_plan(task)
-        else:
-            # Full replan from current state
-            recovery_plan = self.replan(self.current_goal)
-        
-        if recovery_plan:
-            logger.info("Executing recovery plan")
-            recovery_result = self.execute_plan(recovery_plan, self.current_goal)
-            # Merge results with main execution
-            # ... implementation specific ...
-        else:
-            logger.error("Recovery planning failed")
-
-    def _create_recovery_plan(self, failed_task: Task) -> List[Task]:
-        """Create targeted recovery plan for a specific task failure"""
-        # 1. Attempt alternative methods
-        alternatives = self._find_alternative_methods(failed_task)
-        for method_idx in alternatives:
-            new_task = failed_task.copy()
-            new_task.selected_method = method_idx
-            recovery_plan = self.decompose_task(new_task)
-            if recovery_plan and self._validate_plan(recovery_plan):
-                return recovery_plan
-        
-        # 2. Create precondition satisfaction subplan
-        logger.info("Attempting to repair preconditions")
-        repair_plan = self._create_precondition_repair_plan(failed_task)
-        if repair_plan:
-            repair_plan.append(failed_task.copy())
-            return repair_plan
-        
-        return None
-
-    def _create_precondition_repair_plan(self, task: Task) -> Optional[List[Task]]:
-        """Generate plan to satisfy missing preconditions"""
-        # ... implementation of precondition repair ...
-        # This would use task's precondition gap analysis
-        # and method from the task library to satisfy conditions
-        
-    def adjust_for_resource_violation(self, resource: str, usage: float, limit: float):
-        """Adjust plan based on resource violation"""
-        # 1. Check if we can redistribute tasks
-        if self._redistribute_resource_load(resource):
-            return
-            
-        # 2. Scale back resource-intensive tasks
-        self._scale_back_resource_usage(resource, usage, limit)
-        
-        # 3. If still over, trigger replan
-        if self._check_resource_overload(resource):
-            self.replan_from_execution_failure(None, f"resource_violation_{resource}")
-
-    def adjust_for_temporal_violation(self, task: Task, time_delta: float):
-        """Adjust plan based on temporal violation"""
-        # 1. Attempt to accelerate subsequent tasks
-        if self._accelerate_subsequent_tasks(task, time_delta):
-            return
-            
-        # 2. Reallocate time from less critical tasks
-        if self._reallocate_time(task, time_delta):
-            return
-            
-        # 3. If still behind, trigger replan
-        self.replan_from_execution_failure(task, "temporal_violation")
-
-    def _update_resource_metrics(self, metrics: dict, task: Task):
-        """Track resource consumption metrics"""
-        if hasattr(task, 'resource_requirements'):
-            req = task.resource_requirements
-            metrics['resource_usage']['gpu'] += req.gpu
-            metrics['resource_usage']['ram'] += req.ram
-            if req.specialized_hardware:
-                for hw in req.specialized_hardware:
-                    metrics['resource_usage'][hw] += 1
-
-    def _grid_search_alternatives(self, task: Task) -> List[Task]:
-        """Systematic exploration of decomposition methods"""
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.type != TaskType.ABSTRACT:
-            return []
-
-        current_method = task.selected_method
-        total_methods = len(library_task.methods)
-
-        alternatives = []
-        for method_idx in range(current_method + 1, total_methods):
-            new_task = library_task.copy()
-            new_task.selected_method = method_idx
-            alternatives.append(new_task)
-
-        return alternatives
-
-    def _bayesian_alternatives(self, task: Task) -> List[Task]:
-        """Bayesian optimization of decomposition methods"""
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.type != TaskType.ABSTRACT:
-            return []
-
-        # Calculate success probabilities with Laplace smoothing
-        method_scores = []
-        for method_idx in range(len(library_task.methods)):
-            key = (task.name, method_idx)
-            stats = self.method_stats[key]
-            success = stats['success'] + 1  # Laplace prior
-            total = stats['total'] + 2
-            method_scores.append((method_idx, success / total))
-
-        # Sort by descending score, exclude current method
-        sorted_methods = sorted(method_scores, key=lambda x: -x[1])
-        current_method = task.selected_method
-
-        alternatives = []
-        for method_idx, score in sorted_methods:
-            if method_idx != current_method:
-                new_task = library_task.copy()
-                new_task.selected_method = method_idx
-                alternatives.append(new_task)
-
-        return alternatives[:2]  # Return top 2 alternatives
-
-    def _update_scheduler_state(self, task):
-        """Maintain scheduler's view of world state"""
-        self.schedule_state['agent_loads'][task.assigned_agent] -= task.cost
-        self.schedule_state['task_history'][task.name].append({
-            'status': 'failed',
-            'timestamp': time.time()
+        # Initialize mask tokens for each modality
+        self.mask_tokens = nn.ParameterDict({
+            'text': Parameter(torch.zeros(1, self.embed_dim)),
+            'vision': Parameter(torch.zeros(1, self.embed_dim)),
+            'audio': Parameter(torch.zeros(1, self.embed_dim))
         })
+        for key in self.mask_tokens:
+            nn.init.normal_(self.mask_tokens[key], mean=0.0, std=0.02)
 
-    def _validate_plan(self, plan: List[Task]) -> bool:
-        """Enhanced validation with safety constraints"""
-        # Basic validation
-        if not plan:
-            return False
+        # Reference position embeddings from encoders
+        self.position_embeddings = {
+            'text': self.text_encoder.position_embeddings,
+            'vision': self.vision_encoder.position_embed,
+            'audio': self.audio_encoder.position_embed
+        }
+
+        self.multi_modal_projector = nn.ModuleDict({
+            'text': nn.Linear(self.text_encoder.embed_dim, self.embed_dim),
+            'vision': nn.Linear(self.vision_encoder.embed_dim, self.embed_dim),
+            'audio': nn.Linear(self.audio_encoder.embed_dim, self.embed_dim)
+        }).to(self.device)
+
+        # Move components to device
+        self.mask_tokens = self.mask_tokens.to(self.device)
+
+        # Optimizer
+        self.optimizer = self._configure_optimizer()
+
+    def _configure_optimizer(self):
+        """Configures the optimizer for training."""
+        params_to_optimize = list(self.text_encoder.parameters()) + \
+                             list(self.vision_encoder.parameters()) + \
+                             list(self.audio_encoder.parameters()) + \
+                             list(self.text_prediction_head.parameters()) + \
+                             list(self.vision_prediction_head.parameters()) + \
+                             list(self.audio_prediction_head.parameters()) + \
+                             list(self.text_contrastive_proj.parameters()) + \
+                             list(self.vision_contrastive_proj.parameters()) + \
+                             list(self.audio_contrastive_proj.parameters()) + \
+                             list(self.text_generator.parameters()) + \
+                             list(self.vision_generator.parameters()) + \
+                             list(self.audio_generator.parameters()) + \
+                             [self.global_projection_param]
+
+        # Add parameters from task heads if they are dynamically created and stored
+        # For example, if self.task_heads is a nn.ModuleDict:
+        # if hasattr(self, 'task_heads'):
+        #     params_to_optimize.extend(self.task_heads.parameters())
+
+        return torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, params_to_optimize),
+            lr=self.learning_rate,
+            betas=self.adam_betas,
+            eps=self.adam_eps,
+            weight_decay=self.weight_decay
+        )
+
+    def _init_shared_memory_keys(self):
+        """Initialize standardized keys for shared memory access"""
+        self.sm_keys = {
+            'weights_cache': f"perception:weights:{self.name}",
+            'model_snapshot': f"perception:snapshot:{self.name}",
+            'embeddings': f"perception:embeddings:{self.name}",
+            'training_state': f"perception:training:{self.name}"
+        }
+
+    # --- Masking Helpers ---
+    def _apply_masking_text(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Language Modeling."""
+        mask_token_id = self.tokenizer.token_to_id(self.tokenizer.mask_token)
+        rand = torch.rand(input_ids.shape, device=self.device)
+        # Where to mask (bernoulli trial for each token)
+        mask_arr = (rand < self.masking_ratio)
+        
+        # Ensure we don't mask special tokens like [CLS], [SEP], [PAD]
+        pad_token_id = self.tokenizer.token_to_id(self.tokenizer.pad_token)
+        cls_token_id = self.tokenizer.token_to_id(self.tokenizer.cls_token)
+        sep_token_id = self.tokenizer.token_to_id(self.tokenizer.sep_token)
+
+        special_tokens_mask = (input_ids == pad_token_id) | \
+                              (input_ids == cls_token_id) | \
+                              (input_ids == sep_token_id)
+        mask_arr &= ~special_tokens_mask # Don't mask special tokens
+
+        masked_input_ids = input_ids.clone()
+        masked_input_ids[mask_arr] = mask_token_id
+        return masked_input_ids, mask_arr
+
+    def _apply_masking_vision(self, patches: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Patch Modeling. Patches shape: (B, NumPatches, PatchDim)."""
+        batch_size, num_patches, _ = patches.shape
+        mask = torch.rand(
+            batch_size,
+            num_patches,
+            device=self.device
+        ) < self.masking_ratio
+        masked_patches = patches.clone()
+        masked_patches[mask] = 0
+        return masked_patches, mask
+
+    def _apply_masking_audio(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Audio Modeling (e.g., on spectrogram patches or features)."""
+        batch_size, num_frames, _ = features.shape
+        mask = torch.rand(batch_size, num_frames, device=self.device) < self.masking_ratio
+        masked_features = features.clone()
+        masked_features[mask] = 0
+        return masked_features, mask
+
+    # --- Loss Calculation Helpers ---
+    def _calc_reconstruction_loss_text(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Calculates MLM loss. Predictions: (B, SeqLen, VocabSize), Targets: (B, SeqLen), Mask: (B, SeqLen)"""
+        predictions_masked = predictions[mask] # Select logits for masked tokens
+        targets_masked = targets[mask]       # Select target token IDs for masked tokens
+        if predictions_masked.numel() == 0: # No tokens were masked
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        loss = F.cross_entropy(predictions_masked.reshape(-1, predictions.size(-1)), targets_masked.reshape(-1))
+        return loss
+
+    def _calc_reconstruction_loss_vision_audio(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Calculates reconstruction loss for vision/audio. Predictions/Targets/Mask: (B, NumPatches/Frames, FeatureDim)"""
+        if mask.sum() == 0 : # No elements masked
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        expanded_mask = mask.unsqueeze(-1).expand_as(targets)
+        loss = F.mse_loss(predictions[expanded_mask], targets[expanded_mask])
+        return loss
+        
+    def _calc_contrastive_loss(self, emb1: torch.Tensor, emb2: torch.Tensor) -> torch.Tensor:
+        """Calculates InfoNCE contrastive loss. emb1, emb2: (B, ProjDim)"""
+        emb1 = F.normalize(emb1, p=2, dim=-1)
+        emb2 = F.normalize(emb2, p=2, dim=-1)
+
+        # logits: (B, B)
+        logits = torch.matmul(emb1, emb2.t()) / self.contrastive_temp
+        labels = torch.arange(logits.size(0), device=self.device) # Positive pairs are on the diagonal
+        loss = F.cross_entropy(logits, labels)
+        return loss
+
+    def _calc_temporal_coherence_loss(self, sequence_embeddings: torch.Tensor) -> torch.Tensor:
+        """Calculates temporal coherence loss. sequence_embeddings: (B, SeqLen, EmbedDim)"""
+        if sequence_embeddings.size(1) < 2:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        # Difference between consecutive frame embeddings
+        diffs = sequence_embeddings[:, 1:, :] - sequence_embeddings[:, :-1, :]
+        loss = torch.mean(diffs.pow(2)) # MSE of differences
+        return loss
+
+    # --- Pretraining Steps ---
+    def _pretrain_masked_modality(
+        self,
+        modality: str,
+        inputs: Dict[str, torch.Tensor],
+        mask_ratio: float = 0.15,
+        return_reconstructions: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
+        """
+        Performs masked modality pretraining (MLM, MPM, MAM) using modality-specific
+        encoders and simple prediction heads.
+        """
+        valid_modalities = ['vision', 'audio', 'text']
+        if modality not in valid_modalities:
+            raise ValueError(f"Invalid modality '{modality}'. Must be one of {valid_modalities}")
+
+        device = self.device
+        training = self.training # Agent's training state
+
+        # Get modality-specific components
+        encoder = {
+            'text': self.text_encoder,
+            'vision': self.vision_encoder,
+            'audio': self.audio_encoder
+        }[modality]
+    
+        prediction_head = {
+            'text': self.text_prediction_head,
+            'vision': self.vision_prediction_head,
+            'audio': self.audio_prediction_head
+        }[modality]
+    
+        raw_input_key = self._get_input_key_for_modality(modality)
+        raw_input = inputs[raw_input_key].to(device)
+        style_id = inputs.get('style_id')
+        if style_id is not None:
+            style_id = style_id.to(device)
             
-        # Safety validation
-        try:
-            self.safety_planner.safety_check(plan)
-            return True
-        except (ResourceViolation, TemporalViolation) as e:
-            logger.warning(f"Plan validation failed: {str(e)}")
-            return False
+        reconstruction_loss = torch.tensor(0.0, device=device, requires_grad=training)
+        reconstructions_dict = {}
+    
+        if modality in ["audio", "vision"] and encoder.encoder_type != "transformer":
+            return 0.0
 
-    def _update_task_success(self, parent: Task, children: List[Task]):
-        """Update method success statistics for abstract tasks"""
-        if parent.type != TaskType.ABSTRACT:
-            return
+        with torch.set_grad_enabled(training):
+            if modality == 'text':
+                masked_input_ids, target_mask_indices = self._apply_masking_text(raw_input)
+                encoder_output = encoder(masked_input_ids, style_id=style_id, output_type="full_sequence")
+                predictions_logits = prediction_head(encoder_output) # (B, S, VocabSize)
+ 
+                if target_mask_indices.sum() > 0:
+                    # Select logits and labels for masked positions
+                    masked_predictions_logits = predictions_logits[target_mask_indices] # (NumMasked, VocabSize)
+                    masked_target_labels = raw_input[target_mask_indices] # (NumMasked)
+                    
+                    reconstruction_loss = F.cross_entropy(
+                        masked_predictions_logits,
+                        masked_target_labels
+                    )
+                
+                if return_reconstructions:
+                    reconstructions_dict = {
+                        'original_ids': raw_input.detach(),
+                        'masked_input_ids': masked_input_ids.detach(),
+                        'reconstructed_logits': predictions_logits.detach(),
+                        'mask_indices': target_mask_indices.detach()
+                    }
+    
+            elif modality == 'vision' or modality == 'audio':
+                # This implements a BERT-style masked patch/frame prediction.
+                # 1. Extract raw patches/frames.
+                # 2. Project them to initial embeddings.
+                # 3. Mask some of these initial embeddings.
+                # 4. Add CLS token and Positional Embeddings.
+                # 5. Pass through the encoder's main transformer.
+                # 6. Predict original raw patches/frames from the transformer's output at masked positions.
+    
+                if modality == 'vision':
+                    # raw_input: (B, C, H, W)
+                    raw_patches = encoder.extract_patches(raw_input) # (B, NumPatches, RawPatchDim)
+                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumPatches, EmbedDim)
+                    pos_embed_full = encoder.position_embed # (1, BaseNumPatches+1, EmbedDim) or (1, MaxPosEmbed, EmbedDim)
+                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim)
+                    mask_token_for_modality = self.mask_tokens['vision'] # (1, EmbedDim)
+                else: # modality == 'audio'
+                    # raw_input: (B, C, T_audio) or (B, T_audio)
+                    raw_patches = encoder.extract_patches(raw_input) # (B, NumFrames, RawFrameDim)
+                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumFrames, EmbedDim)
+                    pos_embed_full = encoder.position_embed # (1, MaxPosEmbed, EmbedDim)
+                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim) - Assuming audio encoder also has it
+                    mask_token_for_modality = self.mask_tokens['audio'] # (1, EmbedDim)
+    
+                batch_size, num_patches_or_frames, _ = initial_patch_embeddings.shape
+                
+                # Create mask for actual patches/frames
+                target_mask_indices = torch.rand(batch_size, num_patches_or_frames, device=device) < mask_ratio
+                
+                masked_initial_embeddings = initial_patch_embeddings.clone()
+                # Efficiently apply mask token using torch.where or direct assignment
+                # Ensure mask_token_for_modality is correctly broadcasted/expanded
+                expanded_mask_fill = mask_token_for_modality.expand(batch_size, num_patches_or_frames, -1)
+                masked_initial_embeddings = torch.where(target_mask_indices.unsqueeze(-1), 
+                                                        expanded_mask_fill, 
+                                                        masked_initial_embeddings)
+    
+                # Add CLS token
+                cls_tokens_expanded = cls_token_emb.expand(batch_size, -1, -1)
+                transformer_input_embeddings = torch.cat([cls_tokens_expanded, masked_initial_embeddings], dim=1) # (B, NumPatches+1, EmbedDim)
+                
+                current_seq_len = transformer_input_embeddings.size(1)
+                
+                # Add positional embeddings (handle potential size mismatch carefully)
+                # Encoders should ideally handle dynamic PE sizing or use PE up to max_position_embeddings
+                if pos_embed_full.size(1) < current_seq_len:
+                    # Fallback: Use available part and warn. Proper fix is PE interpolation or larger PE table.
+                    logger.warning(f"Positional embedding table size ({pos_embed_full.size(1)}) is smaller than "
+                                   f"current sequence length ({current_seq_len}) for modality {modality}. Truncating/Padding PE.")
+                    pe_to_add = torch.zeros_like(transformer_input_embeddings)
+                    len_to_copy = min(pos_embed_full.size(1), current_seq_len)
+                    pe_to_add[:, :len_to_copy, :] = pos_embed_full[:, :len_to_copy, :]
+                else:
+                    pe_to_add = pos_embed_full[:, :current_seq_len, :]
+                
+                transformer_input_with_pe = transformer_input_embeddings + pe_to_add
+                
+                # Pass through the encoder's transformer component
+                encoder_transformer_output = encoder.transformer(transformer_input_with_pe, style_id=style_id) # (B, NumPatches+1, EmbedDim)
+                
+                if target_mask_indices.sum() > 0:
+                    output_at_masked_positions = encoder_transformer_output[:, 1:, :][target_mask_indices] # (TotalNumMasked, EmbedDim)
+                    
+                    # Predict raw patches/frames from these outputs
+                    predictions_raw = prediction_head(output_at_masked_positions) # (TotalNumMasked, RawPatchDim)
+                    
+                    # Targets are the original raw patches/frames at masked positions
+                    target_raw_values = raw_patches[target_mask_indices] # (TotalNumMasked, RawPatchDim)
+                    
+                    reconstruction_loss = F.mse_loss(predictions_raw, target_raw_values)
+                
+                if return_reconstructions:
+                    reconstructions_dict = {
+                        'original_raw_patches_or_frames': raw_patches.detach(),
+                        'masked_input_embeddings_to_transformer': masked_initial_embeddings.detach(), # These are EmbedDim
+                        'reconstructed_raw_predictions_at_mask': predictions_raw.detach() if target_mask_indices.sum() > 0 else torch.empty(0),
+                        'mask_indices': target_mask_indices.detach()
+                    }
+            
+            # Ensure loss requires grad if in training and it turned out to be 0 (e.g. no tokens masked)
+            if training and not reconstruction_loss.requires_grad and reconstruction_loss.item() == 0.0:
+                reconstruction_loss = reconstruction_loss.clone().requires_grad_(True)
+                
+            if return_reconstructions:
+                return reconstruction_loss, reconstructions_dict
+            
+            return reconstruction_loss
 
-        success = all(t.status == TaskStatus.SUCCESS for t in children)
-        self._update_method_stats(parent, success)
+    def _pretrain_contrastive(self, data_mod1: Dict, data_mod2: Dict, mod1_type: str, mod2_type: str) -> torch.Tensor:
+        """Performs cross-modal contrastive learning."""
+        encoders = {'text': self.text_encoder, 'vision': self.vision_encoder, 'audio': self.audio_encoder}
+        projections = {'text': self.text_contrastive_proj, 
+                       'vision': self.vision_contrastive_proj, 
+                       'audio': self.audio_contrastive_proj}
 
-    def _update_method_stats(self, task: Task, success: bool, cost: float):
-        """Update Bayesian statistics after execution"""
-        if task.type != TaskType.ABSTRACT or task.parent is None:
-            return
+        # Extract input data for each modality
+        input1 = data_mod1[self._get_input_key_for_modality(mod1_type)].to(self.device)
+        input2 = data_mod2[self._get_input_key_for_modality(mod2_type)].to(self.device)
 
-        parent_task = task.parent
-        method_idx = parent_task.selected_method
+        style_id1 = data_mod1.get('style_id')
+        style_id2 = data_mod2.get('style_id')
+
+        # Encode features
+        emb1_full = encoders[mod1_type](input1, style_id=style_id1)
+        emb2_full = encoders[mod2_type](input2, style_id=style_id2)
+
+        emb1 = emb1_full[:, 0, :] if emb1_full.ndim == 3 else emb1_full # (B, EmbedDim)
+        emb2 = emb2_full[:, 0, :] if emb2_full.ndim == 3 else emb2_full # (B, EmbedDim)
+
+        # Project to common contrastive space
+        proj_emb1 = projections[mod1_type](emb1)
+        proj_emb2 = projections[mod2_type](emb2)
         
-        # Use string keys for method_stats
-        key = (parent_task.name, str(method_idx))
-        stats = self.method_stats[key]
-        self.method_stats[key]['total'] += 1
-        if success:
-            self.method_stats[key]['success'] += 1
+        return self._calc_contrastive_loss(proj_emb1, proj_emb2)
 
-    def _execute_action(self, task: Task):
-        """Execute task with resource locking"""
-        # Handle probabilistic actions differently
-        if task.is_probabilistic:
-            # Probabilistic effects handled in policy execution
-            return
+    def _get_input_key_for_modality(self, modality_type: str) -> str:
+        if modality_type == 'text': return 'input_ids'
+        if modality_type == 'vision': return 'pixel_values'
+        if modality_type == 'audio': return 'audio_values'
+        raise ValueError(f"Unknown modality type: {modality_type}")
 
-        # Acquire resources
-        self.resource_monitor.acquire_resources(task.resource_requirements)
+    def _pretrain_temporal_coherence(self, sequence_data: torch.Tensor, modality: str) -> torch.Tensor:
+        """
+        Enhanced temporal coherence learning with configurable loss types,
+        multi-scale coherence, and efficient batched processing.
         
+        Args:
+            sequence_data: Input tensor (B, NumFrames, ...) 
+            modality: 'vision' or 'audio'
+        
+        Returns:
+            Temporal coherence loss tensor
+        """
+        encoders = {'vision': self.vision_encoder, 'audio': self.audio_encoder}
+        if modality not in encoders:
+            raise ValueError(f"Temporal coherence not supported for modality: {modality}")
+        
+        batch_size, num_frames = sequence_data.shape[:2]
+        
+        # Handle short sequences
+        if num_frames < 2:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # Efficient batched encoding - (B*T, ...) -> (B*T, D) -> (B, T, D)
+        flat_sequence = sequence_data.view(-1, *sequence_data.shape[2:])
+        encoded_frames = encoders[modality](flat_sequence)  # (B*T, ...)
+        
+        # Handle different encoder output types
+        if encoded_frames.dim() == 3:  # Sequence output (B*T, S, D)
+            frame_embeddings = encoded_frames[:, 0, :]  # Use CLS token
+        else:  # Pooled output (B*T, D)
+            frame_embeddings = encoded_frames
+        
+        embeddings = frame_embeddings.view(batch_size, num_frames, -1)  # (B, T, D)
+        
+        total_loss = torch.tensor(0.0, device=self.device)
+        
+        # Multi-scale MSE loss (captures both short and long-term coherence)
+        if self.loss_type in ['mse', 'hybrid']:
+            mse_loss = torch.tensor(0.0, device=self.device)
+            valid_scale_count = 0
+            
+            for scale in range(1, min(self.max_scale + 1, num_frames)):
+                if num_frames - scale < 1:
+                    continue
+                    
+                # Calculate differences at current temporal scale
+                emb1 = embeddings[:, :-scale, :]
+                emb2 = embeddings[:, scale:, :]
+                diffs = emb2 - emb1
+                
+                # Accumulate MSE loss
+                scale_loss = torch.mean(diffs.pow(2))
+                mse_loss += scale_loss
+                valid_scale_count += 1
+            
+            if valid_scale_count > 0:
+                mse_loss /= valid_scale_count
+                total_loss += self.mse_weight * mse_loss
+        
+        # Contrastive loss (distinguishes adjacent vs distant frames)
+        if self.loss_type in ['contrastive', 'hybrid']:
+            # Only use consecutive pairs for anchor-positive
+            anchors = embeddings[:, :-1, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
+            positives = embeddings[:, 1:, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
+            
+            # Generate negatives - same sequence but distant frames
+            all_negatives = []
+            for i in range(batch_size):
+                # Get random distant frames from same sequence
+                time_indices = torch.randint(0, num_frames, (num_frames - 1,))
+                distant_frames = embeddings[i, time_indices, :]
+                all_negatives.append(distant_frames)
+            
+            negatives = torch.cat(all_negatives, dim=0)  # (B*(T-1), D)
+            
+            # Normalize embeddings
+            anchors_norm = F.normalize(anchors, dim=-1)
+            positives_norm = F.normalize(positives, dim=-1)
+            negatives_norm = F.normalize(negatives, dim=-1)
+            
+            # Calculate similarities
+            pos_sim = torch.sum(anchors_norm * positives_norm, dim=-1) / self.temperature
+            neg_sim = torch.sum(anchors_norm[:, None] * negatives_norm[None, :], dim=-1) / self.temperature
+            
+            # Contrastive loss (InfoNCE)
+            logits = torch.cat([pos_sim[:, None], neg_sim], dim=1)
+            labels = torch.zeros(logits.size(0), dtype=torch.long, device=self.device)
+            contrastive_loss = F.cross_entropy(logits, labels)
+            
+            total_loss += self.contrastive_weight * contrastive_loss
+        
+        return total_loss
+
+    def _pretraining_step(self, task_data: Dict) -> Dict[str, torch.Tensor]:
+        """Orchestrates a single pretraining step based on the objective."""
+        if self.shared_memory.get(self.sm_keys['training_state']):
+            logger.info("Training paused - another agent is currently training")
+            return {'status': 'paused'}
+            
         try:
-            # Execute task
-            super()._execute_action(task)
+            # Set training lock
+            self.shared_memory.put(self.sm_keys['training_state'], True)
+
+            self.train() # Set agent to training mode
+            self.optimizer.zero_grad()
+            
+            objective = task_data['objective']
+            total_loss = torch.tensor(0.0, device=self.device)
+
+            if objective == 'mlm': # Masked Language Modeling
+                loss = self._pretrain_masked_modality(task_data['text_data'], 'text')
+                total_loss = total_loss + loss
+            elif objective == 'mpm': # Masked Patch Modeling
+                loss = self._pretrain_masked_modality(task_data['vision_data'], 'vision')
+                total_loss = total_loss + loss
+            elif objective == 'mam': # Masked Audio Modeling
+                loss = self._pretrain_masked_modality(task_data['audio_data'], 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_text_image':
+                loss = self._pretrain_contrastive(task_data['text_data'], task_data['vision_data'], 'text', 'vision')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_text_audio':
+                loss = self._pretrain_contrastive(task_data['text_data'], task_data['audio_data'], 'text', 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_vision_audio':
+                loss = self._pretrain_contrastive(task_data['vision_data'], task_data['audio_data'], 'vision', 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'temporal_vision': # Temporal coherence for video
+                loss = self._pretrain_temporal_coherence(task_data['video_data']['frame_sequence'], 'vision') # video_data.frame_sequence: (B, NumFrames, C, H, W)
+                total_loss = total_loss + loss
+            elif objective == 'temporal_audio': # Temporal coherence for audio
+                loss = self._pretrain_temporal_coherence(task_data['audio_sequence_data']['segment_sequence'], 'audio') # audio_sequence_data.segment_sequence: (B, NumSegments, C, T_segment)
+                total_loss = total_loss + loss
+            else:
+                logger.warning(f"Unknown pretraining objective: {objective}")
+                return {'loss': total_loss, 'status': 'unknown_objective'}
+
+            if total_loss.requires_grad: # Ensure loss requires grad before backward
+                total_loss.backward()
+                self.optimizer.step()
+            
+            return {'loss': total_loss.item(), 'status': 'success'}
+
         finally:
-            # Release resources
-            self.resource_monitor.release_resources(task.resource_requirements)
+            # Release training lock
+            self.shared_memory.put(self.sm_keys['training_state'], False)
 
-    def _log_performance(self, result: Dict[str, Any]):
-        """Logs the result of a planning and execution cycle to shared memory for the MetaController."""
-        # Use self.name to create a unique key for this agent's logs
-        log_key = f"log:performance:{self.name}"
+    def train(self):
+        """Set all model components to training mode."""
+        for name in ['encoder', 'decoder', 'projection_layer']:
+            module = getattr(self, name, None)
+            if isinstance(module, torch.nn.Module):
+                module.train()
+
+    def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:
+        self.train()
+        self.optimizer.zero_grad()
+
+        downstream_task = task_data['downstream_task'] # e.g., 'image_classification', 'text_regression'
+        labels = task_data['labels'].to(self.device)
         
-        log_entry = {
-            'timestamp': time.time(),
-            'status': result.get('status'),
-            'metrics': {
-                'total_cost': result.get('metrics', {}).get('total_cost', 0),
-                'plan_length': len(self.current_plan),
-                'success_count': result.get('metrics', {}).get('success_count', 0),
-                'failure_count': result.get('metrics', {}).get('failure_count', 0),
+        embeddings = None
+        if 'text_data' in task_data:
+            input_ids = task_data['text_data']['input_ids'].to(self.device)
+            embeddings = self.text_encoder(input_ids, style_id=task_data['text_data'].get('style_id'))
+        elif 'vision_data' in task_data:
+            pixel_values = task_data['vision_data']['pixel_values'].to(self.device)
+            embeddings = self.vision_encoder(pixel_values, style_id=task_data['vision_data'].get('style_id'))
+        elif 'audio_data' in task_data:
+            waveform = task_data['audio_data']['waveform'].to(self.device)
+            embeddings = self.audio_encoder(waveform, style_id=task_data['audio_data'].get('style_id'))
+        # Add handling for multimodal fine-tuning if necessary, by concatenating/fusing embeddings
+        
+        if embeddings is None:
+            return {'loss': 0, 'status': 'no_input_data'}
+
+        # Use CLS token or mean pooled output for sequence tasks
+        if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
+            pooled_embeddings = embeddings[:, 0, :] # Assuming CLS token
+        else: # (B, EmbedDim)
+            pooled_embeddings = embeddings
+
+        # Get task head
+        num_classes = task_data.get('num_classes') # Required for classification
+        task_head = self.transformer.select_taskhead(
+            downstream_task, 
+            input_dim=self.embed_dim,
+            num_classes=num_classes
+        )
+        
+        logits_or_values = task_head(pooled_embeddings)
+
+        loss = None
+        if "classification" in downstream_task.lower():
+            loss = F.cross_entropy(logits_or_values, labels)
+        elif "regression" in downstream_task.lower():
+            loss = F.mse_loss(logits_or_values.squeeze(), labels.float()) # Ensure labels are float for MSE
+        else:
+            return {'loss': 0, 'status': f'unsupported_task_type:{downstream_task}'}
+        
+        if loss is not None and loss.requires_grad:
+            loss.backward()
+            self.optimizer.step()
+            return {'loss': loss.item(), 'status': 'success', 'predictions': logits_or_values.detach()}
+        return {'loss': 0, 'status': 'loss_not_computed', 'predictions': logits_or_values.detach()}
+
+    def _inference_step(self, task_data: Dict) -> Dict[str, Any]:
+        self.eval() # Set agent to evaluation mode
+        with torch.no_grad():
+            modality = task_data['modality']
+            input_data = task_data['input_data']
+            downstream_task = task_data.get('downstream_task', None) # Optional: for task-specific heads
+
+            embeddings = None
+            style_id = input_data.get('style_id')
+
+            if modality == 'text':
+                input_ids = input_data['input_ids'].to(self.device)
+                embeddings = self.text_encoder(input_ids, style_id=style_id)
+            elif modality == 'vision':
+                pixel_values = input_data['pixel_values'].to(self.device)
+                embeddings = self.vision_encoder(pixel_values, style_id=style_id)
+            elif modality == 'audio':
+                waveform = input_data['waveform'].to(self.device)
+                embeddings = self.audio_encoder(waveform, style_id=style_id)
+            elif modality == 'multimodal': # Example for multimodal inference
+                text_emb = self.text_encoder(input_data['text']['input_ids'].to(self.device), style_id=input_data['text'].get('style_id'))[:,0,:]
+                vis_emb = self.vision_encoder(input_data['vision']['pixel_values'].to(self.device), style_id=input_data['vision'].get('style_id'))[:,0,:]
+                # Simple concatenation for fusion, more sophisticated fusion can be added
+                embeddings = torch.cat((text_emb, vis_emb), dim=-1) 
+                # For multimodal, a specific multimodal head should be used.
+                # Here, we assume a generic task head that can take the concatenated embeddings.
+                # The input_dim for such a head would be 2 * self.embed_dim.
+                # This part requires a more defined multimodal architecture.
+            else:
+                return {'output': None, 'status': f'unknown_modality:{modality}'}
+
+            if downstream_task:
+                if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
+                    pooled_embeddings = embeddings[:, 0, :] # CLS token
+                else: # (B, EmbedDim)
+                    pooled_embeddings = embeddings
+                
+                # Adjust input_dim for multimodal concatenated embeddings
+                current_embed_dim = embeddings.size(-1) if modality == 'multimodal' else self.embed_dim
+
+                task_head = self._get_task_head(downstream_task, input_dim=current_embed_dim, num_classes=task_data.get('num_classes'))
+                output = task_head(pooled_embeddings)
+            else: # Return raw embeddings or pass through a generator
+                if task_data.get('generate', False): # For generative tasks like text generation
+                    if modality == 'text' and 'memory_for_decoder' in input_data: # Assuming memory comes from another encoder
+                        memory = input_data['memory_for_decoder'].to(self.device)
+                        output = self.text_generator.inference(memory=memory, style_id=style_id)
+                    # Add similar generation for vision/audio if applicable
+                    else:
+                        output = embeddings # Fallback to embeddings if generation setup is incomplete
+                else:
+                    output = embeddings
+            
+            return {'output': output.cpu(), 'status': 'success'}
+
+    # --- Main perform_task method ---
+    def perform_task(self, task_data: Dict) -> Dict[str, Any]:
+        """
+        Main entry point for the PerceptionAgent.
+        Dispatches to pretraining, fine-tuning, or inference based on task_data.
+        """
+        # Try loading state from shared memory before execution
+        if task_data.get('use_cached_state', False):
+            if self.load_state_from_shared_memory():
+                logger.info("Using model state from shared memory")
+
+            task_type = task_data.get('task_type')
+            if task_type == 'pretrain':
+                return self._pretraining_step(task_data)
+            elif task_type == 'finetune':
+                return self._finetune_step(task_data)
+            elif task_type == 'inference':
+                return self._inference_step(task_data)
+            else:
+                logger.error(f"Unsupported task_type: {task_type}")
+                return {'status': 'error', 'message': f"Unsupported task_type: {task_type}"}
+
+        # Save state after critical operations
+        if task_data.get('save_state_after', False):
+            self.save_state_to_shared_memory()
+            
+        return result
+
+    def update_projection(self, rewards: Union[List[float], torch.Tensor], lr: float):
+        """
+        Updates the global_projection_param using a custom rule.
+        This is separate from the main optimizer.
+        """
+        if not isinstance(rewards, torch.Tensor):
+            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float3T)
+        
+        # Ensure global_projection_param requires grad for this update logic
+        if not self.global_projection_param.requires_grad:
+            self.global_projection_param.requires_grad_(True)
+
+        # Simplified reward-based scaling for the gradient
+        # The gradient here is a pseudo-gradient based on rewards
+        pseudo_grad = rewards.mean() * torch.sign(self.global_projection_param)
+        
+        if self.global_projection_param.grad is None:
+            self.global_projection_param.grad = pseudo_grad
+        else:
+            self.global_projection_param.grad.data.add_(pseudo_grad) # Accumulate pseudo-gradient
+
+        # Apply update (manual SGD step for this parameter)
+        with torch.no_grad():
+            self.global_projection_param.sub_(lr * self.global_projection_param.grad.data)
+        
+        # Zero out the pseudo-gradient after update
+        if self.global_projection_param.grad is not None:
+            self.global_projection_param.grad.detach_() # Detach from computation graph
+            self.global_projection_param.grad.zero_()
+        
+        logger.debug(f"Updated global_projection_param: {self.global_projection_param.item()}")
+
+    def load_pretrained_weights(self, checkpoint_path: Union[str, Path], source_format: str = "custom_audio"):
+        """Loads pretrained weights, handling different source formats."""
+        logger.info(f"Loading pretrained weights from: {checkpoint_path} (format: {source_format})")
+
+        # First check shared memory cache
+        cache_key = f"{self.sm_keys['weights_cache']}:{source_format}:{checkpoint_path}"
+        cached_weights = self.shared_memory.get(cache_key)
+    
+        path = Path(checkpoint_path)
+        if not path.exists():
+            logger.warning(f"Checkpoint file not found: {checkpoint_path}. Creating new checkpoint.")
+            checkpoint_dir = path.parent
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            weights_data = {
+                'model_state_dict': {
+                    'text_encoder': self.text_encoder.state_dict(),
+                    'vision_encoder': self.vision_encoder.state_dict(),
+                    'audio_encoder': self.audio_encoder.state_dict(),
+                    #'transformer': self.transformer.state_dict(),
+                    'text_decoder': self.text_generator.state_dict(),
+                    'vision_decoder': self.vision_generator.state_dict(),
+                    'audio_decoder': self.audio_generator.state_dict(),
+                },
+                'optimizer_state_dict': self.optimizer.state_dict() if hasattr(self, 'optimizer') else {}
+            }
+            torch.save(weights_data, path)
+            logger.info(f"New checkpoint created at: {checkpoint_path}")
+            return weights_data
+        if path.is_dir():
+            logger.error(f"Checkpoint path is a directory, not a file: {checkpoint_path}")
+            return
+
+        if not Path(checkpoint_path).exists():
+            logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            return
+        if cached_weights:
+            logger.info(f"Using cached weights from shared memory: {cache_key}")
+            weights_data = cached_weights
+        else:
+            # Load weights if not cached
+            weights_data = torch.load(checkpoint_path, map_location=self.device)
+            # Store loaded weights in shared memory
+            self.shared_memory.put(cache_key, weights_data, ttl=timedelta(days=7))
+            logger.info(f"Cached weights in shared memory: {cache_key}")
+        
+        if source_format == "custom_audio":
+            converted_weights = self._convert_custom_audio_weights(weights_data)
+            self.audio_encoder.load_pretrained(converted_weights)
+            # Potentially load for audio_generator too if structure is similar
+            # self.audio_generator.load_pretrained(weights)
+        elif source_format == "vision_language_model":
+            vision_weights, text_weights = self._convert_vision_language_weights(weights_data)
+            self.vision_encoder.load_pretrained(vision_weights)
+            self.text_encoder.load_pretrained_embeddings(text_weights.get('token_embeddings.weight')) # Example
+            # self.text_encoder.transformer.load_pretrained(weights) if text transformer weights are separate
+        elif source_format == "text_encoder_only":
+            self.text_encoder.load_pretrained_embeddings(weights_data.get('token_embeddings.weight'))
+            # Potentially load transformer part of text_encoder
+            # self.text_encoder.transformer.load_pretrained(weights_data.get('transformer_weights', {}))
+        elif source_format == "perception_agent_checkpoint": # Loading a full agent checkpoint
+            self.load_state_dict(weights_data['model_state_dict'])
+            self.optimizer.load_state_dict(weights_data['optimizer_state_dict'])
+            logger.info("Loaded full PerceptionAgent checkpoint.")
+        else:
+            logger.warning(f"Unsupported pretrained weight format: {source_format}")
+
+    def _convert_custom_audio_weights(self, custom_weights: Dict) -> Dict:
+        """Converts custom audio model weights to a format expected by AudioEncoder/Transformer.
+        
+        Handles common architectures:
+        - Wav2Vec 2.0
+        - HuBERT
+        - Speech2Vec
+        - Custom CNN-RNN hybrids
+        
+        Conversion strategies:
+        1. Direct key mapping for standard architectures
+        2. Tensor reshaping for dimension mismatches
+        3. Layer skipping for incompatible components
+        """
+        hf_style_weights = {}
+        config = self.perception_config.get('weight_conversion', {})
+        skip_mismatched = config.get('skip_mismatched', True)
+        reshape_mode = config.get('reshape_mode', 'auto')
+        
+        # Architecture detection
+        arch = None
+        if any(k.startswith('w2v2.') for k in custom_weights):
+            arch = 'wav2vec2'
+        elif any(k.startswith('hubert.') for k in custom_weights):
+            arch = 'hubert'
+        elif any('cnn' in k and 'rnn' in k for k in custom_weights):
+            arch = 'cnn_rnn'
+
+        # Mapping tables for known architectures
+        mapping_tables = {
+            'wav2vec2': {
+                'w2v2.encoder.pos_conv.0.weight': 'position_embed',
+                'w2v2.feature_extractor.conv_layers.0.conv.weight': 'conv_layers.0.weight',
+                'w2v2.post_extract_proj.weight': 'projection.weight',
+                'w2v2.mask_emb': 'mask_tokens.audio',
+                'w2v2.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight',
+                'w2v2.encoder.layers.{}.self_attn.out_proj.weight': 'transformer.layers.{}.attention.out_proj.weight',
+                'w2v2.encoder.layers.{}.fc1.weight': 'transformer.layers.{}.ff.0.weight'
+            },
+            'hubert': {
+                'hubert.encoder.pos_conv.0.weight': 'position_embed',
+                'hubert.feature_projection.projection.weight': 'projection.weight',
+                'hubert.mask_emb': 'mask_tokens.audio',
+                'hubert.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight'
+            },
+            'cnn_rnn': {
+                'cnn.conv1.weight': 'conv_layers.0.weight',
+                'rnn.rnn.weight_ih_l0': 'recurrent_layer.weight_ih',
+                'rnn.rnn.weight_hh_l0': 'recurrent_layer.weight_hh',
+                'projection_layer.weight': 'projection.weight'
             }
         }
         
-        # Get the existing log (or a new deque) and append
-        performance_logs = self.shared_memory.get(log_key, default=deque(maxlen=500))
-        if not isinstance(performance_logs, deque):
-             performance_logs = deque(list(performance_logs), maxlen=500)
-
-        performance_logs.append(log_entry)
-        self.shared_memory.set(log_key, performance_logs)
-        logger.debug(f"Logged performance data to '{log_key}'.")
-
-def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
-    """Full planning-execution cycle with safety and metrics"""
-    # Phase 1: Plan Generation
-    plan = agent.generate_plan(goal_task)
-    if not plan:
-        logger.error("Plan generation failed")
-        return None
-    
-    # Phase 2: Safety Validation
-    try:
-        if not agent.safety_planner.safety_check(plan):
-            logger.error("Final plan failed safety validation")
-            return None
-    except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
-        logger.error(f"Safety violation: {str(e)}")
-        return None
-    
-    # Phase 3: Plan Execution
-    result = agent.execute_plan(plan, goal_task)
-    
-    # Phase 4: Metrics Collection
-    metrics = PlanningMetrics.calculate_all_metrics(
-        plan=plan,
-        planning_start_time=agent._planning_start_time,
-        planning_end_time=agent._planning_end_time,
-        final_status=goal_task.status
-    )
-    
-    logger.info(f"Planning cycle completed: {metrics}")
-    return {
-        "execution_result": result,
-        "metrics": metrics
-    }
-
-class HTNPlanner(PlanningAgent):
-
-    StateTuple = Tuple[Tuple[str, Any], ...]
-
-    """Implements Algorithm 1 from Nau et al. (JAIR 2003)"""
-    def _ordered_decomposition(self, task: Task) -> Optional[List[Task]]:
-        # Tuple-based state representation
-        #StateTuple = Tuple[Tuple[str, Any], ...]
+        # Handle unknown architectures with pattern matching
+        if not arch:
+            logger.warning("Custom audio architecture not recognized - using heuristic mapping")
+            mapping_tables['unknown'] = {
+                r'conv(\d+)\.weight': 'conv_layers.\\1.weight',
+                r'pos_?emb': 'position_embed',
+                r'proj': 'projection',
+                r'transformer\.layer_(\d+)\.attention': 'transformer.layers.\\1.attention',
+                r'mask_?token': 'mask_tokens.audio'
+            }
+            arch = 'unknown'
         
-        decomposition_stack: List[Tuple[Task, int, StateTuple]] = [
-            (task, 0, self._freeze_state())
+        # Conversion process
+        for custom_name, tensor in custom_weights.items():
+            matched = False
+            target_name = None
+            
+            # Try known mappings first
+            for pattern, target_pattern in mapping_tables[arch].items():
+                if arch in ['wav2vec2', 'hubert']:
+                    # Handle layer-indexed patterns
+                    if '{}' in pattern:
+                        for layer_idx in range(self.audio_encoder.transformer.num_layers):
+                            if pattern.format(layer_idx) in custom_name:
+                                target_name = target_pattern.format(layer_idx)
+                                matched = True
+                                break
+                    elif pattern in custom_name:
+                        target_name = target_pattern
+                        matched = True
+                elif arch == 'cnn_rnn':
+                    # Direct mapping
+                    if pattern in custom_name:
+                        target_name = target_pattern
+                        matched = True
+                else:  # Heuristic matching
+                    import re
+                    match = re.match(pattern, custom_name)
+                    if match:
+                        target_name = re.sub(pattern, target_pattern, custom_name)
+                        matched = True
+            
+            # Skip unmapped parameters
+            if not matched:
+                if config.get('log_skipped_weights', False):
+                    logger.debug(f"Skipping unmapped audio weight: {custom_name}")
+                continue
+            
+            # Check tensor compatibility
+            current_shape = tensor.shape
+            try:
+                target_param = self.audio_encoder.get_parameter(target_name)
+                target_shape = target_param.shape
+            except AttributeError:
+                logger.warning(f"Target parameter {target_name} not found in model")
+                continue
+            
+            # Reshape tensors if needed
+            if current_shape != target_shape:
+                if reshape_mode == 'skip':
+                    logger.info(f"Skipping {custom_name} due to shape mismatch "
+                               f"({current_shape} vs {target_shape})")
+                    continue
+                    
+                tensor = self._reshape_tensor(tensor, target_shape, 
+                                             mode=reshape_mode,
+                                             custom_name=custom_name,
+                                             target_name=target_name)
+            
+            hf_style_weights[target_name] = tensor
+        
+        logger.info(f"Converted {len(hf_style_weights)}/{len(custom_weights)} "
+                   f"audio weights ({arch} format)")
+        return hf_style_weights
+    
+    def _reshape_tensor(self, tensor: torch.Tensor, target_shape: Tuple[int], 
+                       mode: str = 'auto', **kwargs) -> torch.Tensor:
+        """Reshapes tensors using various strategies"""
+        if mode == 'auto':
+            if tensor.dim() == 2 and target_shape[0] == target_shape[1]:    # Automatic reshaping heuristics
+                if tensor.shape[0] == target_shape[1] and tensor.shape[1] == target_shape[0]:    # Handle square matrix transpose
+                    return tensor.t()
+            elif tensor.numel() == math.prod(target_shape):
+                return tensor.view(target_shape)
+        
+        elif mode == 'pad':
+            # Zero-padding strategy
+            new_tensor = torch.zeros(target_shape, dtype=tensor.dtype, device=tensor.device)
+            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(tensor.shape, target_shape))
+            new_tensor[slices] = tensor[slices]
+            return new_tensor
+        
+        elif mode == 'crop':
+            # Cropping strategy
+            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(target_shape, tensor.shape))
+            return tensor[slices].clone()
+        
+        logger.warning(f"Could not reshape {kwargs.get('custom_name')} from "
+                      f"{tensor.shape} to {target_shape} using {mode} mode")
+        return tensor
+
+    def _convert_vision_language_weights(self, custom_weights: Dict) -> Tuple[Dict, Dict]:
+        """Separates and converts vision-language weights for VisionEncoder and TextEncoder.
+        
+        Supports models:
+        - CLIP
+        - ALIGN
+        - FLAVA
+        - ALBEF
+        - Custom dual-encoder architectures
+        
+        Handles:
+        - Component separation (vision/text)
+        - Cross-attention redistribution
+        - Modality-specific projection layers
+        """
+        vision_weights = {}
+        text_weights = {}
+        config = self.perception_config.get('weight_conversion', {})
+        fusion_handling = config.get('fusion_handling', 'distribute')
+        
+        # Architecture detection
+        arch = None
+        if any(k.startswith('visual.') or k.startswith('text.') for k in custom_weights):
+            arch = 'clip_style'
+        elif any('image_encoder' in k and 'text_encoder' in k for k in custom_weights):
+            arch = 'dual_encoder'
+        elif any('cross_attention' in k for k in custom_weights):
+            arch = 'fusion_model'
+        
+        # Key classification patterns
+        vision_patterns = [
+            'visual.', 'image_encoder.', 'vision.', 
+            'conv', 'resblocks', 'patch_embed', 'pos_embed',
+            'img_', 'spatial.', 'pixel_'
         ]
-        current_plan = []
-        backtrack_points = []
-
-        while decomposition_stack:
-            current_task, method_step, state = decomposition_stack.pop()
-
-            if method_step >= len(current_task.methods[current_task.selected_method]):
-                if backtrack_points:
-                    # Backtrack to last decision point
-                    current_plan, state = backtrack_points.pop()
-                continue
-
-            next_subtask = current_task.methods[current_task.selected_method][method_step]
-            new_state = self._apply_effects(state, next_subtask)
-
-            if not self._check_preconditions(state, next_subtask):
-                continue
-
-            if next_subtask.type == TaskType.ABSTRACT:
-                # Record backtrack point (plan, state, method_step)
-                backtrack_points.append((
-                    current_plan.copy(),
-                    state,
-                    method_step + 1
-                ))
-                decomposition_stack.append((
-                    next_subtask,
-                    0,
-                    new_state
-                ))
-            else:
-                current_plan.append(next_subtask)
-
-        return current_plan
-
-    def _freeze_state(self) -> Tuple[Tuple[str, Any], ...]:
-        """Immutable state representation for academic planning"""
-        return tuple(sorted(self.world_state.items()))
-
-    def _apply_effects(self, state: StateTuple, task: Task) -> StateTuple:
-        """STRIPS-style effect application (Fikes & Nilsson 1971)"""
-        state_dict = dict(state)
-        for effect in task.effects:
-            effect(state_dict)
-        return tuple(sorted(state_dict.items()))
-
-    def _partial_order_planning(self):
-        """
-        Implements partial-order planning based on:
-        'SIPE: A Unified Theory of Planning' (Wilkins, 1988)
-        """
-        # Temporal constraint network using Allen's interval algebra
-        temporal_network = {
-            'relations': defaultdict(set),
-            'intervals': {}
-        }
-
-        # Plan steps with causal links
-        plan_steps = []
-        open_conditions = []
-        ordering_constraints = []
-
-        # Initialize with start and goal
-        start = Task("start", TaskType.PRIMITIVE)
-        goal = self.current_goal.copy()
-        plan_steps.extend([start, goal])
-        temporal_network['intervals'] = {
-            start: (0, 0),
-            goal: (float('inf'), float('inf'))
-        }
-
-        while open_conditions:
-            # Select next open condition using LCF strategy
-            condition = min(open_conditions, key=lambda c: c[2])  # [step, precondition, criticality]
-
-            # Find candidate providers using knowledge base
-            candidates = self._find_candidate_steps(condition[1])
-
-            for candidate in candidates:
-                # Add causal link and temporal constraints
-                new_constraints = self._add_causal_link(
-                    candidate, condition[0], temporal_network
-                )
-
-                if not self._detect_temporal_inconsistencies(temporal_network):
-                    # Resolve threats using promotion/demotion
-                    self._resolve_threats(plan_steps, temporal_network)
-                    break
+        text_patterns = [
+            'text.', 'token_embed', 'positional_embedding',
+            'transformer.text.', 'word_embed', 'txt_',
+            'language_encoder', 'bert.'
+        ]
+        fusion_patterns = [
+            'cross_attention', 'fusion', 'multihead_attn',
+            'modality_combine', 'concat'
+        ]
+        
+        # Special handling for known architectures
+        if arch == 'clip_style':
+            # CLIP-style explicit naming
+            for k, v in custom_weights.items():
+                if k.startswith('visual.'):
+                    vision_weights[k.replace('visual.', '')] = v
+                elif k.startswith('text.'):
+                    text_weights[k.replace('text.', '')] = v
+                elif 'positional_embedding' in k:
+                    if 'visual.positional_embedding' in k:
+                        vision_weights['position_embed'] = v
+                    else:
+                        text_weights['position_embeddings'] = v
+        
+        else:
+            # Generic heuristic-based separation
+            for custom_name, tensor in custom_weights.items():
+                # Classify as vision, text, or fusion
+                is_vision = any(p in custom_name for p in vision_patterns)
+                is_text = any(p in custom_name for p in text_patterns)
+                is_fusion = any(p in custom_name for p in fusion_patterns)
+                
+                # Fusion component handling
+                if is_fusion:
+                    if fusion_handling == 'distribute':
+                        # Distribute fusion components proportionally
+                        if is_vision or ('image' in custom_name.lower()):
+                            vision_weights[custom_name] = tensor
+                        elif is_text or ('text' in custom_name.lower()):
+                            text_weights[custom_name] = tensor
+                        else:
+                            # Split evenly between modalities
+                            vision_weights[custom_name] = tensor[:tensor.shape[0]//2]
+                            text_weights[custom_name] = tensor[tensor.shape[0]//2:]
+                    elif fusion_handling == 'discard':
+                        logger.info(f"Discarding fusion weight: {custom_name}")
+                        continue
+                    elif fusion_handling == 'vision':
+                        vision_weights[custom_name] = tensor
+                    elif fusion_handling == 'text':
+                        text_weights[custom_name] = tensor
+                
+                # Direct classification
+                elif is_vision:
+                    vision_weights[custom_name] = tensor
+                elif is_text:
+                    text_weights[custom_name] = tensor
                 else:
-                    # Remove failed constraints
-                    self._remove_constraints(new_constraints, temporal_network)
+                    logger.warning(f"Unclassified weight: {custom_name} - assigning to both")
+                    vision_weights[custom_name] = tensor
+                    text_weights[custom_name] = tensor.clone()
+        
+        # Post-processing for each modality
+        vision_weights = self._post_process_vision_weights(vision_weights)
+        text_weights = self._post_process_text_weights(text_weights)
+        
+        logger.info(f"Converted weights: {len(vision_weights)} vision, "
+                   f"{len(text_weights)} text, {arch} format")
+        return vision_weights, text_weights
+    
+    def _post_process_vision_weights(self, weights: Dict) -> Dict:
+        """Applies vision-specific weight transformations"""
+        processed = {}
+        for k, v in weights.items():
+            # Handle different position embedding formats
+            if 'pos_embed' in k and v.dim() == 2:
+                processed[k] = v.unsqueeze(0)  # Add batch dimension
+            
+            # Adapt convolutional weights
+            elif 'conv' in k and v.dim() == 4:
+                # Convert from (out, in, h, w) to (out, in, h, w)
+                if self.vision_encoder.encoder_type == 'transformer' and 'patch_embed' not in k:
+                    # No transformation needed
+                    processed[k] = v
+                else:
+                    # Permute dimensions if needed
+                    processed[k] = v.permute(2, 3, 1, 0) if self.config.get('channels_last') else v
+            
+            # Handle projection layers
+            elif 'proj' in k and v.dim() == 2:
+                target_shape = self.vision_encoder.projection.shape
+                if v.shape != target_shape:
+                    if v.shape[1] == target_shape[1]:
+                        processed[k] = v[:target_shape[0]]
+                    else:
+                        logger.warning(f"Projection shape mismatch: {v.shape} vs {target_shape}")
+            
+            else:
+                processed[k] = v
+        
+        return processed
+    
+    def _post_process_text_weights(self, weights: Dict) -> Dict:
+        """Applies text-specific weight transformations"""
+        processed = {}
+        vocab_size = self.tokenizer.get_vocab_size()
+        
+        for k, v in weights.items():
+            # Handle embedding layers
+            if 'embed' in k:
+                # Adapt to our vocabulary size
+                if v.shape[0] > vocab_size:
+                    processed[k] = v[:vocab_size]
+                elif v.shape[0] < vocab_size:
+                    # Pad with random initialization
+                    new_emb = torch.randn(vocab_size, v.shape[1])
+                    new_emb[:v.shape[0]] = v
+                    processed[k] = new_emb
+                else:
+                    processed[k] = v
+            
+            # Handle position embeddings
+            elif 'position' in k and v.dim() == 1:
+                processed[k] = v.unsqueeze(0)  # Add sequence dimension
+            
+            else:
+                processed[k] = v
+        
+        return processed
 
-            # Update open conditions
-            open_conditions = self._identify_new_conditions(plan_steps, temporal_network)
+    def extract_performance_metrics(self, result: Any) -> dict:
+        """Extracts performance metrics from the result of perform_task."""
+        # This depends on what perform_task returns.
+        # For pretraining, it returns {'loss': ..., 'status': ...}
+        # For finetuning, it returns {'loss': ..., 'status': ..., 'predictions': ...}
+        # For inference, it returns {'output': ..., 'status': ...}
+        
+        metrics = {}
+        if isinstance(result, dict):
+            if 'loss' in result:
+                metrics['loss'] = result['loss']
+            if 'status' in result and result['status'] == 'success':
+                metrics['task_successful'] = 1.0
+            else:
+                metrics['task_successful'] = 0.0
+            
+            # If finetuning with labels and predictions, one could compute accuracy, F1, etc.
+            # This requires 'labels' to be passed or stored from task_data.
+            # Example (pseudo-code, needs actual labels):
+            # if result.get('predictions') is not None and task_data.get('labels') is not None:
+            #     if "classification" in task_data.get('downstream_task','').lower():
+            #         preds = torch.argmax(result['predictions'], dim=-1)
+            #         acc = (preds == task_data['labels']).float().mean().item()
+            #         metrics['accuracy'] = acc
+        
+        return metrics
 
-    def _detect_temporal_inconsistencies(self, network):
-        """Implements path consistency algorithm from Allen's temporal logic"""
-        # Use Floyd-Warshall adaptation for temporal networks
-        for k in network['intervals']:
-            for i in network['intervals']:
-                for j in network['intervals']:
-                    intersection = network['relations'][(i,k)] & network['relations'][(k,j)]
-                    if not intersection:
-                        return True
-                    network['relations'][(i,j)] |= intersection
+    def save_state_to_shared_memory(self):
+        """Save current model state to shared memory"""
+        snapshot = {
+            'model_state_dict': {
+                'text_encoder': self.text_encoder.state_dict(),
+                'vision_encoder': self.vision_encoder.state_dict(),
+                'audio_encoder': self.audio_encoder.state_dict(),
+                #'transformer': self.transformer.state_dict(),
+                'text_decoder': self.text_generator.state_dict(),
+                'vision_decoder': self.vision_generator.state_dict(),
+                'audio_decoder': self.audio_generator.state_dict(),
+            },
+            'optimizer_state': self.optimizer.state_dict(),
+            'config': self.perception_config
+        }
+        self.shared_memory.put(
+            self.sm_keys['model_snapshot'], 
+            snapshot,
+            ttl=timedelta(days=1))
+        logger.info(f"Saved model snapshot to shared memory")
+
+    def load_state_from_shared_memory(self):
+        """Load model state from shared memory"""
+        snapshot = self.shared_memory.get(self.sm_keys['model_snapshot'])
+        if snapshot:
+            self.load_state_dict(snapshot['model_state_dict'])
+            self.optimizer.load_state_dict(snapshot['optimizer_state'])
+            logger.info(f"Loaded model state from shared memory")
+            return True
         return False
 
-    def _thompson_sampling_alternatives(self, task: Task) -> List[Task]:
-        """Thompson sampling for decomposition method selection (Chapelle & Li 2011)"""
-        # Maintain beta distributions for each method
-        method_probs = []
-        for method_idx in range(len(task.methods)):
-            key = (task.name, method_idx)
-            alpha = self.method_stats[key]['success'] + 1
-            beta = self.method_stats[key]['total'] - self.method_stats[key]['success'] + 1
-            sample = random.betavariate(alpha, beta)
-            method_probs.append((method_idx, sample))
-        
-        sorted_methods = sorted(method_probs, key=lambda x: -x[1])
-        return self._create_alternatives(task, sorted_methods)
+    def cache_embeddings(self, modality: str, inputs: torch.Tensor, embeddings: torch.Tensor):
+        """Cache computed embeddings in shared memory"""
+        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        self.shared_memory.put(key, embeddings.detach().cpu())
+        logger.debug(f"Cached embeddings: {key}")
 
-    def _validate_plan(self, plan: List[Task]) -> bool:
-        """Full STRIPS-style validation (Fikes & Nilsson 1971)"""
-        sim_state = self.world_state.copy()
-        for task in plan:
-            if not all(precond(sim_state) for precond in task.preconditions):
-                return False
-            for effect in task.effects:
-                effect(sim_state)
-        return True
-
-class PartialOrderPlanner(PlanningAgent):
-    """Implements Wilkins' temporal constraint management"""
-    def __init__(self):
-        super().__init__()
-        self.temporal_constraints: Set[Tuple[Task, Task, str]] = set()  # (A,B,relation)
-        self.causal_links: Set[Tuple[Task, Task, Callable]] = set()  # (producer, consumer, condition)
-
-    def _add_temporal_constraint(self, constraint: Tuple[Task, Task, str]):
-        """Allen's interval algebra relations (before/after/contains)"""
-        valid_relations = {'before', 'after', 'contains', 'during', 'meets'}
-        if constraint[2] not in valid_relations:
-            raise ValueError(f"Invalid temporal relation: {constraint[2]}")
-        self.temporal_constraints.add(constraint)
-
-    def _resolve_threats(self):
-        """Threat resolution via promotion/demotion (Wilkins 1988)"""
-        for link in self.causal_links:
-            producer, consumer, condition = link
-            for task in self.current_plan:
-                if task.effects and any(not condition(eff) for eff in task.effects):
-                    # Add ordering constraint: task < producer or task > consumer
-                    if random.choice([True, False]):
-                        self._add_temporal_constraint((task, producer, 'before'))
-                    else:
-                        self._add_temporal_constraint((consumer, task, 'before'))
-
-class AStarPlanner(PlanningAgent):
-    """Implements AO* cost propagation (Martelli & Montanari 1973)"""
-    def _optimize_plan(self, plan: List[Task]) -> List[Task]:
-        # Tuple-based cost representation (current, heuristic)
-        for task in plan:
-            if task.type == TaskType.ABSTRACT:
-                and_or_graph[task] = {
-                    'methods': [
-                        (method, sum(self._task_cost(t) for t in method))
-                        for method in task.methods
-                    ],
-                    'best_cost': (float('inf'), float('inf'))
-                }
-                
-        and_or_graph = {
-            task: {
-                'methods': [
-                    (method, sum(self._task_cost(t) for t in method))
-                    for method in task.methods
-                ],
-                'best_cost': (float('inf'), float('inf'))
-            }
-            for task in plan if task.type == TaskType.ABSTRACT
-        }
-        
-        # Initialize with primitive costs
-        for task in plan:
-            if task.type == TaskType.PRIMITIVE:
-                and_or_graph[task] = {'best_cost': (1.0, 0.0)}  # (execution_cost, 0 heuristic)
-
-        # Cost propagation from leaves to root
-        changed = True
-        while changed:
-            changed = False
-            for task in reversed(plan):
-                if task.type != TaskType.ABSTRACT:
-                    continue
-                
-                # Find minimal cost method
-                min_method_cost = min(
-                    (cost for _, cost in and_or_graph[task]['methods']),
-                    default=(float('inf'), float('inf'))
-                )
-                
-                # Update if better than current
-                if min_method_cost < and_or_graph[task]['best_cost']:
-                    and_or_graph[task]['best_cost'] = min_method_cost
-                    changed = True
-
-        return self._extract_optimal_plan(and_or_graph)
-
-    def _task_cost(self, task: Task) -> CostProfile:
-        """Academic cost model from HSP (Bonet & Geffner 2001)"""
-        base = len(self.decompose_task(task))
-        heuristic = self._hsp_heuristic(task)
-        return (base, base + heuristic)
-
-    def _heuristic(self, current_state: WorldState, goal_state: WorldState) -> float:
-        return sum(1 for k, v in dict(goal_state).items() if dict(current_state).get(k) != v)
-
-    def execute_plan(self, goal_task: Task) -> Dict[str, Any]:
-        goal_state = goal_task.goal_state if hasattr(goal_task, "goal_state") else ()
-        open_set = []
-        start_state = self.get_current_state_tuple()
-        heapq.heappush(open_set, (0, [], start_state))
-
-        visited = set()
-
-        while open_set:
-            cost, path, state = heapq.heappop(open_set)
-            if state in visited:
-                continue
-            visited.add(state)
-
-            self.load_state_from_tuple(state)
-
-            if self._goal_satisfied(goal_state):
-                return super().execute_plan(path, goal_task=None)
-
-            for task_name in self.task_library:
-                task = self.task_library[task_name].copy()
-                if task.type != TaskType.PRIMITIVE:
-                    continue
-                if not task.check_preconditions(self.world_state):
-                    continue
-                task.apply_effects(self.world_state)
-                new_state = self.get_current_state_tuple()
-                heuristic = self._heuristic(new_state, goal_state)
-                new_cost = cost + task.cost
-                heapq.heappush(open_set, (new_cost + heuristic, path + [task], new_state))
-
-        return {"status": "FAILURE", "world_state": self.world_state}
-
-    def _goal_satisfied(self, goal_state: WorldState) -> bool:
-        current = dict(self.get_current_state_tuple())
-        goal = dict(goal_state)
-        return all(current.get(k) == v for k, v in goal.items())
-
-class ExplanatoryPlanner(PlanningAgent):
-    def generate_explanation(self, plan: List[Task]) -> Dict:
-        """Produces human-understandable plan rationale"""
-        return {
-            'goal_satisfaction': self._explain_goal_achievement(plan),
-            'method_choices': self._explain_method_selections(plan),
-            'failure_points': self._identify_risk_points(plan)
-        }
-    
-    def _optimize_plan(self, plan: List[Task]) -> List[Task]:
-        """
-        Implements AO* algorithm with cost propagation from:
-        'Optimal Efficiency of the AO* Algorithm' (Martelli & Montanari, 1973)
-        """
-        # Build AND-OR graph representation
-        and_or_graph = self._build_and_or_graph(plan)
-
-        # Initialize heuristic estimates
-        for node in reversed(math.topological_order(and_or_graph)):
-            if node.is_and_node:
-                node.cost = sum(child.cost for child in node.children)
-            else:
-                node.cost = min(child.cost for child in node.children)
-
-        # Priority queue based on f(n) = g(n) + h(n)
-        frontier = math.PriorityQueue()
-        frontier.put((self._heuristic(plan[0]), plan[0]))
-
-        while not frontier.empty():
-            current = frontier.get()[1]
-
-            if current.is_primitive:
-                continue
-
-            # Expand best partial plan
-            best_method = min(current.methods, key=lambda m: m.cost)
-
-            if best_method.cost < current.cost:
-                current.cost = best_method.cost
-                # Propagate cost changes upwards
-                for parent in current.parents:
-                    new_cost = parent.recalculate_cost()
-                    if new_cost < parent.cost:
-                        frontier.put((new_cost + self._heuristic(parent.task)), parent)
-
-        return self._extract_optimal_plan(and_or_graph)
-
-    def _heuristic(self, task: Task) -> float:
-        """Academic admissible heuristic (HSP-style)"""
-        if task.type == TaskType.PRIMITIVE:
-            return 0
-        # Count of remaining abstract tasks (Bonet & Geffner, 2001)
-        return len([t for t in self.task_library.values() if t.type == TaskType.ABSTRACT])
-
-    def _build_and_or_graph(self, plan):
-        """Construct AND-OR graph with cost annotations"""
-        graph = math.ANDORGraph()
-        current_level = {plan[0]: graph.add_node(plan[0], is_and=False)}
-
-        while current_level:
-            next_level = {}
-            for task, node in current_level.items():
-                if task.type == TaskType.ABSTRACT:
-                    # AND nodes for decomposition methods
-                    for method in task.methods:
-                        method_node = graph.add_node(method, is_and=True)
-                        graph.add_edge(node, method_node)
-                        # OR nodes for subtasks
-                        for subtask in method:
-                            subtask_node = graph.add_node(subtask, is_and=False)
-                            graph.add_edge(method_node, subtask_node)
-                            next_level[subtask] = subtask_node
-            current_level = next_level
-
-        return graph
-
-    def _memoize_decompositions(self):
-        """Memoization cache for common decompositions (Markovitch & Scott 1988)"""
-        self.decomposition_cache = {}
-
-    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
-        """Augmented decomposition with safety-aware distribution"""
-        try:
-            # Attempt distributed decomposition first
-            return self.safety_planner.distributed_decomposition(task_to_decompose)
-        except ResourceViolation:
-            logger.info("Falling back to local decomposition")
-            return self._local_decomposition(task_to_decompose)
-
-    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
-        """Integrated safety violation recovery"""
-        logger.warning(f"Initial plan failed safety checks. Attempting repair...")
-        
-        # Get safety-aware repair candidates
-        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
-        
-        # Validate and select best candidate
-        for candidate in candidates:
-            if self.safety_planner.safety_check(candidate):
-                logger.info("Found valid safety-compliant alternative plan")
-                return candidate
-                
-        logger.error("No safe alternatives found")
-        return None
-
-    def interactive_adjustment(self, adjustment: dict):
-        """Expose safety planner's adjustment interface"""
-        self.safety_planner.interactive_adjustment_handler(adjustment)
-        self.current_plan = self.safety_planner.current_plan
+    def get_cached_embeddings(self, modality: str, inputs: torch.Tensor):
+        """Retrieve cached embeddings if available"""
+        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        return self.shared_memory.get(key)
 
 if __name__ == "__main__":
-    print("\n=== Running AI Planning Agent Test ===\n")
-    printer.status("Init", "Planning Agent initialized", "success")
+    printer.status("MAIN", "Starting PerceptionAgent Test", "info")
     from src.agents.collaborative.shared_memory import SharedMemory
     from src.agents.agent_factory import AgentFactory
-    import datetime
 
-    shared_memory = SharedMemory()
+    shared_mem = SharedMemory()
     agent_factory = AgentFactory()
 
-    planner = PlanningAgent(shared_memory, agent_factory, config=None)
-    print(planner)
-    print("\n* * * * * Phase 2 - Heuristic selector * * * * *\n")
-    selector = HeuristicSelector()
-    dummy_method_stats = {
-        ("test_task", "0"): {"success": 3, "total": 5},
-        ("test_task", "1"): {"success": 2, "total": 4},
-    }
+    perception_agent = PerceptionAgent(shared_memory=shared_mem, agent_factory=agent_factory)
+    #print(perception_agent)
+    printer.status("INIT", "PerceptionAgent initialized successfully.", "success")
 
-    print("\n=== Heuristic Selection Tests ===")
+    print("\n* * * * * Phase 2 - Masking * * * * *\n")
+    input_ids = torch.tensor([[1343]], dtype=torch.long, device=perception_agent.device)
+    patch_size = 16
+    feature_dim = 64
+    encoded_output = torch.randn(1, patch_size, feature_dim, device=perception_agent.device)
+    features = encoded_output
+    patches  = encoded_output
 
-    # Test Case 1: RL (sequential task)
-    rl_task = {
-        "name": "test_task",
-        "priority": 0.8,
-        "goal_state": {"x": 1},
-        "parent": {
-            "name": "sub_task_3",
-            "parent": {
-                "name": "sub_task_2",
-                "parent": {
-                    "name": "sub_task_1",
-                    "parent": None
-                }
-            }
-        },
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=2)).isoformat(),
-    }
+    printer.pretty("TEXT", perception_agent._apply_masking_text(input_ids=input_ids), "success")
+    printer.pretty("AUDIO", perception_agent._apply_masking_audio(features=features), "success")
+    printer.pretty("VISION", perception_agent._apply_masking_vision(patches=patches), "success")
 
-    printer.status("1", "Testing RL Heuristic (sequential task):", "success")
-    selector.predict_success_prob(rl_task, world_state={}, method_stats=dummy_method_stats, method_id="0")
+    print("\n* * * * * Phase 3 - Modalities * * * * *\n")
+    mask_ratio = 0.15
+    return_reconstructions = False
 
-    # Test Case 2: DT (deep hierarchy)
-    dt_task = {
-        "name": "test_task",
-        "priority": 0.5,
-        "goal_state": {"x": 1},
-        "parent": {
-            "parent": {
-                "parent": {
-                    "parent": {
-                        "parent": {
-                            "parent": {
-                                "parent": {
-                                    "parent": {
-                                        "parent": {
-                                            "parent": None  # Depth of 10
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=5)).isoformat(),
-    }
+    printer.pretty("PRE1", perception_agent._pretrain_masked_modality(
+        inputs={"input_ids": torch.tensor([[1343]], dtype=torch.long, device=perception_agent.device)},
+        modality="text",
+        mask_ratio=mask_ratio,
+        return_reconstructions=return_reconstructions), "success")
+    
+    printer.pretty("PRE2", perception_agent._pretrain_masked_modality(
+        inputs={"pixel_values": torch.randn(1, 3, 224, 224, device=perception_agent.device)},
+        modality="vision",
+        mask_ratio=mask_ratio,
+        return_reconstructions=return_reconstructions), "success")
+    
+    printer.pretty("PRE3", perception_agent._pretrain_masked_modality(
+        inputs={"audio_values": torch.randn(1, 1, 16000, device=perception_agent.device)},
+        modality="audio",
+        mask_ratio=mask_ratio,
+        return_reconstructions=return_reconstructions), "success")
 
-    printer.status("2", "Testing Decision Tree Heuristic (deep task):", "success")
-    selector.predict_success_prob(dt_task, world_state={}, method_stats=dummy_method_stats, method_id="1")
+    print("\n* * * * * Phase 4 - Pretrain 1 * * * * *\n")
+    data_mod1={'input_ids': torch.tensor([[1343]], dtype=torch.long, device=perception_agent.device)}
+    data_mod2={'audio_values': torch.randn(1, 1, 16000, device=perception_agent.device)}
+    mod1_type='text'
+    mod2_type='audio'
 
-    # Test Case 3: GB (resource-constrained)
-    gb_task = {
-        "name": "test_task",
-        "priority": 0.4,
-        "goal_state": {"x": 1},
-        "parent": None,
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=3)).isoformat(),
-    }
-
-    printer.status("3", "Testing Gradient Boosting Heuristic (low CPU):", "success")
-    selector.predict_success_prob(
-        gb_task,
-        world_state={"cpu_available": 0.2, "memory_available": 0.3},
-        method_stats=dummy_method_stats,
-        method_id="0"
+    contra = perception_agent._pretrain_contrastive(
+        data_mod1=data_mod1,
+        data_mod2=data_mod2,
+        mod1_type=mod1_type,
+        mod2_type=mod2_type
     )
-    print("\n=== Planning Agent Demo Completed ===\n")
+
+    printer.pretty("PRETRAIN", contra, "success" if contra else "error")
+
+    print("\n* * * * * Phase 5 - Pretrain 2 * * * * *\n")
+    checkpoint_path = "src/agents/perception/checkpoints/example_checkpoint.pt"
+    source_format = "custom_audio"
+
+    weight = perception_agent.load_pretrained_weights(
+        checkpoint_path=checkpoint_path,
+        source_format=source_format
+    )
+
+    printer.pretty("LOAD", weight, "success" if weight else "error")
+    printer.pretty("LOAD", perception_agent.save_state_to_shared_memory(), "success" if perception_agent.save_state_to_shared_memory() else "error")
+
+    printer.status("MAIN", "PerceptionAgent Test Finished", "info")
