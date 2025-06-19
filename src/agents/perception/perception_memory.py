@@ -7,11 +7,11 @@ Key features of Perception Memory:
 5. Diagnostic Capabilities
 6. Safety Mechanisms
 """
-
-import json, yaml
+import os
 import torch
 import hashlib
 import warnings
+import json, yaml
 
 from torch import nn, einsum
 from collections import OrderedDict, defaultdict
@@ -37,9 +37,15 @@ class PerceptionMemory(nn.Module):
         self.cache = OrderedDict()
         self.tag_index = defaultdict(list)
         self.checkpoint_dir = self.memory_config.get('checkpoint_dir')
+        self.cache_dir = self.memory_config.get('cache_dir')
         self.max_cache_size = self.memory_config.get('max_cache_size')
         self.enable_checkpointing = self.memory_config.get('enable_checkpointing')
         self.enable_cache = self.memory_config.get('enable_cache')
+
+        if self.enable_checkpointing and self.checkpoint_dir:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+        if self.enable_cache and self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
 
         # Memory metrics
         self.hit_count = 0
@@ -48,7 +54,7 @@ class PerceptionMemory(nn.Module):
         self.total_stored = 0
 
         # Register cleanup hook
-        self.register_buffer('dummy', torch.tensor(0))
+        #self.register_buffer('dummy', torch.tensor(0))
         self._register_cleanup_hook()
 
     def _register_cleanup_hook(self):
