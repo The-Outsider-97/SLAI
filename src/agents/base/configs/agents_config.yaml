@@ -66,6 +66,7 @@ language_agent: {}
 
 learning_agent:
     rl_algorithm: null
+    embedding_dim: 512
     strategy_weights: [0.25, 0.25, 0.25, 0.25]
     prediction_weights: [0.25, 0.25, 0.25, 0.25]
     maml_task_pool_size: 100
@@ -87,7 +88,20 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
-perception_agent: {}
+perception_agent:
+    device: "cpu"
+    embed_dim: 512
+    masking_ratio: 0.15
+    contrastive_temperature: 0.07
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    adam_betas: [0.9, 0.999]
+    adam_eps: 0.0000001
+    loss_type: 'hybrid'  # mse, contrastive, or hybrid
+    max_scale: 3
+    temperature: 0.07
+    mse_weight: 0.5      # for hybrid loss
+    contrastive_weight: 0.5  # for hybrid loss
 
 planning_agent: {}
 
