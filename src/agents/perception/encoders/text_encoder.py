@@ -10,7 +10,7 @@ from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 
 from src.agents.perception.utils.config_loader import load_global_config, get_config_section
-from src.agents.perception.utils.common import TensorOps, Parameter
+from src.agents.base.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer
 from logs.logger import get_logger, PrettyPrinter
 
