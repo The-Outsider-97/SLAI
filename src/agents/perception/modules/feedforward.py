@@ -147,9 +147,9 @@ class FeedForward(torch.nn.Module):
         self._cache['x'] = x
         
         # First projection
-        h = torch.matmul(x, self.w1.data)
+        h = torch.matmul(x, self.w1)
         if self.use_bias and self.b1 is not None:
-            h += self.b1.data
+            h += self.b1
         self._cache['pre_act'] = h.clone()
         
         # Activation function
@@ -168,69 +168,15 @@ class FeedForward(torch.nn.Module):
         self._cache['dropped_act'] = h_drop.clone()
         
         # Second projection
-        output = torch.matmul(h_drop, self.w2.data)
+        output = torch.matmul(h_drop, self.w2)
         if self.use_bias and self.b2 is not None:
-            output += self.b2.data
+            output += self.b2
         
         # Apply residual connection
         if self.use_residual:
             output = residual + output
             
         return output
-
-    def backward(self, dout):
-        dout = dout.to(self.device)
-        original_shape = self._cache['x'].shape
-        
-        # Handle different input dimensions
-        if dout.dim() == 2:  # [batch, embed_dim]
-            effective_batch_dim = dout.shape[0]
-            dout_3d = dout.unsqueeze(1)
-        else:  # [batch, seq_len, embed_dim]
-            effective_batch_dim = dout.shape[0] * dout.shape[1]
-            dout_3d = dout
-        
-        # Reshape tensors for matrix operations
-        h_drop_reshaped = self._cache['dropped_act'].reshape(effective_batch_dim, -1)
-        dout_reshaped = dout_3d.reshape(effective_batch_dim, -1)
-        x_reshaped = self._cache['x'].reshape(effective_batch_dim, -1)
-        
-        # Gradient for w2 and b2
-        if self.w2.grad is None:
-            self.w2.grad = torch.zeros_like(self.w2.data)
-        self.w2.grad += torch.matmul(h_drop_reshaped.T, dout_reshaped)
-        
-        if self.use_bias and self.b2 is not None:
-            if self.b2.grad is None:
-                self.b2.grad = torch.zeros_like(self.b2.data)
-            self.b2.grad += dout_reshaped.sum(dim=0)
-        
-        # Gradient for activation output
-        d_h_drop = torch.matmul(dout_reshaped, self.w2.data.T)
-        
-        # Apply dropout mask if in training
-        if self.training and self.dropout_rate > 0 and 'dropout_mask' in self._cache:
-            dropout_mask = self._cache['dropout_mask'].reshape(d_h_drop.shape)
-            d_h_drop = d_h_drop * dropout_mask
-        
-        # Gradient through activation
-        if self.activation not in self._activation_derivatives:
-            raise ValueError(f"Unsupported activation for backward: {self.activation}")
-        d_h = self._activation_derivatives[self.activation](d_h_drop)
-        
-        # Gradient for w1 and b1
-        if self.w1.grad is None:
-            self.w1.grad = torch.zeros_like(self.w1.data)
-        self.w1.grad += torch.matmul(x_reshaped.T, d_h)
-        
-        if self.use_bias and self.b1 is not None:
-            if self.b1.grad is None:
-                self.b1.grad = torch.zeros_like(self.b1.data)
-            self.b1.grad += d_h.sum(dim=0)
-        
-        # Gradient for input
-        d_x = torch.matmul(d_h, self.w1.data.T)
-        return d_x.reshape(original_shape)
 
     def _apply_fusion(self, x, context):
         """Apply multi-modal fusion"""
@@ -244,8 +190,8 @@ class FeedForward(torch.nn.Module):
         
         elif self.fusion_type == 'film':
             # Feature-wise Linear Modulation
-            gamma = self.film_gamma.data
-            beta = self.film_beta.data
+            gamma = self.film_gamma
+            beta = self.film_beta
             
             # Handle different context dimensions
             if context.dim() == 2:  # Global context (batch, features)
@@ -326,17 +272,17 @@ class FeedForward(torch.nn.Module):
         bias_key = f'{prefix}intermediate.dense.bias'
         
         if weight_key in weights:
-            self.w1.data = weights[weight_key].to(self.device)
+            self.w1 = weights[weight_key].to(self.device)
         if bias_key in weights and self.use_bias and self.b1 is not None:
-            self.b1.data = weights[bias_key].to(self.device)
+            self.b1 = weights[bias_key].to(self.device)
         
         weight_key = f'{prefix}output.dense.weight'
         bias_key = f'{prefix}output.dense.bias'
         
         if weight_key in weights:
-            self.w2.data = weights[weight_key].to(self.device)
+            self.w2 = weights[weight_key].to(self.device)
         if bias_key in weights and self.use_bias and self.b2 is not None:
-            self.b2.data = weights[bias_key].to(self.device)
+            self.b2 = weights[bias_key].to(self.device)
 
 if __name__ == "__main__":
     print("\n=== Running FeedForward ===\n")
@@ -356,10 +302,6 @@ if __name__ == "__main__":
 
     # Simulate dummy loss gradient
     dout = torch.ones_like(y_train)
-
-    # Backward pass
-    dx = model.backward(dout)
-    print("Backward output (gradient w.r.t input):\n", dx)
 
     # Perform simple SGD step
     lr = 0.01
