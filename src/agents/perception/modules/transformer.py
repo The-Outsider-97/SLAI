@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from src.agents.perception.utils.config_loader import load_global_config, get_config_section
 from src.agents.perception.utils.taskheads import (TaskHead, ClassificationHead, MultiTaskHead,
                                 RegressionHead, Seq2SeqHead, MultiModalClassificationHead)
-from src.agents.perception.utils.common import TensorOps, Parameter
+from src.agents.base.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.attention import (EfficientAttention, BaseAttention,
                                         CosineAttention, MultiQueryAttention, CrossAttention)
 from src.agents.perception.modules.feedforward import FeedForward
