@@ -3,6 +3,7 @@ import math
 import yaml
 import torch.nn.functional as F
 
+from rotary_embedding_torch import RotaryEmbedding 
 from functools import partial
 from torch import nn, einsum
 from einops import rearrange
@@ -190,6 +191,25 @@ class BaseAttention(nn.Module):
 
         logger.info(f"Base Attention is successfully initialized")
 
+    def load_from_dict(self, weights_dict, prefix=''):
+        """Load pretrained weights from dictionary"""
+        # Map weights to current module's parameters
+        mapping = {
+            f'{prefix}attention.self.query.weight': 'to_q.weight',
+            f'{prefix}attention.self.key.weight': 'to_kv.weight',
+            f'{prefix}attention.self.value.weight': 'to_kv.weight',
+            f'{prefix}attention.output.dense.weight': 'to_out.weight'
+        }
+        
+        for hf_key, our_key in mapping.items():
+            if hf_key in weights_dict:
+                parts = our_key.split('.')
+                module = self
+                for part in parts[:-1]:
+                    module = getattr(module, part)
+                param = getattr(module, parts[-1])
+                param.data = weights_dict[hf_key].data.clone().to(param.device)
+
     def add_observer(self, observer):
         self.observers.append(observer)
 
@@ -294,7 +314,10 @@ class CosineAttention(BaseAttention):
         super().__init__()
         # Learned scale parameter with log initialization
         scale_init = -math.log(math.log2(seq_len ** 2 - seq_len))
-        self.scale = nn.Parameter(torch.full((1, self.num_heads, 1, 1), scale_init))
+        self.scale = Parameter(torch.full((1, self.num_heads, 1, 1), scale_init))
+
+    def load_from_dict(self, weights_dict, prefix=''):
+        super().load_from_dict(weights_dict, prefix)
 
     def forward(self, x, context=None, mask=None, attn_bias=None,
                 memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
@@ -350,6 +373,14 @@ class EfficientAttention(BaseAttention):
         # Random projection matrix for kernel mapping (dim_head → num_features)
         self.register_buffer("projection_matrix", self._create_random_projection())
 
+    def _positive_random_features(self, x):
+        """
+        Applies FAVOR+ random feature kernel transformation.
+        Ensures positivity and approximates exp(QKᵀ) without full pairwise computation.
+        """
+        x_proj = torch.matmul(x, self.projection_matrix)  # [B, H, T, F]
+        return torch.exp(-x_proj**2 / 2)
+
     def _create_random_projection(self):
         """
         Generates an orthogonal random projection matrix using QR decomposition.
@@ -359,13 +390,18 @@ class EfficientAttention(BaseAttention):
         ortho, _ = torch.linalg.qr(ortho)
         return ortho.T
 
-    def _positive_random_features(self, x):
-        """
-        Applies FAVOR+ random feature kernel transformation.
-        Ensures positivity and approximates exp(QKᵀ) without full pairwise computation.
-        """
-        x_proj = torch.matmul(x, self.projection_matrix)  # [B, H, T, F]
-        return torch.exp(-x_proj**2 / 2)
+    def load_from_dict(self, weights_dict, prefix=''):
+        """Handle weight conversion for efficient attention"""
+        # Convert weights to standard attention format
+        standard_weights = {}
+        for key in weights_dict:
+            if 'query' in key:
+                standard_weights[key.replace('query', 'self.query')] = weights_dict[key]
+            elif 'key' in key:
+                standard_weights[key.replace('key', 'self.key')] = weights_dict[key]
+            elif 'value' in key:
+                standard_weights[key.replace('value', 'self.value')] = weights_dict[key]
+        super().load_from_dict(standard_weights, prefix)
 
     def forward(self, x):
         B, T, _ = x.shape
@@ -393,6 +429,12 @@ class MultiQueryAttention(BaseAttention):
     """
     def __init__(self):
         super().__init__()
+
+        if self.attention_config.get("positional_encoding") == "rotary":
+            self.rotary_emb = RotaryEmbedding(dim=self.dim_head)
+        else:
+            self.rotary_emb = None
+
         # Override projections for multi-query setup
         del self.to_kv  # Remove standard key-value projection
         
@@ -403,17 +445,13 @@ class MultiQueryAttention(BaseAttention):
         # Initialize new projections
         init_fn = getattr(TensorOps, self.initializer)
         for layer in [self.to_k, self.to_v]:
-            if self.initializer == 'he_init':
-                layer.weight.data = init_fn(
-                    layer.weight.shape, 
-                    self.embed_dim,
-                    device=self.device
-                )
-            else:
-                layer.weight.data = init_fn(
-                    layer.weight.shape, 
-                    device=self.device
-                )
+            weight = init_fn(
+                layer.weight.shape, 
+                self.embed_dim,
+                device=self.device
+            )
+            layer.weight = Parameter(weight)
+
 
     def forward(self, x, context=None, mask=None, attn_bias=None,
                 memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
@@ -441,6 +479,10 @@ class MultiQueryAttention(BaseAttention):
             attn_bias=attn_bias, 
             causal=self.causal
         )
+
+        # After computing q, k
+        if self.rotary_emb is not None:
+            q, k = self.rotary_emb(q, k)  # Apply RoPE
         
         # Combine heads and project output
         out = rearrange(out, 'b h n d -> b n (h d)')
@@ -460,17 +502,33 @@ class CrossAttention(BaseAttention):
         # Initialize encoder projections
         init_fn = getattr(TensorOps, self.initializer)
         for layer in [self.to_k_enc, self.to_v_enc]:
-            if self.initializer == 'he_init':
-                layer.weight.data = init_fn(
-                    layer.weight.shape, 
-                    self.embed_dim,
-                    device=self.device
-                )
-            else:
-                layer.weight.data = init_fn(
-                    layer.weight.shape, 
-                    device=self.device
-                )
+            weight = init_fn(
+                layer.weight.shape, 
+                self.embed_dim,
+                device=self.device
+            )
+            layer.weight = Parameter(weight)
+            #else:
+            #    layer.weight = init_fn(
+            #        layer.weight.shape, 
+            #        device=self.device
+            #    )
+
+    def load_from_dict(self, weights_dict, prefix=''):
+        # Additional handling for encoder-specific weights
+        mapping = {
+            f'{prefix}crossattention.key.weight': 'to_k_enc.weight',
+            f'{prefix}crossattention.value.weight': 'to_v_enc.weight'
+        }
+        for hf_key, our_key in mapping.items():
+            if hf_key in weights_dict:
+                parts = our_key.split('.')
+                module = self
+                for part in parts[:-1]:
+                    module = getattr(module, part)
+                param = getattr(module, parts[-1])
+                param.data = weights_dict[hf_key].data.clone().to(param.device)
+        super().load_from_dict(weights_dict, prefix)
 
     def forward(self, x, context, mask=None, attn_bias=None,
                 memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
@@ -542,11 +600,11 @@ if __name__ == "__main__":
         k_bucket_size=k_bucket_size
     )
 
-    #printer.pretty("BASE", forward1, "success")
-    #printer.pretty("SPLIT", base._split_heads(x=x), "success")
+    printer.pretty("BASE", forward1, "success")
+    printer.pretty("SPLIT", base._split_heads(x=x), "success")
     split = base._split_heads(x=x)  
     combined = base._combine_heads(x=split) 
-    #printer.pretty("COMBINED", combined, "success")
+    printer.pretty("COMBINED", combined, "success")
 
     print("\n* * * * * Phase 3 - Cosine * * * * *\n")
     forward2 = cosine.forward(
@@ -558,14 +616,14 @@ if __name__ == "__main__":
         k_bucket_size=k_bucket_size
     )
 
-    #printer.pretty("COSINE", forward2, "success")
+    printer.pretty("COSINE", forward2, "success")
 
     print("\n* * * * * Phase 4 - Efficient * * * * *\n")
     x_heads = rearrange(x, 'b t (h d) -> b h t d', h=model.heads)  # [B, H, T, D]
 
-    #printer.pretty("create", model._create_random_projection(), "success")
-    #printer.pretty("positive", model._positive_random_features(x=x_heads), "success")
-    #printer.pretty("Efficient", model.forward(x=x), "success")
+    printer.pretty("create", model._create_random_projection(), "success")
+    printer.pretty("positive", model._positive_random_features(x=x_heads), "success")
+    printer.pretty("Efficient", model.forward(x=x), "success")
 
     print("\n* * * * * Phase 5 - Multi Query * * * * *\n")
     forward3 = mqa.forward(
@@ -577,7 +635,7 @@ if __name__ == "__main__":
         k_bucket_size=k_bucket_size
     )
 
-    #printer.pretty("MQA", forward3, "success")
+    printer.pretty("MQA", forward3, "success")
 
     print("\n* * * * * Phase 6 - Cross * * * * *\n")
     forward4 = cross.forward(
