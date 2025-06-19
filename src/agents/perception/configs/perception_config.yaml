@@ -15,7 +15,7 @@ max_position_embeddings: 5000
 activation: gelu
 norm_type: "layernorm"  # "layernorm", "batchnorm", or None or "instancenorm", or null
 encoder_type: "transformer"  # or "mfcc"
-in_channels: 1
+in_channels: 3
 dynamic_patching: true
 
 
@@ -86,6 +86,7 @@ audio_encoder:
   audio_length: 16000
   patch_size: 400
   positional_encoding: "learned"
+  in_channels: 1
 
 mfcc:
   sample_rate: 16000
@@ -101,6 +102,7 @@ vision_encoder:
   patch_size: 16
   positional_encoding: learned
   output_activation: sigmoid
+  in_channels: 3
 
 cnn:
   input_size: [224, 224]
