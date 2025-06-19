@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Union, Optional, Tuple
 
 from src.agents.perception.utils.config_loader import load_global_config, get_config_section
-from src.agents.perception.utils.common import TensorOps, Parameter
+from src.agents.base.utils.common import TensorOps, Parameter
 from src.agents.base.utils.base_tokenizer import BaseTokenizer
 from logs.logger import get_logger, PrettyPrinter
 
