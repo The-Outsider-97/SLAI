@@ -3,7 +3,7 @@ import math
 import yaml
 
 from src.agents.perception.utils.config_loader import load_global_config, get_config_section
-from src.agents.base.utils.common import TensorOps, Parameter
+from src.agents.perception.utils.common import TensorOps, Parameter
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("FeedForward")
