@@ -166,6 +166,7 @@ Note: If you see an error about execution policy:
    pip install rotary_embedding_torch
    pip install lz4
    pip install gym
+   pip install pgmpy
    pip install einops
    pip install gymnasium
    pip install opencv-python
