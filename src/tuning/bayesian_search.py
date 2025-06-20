@@ -2,8 +2,6 @@
 Bayesian Hyperparameter Optimization with Integrated Reasoning Agent
 Combines features from both implementations with improved integration
 """
-
-
 from datetime import datetime
 import yaml, json
 import numpy as np
@@ -189,30 +187,19 @@ class BayesianSearch:
                     f"{self.n_initial_points} initial random points.")
         
         iteration_count = 0
+        logger_callback = BayesianLoggerCallback(self)
 
-        # The objective function to be minimized by gp_minimize
+        # The objective function without logging
         @use_named_args(self.dimensions)
         def objective_function(**params: Any) -> float:
-            nonlocal iteration_count
-            iteration_count += 1
-            
-            # Ensure correct types from skopt (e.g., numpy int to python int)
             processed_params = {name: params[name] for name in self.param_names}
-            
-            current_score = self.evaluation_function(processed_params)
-            
-            if not isinstance(current_score, (int, float)) or np.isnan(current_score) or np.isinf(current_score):
-                logger.warning(f"Evaluation function for params {processed_params} returned non-finite "
-                               f"score: {current_score}. Assigning a high penalty.")
-                # Assign a high penalty for bad evaluations to guide optimizer away
-                current_score = float(np.finfo(np.float64).max / (self.n_calls * 10)) # Large but finite penalty
-            
-            self._log_iteration_progress(processed_params, current_score, iteration_count)
-            
-            # gp_minimize aims to minimize this returned value
-            return current_score 
+            try:
+                return self.evaluation_function(processed_params)
+            except Exception as e:
+                logger.error(f"Evaluation failed: {e}")
+                return float('inf')
 
-        # Execute the Gaussian Process minimization
+        # Execute optimization with callback
         try:
             result: OptimizeResult = gp_minimize(
                 func=objective_function,
@@ -220,16 +207,25 @@ class BayesianSearch:
                 n_calls=self.n_calls,
                 n_initial_points=self.n_initial_points,
                 random_state=self.random_state,
-                verbose=False # We handle logging per iteration
+                callback=[logger_callback],  # Add our logging callback
+                verbose=False
             )
+            
+            # Process final results
+            final_best_params = dict(zip(self.param_names, result.x))
+            final_best_score = float(result.fun)
+            logger.info(f"Bayesian optimization completed.")
+            logger.info(f"Best parameters found: {final_best_params}")
+            logger.info(f"Best score (minimized objective): {final_best_score:.6f}")
+            
+            self._save_results_to_file(final_best_params, final_best_score, result)
+            self._plot_optimization_progress()            
+
         except Exception as e:
             logger.error(f"Bayesian optimization failed: {e}", exc_info=True)
-            # In case of failure, we might not have a proper result.
-            # Return current best if any, or None.
             self._save_results_to_file(self.best_params_so_far, self.best_score_so_far, None)
             self._plot_optimization_progress()
             return self.best_params_so_far, self.best_score_so_far, None
-
 
         # The best parameters are in result.x, and the best score (minimized value) is result.fun
         final_best_params = dict(zip(self.param_names, result.x))
@@ -339,6 +335,30 @@ class BayesianSearch:
             return [self._make_dict_json_serializable(item) for item in data]
         else:
             return self._convert_numpy_types(data)
+
+class BayesianLoggerCallback:
+    def __init__(self, bayesian_search_instance):
+        self.bayesian_search = bayesian_search_instance
+        self.iteration_count = 0
+
+    def __call__(self, res):
+        self.iteration_count += 1
+        params = dict(zip(res.space.dimension_names, res.x_iters[-1]))
+        score = res.func_vals[-1]
+        
+        if score < self.bayesian_search.best_score_so_far:
+            self.bayesian_search.best_score_so_far = score
+            self.bayesian_search.best_params_so_far = params
+            logger.info(f"Iteration {self.iteration_count}: New best score: {score:.6f} with params: {params}")
+        else:
+            logger.info(f"Iteration {self.iteration_count}: Score: {score:.6f} with params: {params}")
+        
+        # Store in history
+        self.bayesian_search.optimization_history.append({
+            'iteration': self.iteration_count,
+            'parameters': params,
+            'score': score
+        })
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
