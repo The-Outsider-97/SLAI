@@ -150,7 +150,8 @@ class RLAgent:
         for key in self.eligibility_traces:
             self.eligibility_traces[key] *= self.discount_factor * self.trace_decay
 
-    def select_action(self, processed_state):
+    def select_action(self, state):
+        processed_state = self._process_state(state)
         return self._epsilon_greedy(processed_state)
 
     def _epsilon_greedy(self, processed_state) -> Any:
@@ -215,11 +216,16 @@ class RLAgent:
 
     def _process_state(self, raw_state: Any) -> Tuple[Any, ...]:
         """Convert raw state into hashable tuple format"""
-        if isinstance(raw_state, (np.ndarray, torch.Tensor)):
+        # Handle PyTorch tensors
+        if isinstance(raw_state, torch.Tensor):
+            if raw_state.ndim > 1:  # If batched, take first element
+                raw_state = raw_state.squeeze(0)
             return tuple(raw_state.tolist())
-        elif isinstance(raw_state, list):
+        
+        # Handle other types
+        if isinstance(raw_state, (np.ndarray, list)):
             return tuple(raw_state)
-        elif not isinstance(raw_state, tuple):
+        if not isinstance(raw_state, tuple):
             return (raw_state,)
         return raw_state
 
@@ -876,7 +882,7 @@ if __name__ == "__main__":
         vision_config['vision_encoder']['patch_size'] = 14
         
         # Create vision encoder
-        vision_encoder = VisionEncoder(vision_config)
+        vision_encoder = VisionEncoder()
         print(f"Vision Encoder created with {sum(p.numel() for p in vision_encoder.parameters()):,} parameters")
         
         # Agent configuration
