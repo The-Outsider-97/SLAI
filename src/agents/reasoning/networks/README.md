@@ -11,18 +11,22 @@ This repository contains examples and utilities for working with **Bayesian Netw
 
 They allow efficient reasoning about uncertainty using probabilistic inference.
 
-### Example: Custom Bayesian Network
-This file: [`bayesian_network.json`](./bayesian_network.json)
+### Bayesian Layouts Provided:
+| Grid Size | File                          | Node Count | Use Case                           |
+|-----------|-------------------------------|------------|------------------------------------|
+| 2×2       | [`bayesian_network_2x2.json`](./bayesian_network_2x2.json) | 4          | A simple chain of influence: X → Y → Z |
+| 3×3       | [`bayesian_network_3x3.json`](./bayesian_network_3x3.json) | 9          |  |
+| 4x4       | [`bayesian_network_4x4.json`](./bayesian_network_4x4.json) | 16         |  |
+| 5x5       | [`bayesian_network_5x5.json`](./bayesian_network_5x5.json) | 25         |  |
+| 6x6       | [`bayesian_network_6x6.json`](./bayesian_network_6x6.json) | 36         |  |
+| 7×7       | [`bayesian_network_7x7.json`](./bayesian_network_7x7.json) | 49         |  |
+| 8x8       | [`bayesian_network_8x8.json`](./bayesian_network_8x8.json) | 64         |  |
+| 9x9       | [`bayesian_network_9x9.json`](./bayesian_network_9x9.json) | 81         |  |
+| 10×10     | [`bayesian_network_10x10.json`](./bayesian_network_10x10.json) | 100        |  |
+| 20x20     | [`bayesian_network_20x20.json`](./bayesian_network_20x20.json) | 400         |  |
+| 32x32     | [`bayesian_network_32x32.json`](./bayesian_network_32x32.json) | 1024         |  |
+| 64x64     | [`bayesian_network_64x64.json`](./bayesian_network_64x64.json) | 4096         |  |
 
-#### Structure:
-- 8 nodes: A → H
-- Mixed dependencies (AND, OR, hierarchical)
-- CPTs define how each variable behaves given its parents
-
-#### Highlights:
-- Multi-parent nodes (e.g. D, G, H)
-- Hierarchical causal layers
-- Feedback and mediated paths
 
 ## 🔳 What Are Grid Networks?
 
