@@ -106,12 +106,15 @@ perception_agent:
 planning_agent: {}
 
 reasoning_agent:
+    learning_rate: 0.01
+    exploration_rate: 0.1
     tuple_key: ["subject", "predicate", "object"]
     hypothesis_graph:
         nodes: {}
         edges: {}
         confedence: 0.0
     language_config_path: "src/agents/language/configs/language_config.yaml"
+    knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
     glove_path: "data/embeddings/glove.6B.200d.json"
     ner_tag: None
     embedding: None
