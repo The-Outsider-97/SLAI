@@ -1,0 +1,47 @@
+{
+  "nodes": [
+    "X",
+    "Y"
+  ],
+  "edges": [
+    [
+      "X",
+      "Y"
+    ]
+  ],
+  "cpt": {
+    "X": {
+      "prior": 0.6
+    },
+    "Y": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    }
+  },
+  "description": "Simple 2-node Bayesian network: X \u2192 Y with basic binary CPTs.",
+  "metadata": {
+    "node_descriptions": {
+      "X": "Root variable (e.g., disease present)",
+      "Y": "Dependent variable (e.g., symptom present)"
+    },
+    "dependency_types": {
+      "directed": [
+        "X\u2192Y"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

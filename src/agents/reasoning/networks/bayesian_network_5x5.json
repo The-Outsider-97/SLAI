@@ -1,0 +1,98 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+  ],
+  "edges": [
+    [
+      "A",
+      "B"
+    ],
+    [
+      "A",
+      "C"
+    ],
+    [
+      "B",
+      "D"
+    ],
+    [
+      "B",
+      "E"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.5
+    },
+    "B": {
+      "True": {
+        "True": 0.8,
+        "False": 0.2
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.4,
+        "False": 0.6
+      }
+    },
+    "D": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "E": {
+      "True": {
+        "True": 0.75,
+        "False": 0.25
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    }
+  },
+  "description": "5-node tree-style Bayesian network: A \u2192 {B, C}, B \u2192 {D, E}",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Root decision factor",
+      "B": "Branch 1",
+      "C": "Branch 2",
+      "D": "Leaf from B",
+      "E": "Leaf from B"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192B",
+        "A\u2192C",
+        "B\u2192D",
+        "B\u2192E"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

@@ -1,0 +1,564 @@
+{
+  "nodes": [
+    "N00",
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N10",
+    "N11",
+    "N12",
+    "N13",
+    "N14",
+    "N20",
+    "N21",
+    "N22",
+    "N23",
+    "N24",
+    "N30",
+    "N31",
+    "N32",
+    "N33",
+    "N34",
+    "N40",
+    "N41",
+    "N42",
+    "N43",
+    "N44"
+  ],
+  "edges": [
+    [
+      "N00",
+      "N01"
+    ],
+    [
+      "N00",
+      "N10"
+    ],
+    [
+      "N01",
+      "N02"
+    ],
+    [
+      "N01",
+      "N11"
+    ],
+    [
+      "N02",
+      "N03"
+    ],
+    [
+      "N02",
+      "N12"
+    ],
+    [
+      "N03",
+      "N04"
+    ],
+    [
+      "N03",
+      "N13"
+    ],
+    [
+      "N04",
+      "N14"
+    ],
+    [
+      "N10",
+      "N11"
+    ],
+    [
+      "N10",
+      "N20"
+    ],
+    [
+      "N11",
+      "N12"
+    ],
+    [
+      "N11",
+      "N21"
+    ],
+    [
+      "N12",
+      "N13"
+    ],
+    [
+      "N12",
+      "N22"
+    ],
+    [
+      "N13",
+      "N14"
+    ],
+    [
+      "N13",
+      "N23"
+    ],
+    [
+      "N14",
+      "N24"
+    ],
+    [
+      "N20",
+      "N21"
+    ],
+    [
+      "N20",
+      "N30"
+    ],
+    [
+      "N21",
+      "N22"
+    ],
+    [
+      "N21",
+      "N31"
+    ],
+    [
+      "N22",
+      "N23"
+    ],
+    [
+      "N22",
+      "N32"
+    ],
+    [
+      "N23",
+      "N24"
+    ],
+    [
+      "N23",
+      "N33"
+    ],
+    [
+      "N24",
+      "N34"
+    ],
+    [
+      "N30",
+      "N31"
+    ],
+    [
+      "N30",
+      "N40"
+    ],
+    [
+      "N31",
+      "N32"
+    ],
+    [
+      "N31",
+      "N41"
+    ],
+    [
+      "N32",
+      "N33"
+    ],
+    [
+      "N32",
+      "N42"
+    ],
+    [
+      "N33",
+      "N34"
+    ],
+    [
+      "N33",
+      "N43"
+    ],
+    [
+      "N34",
+      "N44"
+    ],
+    [
+      "N40",
+      "N41"
+    ],
+    [
+      "N41",
+      "N42"
+    ],
+    [
+      "N42",
+      "N43"
+    ],
+    [
+      "N43",
+      "N44"
+    ]
+  ],
+  "cpt": {
+    "N00": {
+      "prior": 0.5
+    },
+    "N01": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N02": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N03": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N04": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N10": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N11": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N12": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N13": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N14": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N20": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N21": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N22": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N23": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N24": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N30": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N31": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N32": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N33": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N34": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N40": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N41": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N42": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N43": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N44": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    }
+  }
+}

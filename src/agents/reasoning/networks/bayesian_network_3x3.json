@@ -1,0 +1,64 @@
+{
+  "nodes": [
+    "X",
+    "Y",
+    "Z"
+  ],
+  "edges": [
+    [
+      "X",
+      "Y"
+    ],
+    [
+      "Y",
+      "Z"
+    ]
+  ],
+  "cpt": {
+    "X": {
+      "prior": 0.7
+    },
+    "Y": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "Z": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    }
+  },
+  "description": "Chained 3-node Bayesian network: X \u2192 Y \u2192 Z",
+  "metadata": {
+    "node_descriptions": {
+      "X": "Root cause or latent variable",
+      "Y": "Intermediate state",
+      "Z": "Final outcome"
+    },
+    "dependency_types": {
+      "directed": [
+        "X\u2192Y",
+        "Y\u2192Z"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

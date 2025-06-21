@@ -1,0 +1,81 @@
+{
+  "nodes": [
+    "X",
+    "Y",
+    "Z",
+    "W"
+  ],
+  "edges": [
+    [
+      "X",
+      "Y"
+    ],
+    [
+      "X",
+      "Z"
+    ],
+    [
+      "X",
+      "W"
+    ]
+  ],
+  "cpt": {
+    "X": {
+      "prior": 0.6
+    },
+    "Y": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "Z": {
+      "True": {
+        "True": 0.8,
+        "False": 0.2
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "W": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.35,
+        "False": 0.65
+      }
+    }
+  },
+  "description": "4-node fork-style Bayesian network: X \u2192 {Y, Z, W}",
+  "metadata": {
+    "node_descriptions": {
+      "X": "Common cause (e.g., underlying condition)",
+      "Y": "Effect 1 (e.g., symptom 1)",
+      "Z": "Effect 2 (e.g., symptom 2)",
+      "W": "Effect 3 (e.g., test result)"
+    },
+    "dependency_types": {
+      "directed": [
+        "X\u2192Y",
+        "X\u2192Z",
+        "X\u2192W"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

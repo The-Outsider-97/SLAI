@@ -1,0 +1,1017 @@
+{
+  "nodes": [
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "C0",
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "E0",
+    "E1",
+    "E2",
+    "E3",
+    "E4",
+    "E5",
+    "E6",
+    "E7",
+    "F0",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "G0",
+    "G1",
+    "G2",
+    "G3",
+    "G4",
+    "G5",
+    "G6",
+    "G7",
+    "H0",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "H7"
+  ],
+  "edges": [
+    [
+      "A0",
+      "A1"
+    ],
+    [
+      "A1",
+      "A2"
+    ],
+    [
+      "A2",
+      "A3"
+    ],
+    [
+      "A3",
+      "A4"
+    ],
+    [
+      "A4",
+      "A5"
+    ],
+    [
+      "A5",
+      "A6"
+    ],
+    [
+      "A6",
+      "A7"
+    ],
+    [
+      "B0",
+      "B1"
+    ],
+    [
+      "B1",
+      "B2"
+    ],
+    [
+      "B2",
+      "B3"
+    ],
+    [
+      "B3",
+      "B4"
+    ],
+    [
+      "B4",
+      "B5"
+    ],
+    [
+      "B5",
+      "B6"
+    ],
+    [
+      "B6",
+      "B7"
+    ],
+    [
+      "C0",
+      "C1"
+    ],
+    [
+      "C1",
+      "C2"
+    ],
+    [
+      "C2",
+      "C3"
+    ],
+    [
+      "C3",
+      "C4"
+    ],
+    [
+      "C4",
+      "C5"
+    ],
+    [
+      "C5",
+      "C6"
+    ],
+    [
+      "C6",
+      "C7"
+    ],
+    [
+      "D0",
+      "D1"
+    ],
+    [
+      "D1",
+      "D2"
+    ],
+    [
+      "D2",
+      "D3"
+    ],
+    [
+      "D3",
+      "D4"
+    ],
+    [
+      "D4",
+      "D5"
+    ],
+    [
+      "D5",
+      "D6"
+    ],
+    [
+      "D6",
+      "D7"
+    ],
+    [
+      "E0",
+      "E1"
+    ],
+    [
+      "E1",
+      "E2"
+    ],
+    [
+      "E2",
+      "E3"
+    ],
+    [
+      "E3",
+      "E4"
+    ],
+    [
+      "E4",
+      "E5"
+    ],
+    [
+      "E5",
+      "E6"
+    ],
+    [
+      "E6",
+      "E7"
+    ],
+    [
+      "F0",
+      "F1"
+    ],
+    [
+      "F1",
+      "F2"
+    ],
+    [
+      "F2",
+      "F3"
+    ],
+    [
+      "F3",
+      "F4"
+    ],
+    [
+      "F4",
+      "F5"
+    ],
+    [
+      "F5",
+      "F6"
+    ],
+    [
+      "F6",
+      "F7"
+    ],
+    [
+      "G0",
+      "G1"
+    ],
+    [
+      "G1",
+      "G2"
+    ],
+    [
+      "G2",
+      "G3"
+    ],
+    [
+      "G3",
+      "G4"
+    ],
+    [
+      "G4",
+      "G5"
+    ],
+    [
+      "G5",
+      "G6"
+    ],
+    [
+      "G6",
+      "G7"
+    ],
+    [
+      "H0",
+      "H1"
+    ],
+    [
+      "H1",
+      "H2"
+    ],
+    [
+      "H2",
+      "H3"
+    ],
+    [
+      "H3",
+      "H4"
+    ],
+    [
+      "H4",
+      "H5"
+    ],
+    [
+      "H5",
+      "H6"
+    ],
+    [
+      "H6",
+      "H7"
+    ]
+  ],
+  "cpt": {
+    "A0": {
+      "prior": 0.6
+    },
+    "A1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B0": {
+      "prior": 0.6
+    },
+    "B1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C0": {
+      "prior": 0.6
+    },
+    "C1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D0": {
+      "prior": 0.6
+    },
+    "D1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E0": {
+      "prior": 0.6
+    },
+    "E1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "E7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F0": {
+      "prior": 0.6
+    },
+    "F1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G0": {
+      "prior": 0.6
+    },
+    "G1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H0": {
+      "prior": 0.6
+    },
+    "H1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "H7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    }
+  },
+  "description": "64-node Bayesian network: Eight independent 8-node chains (A\u2013H)",
+  "metadata": {
+    "node_descriptions": {
+      "A0": "A0 in chain A",
+      "A1": "A1 in chain A",
+      "A2": "A2 in chain A",
+      "A3": "A3 in chain A",
+      "A4": "A4 in chain A",
+      "A5": "A5 in chain A",
+      "A6": "A6 in chain A",
+      "A7": "A7 in chain A",
+      "B0": "B0 in chain B",
+      "B1": "B1 in chain B",
+      "B2": "B2 in chain B",
+      "B3": "B3 in chain B",
+      "B4": "B4 in chain B",
+      "B5": "B5 in chain B",
+      "B6": "B6 in chain B",
+      "B7": "B7 in chain B",
+      "C0": "C0 in chain C",
+      "C1": "C1 in chain C",
+      "C2": "C2 in chain C",
+      "C3": "C3 in chain C",
+      "C4": "C4 in chain C",
+      "C5": "C5 in chain C",
+      "C6": "C6 in chain C",
+      "C7": "C7 in chain C",
+      "D0": "D0 in chain D",
+      "D1": "D1 in chain D",
+      "D2": "D2 in chain D",
+      "D3": "D3 in chain D",
+      "D4": "D4 in chain D",
+      "D5": "D5 in chain D",
+      "D6": "D6 in chain D",
+      "D7": "D7 in chain D",
+      "E0": "E0 in chain E",
+      "E1": "E1 in chain E",
+      "E2": "E2 in chain E",
+      "E3": "E3 in chain E",
+      "E4": "E4 in chain E",
+      "E5": "E5 in chain E",
+      "E6": "E6 in chain E",
+      "E7": "E7 in chain E",
+      "F0": "F0 in chain F",
+      "F1": "F1 in chain F",
+      "F2": "F2 in chain F",
+      "F3": "F3 in chain F",
+      "F4": "F4 in chain F",
+      "F5": "F5 in chain F",
+      "F6": "F6 in chain F",
+      "F7": "F7 in chain F",
+      "G0": "G0 in chain G",
+      "G1": "G1 in chain G",
+      "G2": "G2 in chain G",
+      "G3": "G3 in chain G",
+      "G4": "G4 in chain G",
+      "G5": "G5 in chain G",
+      "G6": "G6 in chain G",
+      "G7": "G7 in chain G",
+      "H0": "H0 in chain H",
+      "H1": "H1 in chain H",
+      "H2": "H2 in chain H",
+      "H3": "H3 in chain H",
+      "H4": "H4 in chain H",
+      "H5": "H5 in chain H",
+      "H6": "H6 in chain H",
+      "H7": "H7 in chain H"
+    },
+    "dependency_types": {
+      "directed": [
+        "A0\u2192A1",
+        "A1\u2192A2",
+        "A2\u2192A3",
+        "A3\u2192A4",
+        "A4\u2192A5",
+        "A5\u2192A6",
+        "A6\u2192A7",
+        "B0\u2192B1",
+        "B1\u2192B2",
+        "B2\u2192B3",
+        "B3\u2192B4",
+        "B4\u2192B5",
+        "B5\u2192B6",
+        "B6\u2192B7",
+        "C0\u2192C1",
+        "C1\u2192C2",
+        "C2\u2192C3",
+        "C3\u2192C4",
+        "C4\u2192C5",
+        "C5\u2192C6",
+        "C6\u2192C7",
+        "D0\u2192D1",
+        "D1\u2192D2",
+        "D2\u2192D3",
+        "D3\u2192D4",
+        "D4\u2192D5",
+        "D5\u2192D6",
+        "D6\u2192D7",
+        "E0\u2192E1",
+        "E1\u2192E2",
+        "E2\u2192E3",
+        "E3\u2192E4",
+        "E4\u2192E5",
+        "E5\u2192E6",
+        "E6\u2192E7",
+        "F0\u2192F1",
+        "F1\u2192F2",
+        "F2\u2192F3",
+        "F3\u2192F4",
+        "F4\u2192F5",
+        "F5\u2192F6",
+        "F6\u2192F7",
+        "G0\u2192G1",
+        "G1\u2192G2",
+        "G2\u2192G3",
+        "G3\u2192G4",
+        "G4\u2192G5",
+        "G5\u2192G6",
+        "G6\u2192G7",
+        "H0\u2192H1",
+        "H1\u2192H2",
+        "H2\u2192H3",
+        "H3\u2192H4",
+        "H4\u2192H5",
+        "H5\u2192H6",
+        "H6\u2192H7"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

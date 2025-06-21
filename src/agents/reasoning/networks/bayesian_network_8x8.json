@@ -1,0 +1,137 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H"
+  ],
+  "edges": [
+    [
+      "A",
+      "B"
+    ],
+    [
+      "B",
+      "C"
+    ],
+    [
+      "C",
+      "D"
+    ],
+    [
+      "E",
+      "F"
+    ],
+    [
+      "F",
+      "G"
+    ],
+    [
+      "G",
+      "H"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.5
+    },
+    "E": {
+      "prior": 0.6
+    },
+    "B": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "D": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "F": {
+      "True": {
+        "True": 0.88,
+        "False": 0.12
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G": {
+      "True": {
+        "True": 0.92,
+        "False": 0.08
+      },
+      "False": {
+        "True": 0.28,
+        "False": 0.72
+      }
+    },
+    "H": {
+      "True": {
+        "True": 0.95,
+        "False": 0.05
+      },
+      "False": {
+        "True": 0.15,
+        "False": 0.85
+      }
+    }
+  },
+  "description": "8-node layered Bayesian network: A\u2192B\u2192C\u2192D and E\u2192F\u2192G\u2192H",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Input 1",
+      "B": "Stage 1 of path 1",
+      "C": "Stage 2 of path 1",
+      "D": "Final output of path 1",
+      "E": "Input 2",
+      "F": "Stage 1 of path 2",
+      "G": "Stage 2 of path 2",
+      "H": "Final output of path 2"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192B",
+        "B\u2192C",
+        "C\u2192D",
+        "E\u2192F",
+        "F\u2192G",
+        "G\u2192H"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

@@ -1,0 +1,132 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G"
+  ],
+  "edges": [
+    [
+      "A",
+      "B"
+    ],
+    [
+      "A",
+      "C"
+    ],
+    [
+      "B",
+      "D"
+    ],
+    [
+      "B",
+      "E"
+    ],
+    [
+      "C",
+      "F"
+    ],
+    [
+      "C",
+      "G"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.7
+    },
+    "B": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "D": {
+      "True": {
+        "True": 0.95,
+        "False": 0.05
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "E": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "F": {
+      "True": {
+        "True": 0.92,
+        "False": 0.08
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "G": {
+      "True": {
+        "True": 0.88,
+        "False": 0.12
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    }
+  },
+  "description": "7-node tree-style Bayesian network: A \u2192 {B, C}, B \u2192 {D, E}, C \u2192 {F, G}",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Root cause or trigger",
+      "B": "Intermediate node 1",
+      "C": "Intermediate node 2",
+      "D": "Leaf node under B",
+      "E": "Leaf node under B",
+      "F": "Leaf node under C",
+      "G": "Leaf node under C"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192B",
+        "A\u2192C",
+        "B\u2192D",
+        "B\u2192E",
+        "C\u2192F",
+        "C\u2192G"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}
