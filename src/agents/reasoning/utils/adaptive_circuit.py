@@ -17,20 +17,17 @@ printer = PrettyPrinter
 
 class AdaptiveCircuit(nn.Module):
     """Hybrid neural circuit informed by Bayesian network structure and knowledge base"""
-    def __init__(
-        self,
+    def __init__(self,
         network_structure: Dict[str, Any],
         knowledge_base: Dict[Tuple, Any]
-    ):
+        ):
         super().__init__()
-        printer.section_header("Adaptive Circuit")
         self.config = load_global_config()
+        self.embedding_dim = self.config.get('embedding_dim')
+    
         self.circuit_config = get_config_section('adaptive_circuit')
-
-        # Configuration parameters with defaults
-        self.embedding_dim = self.circuit_config.get('embedding_dim', 64)
-        self.hidden_dim = self.circuit_config.get('hidden_dim', 128)
-        num_kb_embeddings = self.circuit_config.get('num_kb_embeddings', 1000)
+        self.hidden_dim = self.circuit_config.get('hidden_dim')
+        num_kb_embeddings = self.circuit_config.get('num_kb_embeddings')
 
         self.network_structure = network_structure
         self.knowledge_base = knowledge_base
@@ -253,7 +250,7 @@ class AdaptiveCircuit(nn.Module):
                 'num_parameters': sum(p.numel() for p in self.parameters())
             }
         }
-        
+
         if input_tensor is not None:
             try:
                 with torch.no_grad():
@@ -266,9 +263,98 @@ class AdaptiveCircuit(nn.Module):
             except Exception as e:
                 logger.error(f"Evidence generation failed: {str(e)}")
                 evidence['error'] = str(e)
-        
+
         return evidence
 
+    def compute_scopes(self) -> Dict[str, set]:
+        """Computes scope of each node in the circuit"""
+        scopes = {}
+        # Initialize scopes for input nodes
+        for i, node_name in enumerate(self.input_vars):
+            scopes[f'input_{node_name}'] = {node_name}
+
+        # Create dependency graph
+        graph = {
+            'fc1': set(self.input_vars),
+            'bn_layer_norm': {'fc1'},
+            'dropout': {'bn_layer_norm'},
+            'fc2': {'dropout'},
+            'fc3': {'fc2'},
+            'output': {'fc3'}
+        }
+
+        # Propagate scopes through computational graph
+        scopes['fc1'] = set(self.input_vars)
+        scopes['bn_layer_norm'] = scopes['fc1']
+        scopes['dropout'] = scopes['bn_layer_norm']
+        scopes['fc2'] = scopes['dropout']
+        scopes['fc3'] = scopes['fc2']
+        scopes['output'] = scopes['fc3']
+
+        # Add KB embedding scope if present
+        if self.kb_embedding:
+            kb_scope = set()
+            for fact in self.knowledge_base.keys():
+                if isinstance(fact, tuple):
+                    kb_scope |= set(str(item) for item in fact)
+            graph['kb_embedding'] = kb_scope
+            scopes['kb_embedding'] = kb_scope
+            scopes['fc1'] |= kb_scope
+
+        logger.debug(f"Computed scopes for {len(scopes)} nodes")
+        return scopes
+
+    def trace_activations(self, input_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Traces activations through the network"""
+        activations = {}
+        with torch.no_grad():
+            activations['input'] = input_tensor.clone()
+            kb_features = self._get_kb_features_for_input(input_tensor)
+            if kb_features is not None:
+                activations['kb_features'] = kb_features.clone()
+                combined_input = torch.cat([input_tensor, kb_features], dim=1)
+            else:
+                combined_input = input_tensor
+
+            # Forward pass through layers
+            h1 = self.fc1(combined_input)
+            activations['fc1_pre_act'] = h1.clone()
+            h1_relu = F.relu(h1)
+            activations['relu1'] = h1_relu.clone()
+            h1_norm = self.bn_layer_norm(h1_relu)
+            activations['bn_layer_norm'] = h1_norm.clone()
+            h1_dropped = self.dropout(h1_norm)
+            activations['dropout'] = h1_dropped.clone()
+            h2 = self.fc2(h1_dropped)
+            activations['fc2_pre_act'] = h2.clone()
+            h2_relu = F.relu(h2)
+            activations['relu2'] = h2_relu.clone()
+            logits = self.fc3(h2_relu)
+            activations['fc3_logits'] = logits.clone()
+            probabilities = torch.sigmoid(logits)
+            activations['output_probabilities'] = probabilities.clone()
+
+        logger.debug(f"Traced activations for {len(activations)} layers")
+        return activations
+
+    @property
+    def nodes(self) -> List[Tuple[str, nn.Module]]:
+        """Returns list of named nodes in circuit"""
+        node_list = [
+            ('fc1', self.fc1),
+            ('bn_layer_norm', self.bn_layer_norm),
+            ('dropout', self.dropout),
+            ('fc2', self.fc2),
+            ('fc3', self.fc3)
+        ]
+        if self.kb_embedding:
+            node_list.insert(0, ('kb_embedding', self.kb_embedding))
+        return node_list
+
+    @property
+    def root(self) -> nn.Module:
+        """Returns root module of circuit (output layer)"""
+        return self.fc3
 
 if __name__ == "__main__":
     print("\n=== Running Adaptive Circuit ===")
