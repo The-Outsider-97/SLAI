@@ -78,7 +78,10 @@ class PerformAction:
             external_api_handler (callable, optional): Function or object that executes external system commands.
         """
         self.config = load_global_config()
+        self.enabled = self.config.get('enabled')
+
         self.action_config = get_config_section('perform_action')
+
         self.sector_rules = defaultdict(list)
         self.external_api_handler = external_api_handler
         self.semaphore = threading.Semaphore(self.action_config.get('max_concurrent_actions'))
