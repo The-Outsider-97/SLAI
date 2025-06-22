@@ -4,322 +4,333 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
+from src.agents.perception.utils.config_loader import load_global_config, get_config_section
 from src.agents.perception.utils.common import TensorOps, Parameter
 from src.agents.perception.modules.transformer import Transformer
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Audio Encoder")
+printer = PrettyPrinter
 
-CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
-class AudioEncoder(torch.nn.Module):
-    def __init__(self, config, device: str = 'cpu'):
+class AudioEncoder(nn.Module):
+    def __init__(self):
         super().__init__()
-        self._cache = {}
-        audio_cfg = config['audio_encoder']
-        transformer_cfg = config['transformer']
+        self._init_configs()
+        self._init_components()
+        logger.info(f"AudioEncoder initialized: type={self.encoder_type}, "
+                   f"patch_size={self.patch_size}, embed_dim={self.embed_dim},"
+                   f"in_channels={self.in_channels}")
+
+    def _init_configs(self):
+        """Load and validate all configurations"""
+        self.config = load_global_config()
+        self.audio_config = get_config_section('audio_encoder')
+        self.mfcc_config = get_config_section('mfcc')
+        
+        # Core parameters
+        self.embed_dim = self.config.get('embed_dim')
+        self.encoder_type = self.config.get('encoder_type')
+        self.device = self.config.get('device')
+        self.max_position_embeddings = self.config.get('max_position_embeddings')
+        self.dropout_rate = self.config.get('dropout_rate')
         
         # Audio-specific parameters
-        self.encoder_type = audio_cfg['encoder_type']
-        self.audio_length = audio_cfg['audio_length']
-        self.in_channels = audio_cfg['in_channels']
-        self.device = device
-
-        if self.encoder_type == "mfcc":
-            self.dct_matrix = self._dct_matrix()  # (n_mfcc, n_filters)
-
-        # Shared transformer parameters
-        self.embed_dim = transformer_cfg['embed_dim']
+        self.in_channels = self.audio_config.get('in_channels')
+        self.audio_length = self.audio_config.get('audio_length')
+        self.patch_size = self.audio_config.get('patch_size')
+        self.positional_encoding = self.audio_config.get('positional_encoding')
+        self.dynamic_patching = self.config.get('dynamic_patching')
         
-        if self.encoder_type == "transformer":
-            self.patch_size = audio_cfg['patch_size']
-            self.dynamic_patching = audio_cfg['dynamic_patching']
-            self.positional_encoding = audio_cfg['positional_encoding']
-            self.dropout_rate = audio_cfg['dropout_rate']
+        # MFCC parameters (conditionally load if "mfcc" is part of the encoder_type)
+        if "mfcc" in str(self.encoder_type).lower():
+            self.sample_rate = self.mfcc_config.get('sample_rate')
+            self.n_mfcc = self.mfcc_config.get('n_mfcc')
+            self.frame_length_ms = self.mfcc_config.get('frame_length_ms') # Store ms for clarity
+            self.frame_step_ms = self.mfcc_config.get('frame_step_ms')   # Store ms for clarity
             
-            # Projection layer
-            self.projection = Parameter(
-                TensorOps.he_init(
-                    (self.patch_size * self.in_channels, self.embed_dim),
-                    self.patch_size * self.in_channels,
-                    device=device
-                )
-            )
+            if self.sample_rate and self.frame_length_ms and self.frame_step_ms: # Check if necessary mfcc params exist
+                self.frame_length = int(self.frame_length_ms * self.sample_rate / 1000)
+                self.frame_step = int(self.frame_step_ms * self.sample_rate / 1000)
+            else: # Handle missing parameters for MFCC if MFCC is chosen
+                if "mfcc" in str(self.encoder_type).lower(): # Only warn if MFCC type is explicitly chosen
+                    logger.warning("MFCC encoder type selected, but sample_rate, frame_length_ms, or frame_step_ms missing in mfcc_config.")
+                self.frame_length = 0 # or some default
+                self.frame_step = 0   # or some default
             
-            # Positional encoding
-            if self.positional_encoding == "sinusoidal":
-                self.position_embed = self._init_sinusoidal_encoding()
-            else:  # learned
-                self.position_embed = Parameter(
-                    torch.randn(1, transformer_cfg['max_position_embeddings'], 
-                              self.embed_dim, device=device) * 0.02
-                )
-            
-            self.cls_token = Parameter(torch.randn(1, 1, self.embed_dim, device=device) * 0.02)
-            self.transformer = Transformer(config)
-            
-        elif self.encoder_type == "mfcc":
-            mfcc_cfg = audio_cfg['mfcc']
-            self.n_mfcc = mfcc_cfg['n_mfcc']
-            self.sample_rate = mfcc_cfg['sample_rate']
-            self.frame_length = int(mfcc_cfg['frame_length_ms'] * self.sample_rate / 1000)
-            self.frame_step = int(mfcc_cfg['frame_step_ms'] * self.sample_rate / 1000)
-            
-            # Project MFCC features to embed_dim
-            self.mfcc_proj = nn.Linear(self.n_mfcc, self.embed_dim)
-            self.mel_filters = self._create_mel_filterbank(mfcc_cfg)
+            self.n_filters = self.mfcc_config.get('n_filters')
+            self.low_freq = self.mfcc_config.get('low_freq')
+            self.high_freq = self.mfcc_config.get('high_freq')
 
-    def _init_sinusoidal_encoding(self):
-        pe = torch.zeros(1, self.max_position_embeddings, self.embed_dim, device=self.device)
-        position = torch.arange(0, self.max_position_embeddings, dtype=torch.float, 
-                              device=self.device).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, self.embed_dim, 2).float() * 
-                           (-math.log(10000.0) / self.embed_dim))
+    def _init_components(self):
+        """Initialize encoder-specific components"""
+        if self.encoder_type == "transformer":
+            self._init_transformer_encoder()
+        elif self.encoder_type == "mfcc":
+            self._init_mfcc_encoder()
+        else:
+            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
+
+    def _init_transformer_encoder(self):
+        """Initialize transformer-based encoder components"""
+        # Projection layer - now using standard tensor initialization
+        self.projection = nn.Parameter(
+            TensorOps.he_init(
+                (self.patch_size * self.in_channels, self.embed_dim),
+                fan_in=self.patch_size * self.in_channels,
+                device=self.device
+            )
+        )
+        
+        # Positional encoding
+        if self.positional_encoding == "sinusoidal":
+            self.position_embed = self._init_sinusoidal_encoding()
+        else:  # learned
+            self.position_embed = nn.Parameter(
+                torch.randn(1, self.max_position_embeddings, self.embed_dim, 
+                          device=self.device) * 0.02
+            )
+        
+        # Special tokens - now using standard Parameter
+        self.cls_token = nn.Parameter(
+            torch.randn(1, 1, self.embed_dim, device=self.device) * 0.02
+        )
+        
+        # Transformer backbone
+        self.transformer = Transformer()
+
+    def _init_mfcc_encoder(self):
+        """Initialize MFCC-based encoder components"""
+        printer.status("AUDIO", "Initializing MFCC-based encoder", "info")
+
+        # Precomputed buffers - register directly instead of setting as attributes
+        self.register_buffer("mel_filters", self._create_mel_filterbank())
+        self.register_buffer("dct_matrix", self._create_dct_matrix().t())  # Transpose to (n_filters, n_mfcc)
+        
+        # Projection layer
+        self.mfcc_proj = nn.Sequential(
+            nn.Linear(self.n_mfcc, self.embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(self.embed_dim)
+        )
+
+    def _init_sinusoidal_encoding(self) -> Parameter:
+        """Create sinusoidal positional encoding (non-trainable)"""
+        printer.status("AUDIO", "Creating sinusoidal positional encoding", "info")
+
+        pe = torch.zeros(1, self.max_position_embeddings, self.embed_dim, 
+                       device=self.device)
+        position = torch.arange(0, self.max_position_embeddings, dtype=torch.float,
+                             device=self.device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.embed_dim, 2).float() *
+                         (-math.log(10000.0) / self.embed_dim))
         pe[0, :, 0::2] = torch.sin(position * div_term)
         pe[0, :, 1::2] = torch.cos(position * div_term)
         return Parameter(pe, requires_grad=False)
 
-    def extract_patches(self, x):
-        if x.ndim == 2:
-            x = x.unsqueeze(1)  # Add channel dim if missing
-        b, c, l = x.shape
+    def forward(self, x: torch.Tensor, style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Process audio input through selected encoder
+        Args:
+            x: Input tensor of shape (B, C, T)
+            style_id: Optional style IDs for transformer conditioning
+        Returns:
+            Encoded representations (B, L, D)
+        """
+        printer.status("AUDIO", "Processing audio input through selected encoder", "info")
+
+        if isinstance(x, tuple):
+            x = x[0]  # or raise an error
+    
+        if self.encoder_type == "transformer":
+            return self._forward_transformer(x, style_id)
+        return self._forward_mfcc(x)
+
+    def _forward_transformer(self, x: torch.Tensor, style_id: torch.Tensor) -> torch.Tensor:
+        printer.status("AUDIO", "Forward transformer", "info")
+
+        # Patch extraction and projection
+        x = self.extract_patches(x)  # (B, N, P*C)
+        x = torch.matmul(x, self.projection)  # (B, N, D)
         
+        # Apply dropout during training - handle tuple return
+        if self.training and self.dropout_rate > 0:
+            dropped = TensorOps.dropout(x)
+            x = dropped[0] if isinstance(dropped, tuple) else dropped
+        
+        # Add CLS token and positional embeddings
+        cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
+        x = torch.cat([cls_tokens, x], dim=1)
+        x = x + self.position_embed[:, :x.size(1)]
+        
+        # Process through transformer
+        return self.transformer(x, style_id)
+
+    def _forward_mfcc(self, x: torch.Tensor) -> torch.Tensor:
+        """MFCC feature extraction and projection"""
+        printer.status("AUDIO", "MFCC feature extraction", "info")
+
+        mfcc = self._extract_mfcc(x)  # (B, T, n_mfcc)
+        return self.mfcc_proj(mfcc)  # (B, T, D)
+
+    def extract_patches(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert waveform into patches
+        Args:
+            x: Input tensor (B, C, T)
+        Returns:
+            Patch embeddings (B, num_patches, patch_size*C)
+        """
+        printer.status("AUDIO", "Converting waveform into patches", "info")
+
+        if x.ndim == 2:
+            x = x.unsqueeze(1)  # Add channel dim: (B, 1, T)
+        
+        b, c, t = x.shape
         if self.dynamic_patching:
-            pad = (self.patch_size - (l % self.patch_size)) % self.patch_size
+            pad = (self.patch_size - (t % self.patch_size)) % self.patch_size
             x = F.pad(x, (0, pad))
         
-        x = x.unfold(2, self.patch_size, self.patch_size)  # (B, C, num_patches, patch_size)
-        x = x.permute(0, 2, 1, 3).reshape(b, -1, self.patch_size * c)
-        return x
+        # Unfold into patches
+        x = x.unfold(2, self.patch_size, self.patch_size)  # (B, C, N, P)
+        x = x.permute(0, 2, 1, 3)  # (B, N, C, P)
+        return x.reshape(b, -1, c * self.patch_size)  # (B, N, C*P)
 
-    def forward(self, x, style_id=0):
-        if self.encoder_type == "transformer":
-            x = self.extract_patches(x)
-            self._cache['input_shape'] = x.shape
-            
-            x = torch.matmul(x, self.projection.data)
-            
-            if self.training and self.dropout_rate > 0:
-                mask = (torch.rand(x.shape, device=self.device) > self.dropout_rate).float()
-                x *= mask
-            
-            cls_tokens = self.cls_token.data.expand(x.size(0), -1, -1)
-            x = torch.cat([cls_tokens, x], dim=1)
-            
-            seq_len = x.size(1)
-            x += self.position_embed.data[:, :seq_len]
-            
-            return self.transformer.forward(x, style_id)
-        
-        elif self.encoder_type == "mfcc":
-            mfcc = self._extract_mfcc(x)  # (batch, seq_len, n_mfcc)
-            return self.mfcc_proj(mfcc)  # Project to embed_dim
-            
-        else:
-            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
+    def _extract_mfcc(self, waveform: torch.Tensor) -> torch.Tensor:
+        """
+        Vectorized MFCC extraction
+        Args:
+            waveform: Input audio (B, C, T)
+        Returns:
+            MFCC features (B, frames, n_mfcc)
+        """
+        printer.status("AUDIO", "Vectorizing MFCC extraction", "info")
 
-    def backward(self, dout):
-        """Backprop through encoder"""
-        d_x = self.transformer.backward(dout)
-        d_x = d_x[:, 1:, :]  # Remove CLS token
+        # Handle multi-channel input
+        if waveform.dim() == 3:
+            waveform = waveform.mean(dim=1)  # Mix to mono: (B, T)
         
-        # Gradient for projection
-        d_proj = torch.matmul(
-            self._cache['input_shape'].transpose(0, 2, 1), 
-            d_x.reshape(-1, self.embed_dim))
-        self.projection.grad += d_proj.sum(axis=0)
-        
-        return torch.matmul(d_x, self.projection.data.T)
-
-    def _extract_mfcc(self, waveform):
-        """Extract MFCC features with proper batching"""
-        batch_size = waveform.shape[0]
-        frames = []
-        
-        for i in range(batch_size):
-            # Process each sample in batch
-            frames.append(self._mfcc_forward(waveform[i]))
-        
-        return torch.stack(frames)  # (batch, seq_len, n_mfcc)
-
-    def _mfcc_forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Vectorized MFCC feature extraction for batched input."""
-        B, T = waveform.shape  # Assuming waveform shape is (batch, time)
-        
-        # Frame extraction using unfold
-        frames = waveform.unfold(
-            dimension=1, 
-            size=self.frame_length, 
-            step=self.frame_step
-        )  # Shape: (B, num_frames, frame_length)
+        # Frame extraction
+        frames = waveform.unfold(1, self.frame_length, self.frame_step)  # (B, N, L)
         
         # Windowing
         window = torch.hamming_window(self.frame_length, device=waveform.device)
-        windowed = frames * window  # Applies window to each frame
+        windowed = frames * window
         
-        # Power spectrum (FFT and magnitude squared)
+        # Power spectrum
         fft = torch.fft.rfft(windowed, dim=-1)
-        power_spectrum = torch.abs(fft) ** 2  # (B, num_frames, n_fft_bins)
+        power_spectrum = torch.abs(fft) ** 2
         
-        # Mel filterbank energies (batch matmul)
-        mel_energies = torch.matmul(power_spectrum, self.mel_filters.T)  # (B, num_frames, n_filters)
-        
-        # Log compression
-        log_energies = torch.log(mel_energies + 1e-6)
-        
-        # DCT (precompute self.dct_matrix during init)
-        mfcc = torch.matmul(log_energies, self.dct_matrix)  # (B, num_frames, n_mfcc)
-        
-        return mfcc
+        # Mel filterbank
+        mel_energies = torch.matmul(power_spectrum, self.mel_filters.t())
+        return torch.matmul(torch.log(mel_energies + 1e-6), self.dct_matrix)
+
+    def _create_mel_filterbank(self) -> torch.Tensor:
+        """Create Mel-scale filterbank"""
+        printer.status("AUDIO", "Creating Mel-scale filterbank", "info")
     
-    def _dct_matrix(self) -> torch.Tensor:
-        """Vectorized DCT matrix creation."""
-        n = self.mel_filters.shape[0]
-        k = torch.arange(self.n_mfcc, device=self.device)[:, None]
-        j = torch.arange(n, device=self.device)[None, :]
-        return torch.cos(math.pi * k * (2 * j + 1) / (2 * n)) * math.sqrt(2 / n)
-
-    def parameters(self):
-        if self.encoder_type == "transformer":
-            return [self.projection, self.cls_token, self.position_embed] + list(self.transformer.parameters())
-        else:
-            return list(self.mfcc_proj.parameters())
-
-    def _create_mel_filterbank(self, config: Dict[str, Any]) -> torch.Tensor:
-        """Create Mel-scale filter bank"""
-        n_filters = config.get('n_filters', 40)
-        low_freq = config.get('low_freq', 0)
-        high_freq = config.get('high_freq', self.sample_rate//2)
+        # Convert frequencies to tensors
+        low_freq = torch.tensor(self.low_freq, device=self.device)
+        high_freq = torch.tensor(self.high_freq, device=self.device)
         
-        # Convert frequencies to Mel scale
-        low_mel = 2595 * torch.log10(1 + low_freq/700)
-        high_mel = 2595 * torch.log10(1 + high_freq/700)
+        # Frequency to Mel conversion
+        low_mel = 2595 * torch.log10(1 + low_freq / 700)
+        high_mel = 2595 * torch.log10(1 + high_freq / 700)
         
-        # Create filter points
-        mel_points = torch.linspace(low_mel, high_mel, n_filters + 2)
-        hz_points = 700 * (10**(mel_points/2595) - 1)
+        # Mel points and Hz conversion
+        mel_points = torch.linspace(low_mel, high_mel, self.n_filters + 2, device=self.device)
+        hz_points = 700 * (10 ** (mel_points / 2595) - 1)
         bin_points = torch.floor((self.frame_length + 1) * hz_points / self.sample_rate)
         
-        # Create filter banks
-        filters = torch.zeros((n_filters, self.frame_length//2 + 1))
-        for i in range(1, n_filters + 1):
-            left = bin_points[i-1]
-            center = bin_points[i]
-            right = bin_points[i+1]
+        # Build filters
+        filters = torch.zeros(self.n_filters, self.frame_length // 2 + 1, device=self.device)
+        for i in range(1, self.n_filters + 1):
+            left, center, right = bin_points[i-1], bin_points[i], bin_points[i+1]
+            left_idx, center_idx, right_idx = map(int, (left, center, right))
             
-            for j in range(int(left), int(center)):
-                filters[i-1, j] = (j - left) / (center - left)
-            for j in range(int(center), int(right)):
-                filters[i-1, j] = (right - j) / (right - center)
+            # Rising slope
+            if center_idx > left_idx:
+                filters[i-1, left_idx:center_idx] = torch.linspace(0, 1, center_idx - left_idx, device=self.device)
+            
+            # Falling slope
+            if right_idx > center_idx:
+                filters[i-1, center_idx:right_idx] = torch.linspace(1, 0, right_idx - center_idx, device=self.device)
         
-        return filters
+        # Normalize filters
+        return filters / filters.sum(dim=1, keepdim=True)
 
-    def load_pretrained(self, weights):
-        """Handle 1D conv, transformer, and positional weights"""
-        if 'conv_proj' in weights:
-            # Convert (embed_dim, in_channels, kernel_size) → (in_channels*kernel_size, embed_dim)
-            w = weights['conv_proj'].reshape(weights['conv_proj'].shape[0], -1).T
-            self.projection.data = w
-        
-        self.cls_token.data = weights.get('cls_token', self.cls_token.data)
-        self.position_embed.data = weights.get('pos_embed', self.position_embed.data)
-        
-        # Load transformer weights
-        transformer_weights = {
-            k.split('transformer_')[-1]: v 
-            for k, v in weights.items() 
-            if k.startswith('transformer_')
-        }
-        if transformer_weights:
+    def _create_dct_matrix(self) -> torch.Tensor:
+        """Create DCT matrix for MFCC computation"""
+        printer.status("AUDIO", "Creating DCT matrix", "info")
+
+        n = self.n_filters
+        k = torch.arange(self.n_mfcc, device=self.device)[:, None]
+        j = torch.arange(n, device=self.device)
+        return torch.cos(math.pi * k * (2 * j + 1) / (2 * n)) * math.sqrt(2 / n)
+
+    def load_pretrained(self, weights: Dict[str, torch.Tensor]):
+        """Load pretrained weights"""
+        printer.status("AUDIO", "Loading pretrained weights", "info")
+
+        if self.encoder_type == "transformer":
+            # Load projection weights
+            if 'conv_proj' in weights:
+                w = weights['conv_proj'].reshape(weights['conv_proj'].shape[0], -1).T
+                self.projection.data.copy_(w)
+            
+            # Load special tokens
+            self.cls_token.data.copy_(weights.get('cls_token', self.cls_token.data))
+            self.position_embed.data.copy_(weights.get('pos_embed', self.position_embed.data))
+            
+            # Load transformer weights
+            prefix = 'transformer.'
+            transformer_weights = {
+                k[len(prefix):]: v 
+                for k, v in weights.items() 
+                if k.startswith(prefix)
+            }
             self.transformer.load_pretrained(transformer_weights)
 
-    def _mfcc_forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """MFCC feature extraction pipeline"""
-        T = len(waveform)
-        L = self.frame_length
-        S = self.frame_step
-        N = 1 + (T - L) // S
-        
-        mfccs = []
-        for i in range(N):
-            # Frame extraction
-            frame = waveform[i*S : i*S+L]
-            
-            # Pre-emphasis
-            emphasized = torch.append(frame[0], frame[1:] - 0.97 * frame[:-1])
-            
-            # Windowing
-            window = 0.54 - 0.46 * torch.cos(2 * torch.pi * torch.arange(L) / (L - 1))
-            windowed = emphasized * window
-            
-            # Power spectrum
-            spectrum = torch.abs(torch.fft.rfft(windowed)) ** 2
-            
-            # Mel filterbank
-            filter_energies = torch.dot(spectrum, self.mel_filters.T)
-            
-            # Log compression
-            log_energies = torch.log(filter_energies + 1e-6)
-            
-            # DCT
-            mfcc = torch.dot(log_energies, self._dct_matrix(self.n_mfcc, self.mel_filters.shape[0]))
-            mfccs.append(mfcc)
-        
-        return torch.array(mfccs)
+    def train(self, mode: bool = True):
+        """Set training mode"""
+        printer.status("AUDIO", "Setting training mode", "info")
 
-    @staticmethod
-    def _dct_matrix(n_filters: int, n_coefficients: int) -> torch.Tensor:
-        """Create DCT-II matrix for MFCC computation"""
-        dct_matrix = torch.zeros((n_filters, n_coefficients))
-        for i in range(n_filters):
-            for j in range(n_coefficients):
-                dct_matrix[i, j] = torch.cos(torch.pi * i * (j + 0.5) / n_coefficients)
-        return dct_matrix
-
-    def train(self):
-        self.training = True
-        self.transformer.training = True
+        super().train(mode)
+        if self.encoder_type == "transformer":
+            self.transformer.train(mode)
+        return self
 
     def eval(self):
-        self.training = False
-        self.transformer.training = False
+        """Set evaluation mode"""
+        printer.status("AUDIO", "Setting evaluation mode", "info")
+
+        return self.train(False)
 
 if __name__ == "__main__":
-    print("\n=== Running Audio Encoder ===\n")
-    import torch
+    print("\n=== Testing Audio Encoder ===")
 
-    # Load configuration
-    config = get_merged_config()
-
-    # Create dummy audio input: (batch_size, in_channels, audio_length)
-    batch_size = 2
-    audio_cfg = config['audio_encoder']
-    in_channels = audio_cfg['in_channels']
-    audio_length = audio_cfg['audio_length']
-    dummy_audio = torch.randn(batch_size, in_channels, audio_length)
-
-    # Instantiate encoder
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    encoder = AudioEncoder(config, device=device).to(device)
-    dummy_audio = dummy_audio.to(device)
-
-    # Forward pass
-    output = encoder(dummy_audio)
-
-    # Print output shape
-    if isinstance(output, tuple):
-        output = output[0]
-    print("AudioEncoder output shape:", output.shape)
+    # Override config for testing
+    config = load_global_config()
+    config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+    config['encoder_type'] = "transformer"
+    config['dynamic_patching'] = True
+    
+    # Create test input
+    audio = torch.randn(4, 1, 16000).to(config['device'])
+    
+    # Initialize encoder
+    encoder = AudioEncoder().to(config['device'])
+    
+    # Test forward pass
+    print(f"\nEncoder type: {encoder.encoder_type}")
+    output = encoder(audio)
+    print("Output shape:", output.shape)
+    
+    # Test MFCC mode
+    config['encoder_type'] = "mfcc"
+    mfcc_encoder = AudioEncoder().to(config['device'])
+    print(f"\nEncoder type: {mfcc_encoder.encoder_type}")
+    mfcc_output = mfcc_encoder(audio)
+    print("MFCC output shape:", mfcc_output.shape)
+    print("\n=== AudioEncoder tests passed ===")

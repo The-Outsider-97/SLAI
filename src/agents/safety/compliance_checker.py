@@ -65,6 +65,8 @@ class ComplianceChecker:
     
     def evaluate_compliance(self) -> Dict[str, Any]:
         """Comprehensive compliance evaluation against all controls"""
+        printer.status("CHECK", "Evaluating compliance", "info")
+
         if not self.compliance_framework:
             return {"status": "error", "message": "Compliance framework not loaded"}
         
@@ -136,6 +138,8 @@ class ComplianceChecker:
     
     def _evaluate_control(self, control: Dict) -> str:
         """Evaluate a single control using control-specific logic"""
+        printer.status("CHECK", "Evaluating control", "info")
+
         control_id = control['controlId']
         
         # Map control IDs to evaluation methods
@@ -152,6 +156,8 @@ class ComplianceChecker:
 
     def _generic_control_check(self, control: Dict) -> str:
         """Perform a generic compliance control check based on required memory tags and fields"""
+        printer.status("CHECK", "Control check", "info")
+
         try:
             required_tags = control.get("required_tags", [])
             required_fields = control.get("required_fields", [])
@@ -175,6 +181,8 @@ class ComplianceChecker:
     
     def _get_compliance_status(self, score: float) -> str:
         """Determine compliance status based on score"""
+        printer.status("CHECK", "Status compliance", "info")
+
         thresholds = self.complience_config.get('report_thresholds', {})
         critical = thresholds.get('critical', 0.7)
         warning = thresholds.get('warning', 0.9)
@@ -188,6 +196,8 @@ class ComplianceChecker:
     # Control-specific evaluation methods
     def check_gdpr(self, control: Dict) -> str:
         """Validate GDPR compliance across key principles"""
+        printer.status("CHECK", "Checking GDPR compliance", "info")
+
         try:
             # 1. Lawful basis for data processing
             basis = self.memory.recall(tag="consent_records", top_k=1)
@@ -232,6 +242,8 @@ class ComplianceChecker:
     
     def check_hipaa(self, data: Dict) -> str:
         """Check HIPAA compliance"""
+        printer.status("CHECK", "Checking HIPAA compliance", "info")
+
         return "pass" if 'PHI' not in data or data.get('encrypted', False) else "fail"
     
     def _check_data_classification(self, control: Dict) -> str:
@@ -260,12 +272,11 @@ class ComplianceChecker:
     
     def _check_data_minimization(self, control: Dict) -> str:
         """Check whether data minimization principles are followed"""
+        printer.status("CHECK", "Checking data minimization", "info")
     
         try:
-            # Assume input_size_limit is a proxy for data minimization enforcement
             input_limit = self.config.get("adaptive_security", {}).get("input_size_limit", 2024)
-    
-            # Check stored feature extraction logs or schema for field count and rationale
+
             logs = self.memory.recall(tag="feature_extraction", top_k=1)
             if not logs:
                 logger.warning("No feature extraction logs found")
@@ -288,7 +299,8 @@ class ComplianceChecker:
 
     def _check_model_integrity(self, control: Dict) -> str:
         """Verify model file integrity using cryptographic hashes"""
-    
+        printer.status("CHECK", "Verifying model file integrity using cryptographic hashes", "info")
+
         try:
             trusted = self.memory.recall(tag="trusted_hashes", top_k=1)
             if not trusted:
@@ -320,6 +332,8 @@ class ComplianceChecker:
     
     def generate_report(self, results: Dict) -> str:
         """Generate comprehensive compliance report"""
+        printer.status("CHECK", "Generating report", "info")
+
         report = [
             "# Security Compliance Report",
             f"**Generated**: {datetime.now().isoformat()}",

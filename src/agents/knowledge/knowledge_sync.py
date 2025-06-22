@@ -19,6 +19,7 @@ from collections import defaultdict, deque
 
 from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
 from src.agents.knowledge.knowledge_memory import KnowledgeMemory
+from src.agents.knowledge.utils.rule_engine import RuleEngine
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Knowledge Synchronizer")
@@ -29,21 +30,26 @@ class KnowledgeSynchronizer:
     
     def __init__(self):
         self.config = load_global_config()
+        self.enabled = self.config.get('enabled')
+
         self.sync_config = get_config_section('knowledge_sync')
+        self.auto_sync = self.sync_config.get('auto_sync', {
+            'enabled', 'interval'
+            })
+        self.conflict_resolution = self.sync_config.get('conflict_resolution', {
+            'strategy', 'similarity_threshold', 'auto_quarantine'
+            })
+        self.versioning = self.sync_config.get('versioning', {
+            'enabled', 'max_versions'
+            })
+
+        self.external_config = get_config_section('external_sources')
+
+        self.knowledge_memory = KnowledgeMemory()
+
         self.version_history = defaultdict(deque)
         self.sync_lock = threading.Lock()
         self.stop_event = threading.Event()
-
-        # Initialize core components
-        self.knowledge_memory = KnowledgeMemory()
-
-        # Load configuration
-        self.auto_sync = self.sync_config.get('auto_sync', {'enabled': True, 'interval': 300})
-        self.versioning = self.sync_config.get('versioning', {'enabled': True, 'max_versions': 10})
-        self.conflict_resolution = self.sync_config.get(
-            'conflict_resolution', 
-            {'strategy': 'timestamp', 'similarity_threshold': 0.7})
-        self.external_sources = self.sync_config.get('external_sources', [])
 
         # Initialize conflict strategies
         self.conflict_strategies = {
@@ -54,14 +60,112 @@ class KnowledgeSynchronizer:
         }
 
         # Start background sync thread
-        if self.auto_sync.get('enabled', False):
+        if self.enabled:
             self._start_sync_thread()
+
+        logger.info(f"Knowledge Synchronizer initialized")
+
+    def _start_sync_thread(self):
+        """Start background synchronization thread with graceful shutdown"""
+        printer.status("SYNC", "Start background synchronization", "info")
+
+        def sync_loop():
+            logger.info("Background sync thread started")
+            while not self.stop_event.is_set():
+                try:
+                    start_time = time.time()
+                    stats = self.full_sync()
+                    duration = time.time() - start_time
+                    logger.info(f"Sync completed in {duration:.2f}s. "
+                                f"Updates: {stats.get('memory_updates', 0)}, "
+                                f"Conflicts: {stats.get('memory_conflicts', 0)}")
+                except Exception as e:
+                    logger.error(f"Sync failed: {str(e)}", exc_info=True)
+                
+                # Wait for interval or until stop event
+                wait_time = self.auto_sync.get('interval', 300)
+                self.stop_event.wait(wait_time)
+                
+            logger.info("Background sync thread stopped")
+                
+        self.sync_thread = threading.Thread(target=sync_loop, daemon=True)
+        self.sync_thread.start()
+
+    def resolve_conflict(self, key: str, *versions) -> Any:
+        """Apply configured conflict resolution strategy"""
+        printer.status("SYNC", "Apply configured conflict resolution strategy", "info")
+
+        strategy_name = self.conflict_resolution.get('strategy', 'timestamp')
+        strategy = self.conflict_strategies.get(strategy_name, self._resolve_by_timestamp)
+        return strategy(key, *versions)
+
+    def _resolve_by_timestamp(self, key: str, *versions) -> Any:
+        """Select most recent version based on timestamp"""
+        printer.status("SYNC", "Resolving conflicts by timestamp", "info")
+
+        return max(versions, key=lambda v: v.get('metadata', {}).get('timestamp', 0))
+
+    def _resolve_by_confidence(self, key: str, *versions) -> Any:
+        """Select version with highest confidence score"""
+        printer.status("SYNC", "Resolving conflicts with highest confidence score", "info")
+
+        return max(versions, key=lambda v: v.get('metadata', {}).get('confidence', 0))
+
+    def _resolve_by_semantics(self, key: str, *versions) -> Any:
+        """Resolve conflicts using semantic similarity"""
+        printer.status("SYNC", "Resolving conflicts using semantic similarity", "info")
+
+        best_match = None
+        highest_score = 0
+        
+        for version in versions:
+            text = version.get('text', '')
+            other_texts = [v.get('text', '') for v in versions if v != version]
+            
+            # Calculate average similarity to other versions
+            avg_score = sum(
+                SequenceMatcher(None, text, other_text).ratio()
+                for other_text in other_texts
+            ) / max(1, len(other_texts))
+            
+            if avg_score > highest_score:
+                highest_score = avg_score
+                best_match = version
+                
+        return best_match or versions[0]
+
+    def _resolve_by_rules(self, key: str, *versions) -> Any:
+        """Resolve conflicts using rule engine inference"""
+        printer.status("SYNC", "Resolving conflicts using rule engine inference", "info")
+
+        # Create knowledge base from versions
+        kb = {
+            f"version_{idx}": {
+                "text": v.get('text', ''),
+                "metadata": v.get('metadata', {})
+            }
+            for idx, v in enumerate(versions)
+        }
+        
+        # Apply rule engine to infer best version
+        inferred = self.rule_engine.smart_apply(kb)
+        
+        # Select version with highest confidence
+        best_version_key = max(inferred, key=lambda k: inferred[k], default=None)
+        
+        if best_version_key:
+            version_idx = int(best_version_key.split('_')[-1])
+            return versions[version_idx]
+        
+        return versions[0]  # Fallback to first version
 
     def full_sync(self, components: List[str] = None) -> Dict[str, int]:
         """
         Perform complete synchronization across specified components
         Returns: Dictionary of sync statistics
         """
+        printer.status("SYNC", "Performing complete synchronization", "info")
+
         stats = defaultdict(int)
         components = components or ['memory', 'external', 'rules']
         
@@ -97,11 +201,40 @@ class KnowledgeSynchronizer:
                     self.knowledge_memory.update(key, resolved)
                     
         return stats
+
+    def _sync_rule_engine(self) -> Dict[str, int]:
+        """Refresh rule engine with latest rules"""
+        self.rule_engine = RuleEngine()
+
+        stats = {'rules_loaded': 0}
+        try:
+            # Reload all rule sectors
+            self.rule_engine.load_all_sectors()
+            stats['rules_loaded'] = len(self.rule_engine.rules)
+            logger.info(f"Reloaded {stats['rules_loaded']} rules into RuleEngine")
+        except Exception as e:
+            logger.error(f"Failed to sync rule engine: {str(e)}")
+            stats['errors'] = 1
+        return stats
+
+    def _sync_with_external_sources(self) -> Dict[str, int]:
+        """Synchronize with configured external knowledge sources"""
+        stats = {'external_fetches': 0, 'external_errors': 0}
+        
+        for source in self.external_config:
+            try:
+                stats['external_fetches'] += 1
+            except Exception as e:
+                logger.error(f"External sync failed for {source}: {str(e)}")
+                stats['external_errors'] += 1
+                
+        return stats
+
     def _fetch_external_data(self) -> Dict[str, dict]:
         """Fetch and merge knowledge entries from configured external sources"""
         merged_data = {}
     
-        for source in self.external_sources:
+        for source in self.external_config:
             try:
                 # Handle different source types
                 if isinstance(source, str):
@@ -131,8 +264,7 @@ class KnowledgeSynchronizer:
                     if not isinstance(value, dict):
                         # Normalize to standard format
                         value = {"text": str(value), "metadata": {"timestamp": time.time(), "confidence": 0.5}}
-                    
-                    # Add source metadata
+
                     if 'metadata' not in value:
                         value['metadata'] = {}
                     value['metadata']['source'] = str(source)
@@ -247,94 +379,6 @@ class KnowledgeSynchronizer:
         logger.info(f"Processed {len(processed)} valid items from source: {source}")
         return processed
 
-    def _sync_rule_engine(self) -> Dict[str, int]:
-        """Refresh rule engine with latest rules"""
-        from src.agents.knowledge.utils.rule_engine import RuleEngine
-        self.rule_engine = RuleEngine()
-
-        stats = {'rules_loaded': 0}
-        try:
-            # Reload all rule sectors
-            self.rule_engine.load_all_sectors()
-            stats['rules_loaded'] = len(self.rule_engine.rules)
-            logger.info(f"Reloaded {stats['rules_loaded']} rules into RuleEngine")
-        except Exception as e:
-            logger.error(f"Failed to sync rule engine: {str(e)}")
-            stats['errors'] = 1
-        return stats
-
-    def resolve_conflict(self, key: str, *versions) -> Any:
-        """Apply configured conflict resolution strategy"""
-        strategy_name = self.conflict_resolution.get('strategy', 'timestamp')
-        strategy = self.conflict_strategies.get(strategy_name, self._resolve_by_timestamp)
-        return strategy(key, *versions)
-
-    def _resolve_by_timestamp(self, key: str, *versions) -> Any:
-        """Select most recent version based on timestamp"""
-        return max(versions, key=lambda v: v.get('metadata', {}).get('timestamp', 0))
-
-    def _resolve_by_confidence(self, key: str, *versions) -> Any:
-        """Select version with highest confidence score"""
-        return max(versions, key=lambda v: v.get('metadata', {}).get('confidence', 0))
-
-    def _resolve_by_semantics(self, key: str, *versions) -> Any:
-        """Resolve conflicts using semantic similarity"""
-        best_match = None
-        highest_score = 0
-        
-        for version in versions:
-            text = version.get('text', '')
-            other_texts = [v.get('text', '') for v in versions if v != version]
-            
-            # Calculate average similarity to other versions
-            avg_score = sum(
-                SequenceMatcher(None, text, other_text).ratio()
-                for other_text in other_texts
-            ) / max(1, len(other_texts))
-            
-            if avg_score > highest_score:
-                highest_score = avg_score
-                best_match = version
-                
-        return best_match or versions[0]
-
-    def _resolve_by_rules(self, key: str, *versions) -> Any:
-        """Resolve conflicts using rule engine inference"""
-        # Create knowledge base from versions
-        kb = {
-            f"version_{idx}": {
-                "text": v.get('text', ''),
-                "metadata": v.get('metadata', {})
-            }
-            for idx, v in enumerate(versions)
-        }
-        
-        # Apply rule engine to infer best version
-        inferred = self.rule_engine.smart_apply(kb)
-        
-        # Select version with highest confidence
-        best_version_key = max(inferred, key=lambda k: inferred[k], default=None)
-        
-        if best_version_key:
-            version_idx = int(best_version_key.split('_')[-1])
-            return versions[version_idx]
-        
-        return versions[0]  # Fallback to first version
-
-    def _sync_with_external_sources(self) -> Dict[str, int]:
-        """Synchronize with configured external knowledge sources"""
-        stats = {'external_fetches': 0, 'external_errors': 0}
-        
-        for source in self.external_sources:
-            try:
-                # Already handled in _fetch_external_data
-                stats['external_fetches'] += 1
-            except Exception as e:
-                logger.error(f"External sync failed for {source}: {str(e)}")
-                stats['external_errors'] += 1
-                
-        return stats
-
     def _create_version_snapshot(self) -> str:
         """Create versioned snapshot of current knowledge state and return version ID"""
         # Get current memory state
@@ -398,30 +442,6 @@ class KnowledgeSynchronizer:
             logger.error(f"Rollback failed: {str(e)}", exc_info=True)
             return False
 
-    def _start_sync_thread(self):
-        """Start background synchronization thread with graceful shutdown"""
-        def sync_loop():
-            logger.info("Background sync thread started")
-            while not self.stop_event.is_set():
-                try:
-                    start_time = time.time()
-                    stats = self.full_sync()
-                    duration = time.time() - start_time
-                    logger.info(f"Sync completed in {duration:.2f}s. "
-                                f"Updates: {stats.get('memory_updates', 0)}, "
-                                f"Conflicts: {stats.get('memory_conflicts', 0)}")
-                except Exception as e:
-                    logger.error(f"Sync failed: {str(e)}", exc_info=True)
-                
-                # Wait for interval or until stop event
-                wait_time = self.auto_sync.get('interval', 300)
-                self.stop_event.wait(wait_time)
-                
-            logger.info("Background sync thread stopped")
-                
-        self.sync_thread = threading.Thread(target=sync_loop, daemon=True)
-        self.sync_thread.start()
-        
     def stop_sync(self):
         """Stop background synchronization"""
         self.stop_event.set()
@@ -493,35 +513,6 @@ if __name__ == "__main__":
     print("\n=== Knowledge Synchronizer Test ===")
     sync = KnowledgeSynchronizer()
     printer.status("Initial sync:", sync,)
-    printer.status("Initial sync:", sync.full_sync(), "success")
-    printer.status("Initial sync:", sync._start_sync_thread(), "success")
+    printer.status("SYNC", sync._start_sync_thread(), "success")
 
-    if sync.versioning.get('enabled', False):
-        sync._create_version_snapshot()
-        printer.pretty(f"Versions stored:", (sync.version_history), "success")
-
-    # Test API source
-    api_source = {
-        'type': 'api',
-        'endpoint': 'https://api.knowledgebase/v1/updates',
-        'auth_type': 'bearer_token',
-        'token': 'test_token'
-    }
-    print("API data:", sync._fetch_from_api(api_source))
-    
-    # Test conflict detection
-    item1 = {'text': 'The sky is blue', 'metadata': {'timestamp': time.time()}}
-    item2 = {'text': 'The sky is grey', 'metadata': {'timestamp': time.time()}}
-    printer.pretty("Conflict detected:", sync._detect_conflict(item1, item2), "success")
-
-    # Start sync thread
-    sync._start_sync_thread()
-    print("Background sync started")
-    
-    # Stop sync after short delay
-    time.sleep(2)
-    sync.stop_sync()
-    print("Background sync stopped")
-
-        
     print("\n=== Synchronization Test Completed ===\n")

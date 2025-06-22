@@ -1,0 +1,105 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F"
+  ],
+  "edges": [
+    [
+      "A",
+      "C"
+    ],
+    [
+      "B",
+      "C"
+    ],
+    [
+      "D",
+      "E"
+    ],
+    [
+      "F",
+      "E"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.6
+    },
+    "B": {
+      "prior": 0.5
+    },
+    "D": {
+      "prior": 0.4
+    },
+    "F": {
+      "prior": 0.7
+    },
+    "C": {
+      "False,False": {
+        "True": 0.1,
+        "False": 0.9
+      },
+      "False,True": {
+        "True": 0.3,
+        "False": 0.7
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.9,
+        "False": 0.1
+      }
+    },
+    "E": {
+      "False,False": {
+        "True": 0.2,
+        "False": 0.8
+      },
+      "False,True": {
+        "True": 0.4,
+        "False": 0.6
+      },
+      "True,False": {
+        "True": 0.7,
+        "False": 0.3
+      },
+      "True,True": {
+        "True": 0.95,
+        "False": 0.05
+      }
+    }
+  },
+  "description": "6-node collider-style Bayesian network with two colliders: C (A\u2190C\u2192B), E (D\u2190E\u2192F)",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Cause 1 for C",
+      "B": "Cause 2 for C",
+      "C": "Collider (influenced by A and B)",
+      "D": "Cause 1 for E",
+      "F": "Cause 2 for E",
+      "E": "Collider (influenced by D and F)"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192C",
+        "B\u2192C",
+        "D\u2192E",
+        "F\u2192E"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

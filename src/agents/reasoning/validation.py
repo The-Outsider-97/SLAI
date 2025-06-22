@@ -13,42 +13,94 @@ from collections import defaultdict
 from typing import List, Tuple, Dict, Set, Optional, Any
 
 from sentence_transformers import util
-import tensorflow as tf
-tf.get_logger().setLevel('ERROR')
 
 from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from src.agents.reasoning.utils.mln_rules import mln_rules
 from src.agents.reasoning.reasoning_memory import ReasoningMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Validation Engine")
+printer = PrettyPrinter
 
 class ValidationEngine:
-    def __init__(self, knowledge_base: Dict[Tuple, float] = None):
+    def __init__(self):
         self.config = load_global_config()
+        self.contradiction_threshold = self.config.get('contradiction_threshold')
+        self.markov_logic_weight = self.config.get('markov_logic_weight')
+
         self.validation_config = get_config_section('validation')
-        self.max_depth = self.validation_config.get('max_circular_depth', 3)
-        self.knowledge_base = knowledge_base or self._load_knowledge_base()
+        self.enable = self.validation_config.get('enable')
+        self.redundancy_margin = self.validation_config.get('redundancy_margin')
+        self.max_circular_depth = self.validation_config.get('max_circular_depth')
+        self.validation_timeout = self.validation_config.get('validation_timeout')
+        self.min_soundness_score = self.validation_config.get('min_soundness_score')
+        self.max_validation_attempts = self.validation_config.get('max_validation_attempts')
+        self.mln_rule_confidence_threshold = self.validation_config.get('mln_rule_confidence_threshold')
+
+        self.storage_config = get_config_section('storage')
+        self.knowledge_db_path = self.storage_config.get('knowledge_db')
+
+        # Initialize core components
+        self.knowledge_base = self._load_knowledge_base(Path(self.knowledge_db_path))
 
         self.reasoning_memory = ReasoningMemory()
         # Initialize semantic similarity model
         self.semantic_model = None
-        if self.validation_config['enable_semantic_redundancy']:
+        if self.validation_config.get('enable_semantic_redundancy'):  # Safe get with default
             self._initialize_semantic_model()
 
         logger.info(f"Validation Initialized with {len(self.knowledge_base)} facts")
 
-    def _load_knowledge_base(self) -> Dict[Tuple, float]:
-        """Load knowledge base from configured path"""
-        kb_path = Path(self.config['storage']['knowledge_db'])
+    def _load_knowledge_base(self, kb_path: Path) -> Dict[Tuple, float]:
+        """Load knowledge base from configured path with robust parsing"""
+        if not kb_path.exists():
+            logger.error(f"Knowledge base file not found: {kb_path}")
+            return {}
+            
         with open(kb_path, 'r') as f:
-            return {tuple(k.split('||')): v for k, v in json.load(f).items()}
+            data = json.load(f)
+            
+        # Handle different KB formats
+        if isinstance(data, dict) and 'knowledge' in data:
+            facts = data['knowledge']
+        elif isinstance(data, list):
+            facts = data
+        else:
+            logger.error("Unsupported KB format")
+            return {}
+        
+        processed_kb = {}
+        for fact in facts:
+            try:
+                # Handle dictionary format
+                if isinstance(fact, dict):
+                    s = fact.get("subject")
+                    p = fact.get("predicate")
+                    o = fact.get("object")
+                    weight = fact.get("weight", 0.5)
+                    key = (s, p, o)
+                    processed_kb[key] = float(weight)
+                    
+                # Handle list format
+                elif isinstance(fact, list) and len(fact) >= 3:
+                    s, p, o = fact[:3]
+                    weight = fact[3] if len(fact) >= 4 else 0.5
+                    key = (s, p, o)
+                    processed_kb[key] = float(weight)
+            except Exception as e:
+                logger.warning(f"Skipping invalid fact: {fact} - {str(e)}")
+                
+        return processed_kb
 
     def _initialize_semantic_model(self):
-        """Initialize semantic similarity model"""
-        from src.agents.perception.modules.transformer import Transformer
-        self.semantic_model = Transformer()
-        logger.info("Initialized semantic similarity model for redundancy checks")
+        """Initialize semantic similarity model with error handling"""
+        try:
+            from src.agents.perception.modules.transformer import Transformer
+            self.semantic_model = Transformer()
+            logger.info("Initialized semantic similarity model for redundancy checks")
+        except Exception as e:
+            logger.error(f"Failed to initialize semantic model: {str(e)}")
+            self.semantic_model = None
 
     def validate_all(self, rules: List[Tuple[str, callable, float]], new_facts: Dict[Tuple, float]) -> Dict:
         """Execute full validation pipeline"""
@@ -135,7 +187,7 @@ class ValidationEngine:
     def detect_fact_conflicts(self, new_facts: Dict[Tuple, float]) -> List[Tuple]:
         """Multi-dimensional conflict detection"""
         conflicts = []
-        threshold = self.validation_config.get('contradiction_threshold')
+        threshold = self.contradiction_threshold
 
         # Direct contradictions
         for (s, p, o), conf in new_facts.items():
@@ -157,7 +209,7 @@ class ValidationEngine:
     def check_redundancies(self, new_facts: Dict[Tuple, float]) -> List[Tuple]:
         """Multi-modal redundancy detection"""
         redundancies = []
-        margin = self.validation_config.get('redundancy_margin')
+        margin = self.redundancy_margin
 
         # Exact match redundancies
         for fact, conf in new_facts.items():
@@ -176,7 +228,7 @@ class ValidationEngine:
         """Validate rules against current knowledge base"""
         sound_rules = []
         unsound_rules = []
-        min_score = self.validation_config.get('min_soundness_score')
+        min_score = self.min_soundness_score
 
         for name, rule, weight in rules:
             try:
@@ -198,8 +250,8 @@ class ValidationEngine:
     def validate_knowledge_base_consistency(self, kb: Dict[Tuple, float]) -> Dict:
         """Full KB consistency check with retry logic"""
         attempts = 0
-        max_attempts = self.validation_config.get('max_validation_attempts')
-        timeout = self.validation_config.get('validation_timeout')
+        max_attempts = self.max_validation_attempts
+        timeout = self.validation_timeout
 
         while attempts < max_attempts:
             try:
@@ -211,22 +263,27 @@ class ValidationEngine:
         
         raise RuntimeError(f"Consistency check failed after {max_attempts} attempts")
 
-    def _perform_consistency_check(self, kb: Dict[Tuple, float]) -> Dict:
-        """Core consistency validation logic"""
+    def _perform_consistency_check(self, kb: Dict[Tuple, Any]) -> Dict:
+        """Core consistency validation logic with type safety"""
         consistency_report = {
             'total_facts': len(kb),
             'contradictions': [],
             'redundancies': [],
-            'confidence_violations': []
+            'confidence_violations': [],
+            'markov_violations': []
         }
 
-        # Confidence boundary checks
+        # Confidence boundary checks with type validation
         for fact, conf in kb.items():
-            if not (0.0 <= conf <= 1.0):
+            try:
+                conf_val = float(conf)
+                if not (0.0 <= conf_val <= 1.0):
+                    consistency_report['confidence_violations'].append(fact)
+            except (TypeError, ValueError):
                 consistency_report['confidence_violations'].append(fact)
 
         # Cross-validation with Markov logic network
-        mlw = self.config['inference']['markov_logic_weight']
+        mlw = self.markov_logic_weight
         consistency_report['markov_violations'] = self._validate_with_markov_logic(kb, mlw)
 
         return consistency_report
@@ -282,12 +339,10 @@ class ValidationEngine:
         
         return total_score / len(inferred)
 
-    def _validate_with_markov_logic(self, kb: Dict[Tuple, float], default_weight_not_used_by_lambdas: float) -> List[Tuple]:
-        """
-        Validate using imported MLN-style soft rules.
-        """
+    def _validate_with_markov_logic(self, kb: Dict[Tuple, Any], weight: float) -> List[Tuple]:
+        """Validate using imported MLN-style soft rules with type safety"""
         violations = []
-        confidence_threshold = self.validation_config.get('mln_rule_confidence_threshold', 0.7)
+        confidence_threshold = self.mln_rule_confidence_threshold
     
         # Use the imported mln_rules list
         for rule_def in mln_rules:
@@ -301,21 +356,22 @@ class ValidationEngine:
     
             try:
                 if lambda_func(kb, confidence_threshold):
-                    # If the lambda returns True, it means a violation of the soft rule was found
                     violations.append((f"MLN_VIOLATION ({rule_id})", description))
             except Exception as e:
-                logger.warning(f"Error executing MLN rule check for '{description}' (ID: {rule_id}): {str(e)}")
-                # Log traceback for debugging
-                logger.debug(traceback.format_exc())
+                logger.warning(f"Error executing MLN rule check: {str(e)}")
     
         # Soft logic: additionally penalize any contradictory logic below threshold
         for (s, p, o), conf in kb.items():
-            if o.startswith("not_"):
-                positive_form = (s, p, o.replace("not_", ""))
-                if positive_form in kb:
-                    pos_conf = kb[positive_form]
-                    if abs(pos_conf - conf) > weight:
-                        violations.append(((s, p, o), f"Conflicting with {positive_form}"))
+            try:
+                conf_val = float(conf)
+                if o.startswith("not_"):
+                    positive_form = (s, p, o.replace("not_", ""))
+                    if positive_form in kb:
+                        pos_conf = float(kb[positive_form])
+                        if abs(pos_conf - conf_val) > self.contradiction_threshold:
+                            violations.append(((s, p, o), f"Conflicting with {positive_form}"))
+            except (TypeError, ValueError):
+                continue  # Skip invalid confidence values
     
         return violations
 
@@ -363,7 +419,7 @@ if __name__ == "__main__":
     ]
 
     # Initialize validation engine
-    validation = ValidationEngine(knowledge_base=sample_kb)
+    validation = ValidationEngine()
     print("Validation Engine initialized with test knowledge base\n")
 
     # Test 1: Circular Rule Detection
@@ -417,7 +473,7 @@ if __name__ == "__main__":
     print("- Redundancies:", len(full_results['redundancies']), "found")
     print("- Sound Rules:", len(full_results['sound_rules']['sound']))
     print("- KB Consistency Issues:", len(full_results['consistency'].get('markov_violations', [])))
-    
+
     # Test 6: MLN Rule Validation
     print("\n=== Testing MLN Rule Validation ===")
     mln_violations = validation._validate_with_markov_logic(sample_kb, 0.7)

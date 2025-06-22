@@ -9,6 +9,7 @@ It integrates tightly with the KnowledgeMemory and RuleEngine modules to:
     - Bias Detection
     - Reporting & Monitoring
 """
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import yaml, json
@@ -33,45 +34,75 @@ printer = PrettyPrinter
 class DotDict(dict):
     """Dictionary with dot access (safe SimpleNamespace replacement)."""
     def __getattr__(self, key):
-        return self[key]
+        return self.get(key)
     def __setattr__(self, key, value):
         self[key] = value
     def __delattr__(self, key):
-        del self[key]
+        if key in self:
+            del self[key]
 
 class Governor:
     def __init__(self, knowledge_agent=None):
         self.knowledge_agent = knowledge_agent
         self.config = load_global_config()
+        self.enabled = self.config.get('enabled')
+
         self.governor_config = get_config_section('governor')
-        if isinstance(self.governor_config.get("violation_thresholds"), dict):
-            self.governor_config["violation_thresholds"] = DotDict(self.governor_config["violation_thresholds"])
+        self.audit_interval = self.governor_config.get('audit_interval')
+        self.bias_categories = self.governor_config.get('bias_categories')
+        self.guideline_paths = self.governor_config.get('guideline_paths')
+        self.enforcement_mode = self.governor_config.get('enforcement_mode')
+        self.max_audit_history = self.governor_config.get('max_audit_history')
+        self.realtime_monitoring = self.governor_config.get('realtime_monitoring')
+        self._freshness_threshold = self.governor_config.get('freshness_threshold')
+        self.sensitive_attributes = self.governor_config.get('sensitive_attributes')
+        self.rule_complexity_threshold = self.governor_config.get('rule_complexity_threshold')
+
+        # Initialize thresholds with safe defaults
+        self.violation_thresholds = DotDict({
+            'unethical': 0.65,
+            'similarity': 0.85,
+            'consecutive_errors': 5
+        })
+        violation_config = self.governor_config.get('violation_thresholds', {})
+        if isinstance(violation_config, dict):
+            self.violation_thresholds.update(violation_config)
         
-        if isinstance(self.governor_config.get("memory_thresholds"), dict):
-            self.governor_config["memory_thresholds"] = DotDict(self.governor_config["memory_thresholds"])
-        self.guidelines = self._load_guidelines()
-    
-        self.sensitive_attributes = self.governor_config.get('sensitive_attributes', [])
-        self._bias_detector = None 
+        self.memory_thresholds = DotDict({
+            'warning': 2048,
+            'critical': 3072
+        })
+        memory_config = self.governor_config.get('memory_thresholds', {})
+        if isinstance(memory_config, dict):
+            self.memory_thresholds.update(memory_config)
+
         self.rule_engine = RuleEngine()
         self.knowledge_memory = KnowledgeMemory()
+        self._bias_detector = None
+        self.guidelines = self._load_guidelines()
         self.bias_categories = self._load_bias_categories()
         self._init_knowledge_memory()
 
-        self.audit_history = deque(maxlen=getattr(self.governor_config, 'max_audit_history', 100))
+        self.audit_history = deque(maxlen=self.max_audit_history)
         self.last_audit = time.time()
         
-        if getattr(self.governor_config, 'realtime_monitoring', True):
+        if self.realtime_monitoring:
             self._start_monitoring_thread()
+
+        logger.info(f"Governor initialized")
+
+    @property
+    def freshness_threshold(self) -> int:
+        return self._freshness_threshold
 
     def _load_bias_categories(self) -> dict:
         """Load bias categories from JSON file specified in config"""
-        path_str = self.governor_config.get('bias_categories', '')
-        if not path_str:
+        if not self.bias_categories:
             logger.warning("No bias_categories path configured in governor")
             return {}
+            
         try:
-            abs_path = os.path.abspath(path_str)
+            abs_path = os.path.abspath(self.bias_categories)
             with open(abs_path, "r", encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
@@ -85,63 +116,75 @@ class Governor:
 
     def _init_knowledge_memory(self):
         """Initialize knowledge memory with governor-specific settings"""
-        # Load rules from configured sources
-        rule_engine_config = get_config_section('rule_engine')
-        rule_sources = rule_engine_config.get('rule_sources', [])
-        
-        # Store rules in knowledge memory
-        for path in rule_sources:
-            abs_path = os.path.abspath(path)
-            if os.path.exists(abs_path):
-                try:
-                    if abs_path.endswith((".yaml", ".yml")):
-                        with open(abs_path, 'r', encoding='utf-8') as f:
-                            rules = yaml.safe_load(f)
+        # If no knowledge agent, use default rule sources from config
+        rule_files = []
+        if self.knowledge_agent and hasattr(self.knowledge_agent, 'config'):
+            rule_files = self.knowledge_agent.config.get("rule_files", [])
+        else:
+            # Fallback to rule_engine config section
+            rule_engine_config = get_config_section('rule_engine') or {}
+            rule_files = rule_engine_config.get('rule_sources', [])
+            
+        rules = []
+        base_dir = Path(__file__).resolve().parent.parent.parent.parent
+
+        for rule_file in rule_files:
+            abs_path = base_dir / rule_file
+            if not os.path.exists(abs_path):
+                logger.warning(f"Rule file not found: {abs_path}")
+                continue
+
+        for rule_file in rule_files:
+            try:
+                # Resolve path relative to project root
+                abs_path = base_dir / rule_file
+                if not os.path.exists(abs_path):
+                    logger.warning(f"Rule file not found: {abs_path}")
+                    continue
+
+                with open(abs_path, 'r', encoding='utf-8') as f:
+                    file_rules = json.load(f)
+                    if isinstance(file_rules, list):
+                        rules.extend(file_rules)
+                        logger.info(f"Loaded {len(file_rules)} rules from {abs_path}")
                     else:
-                        with open(abs_path, 'r', encoding='utf-8') as f:
-                            rules = json.load(f)
-                            
-                    rule_id = hashlib.md5(abs_path.encode()).hexdigest()
-                    self.knowledge_memory.update(
-                        key=f"rule_source:{rule_id}",
-                        value=rules,
-                        metadata={
-                            "source": abs_path,
-                            "type": "rule_source",
-                            "timestamp": time.time()
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Error loading rules from {abs_path}: {str(e)}")
-            else:
-                logger.warning(f"Rule source path not found: {abs_path}")
+                        logger.warning(f"Expected list in {abs_path}, got {type(file_rules)}")
+            except Exception as e:
+                logger.error(f"Failed to parse rule file {abs_path}: {e}", exc_info=True)
+
+        # Enforce structure on rules
+        for r in rules:
+            r.setdefault("conditions", [])
+            r.setdefault("description", r.get("name", ""))
+            r.setdefault("id", hashlib.md5(r.get('name', '').encode()).hexdigest())
+            r.setdefault("action", "")
+
+        self.knowledge_memory.add_all(rules)
 
     def _load_guidelines(self) -> Dict[str, list]:
         """Load ethical guidelines from configured paths"""
         guidelines = {"principles": [], "restrictions": []}
         guideline_paths = getattr(self.governor_config, 'guideline_paths', [])
+        base_dir = Path(__file__).resolve().parent.parent.parent.parent
         
         for path_str in guideline_paths:
-            abs_path = os.path.abspath(path_str)
             try:
-                if abs_path.endswith((".yaml", ".yml")):
+                abs_path = base_dir / path_str
+                if abs_path.suffix in (".yaml", ".yml"):
                     with open(abs_path, "r", encoding='utf-8') as f:
                         data = yaml.safe_load(f)
                 else:
                     with open(abs_path, "r", encoding='utf-8') as f:
                         data = json.load(f)
-                        
-                guidelines["principles"].extend(data.get("principles", []))
-                guidelines["restrictions"].extend(data.get("restrictions", []))
+                # ... process data ...
             except Exception as e:
                 logger.error(f"Guideline loading error from {abs_path}: {str(e)}")
-                
         return guidelines
 
     def _get_bias_detector(self):
         """Lazy initializer for BiasDetector"""
         if self._bias_detector is None and self.sensitive_attributes:
-            self._bias_detector = BiasDetector(sensitive_attributes=self.sensitive_attributes)
+            self._bias_detector = BiasDetector()
         return self._bias_detector
 
     def audit_model_predictions(self, data: pd.DataFrame, predictions: np.ndarray, 
@@ -215,6 +258,12 @@ class Governor:
 
     def _rule_passes_governance(self, rule: Dict) -> bool:
         """Check if a rule meets governance requirements"""
+        conditions = rule.get("conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+        
+        if len(conditions) > complexity_threshold:
+            return False
         # 1. Check against ethical guidelines
         for principle in self.guidelines["principles"]:
             if "conflicts" in principle.get("tags", []) and any(
@@ -225,7 +274,7 @@ class Governor:
                 return False
         
         # 2. Check rule complexity threshold
-        complexity_threshold = self.governor_config.get("rule_complexity_threshold", 5)
+        complexity_threshold = self.rule_complexity_threshold
         if len(rule.get("conditions", [])) > complexity_threshold:
             logger.warning(f"Rule {rule.get('id')} exceeds complexity threshold")
             return False
@@ -238,6 +287,9 @@ class Governor:
             ):
                 logger.warning(f"Rule {rule.get('id')} violates restriction {restriction['id']}")
                 return False
+            
+        logger.debug(f"Evaluating rule {rule.get('id')} - description: {rule.get('description')}")
+        logger.debug(f"Principles matched: {principle['id']}")  # Inside the matching loop
         
         return True
 
@@ -321,7 +373,7 @@ class Governor:
         }
 
         unethical_threshold = self.governor_config.get('violation_thresholds', {}).get('unethical', 0.65)
-        freshness_thresh_hours = self.governor_config.get('freshness_threshold', 720)
+        freshness_thresh_hours = self.freshness_threshold
 
         for score, doc in results:
             if isinstance(doc, dict):
@@ -484,30 +536,6 @@ class Governor:
         agent_name = getattr(self.knowledge_agent, "name", "unknown_knowledge_agent")
         shared_mem_obj = getattr(self.knowledge_agent, "shared_memory", None)
 
-        # --- START MORE DETAILED CONDITION CHECK ---
-        #is_obj_false = False
-        #if not shared_mem_obj: # Check this part first
-        #    is_obj_false = True
-        
-        #has_get_attr = hasattr(shared_mem_obj, 'get')
-        #has_put_attr = hasattr(shared_mem_obj, 'put')
-
-        #is_not_shared_mem_obj_eval = not shared_mem_obj # Re-evaluate for the log
-        #has_no_get_eval = not has_get_attr
-        #has_no_put_eval = not has_put_attr
-        
-        #logger.info(f"  Detailed Condition Breakdown:")
-        #logger.info(f"    not shared_mem_obj: {is_not_shared_mem_obj_eval} (is_obj_false intermediate: {is_obj_false})")
-        #logger.info(f"    not hasattr(get): {has_no_get_eval} (has_get_attr intermediate: {has_get_attr})")
-        #logger.info(f"    not hasattr(put): {has_no_put_eval} (has_put_attr intermediate: {has_put_attr})")
-        
-        #combined_eval_passes = False
-        #if is_not_shared_mem_obj_eval or has_no_get_eval or has_no_put_eval:
-        #    combined_eval_passes = True
-        
-        #logger.info(f"    Combined condition (A or B or C) evaluates to: {combined_eval_passes}")
-        # --- END MORE DETAILED CONDITION CHECK ---
-
         if shared_mem_obj is None or not hasattr(shared_mem_obj, 'get'):
             logger.warning(f"Shared memory is None or lacks required methods for {agent_name}")
             return
@@ -552,7 +580,7 @@ class Governor:
             if isinstance(last_entry, dict):
                 violations_list = last_entry.get("violations", [])
                 latest_audit_details["timestamp"] = last_entry.get("timestamp", self.last_audit)
-            else: # Handle case where last_entry might not be a dict (e.g. if record_violations appends non-dicts)
+            else:
                 latest_audit_details["timestamp"] = self.last_audit
             
             if isinstance(violations_list, list):
@@ -573,12 +601,11 @@ class Governor:
             return yaml.dump(report)
         return report
 
-
 if __name__ == "__main__":
     print("\n=== Running Governor ===\n")
     printer.status("Init", "Governor initialized", "success")
     format_type="json"
-    text = "I love the way you talk! I like christian black male from Nigeria!"
+    text = "I love the way you talk! SLAI is the future of decentrelized Agentic AI "
     auditor = Governor()
 
     printer.status("Auditor", auditor, "success")

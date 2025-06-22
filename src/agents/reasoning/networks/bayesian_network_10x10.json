@@ -1,0 +1,171 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J"
+  ],
+  "edges": [
+    [
+      "A",
+      "B"
+    ],
+    [
+      "B",
+      "C"
+    ],
+    [
+      "C",
+      "D"
+    ],
+    [
+      "D",
+      "E"
+    ],
+    [
+      "F",
+      "G"
+    ],
+    [
+      "F",
+      "H"
+    ],
+    [
+      "F",
+      "I"
+    ],
+    [
+      "F",
+      "J"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.6
+    },
+    "F": {
+      "prior": 0.7
+    },
+    "B": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C": {
+      "True": {
+        "True": 0.88,
+        "False": 0.12
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "D": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "E": {
+      "True": {
+        "True": 0.92,
+        "False": 0.08
+      },
+      "False": {
+        "True": 0.1,
+        "False": 0.9
+      }
+    },
+    "G": {
+      "True": {
+        "True": 0.91,
+        "False": 0.09
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "H": {
+      "True": {
+        "True": 0.89,
+        "False": 0.11
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "I": {
+      "True": {
+        "True": 0.93,
+        "False": 0.07
+      },
+      "False": {
+        "True": 0.35,
+        "False": 0.65
+      }
+    },
+    "J": {
+      "True": {
+        "True": 0.95,
+        "False": 0.05
+      },
+      "False": {
+        "True": 0.15,
+        "False": 0.85
+      }
+    }
+  },
+  "description": "10-node mixed Bayesian network: A\u2192B\u2192C\u2192D\u2192E and F\u2192{G, H, I, J}",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Start of chain path",
+      "B": "Chain step 1",
+      "C": "Chain step 2",
+      "D": "Chain step 3",
+      "E": "Chain end node",
+      "F": "Fork root node",
+      "G": "Fork leaf 1",
+      "H": "Fork leaf 2",
+      "I": "Fork leaf 3",
+      "J": "Fork leaf 4"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192B",
+        "B\u2192C",
+        "C\u2192D",
+        "D\u2192E",
+        "F\u2192G",
+        "F\u2192H",
+        "F\u2192I",
+        "F\u2192J"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

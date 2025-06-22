@@ -11,8 +11,10 @@ def load_global_config():
         config_path = Path(__file__).parent.parent.parent / CONFIG_PATH
         with open(config_path, "r", encoding='utf-8') as f:
             _global_config = yaml.safe_load(f)
+        _global_config['__config_path__'] = str(config_path.resolve())
     return _global_config
 
 def get_config_section(section_name: str) -> dict:
     config = load_global_config()
     return config.get(section_name, {})
+

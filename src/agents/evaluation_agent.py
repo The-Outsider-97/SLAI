@@ -468,10 +468,8 @@ class EvaluationAgent(BaseAgent):
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
-        return HyperparamTuner(
-            tuner_config=TUNER_CONFIG_PATH,
-            evaluation_function=self.evaluate_hyperparameters,
-            strategy=self.config.get("tuning_strategy", "bayesian")
+        return HyperparamTuner(model_type=None,
+            evaluation_function=self.evaluate_hyperparameters
         )
 
     def evaluate_hyperparameters(self, params: Dict) -> float:

@@ -8,31 +8,21 @@ import unicodedata
 from pathlib import Path
 from typing import List, Dict, Union, Optional, Tuple
 
-from logs.logger import get_logger
+from src.agents.perception.utils.config_loader import load_global_config, get_config_section
+from src.agents.perception.utils.common import TensorOps, Parameter
+from src.agents.base.utils.base_tokenizer import BaseTokenizer
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Tokenizer")
+printer = PrettyPrinter
 
-# BPE_MODEL_PATH = "data/embeddings/bpe_200d_50k_model.json"
-# BPE_VOCAB_PATH = "data/embeddings/bpe_200d_50k_vocab.json"
-CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
-class Tokenizer:
+class Tokenizer(BaseTokenizer):
     """
     Handles text preprocessing: tokenization, ID conversion, padding, truncation,
     and attention mask generation based on a predefined vocabulary
     """
-    def __init__(self, config):
+    def __init__(self):
+        super().__init__()
         """
         Initializes the Tokenizer.
 
@@ -44,101 +34,59 @@ class Tokenizer:
             cls_token (str): Classification token added at the beginning.
             sep_token (str): Separator token added at the end.
         """
-        cfg = config['tokenizer']
-        self.max_length = cfg['max_length']
-        self.bpe_merges_path = Path(cfg['bpe_model_path'])
-        self.bpe_vocab_path = Path(cfg['bpe_vocab_path'])
-        self.vocab_size = cfg['vocab_size']
+        self.config = load_global_config()
+        self.token_config = get_config_section('tokenizer')
+        self.max_length = self.token_config.get('max_length')
+        self.cls_token = self.token_config.get('cls_token')
+        self.sep_token = self.token_config.get('sep_token')
+        self.image_token = self.token_config.get('image_token')
+        self.audio_token = self.token_config.get('audio_token')
+        self.add_tokens([self.cls_token, self.sep_token], special=True)
 
-        # --- Special Tokens ---
-        self.pad_token = cfg['pad_token']
-        self.unk_token = cfg['unk_token']
-        self.cls_token = cfg['cls_token']
-        self.sep_token = cfg['sep_token']
+        self.bpe_vocab_path = Path(self.bpe_vocab_path)
+        self.bpe_model_path = Path(self.bpe_model_path)
 
+        # Set up BPE processor
+        self._setup_bpe_processor()
+        
+        # Pre-compile regex patterns
+        self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?[^\W\d_]+| ?\d+| ?[^\s\w\d]+|\s+(?!\S)|\s+""")
+        self.cache = {}  # BPE cache
+
+        logger.info(f"Tokenizer initialized with max_length={self.max_length}")
+
+    def _setup_bpe_processor(self):
+        """Load BPE merges and vocabulary from base tokenizer"""
+        # Base tokenizer should have already loaded these paths
+        if not hasattr(self, 'bpe_model_path') or not hasattr(self, 'bpe_vocab_path'):
+            raise AttributeError("BaseTokenizer did not initialize BPE paths")
+        
+        # Validate BPE files
         if not self.bpe_vocab_path.exists():
             raise FileNotFoundError(f"BPE vocab file not found: {self.bpe_vocab_path}")
-        if not self.bpe_merges_path.exists():
-             raise FileNotFoundError(f"BPE model (merges) file not found: {self.bpe_merges_path}")
+        if not self.bpe_model_path.exists():
+            raise FileNotFoundError(f"BPE model file not found: {self.bpe_model_path}")
 
         # Load BPE Vocabulary
         with open(self.bpe_vocab_path, "r", encoding="utf-8") as f:
-            self.word_to_id = json.load(f)
-
+            bpe_word_to_id = json.load(f)
+        
+        # Add BPE vocabulary to existing vocab
+        for token in bpe_word_to_id:
+            if token not in self.vocab:
+                self.add_tokens([token])
+                
         # Load BPE Merges
-        with open(self.bpe_merges_path, "r", encoding="utf-8") as f:
+        with open(self.bpe_model_path, "r", encoding="utf-8") as f:
             merges_data = json.load(f)
             bpe_merges = [tuple(pair) for pair in merges_data["merges"]]
             logger.info(f"Loaded {len(bpe_merges)} BPE merges")
 
         self.bpe_ranks = {pair: i for i, pair in enumerate(bpe_merges)}
-        self.bpe_processor = BytePairEncoder(bpe_merges, self.word_to_id, self.unk_token)
+        self.bpe_processor = BytePairEncoder(bpe_merges, self.vocab, self.unk_token)
 
-        # ASCII characters as fallback
-        for char in map(chr, range(32, 127)):
-            if char not in self.word_to_id:
-                self.word_to_id[char] = len(self.word_to_id)
-        logger.info(f"Added ASCII fallback tokens. New vocab size: {len(self.word_to_id)}")
-
-        # Add special tokens if they aren't already in the BPE vocab
-        self._additional_special_tokens = cfg.get('additional_special_tokens', [])
-        self.special_tokens = [self.pad_token, self.unk_token, self.cls_token, self.sep_token]
-        current_id = 0
-        for token in self.special_tokens:
-            if token not in self.word_to_id:
-                self.word_to_id[token] = current_id
-                current_id += 1
-        # Rebuild id_to_word after special token assignment
-        self.id_to_word = {v: k for k, v in self.word_to_id.items()}
-
-        self.id_to_word = {idx: token for token, idx in self.word_to_id.items()}
-        self.vocab_size = len(self.word_to_id)
-
-        # Assign specific IDs after loading
-        self.pad_token_id = self.word_to_id[self.pad_token]
-        self.unk_token_id = self.word_to_id[self.unk_token]
-        self.cls_token_id = self.word_to_id[self.cls_token]
-        self.sep_token_id = self.word_to_id[self.sep_token]
-
-        # Pre-compile regex patterns
-        self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?[^\W\d_]+| ?\d+| ?[^\s\w\d]+|\s+(?!\S)|\s+""")
-        self.cache = {} # BPE cache
-
-        logger.info(f"Tokenizer initialized with BPE vocab size: {self.vocab_size}")
-        logger.info(f"Using BPE model: {self.bpe_merges_path}")
-        logger.info(f"Using BPE vocab: {self.bpe_vocab_path}")
-
-    def _load_vocab(self):
-        """Loads the vocabulary from the GloVe JSON file and adds special tokens."""
-        if not self.bpe_vocab_path.exists():
-            logger.error(f"Vocabulary file not found at: {self.bpe_vocab_path}")
-            raise FileNotFoundError(f"Vocabulary file not found: {self.bpe_vocab_path}")
-
-        try:
-            logger.info(f"Loading vocabulary from: {self.bpe_vocab_path}")
-            with open(self.bpe_vocab_path, "r", encoding="utf-8") as f:
-                glove_data = json.load(f)
-            logger.info(f"Successfully loaded {len(glove_data)} words from GloVe file.")
-
-            # 1. Add special tokens first to ensure consistent IDs (0, 1, 2, ...)
-            current_id = 0
-            all_special_tokens = self._special_tokens_list + self._additional_special_tokens
-            for token in all_special_tokens:
-                if token not in self.word_to_id:
-                    self.word_to_id[token] = current_id
-                    self.id_to_word[current_id] = token
-                    current_id += 1
-
-            self.vocab_size = len(self.word_to_id)
-
-        except json.JSONDecodeError:
-            logger.error(f"Failed to decode JSON from vocabulary file: {self.bpe_vocab_path}")
-            raise ValueError(f"Invalid JSON file: {self.bpe_vocab_path}")
-        except Exception as e:
-            logger.error(f"Error loading vocabulary: {e}")
-            raise
-
-    def _tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> List[str]:
+        """Override base tokenization with BPE processing"""
         def normalize(text):
             text = unicodedata.normalize('NFKC', text)
             text = ''.join(c for c in text if not unicodedata.combining(c))
@@ -155,89 +103,100 @@ class Tokenizer:
         else:
             return tokens
 
-    def convert_tokens_to_ids(self, tokens: List[str]) -> List[int]:
-        """Converts a list of string tokens to their corresponding integer IDs."""
-        ids = []
-        for token in tokens:
-            if token in self.word_to_id:
-                ids.append(self.word_to_id[token])
-            else:
-                logger.warning(f"Unknown token encountered: {token}")
-                ids.append(self.unk_token_id)
-        return ids
+    def get_token_type_ids(self, text_length: int, image_length: int,
+                           audio_length: int) -> torch.Tensor:
+        """Generate token type IDs for each modality"""
+        return torch.cat([
+            torch.zeros(text_length),          # Text type = 0
+            torch.ones(image_length),          # Image type = 1
+            torch.full((audio_length,), 2)     # Audio type = 2
+        ])
 
-    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
-        """Converts a list of integer IDs back to their string tokens."""
-        return [self.id_to_word.get(id_val, self.unk_token) for id_val in ids]
+    def create_cross_modal_mask( self, text_length: int, image_length: int,
+                                audio_length: int) -> torch.Tensor:
+        """Create attention mask for cross-modal attention"""
+        total_length = text_length + image_length + audio_length
+        mask = torch.ones(total_length, total_length)
+        
+        # Allow full attention within modalities
+        mask[:text_length, :text_length] = 0
+        mask[text_length:text_length+image_length, text_length:text_length+image_length] = 0
+        mask[text_length+image_length:, text_length+image_length:] = 0
+        
+        # Allow cross-modal attention
+        return  TensorOps.attention_mask(
+        lengths=torch.tensor([text_length, image_length, audio_length]),
+        causal=False
+    )
+
+    def encode_multi_modal(self, text: Optional[str] = None, image_features: Optional[torch.Tensor] = None,
+                            audio_features: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        printer.status("TOKEN", "Encoding multi modal input", "info")
+
+        sequences = []
+        
+        if text:
+            text_tokens = self.tokenize(text)
+            sequences.append(text_tokens)
+        
+        if image_features is not None:
+            sequences.append([self.image_token])
+            # (Image features would be handled separately in the model)
+        
+        if audio_features is not None:
+            sequences.append([self.audio_token])
+        
+        # Flatten all tokens
+        tokens = [token for seq in sequences for token in seq]
+        
+        # Continue with standard preparation
+        return self._prepare_single_text(tokens)
 
     def _prepare_single_text(self, text: str) -> Tuple[List[int], List[int]]:
-        """Internal function to tokenize, add special tokens, convert to IDs, and handle padding/truncation."""
-        tokens = self._tokenize(text)
+        """Tokenize, add special tokens, convert to IDs, handle padding/truncation"""
+        printer.status("TOKEN", "Preparing single text", "info")
+        tokens = self.tokenize(text)
 
-        # Account for [CLS] and [SEP] tokens that will be added
-        max_tokens_for_input = self.max_length - 2
+        # Account for [CLS] and [SEP] tokens
+        max_tokens = self.max_length - 2
 
-        # Truncate if necessary BEFORE adding special tokens
-        truncated_tokens = tokens[:max_tokens_for_input]
+        # Truncate before adding special tokens
+        truncated_tokens = tokens[:max_tokens]
 
         # Add special tokens
         tokens_with_special = [self.cls_token] + truncated_tokens + [self.sep_token]
 
         # Convert to IDs
-        input_ids = self.convert_tokens_to_ids(tokens_with_special)
+        input_ids = [self.token_to_id(token) for token in tokens_with_special]
 
-        # Create attention mask (1 for real tokens, 0 for padding)
+        # Create attention mask
         attention_mask = [1] * len(input_ids)
 
-        # Calculate padding length
+        # Handle padding
         padding_length = self.max_length - len(input_ids)
-
-        # Apply padding
         if padding_length > 0:
-            input_ids = input_ids + ([self.pad_token_id] * padding_length)
-            attention_mask = attention_mask + ([0] * padding_length)
+            pad_id = self.token_to_id(self.pad_token)
+            input_ids = TensorOps.pad_sequence(input_ids, self.max_length, value=pad_id)
+            attention_mask = TensorOps.pad_sequence(attention_mask, self.max_length, value=0)
+            input_ids += [pad_id] * padding_length
+            attention_mask += [0] * padding_length
         elif padding_length < 0:
-            # This case should ideally not happen if truncation logic is correct, but as a safeguard:
-            logger.warning(f"Sequence length exceeded max_length ({self.max_length}) even after truncation. Truncating final IDs.")
+            logger.warning(f"Sequence truncated to max_length={self.max_length}")
             input_ids = input_ids[:self.max_length]
             attention_mask = attention_mask[:self.max_length]
-
-        assert len(input_ids) == self.max_length, f"Final input_ids length is {len(input_ids)}, expected {self.max_length}"
-        assert len(attention_mask) == self.max_length, f"Final attention_mask length is {len(attention_mask)}, expected {self.max_length}"
 
         return input_ids, attention_mask
 
     def encode(self, text: str) -> Dict[str, torch.Tensor]:
-        """
-        Encodes a single string into token IDs and an attention mask.
-
-        Args:
-            text (str): The input text string.
-
-        Returns:
-            Dict[str, torch.Tensor]: A dictionary containing:
-                - 'input_ids': NumPy array of token IDs (shape: [max_length]).
-                - 'attention_mask': NumPy array of attention mask (shape: [max_length]).
-        """
         input_ids, attention_mask = self._prepare_single_text(text)
-        
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.int32),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.int32)
         }
 
     def batch_encode(self, texts: List[str]) -> Dict[str, torch.Tensor]:
-        """
-        Encodes a batch of strings into token IDs and attention masks.
+        printer.status("TOKEN", "Encoding batch input", "info")
 
-        Args:
-            texts (List[str]): A list of input text strings.
-
-        Returns:
-            Dict[str, torch.Tensor]: A dictionary containing:
-                - 'input_ids': NumPy array of token IDs (shape: [batch_size, max_length]).
-                - 'attention_mask': NumPy array of attention masks (shape: [batch_size, max_length]).
-        """
         all_input_ids = []
         all_attention_masks = []
 
@@ -252,52 +211,37 @@ class Tokenizer:
         }
 
     def decode(self, token_ids: Union[List[int], torch.Tensor], skip_special_tokens: bool = True) -> str:
-        """
-        Decodes a sequence of token IDs back into a string with improved spacing and punctuation handling.
-        """
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
     
         tokens = []
         for token_id in token_ids:
-            token = self.id_to_word.get(token_id, self.unk_token)
+            token = self.id_to_token(token_id)
             if skip_special_tokens and token in [self.pad_token, self.cls_token, self.sep_token]:
                 continue
             tokens.append(token)
     
-        # Reconstruct the text from BPE tokens
-        current_part = []
-        parts = []
-        for token in tokens:
-            if token.endswith('</w>'):
-                # Remove the </w> and add to current_part
-                stripped_token = token[:-4]
-                current_part.append(stripped_token)
-                # Join and add to parts, then reset current_part
-                parts.append(''.join(current_part))
-                current_part = []
-            else:
-                current_part.append(token)
-        # Add any remaining parts
-        if current_part:
-            parts.append(''.join(current_part))
-
-        # Handling of BPE markers
+        # Reconstruct text from BPE tokens
         decoded_text = ""
         for token in tokens:
             if token == self.unk_token:
-                decoded_text += " " + "[UNK]"
+                decoded_text += " [UNK]"
             elif token.endswith('</w>'):
                 decoded_text += token[:-4] + " "
             else:
                 decoded_text += token
-        # Remove extra spaces around punctuation
-        decoded_text = re.sub(r'\s+([.,!?])', r'\1', decoded_text)
-        return decoded_text.strip()
 
-    # Make the tokenizer callable like Hugging Face tokenizers
+        # Handle modality tokens
+        for token in tokens:
+            if token == self.image_token:
+                decoded_text += " [IMAGE]"
+            elif token == self.audio_token:
+                decoded_text += " [AUDIO]"
+                
+        # Apply base class cleaning
+        return self.clean_text(decoded_text.strip())
+
     def __call__(self, text: Union[str, List[str]]) -> Dict[str, torch.Tensor]:
-        """Allows calling the tokenizer instance directly."""
         if isinstance(text, str):
             return self.encode(text)
         elif isinstance(text, list):
@@ -305,64 +249,16 @@ class Tokenizer:
         else:
             raise TypeError("Input must be a string or a list of strings.")
 
-    def initialize_subword_embeddings(self, embedding_dim, glove_embeddings):
-        """
-        glove_embeddings: Dict[str, torch.Tensor] | A mapping of GloVe word → embedding vector.
-        """
-        self.embedding_matrix = (torch.rand(self.vocab_size, embedding_dim) * 0.2) - 0.1
-    
-        loaded_count = 0
-        for token, idx in self.word_to_id.items():
-            if token in glove_embeddings:
-                self.embedding_matrix[idx] = glove_embeddings[token]
-                loaded_count += 1
-    
-        logger.info(f"Initialized embedding matrix: "
-                    f"{loaded_count} pretrained embeddings, "
-                    f"{self.vocab_size - loaded_count} random-initialized (subwords or unknown).")
+    def chunk_sequence(self, tokens: List[str], chunk_size: int) -> List[List[str]]:
+        """Split long sequences into manageable chunks"""
+        return [tokens[i:i+chunk_size] for i in range(0, len(tokens), chunk_size)]
 
-    def _load_bpe_merges(self, path):
-        with open(path, 'r', encoding='utf-8') as f:
-            merges = [tuple(line.strip().split()) for line in f if line.strip() and not line.startswith('#')]
-        self.bpe_processor = BytePairEncoder(self.word_to_id, merges)
+    def get_position_ids(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Generate positional IDs from attention mask"""
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+        return TensorOps.sequence_mask(attention_mask.sum(dim=1))
 
-    def load_bpe_model(self, bpe_model_path):
-        with open(bpe_model_path, 'r', encoding='utf-8') as f:
-            bpe_data = json.load(f)
-        
-        merges = [tuple(pair) for pair in bpe_data['merges']]
-        self.bpe_processor = BytePairEncoder(merges)
-    
-        # Build subword vocab
-        subword_vocab = set()
-        for pair in merges:
-            subword_vocab.update(pair)
-        # Start from existing vocab (GloVe words)
-        combined_vocab = set(self.word_to_id.keys())
-        combined_vocab.update(subword_vocab)
-        combined_vocab.update(self._special_tokens_list)
-    
-        # Assign IDs
-        self.word_to_id = {token: idx for idx, token in enumerate(sorted(combined_vocab))}
-        self.id_to_word = {idx: token for token, idx in self.word_to_id.items()}
-        self.vocab_size = len(self.word_to_id)
-
-        for special in self._special_tokens_list:
-            if special not in self.word_to_id:
-                new_id = len(self.word_to_id)
-                self.word_to_id[special] = new_id
-                self.id_to_word[new_id] = special
-    
-        # Update special token IDs
-        self.pad_token_id = self.word_to_id[self.pad_token]
-        self.unk_token_id = self.word_to_id[self.unk_token]
-        self.cls_token_id = self.word_to_id[self.cls_token]
-        self.sep_token_id = self.word_to_id[self.sep_token]
-
-    @property
-    def _special_tokens_list(self) -> List[str]:
-        """Returns all special tokens (core + additional)"""
-        return self._special_tokens_list + self._additional_special_tokens
 
 class BytePairEncoder:
     def __init__(self, merges, word_to_id=None, unk_token='[UNK]'):
@@ -435,16 +331,14 @@ class BytePairEncoder:
 
 if __name__ == "__main__":
     print("\n=== Running Tokenizer ===\n")
-    config = load_config()
-
     try:
-        tokenizer = Tokenizer(config)
+        tokenizer = Tokenizer()
 
-        # Example input (SINGLE STRING)
-        example_text = "I love you SLAI!"  # <- Remove list brackets
+        # Example input
+        example_text = "I love you SLAI!"
 
         # Tokenize
-        encoded = tokenizer.encode(example_text)  # Now receives a string
+        encoded = tokenizer.encode(example_text)
         print("Encoded:")
         print("Input IDs:", encoded['input_ids'])
         print("Attention Mask:", encoded['attention_mask'])
@@ -453,16 +347,20 @@ if __name__ == "__main__":
         decoded = tokenizer.decode(encoded['input_ids'])
         print("Decoded Text:", decoded)
 
-        # Test cases (keep as list for batch testing)
+        # Test cases
         test_cases = [
             "Hello world!", 
             "I'm testing contractions",
             "SLAI-2023"
         ]
-        batch_encoded = tokenizer.batch_encode(test_cases)  # Use batch_encode for lists
+        batch_encoded = tokenizer.batch_encode(test_cases)
         print("\nBatch Encoded IDs:", batch_encoded['input_ids'][0][:10])
 
     except Exception as e:
         print("Tokenizer failed:", str(e))
 
+    print("\n* * * * * Phase 2 * * * * *\n")
+    multimodal = tokenizer.encode_multi_modal(text=example_text)
+
+    printer.pretty("TEST2", multimodal, "success")
     print("\n=== Successfully Ran Tokenizer ===\n")

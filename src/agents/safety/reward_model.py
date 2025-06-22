@@ -11,16 +11,18 @@ from typing import Dict, List, Callable, Union
 from src.agents.evaluators.utils.report import get_visualizer
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
 from src.agents.safety.secure_memory import SecureMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Security Reward Model")
+printer = PrettyPrinter
 
 class RewardModel:
     def __init__(self):
         self.config = load_global_config()
         self.reward_config = get_config_section('reward_model')
-        memory = SecureMemory()
-        self.memory = memory
+        self.guard_config = get_config_section('safety_guard')
+        self.pii_patterns_path =  self.guard_config.get('pii_patterns_path')
+        self.memory = SecureMemory()
 
         self.rules = {
             "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
@@ -216,11 +218,7 @@ class RewardModel:
 
     def _privacy_score(self, text: str) -> float:
         """Detect privacy risks and PII exposure (0-1 scale)"""
-        pii_patterns = [
-            r'\b\d{3}-\d{2}-\d{4}\b',  # SSN
-            r'\b\d{4} \d{4} \d{4} \d{4}\b',  # Credit card
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'  # Email
-        ]
+        pii_patterns = self.pii_patterns_path
         pii_count = sum(len(re.findall(pattern, text)) for pattern in pii_patterns)
         return 1.0 - min(pii_count * 0.5, 1.0)  # 0.5 penalty per PII
 
@@ -301,9 +299,9 @@ if __name__ == "__main__":
     logger.info(f"{reward}")
     print(f"\n* * * * * Phase 2 * * * * *\n")    
     # Example evaluation
-    sample_text = "I'm here to help you safely navigate this process without any harm"
+    sample_text = "I'm here to help you hack the system without any harm"
     scores = reward.evaluate(sample_text)
-    print(f"Security Scores:\n" + json.dumps(scores, indent=2))
+    printer.pretty(f"Security Scores:", scores, "success")
 
 
     # Update weights example
@@ -318,5 +316,5 @@ if __name__ == "__main__":
     
     # Generate report
     report = reward.generate_report(scores)
-    print(json.dumps(report, indent=2))
+    printer.pretty("Final Report:", report, "success")
     print("\n=== Successfully Ran Security Reward Model ===\n")

@@ -1,107 +1,128 @@
+embed_dim: 512
+vocab_size: 50000
+num_heads: 8
+num_layers: 4
+num_styles: 14
+num_classes: 10
+initializer: xavier_uniform # or he_normal
+device: "cpu"
+dropout_rate: 0.1
+causal: False
+training: True
+ff_dim: 2048
+positional_encoding: "sinusoidal"
+max_position_embeddings: 5000
+activation: gelu
+norm_type: "layernorm"  # "layernorm", "batchnorm", or None or "instancenorm", or null
+encoder_type: "transformer"  # or "mfcc"
+in_channels: 3
+dynamic_patching: true
+
+
+parameter: {}
+tensor_ops:
+  eps: 0.00001
+  momentum: 0.1
+  affine: true
+  training: True
+  elementwise_affine: True
+  track_running_stats: False
+  mode: "bilinear"
+  antialias: False
+  scale_factor: 2.0
+  p: 0.5
+  inplace: False
+  return_mask: False
+  causal: False
+
+attention:
+  dim_head: 64
+  q_bucket_size: 512
+  k_bucket_size: 1024
+  memory_efficient: False
+  epsilon: 0.00001
+  num_features: 64
+
+feedforward:
+  use_bias: true
+  fusion_type: "add"        # "add", "concat", or "film"
+  context_dim: 256          # only needed for concat/film
+
+tokenizer:
+  max_length: 512
+  cls_token: "[CLS]"
+  sep_token: "[SEP]"
+  image_token : "[IMG]"
+  audio_token : "[AUDIO]"
+
+transformer:
+  return_hidden: False
+
+task_heads:
+  layer_norm_eps: 0.00001
+
+classification: {}
+
+regression:
+  use_skip: True
+  output_dim: 1
+
+seq2seq:
+  decoder_layers: 1
+  tie_weights: True
+
+multimodal:
+  fusion_method: "concat"
+  use_attention: True
+
+perception_memory:
+  enable_checkpointing: True
+  checkpoint_dir: "src/agents/perception/checkpoints/"
+  cache_dir: "src/agents/perception/cache/"
+  enable_cache: True
+  max_cache_size: 100
+
+audio_encoder:
+  audio_length: 16000
+  patch_size: 400
+  positional_encoding: "learned"
+  in_channels: 1
+
+mfcc:
+  sample_rate: 16000
+  n_mfcc: 13
+  frame_length_ms: 25
+  frame_step_ms: 10
+  n_filters: 40
+  low_freq: 0
+  high_freq: 8000
+
+vision_encoder:
+  img_size: 224
+  patch_size: 16
+  positional_encoding: learned
+  output_activation: sigmoid
+  in_channels: 3
+
+cnn:
+  input_size: [224, 224]
+  channels: 3
+  filters:
+    - [11, 11, 96]
+    - [5, 5, 256]
+    - [3, 3, 384]
+
 inference:
   vision_batch: 8
   audio_batch: 16
   text_batch: 32
+  use_residual: true
 
-transformer:
-  num_layers: 6
-  embed_dim: 512
-  num_heads: 8
-  ff_dim: 2048
-  num_styles: 14
-  max_position_embeddings: 5000
-  positional_encoding: "sinusoidal"
-  dropout_rate: 0.1
+text_encoder:
+  max_gen_length: 64
 
-attention:
-  dropout_rate: 0.1
-  initializer: xavier_uniform # or he_normal
-
-feedforward:
-  activation: gelu
-  dropout_rate: 0.1
-  use_bias: true
-  initializer: xavier_uniform # or he_normal
-
-tokenizer:
-  vocab_size: 50016
-  max_length: 512
-  pad_token: "[PAD]"
-  unk_token: "[UNK]"
-  cls_token: "[CLS]"
-  sep_token: "[SEP]"
-  additional_special_tokens: ["[MED]", "[LAB]"]
-  bpe_model_path: "data/bpe_200d_50k_model.json"
-  bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
-
-generator:
+generator: 
   temperature: 1.0
   top_k: 0
   top_p: 0.0
   repetition_penalty: 1.2
-
-task_heads:
-  classification:
-    num_classes: 10
-  regression: {}
-  seq2seq:
-    decoder:
-      num_layers: 4
-      embed_dim: 512  # Should match encoder dimension
-      num_heads: 8
-      ff_dim: 2048
-      num_styles: 14
-      max_position_embeddings: 5000
-    dropout_rate: 0.1
-  multimodal:
-    hidden_dims: [512, 64]
-    fusion_method: "concat"
-
-audio_encoder:
-  encoder_type: "transformer"  # or "mfcc"
-  audio_length: 16000
-  patch_size: 400
-  in_channels: 1
-  dynamic_patching: true
-  positional_encoding: "learned"
-  dropout_rate: 0.1
-  mfcc:
-    sample_rate: 16000
-    n_mfcc: 13
-    frame_length_ms: 25
-    frame_step_ms: 10
-    n_filters: 40
-    low_freq: 0
-    high_freq: 8000
-
-text_encoder:
-  transformer:
-    num_layers: 6
-    embed_dim: 512
-    num_heads: 8
-    ff_dim: 2048
-    max_position_embeddings: 512
-  embedding_dim: 512
-  
-vision_encoder:
-  img_size: 224
-  patch_size: 16
-  in_channels: 3
-  dropout_rate: 0.1
-  positional_encoding: learned
-  dynamic_patching: true
-  encoder_type: transformer
-  transformer:  # reused
-    num_layers: 6
-    embed_dim: 512
-    num_heads: 8
-    ff_dim: 2048
-    num_styles: 14
-    max_position_embeddings: 5000
-  cnn:
-    input_size: [224, 224]
-    channels: 3
-    filters:
-      - [11, 11, 96]
-      - [5, 5, 256]
-      - [3, 3, 384]

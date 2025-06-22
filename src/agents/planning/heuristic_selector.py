@@ -8,6 +8,7 @@ from typing import Dict, Any, Tuple, Optional
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
+from src.agents.planning.uncertainty_aware_heuristic import UncertaintyAwareHeuristic
 from src.agents.planning.reinforcement_learning_heuristic import ReinforcementLearningHeuristic
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
@@ -34,7 +35,8 @@ class HeuristicSelector:
         self.heuristics = {
             "DT": DecisionTreeHeuristic(),
             "GB": GradientBoostingHeuristic(),
-            "RL": ReinforcementLearningHeuristic()
+            "RL": ReinforcementLearningHeuristic(),
+            "UA": UncertaintyAwareHeuristic()
         }
         self.heuristic_performance = {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
         self.last_used = {key: 0 for key in self.heuristics}
@@ -48,22 +50,20 @@ class HeuristicSelector:
         """Load state from memory or initialize defaults"""
         state = self.memory.base_state.get('heuristic_selector', {})
         
-        self.heuristic_performance = state.get(
-            'performance', 
-            {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
-        )
+        # Initialize with default values
+        self.heuristic_performance = {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
+        self.last_used = {key: 0 for key in self.heuristics}
         
-        self.last_used = state.get(
-            'last_used', 
-            {key: 0 for key in self.heuristics}
-        )
-        
-        # Initialize heuristics with memory reference
-        self.heuristics = {
-            "DT": DecisionTreeHeuristic(),
-            "GB": GradientBoostingHeuristic(),
-            "RL": ReinforcementLearningHeuristic()
-        }
+        # Update with saved state if available
+        if 'performance' in state:
+            for key, val in state['performance'].items():
+                if key in self.heuristic_performance:
+                    self.heuristic_performance[key] = val
+                    
+        if 'last_used' in state:
+            for key, val in state['last_used'].items():
+                if key in self.last_used:
+                    self.last_used[key] = val
 
     def save_state(self):
         """Persist current state to memory"""
@@ -78,10 +78,15 @@ class HeuristicSelector:
     def load_performance_stats(self):
         """Load historical performance metrics if available"""
         try:
-            if os.path.exists(self.selector_config.get('performance_log_path')):
-                self.heuristic_performance = joblib.load(self.selector_config.get('performance_log_path'))
+            path = self.selector_config.get('performance_log_path')
+            if os.path.exists(path):
+                # Load performance data but preserve current structure
+                loaded = joblib.load(path)
+                for key in self.heuristic_performance:
+                    if key in loaded:
+                        self.heuristic_performance[key] = loaded[key]
         except Exception as e:
-            print(f"Failed to load performance stats: {str(e)}")
+            logger.error(f"Failed to load performance stats: {str(e)}")
     
     def save_performance_stats(self):
         """Save current performance metrics"""
@@ -133,6 +138,10 @@ class HeuristicSelector:
         if "cpu_available" in world_state and world_state["cpu_available"] < 0.3:
             if self._heuristic_available("GB", time_budget):
                 return "GB", self.heuristics["GB"]
+            
+        if task.get('priority', 0) > 0.8 or task.get('safety_critical', False):
+            if self._heuristic_available("UA", time_budget):
+                return "UA", self.heuristics["UA"]
         
         # Fallback to performance-based selection
         return self._select_by_performance(time_budget)
@@ -196,6 +205,41 @@ class HeuristicSelector:
         # Return heuristic with highest score
         candidates.sort(reverse=True)
         return candidates[0][1], candidates[0][2]
+
+    def select_best_method(
+        self,
+        task: Dict[str, Any],
+        world_state: Dict[str, Any],
+        candidate_methods: list,
+        method_stats: Dict[Tuple[str, str], Dict[str, int]],
+        time_budget: float = 0.5
+    ) -> Tuple[Optional[str], float]:
+        """Select the best method using the optimal heuristic"""
+        start_time = time.time()
+        
+        # Select appropriate heuristic
+        heuristic_name, heuristic = self.select_heuristic(
+            task, world_state, candidate_methods, time_budget
+        )
+        
+        # Select best method
+        if heuristic_name == "RL":
+            method, prob = heuristic.select_method(task, world_state, candidate_methods, method_stats)
+        elif heuristic_name == "UA":
+            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        elif heuristic_name == "DT":
+            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        else:  # GB
+            # GB doesn't take method_stats in select_best_method in the provided code
+            # This is a workaround for the interface inconsistency
+            method, prob = heuristic.select_best_method(task, world_state, candidate_methods)
+        
+        # Update performance metrics
+        elapsed = time.time() - start_time
+        # Accuracy would be updated after execution based on actual outcome
+        self.update_performance(heuristic_name, elapsed, 0.5)
+        
+        return method, prob
     
     def predict_success_prob(
         self,
@@ -214,7 +258,7 @@ class HeuristicSelector:
         )
         
         # Make prediction
-        if heuristic_name == "RL":
+        if heuristic_name in ["RL", "UA"]: # == "RL":
             prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id)
         else:
             # Save current method and set to target method
@@ -238,39 +282,6 @@ class HeuristicSelector:
         
         return prob
     
-    def select_best_method(
-        self,
-        task: Dict[str, Any],
-        world_state: Dict[str, Any],
-        candidate_methods: list,
-        method_stats: Dict[Tuple[str, str], Dict[str, int]],
-        time_budget: float = 0.5
-    ) -> Tuple[Optional[str], float]:
-        """Select the best method using the optimal heuristic"""
-        start_time = time.time()
-        
-        # Select appropriate heuristic
-        heuristic_name, heuristic = self.select_heuristic(
-            task, world_state, candidate_methods, time_budget
-        )
-        
-        # Select best method
-        if heuristic_name == "RL":
-            method, prob = heuristic.select_method(task, world_state, candidate_methods, method_stats)
-        elif heuristic_name == "DT":
-            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
-        else:  # GB
-            # GB doesn't take method_stats in select_best_method in the provided code
-            # This is a workaround for the interface inconsistency
-            method, prob = heuristic.select_best_method(task, world_state, candidate_methods)
-        
-        # Update performance metrics
-        elapsed = time.time() - start_time
-        # Accuracy would be updated after execution based on actual outcome
-        self.update_performance(heuristic_name, elapsed, 0.5)
-        
-        return method, prob
-
 if __name__ == "__main__":
     print("\n=== Testing Heuristic Selector ===\n")
     selector = HeuristicSelector()

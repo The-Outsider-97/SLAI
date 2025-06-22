@@ -51,7 +51,7 @@ evaluation_agent:
     risk_thresholds:
         warning: [0.4, 0.7]
         critical: [0.7, 1.0]
-    issue_database':
+    issue_database:
         host: 'localhost'
         port: 5432
         database: 'ai_issues'
@@ -60,12 +60,33 @@ evaluation_agent:
 
 execution_agent: {}
 
-knowledge_agent: {}
+knowledge_agent:
+    knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
+    use_graph_ontology: True  # False for in-memory
+    ontology_threshold: 500   # Switch to graph DB at this size
+    in_memory_cache: True  # Whether to keep in-memory cache
+    cache_size: 1000
+    bias_threshold: 0.7
+    bias_detection_enabled: True
+    embedding_model: "all-MiniLM-L6-v2"
+    stopwords: "src/agents/language/templates/stopwords.json"
+    directory_path: "src/agents/knowledge/templates/"
+    similarity_threshold: 0.2
+    use_ontology_expansion: True
+    first_pass: True
+    is_query: False
+    decay_factor: 0.8
+    context_window: 3
+    knowledge_tag: "knowledge_snippet"
+    ttl: 600
+    source: "broadcast_phase"
+    retrieval_mode: "dense"
 
 language_agent: {}
 
 learning_agent:
     rl_algorithm: null
+    embedding_dim: 512
     strategy_weights: [0.25, 0.25, 0.25, 0.25]
     prediction_weights: [0.25, 0.25, 0.25, 0.25]
     maml_task_pool_size: 100
@@ -87,17 +108,33 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
-perception_agent: {}
+perception_agent:
+    device: "cpu"
+    embed_dim: 512
+    masking_ratio: 0.15
+    contrastive_temperature: 0.07
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    adam_betas: [0.9, 0.999]
+    adam_eps: 0.0000001
+    loss_type: 'hybrid'  # mse, contrastive, or hybrid
+    max_scale: 3
+    temperature: 0.07
+    mse_weight: 0.5      # for hybrid loss
+    contrastive_weight: 0.5  # for hybrid loss
 
 planning_agent: {}
 
 reasoning_agent:
+    learning_rate: 0.01
+    exploration_rate: 0.1
     tuple_key: ["subject", "predicate", "object"]
     hypothesis_graph:
         nodes: {}
         edges: {}
         confedence: 0.0
     language_config_path: "src/agents/language/configs/language_config.yaml"
+    knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
     glove_path: "data/embeddings/glove.6B.200d.json"
     ner_tag: None
     embedding: None
@@ -105,12 +142,19 @@ reasoning_agent:
 
 safety_agent:
     constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
+    audit_level: 2
+    collect_feedback: true
+    enable_learnable_aggregation: false
+    system_models: {}
+    known_hazards: []
+    global_losses: []
+    safety_policies: []
+    architecture_map: {}
+    formal_specs: {}
+    fault_tree_config: {}
     risk_thresholds:
         overall_safety: 0.75
         cyber_risk: 0.5
         compliance_failure_is_blocker: true
-    audit_level: 2
-    collect_feedback: true
-    enable_learnable_aggregation: false
     secure_memory:
         default_ttl_seconds: 3600

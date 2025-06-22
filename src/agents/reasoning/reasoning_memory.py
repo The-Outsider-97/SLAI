@@ -269,6 +269,105 @@ class ReasoningMemory:
             'total_priority': self.tree.total(),
             'max_priority': self.max_priority
         }
+    
+    def get_current_context(self) -> list:
+        """
+        Dynamically generates current context tags based on:
+        - Recent high-priority experiences
+        - Semantic clustering of recent memories
+        - Memory saturation levels
+        - Temporal patterns
+        Returns a list of context tags describing the current cognitive state
+        """
+        context_tags = []
+        if self.tree.size == 0:
+            return ["empty_memory"]
+        
+        # Configuration parameters
+        recent_window = min(50, self.tree.size)
+        high_priority_threshold = 0.85
+        context_decay_factor = 0.95
+        
+        # Calculate memory saturation
+        saturation = self.tree.size / self.tree.capacity
+        if saturation > 0.9:
+            context_tags.append("memory_saturated")
+        
+        # Analyze recent experiences
+        recent_indices = self._get_recent_indices(recent_window)
+        recent_tags = []
+        high_priority_count = 0
+        
+        for data_idx in recent_indices:
+            # Get priority value
+            tree_idx = data_idx + self.tree.capacity - 1
+            priority = self.tree.tree[tree_idx]
+            
+            # Check for high-priority items
+            if priority > high_priority_threshold:
+                high_priority_count += 1
+            
+            # Get experience and its tags
+            exp = self.tree.data[data_idx]
+            if exp and 'tag' in exp:
+                recent_tags.append(exp['tag'])
+        
+        # Add priority context
+        if high_priority_count > recent_window * 0.3:
+            context_tags.append("high_priority_context")
+        
+        # Add most frequent tags from recent window
+        if recent_tags:
+            freq_dist = defaultdict(int)
+            for tag in recent_tags:
+                freq_dist[tag] += 1
+            top_tags = sorted(freq_dist.items(), key=lambda x: x[1], reverse=True)[:3]
+            context_tags.extend([tag for tag, _ in top_tags])
+        
+        # Add temporal context
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            context_tags.append("morning_context")
+        elif 18 <= hour < 22:
+            context_tags.append("evening_context")
+        
+        # Apply context decay to historical tags
+        if hasattr(self, 'historical_context'):
+            decayed_context = []
+            for tag, weight in self.historical_context.items():
+                new_weight = weight * context_decay_factor
+                if new_weight > 0.1:
+                    decayed_context.append((tag, new_weight))
+            self.historical_context = dict(decayed_context)
+        else:
+            self.historical_context = {}
+        
+        # Update historical context
+        for tag in set(context_tags):
+            self.historical_context[tag] = self.historical_context.get(tag, 0) + 1.0
+        
+        # Combine with persistent context
+        persistent_tags = [tag for tag, weight in self.historical_context.items() 
+                          if weight > 0.5]
+        return list(set(context_tags + persistent_tags))
+    
+    def _get_recent_indices(self, count: int) -> list:
+        """Get indices of most recent experiences in chronological order"""
+        if count <= 0:
+            return []
+        
+        count = min(count, self.tree.size)
+        indices = []
+        
+        if self.tree.write_ptr >= count:
+            start = self.tree.write_ptr - count
+            indices = list(range(start, self.tree.write_ptr))
+        else:
+            wrap_count = count - self.tree.write_ptr
+            indices = (list(range(self.tree.capacity - wrap_count, self.tree.capacity)) +
+                      list(range(0, self.tree.write_ptr)))
+        
+        return indices
 
 if __name__ == "__main__":
     print("\n=== Running Reasoning Memory ===")

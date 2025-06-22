@@ -1,0 +1,355 @@
+{
+  "nodes": [
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "A9",
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B9"
+  ],
+  "edges": [
+    [
+      "A0",
+      "A1"
+    ],
+    [
+      "A1",
+      "A2"
+    ],
+    [
+      "A2",
+      "A3"
+    ],
+    [
+      "A3",
+      "A4"
+    ],
+    [
+      "A4",
+      "A5"
+    ],
+    [
+      "A5",
+      "A6"
+    ],
+    [
+      "A6",
+      "A7"
+    ],
+    [
+      "A7",
+      "A8"
+    ],
+    [
+      "A8",
+      "A9"
+    ],
+    [
+      "B0",
+      "B1"
+    ],
+    [
+      "B1",
+      "B2"
+    ],
+    [
+      "B2",
+      "B3"
+    ],
+    [
+      "B3",
+      "B4"
+    ],
+    [
+      "B4",
+      "B5"
+    ],
+    [
+      "B5",
+      "B6"
+    ],
+    [
+      "B6",
+      "B7"
+    ],
+    [
+      "B7",
+      "B8"
+    ],
+    [
+      "B8",
+      "B9"
+    ]
+  ],
+  "cpt": {
+    "A0": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A8": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A9": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B0": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B8": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B9": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    }
+  },
+  "description": "20-node Bayesian network: Two independent 10-node causal chains",
+  "metadata": {
+    "node_descriptions": {
+      "A0": "A0 in chain A",
+      "A1": "A1 in chain A",
+      "A2": "A2 in chain A",
+      "A3": "A3 in chain A",
+      "A4": "A4 in chain A",
+      "A5": "A5 in chain A",
+      "A6": "A6 in chain A",
+      "A7": "A7 in chain A",
+      "A8": "A8 in chain A",
+      "A9": "A9 in chain A",
+      "B0": "B0 in chain B",
+      "B1": "B1 in chain B",
+      "B2": "B2 in chain B",
+      "B3": "B3 in chain B",
+      "B4": "B4 in chain B",
+      "B5": "B5 in chain B",
+      "B6": "B6 in chain B",
+      "B7": "B7 in chain B",
+      "B8": "B8 in chain B",
+      "B9": "B9 in chain B"
+    },
+    "dependency_types": {
+      "directed": [
+        "A0\u2192A1",
+        "A1\u2192A2",
+        "A2\u2192A3",
+        "A3\u2192A4",
+        "A4\u2192A5",
+        "A5\u2192A6",
+        "A6\u2192A7",
+        "A7\u2192A8",
+        "A8\u2192A9",
+        "B0\u2192B1",
+        "B1\u2192B2",
+        "B2\u2192B3",
+        "B3\u2192B4",
+        "B4\u2192B5",
+        "B5\u2192B6",
+        "B6\u2192B7",
+        "B7\u2192B8",
+        "B8\u2192B9"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

@@ -1,7 +1,7 @@
-src_vocab_size: 49963
-tgt_vocab_size: 49963
-bpe_model_path: {}
-bpe_vocab_path: {}
+src_vocab_size: 50000
+tgt_vocab_size: 50000
+bpe_model_path: "data/bpe_200d_50k_model.json"
+bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
 
 base_transformer:
   d_model: 512

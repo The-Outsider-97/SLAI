@@ -1,16 +1,22 @@
-semantic_frames_path: "src/agents/reasoning/templates/semantic_rules.json"
+semantic_frames_path: "src/agents/reasoning/templates/semantic_frames.json"
+max_circular_depth: 3
+learning_rate: 0.001
+embedding_dim: 64
+contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
+markov_logic_weight: 0.7
 
 inference:
   default_chain_length: 5         # Max steps in chain-of-thought reasoning
   neuro_symbolic_weight: 0.4      # Weight for neural vs symbolic reasoning (0.0-1.0)
   max_hypotheses: 100             # Cap on number of hypotheses retained
   exploration_rate: 0.1           # Probability to trigger rule discovery
+  max_learning_cycles: 100
+  knowledge_base_weight: 0.3
+  structural_weights: "src/agents/reasoning/templates/structural_weights.json"
   llm_fallback:
     enable: true
     temperature: 0.3
     max_tokens: 100
-  markov_logic_weight: 0.7
-  knowledge_base_weight: 0.3
 
 rules:
   enable_learning: true           # Enable adaptive rule discovery
@@ -24,13 +30,12 @@ rules:
 
 validation:
   enable: true
-  max_circular_depth: 3
-  min_soundness_score: 0.7
-  contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
   redundancy_margin: 0.05
-  max_validation_attempts: 5
+  max_circular_depth: 3
   validation_timeout: 1
-  enable_semantic_redundancy: false  # or true, depending on your needs
+  min_soundness_score: 0.7
+  max_validation_attempts: 5
+  enable_semantic_redundancy: False  # or true, depending on your needs
   mln_rule_confidence_threshold: 0.7
 
 nlp:
@@ -40,16 +45,17 @@ nlp:
   use_semantic_frames: true
 
 storage:
+  bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"
   knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
   rule_backup: "src/agents/knowledge/discovered_rules.json"
   lexicon_path: "src/agents/language/templates/sentiment_lexicon.json"
-  bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"
+  dependency_rules_path: "src/agents/language/templates/pos_patterns.json"
 
 model_compute:
-  lr: 0.001
+  schema_version: 1.2
+  reduction: batchmean
 
 adaptive_circuit:
-  embedding_dim: 64
   hidden_dim: 128
   num_kb_embeddings: 1000
 
@@ -62,3 +68,28 @@ reasoning_memory:
   beta: 0.4
   epsilon: 0.00005
 
+networks:
+  bn2x2: "src/agents/reasoning/networks/bayesian_network_2x2.json"
+  bn3x3: "src/agents/reasoning/networks/bayesian_network_3x3.json"
+  bn4x4: "src/agents/reasoning/networks/bayesian_network_4x4.json"
+  bn5x5: "src/agents/reasoning/networks/bayesian_network_5x5.json"
+  bn6x6: "src/agents/reasoning/networks/bayesian_network_6x6.json"
+  bn7x7: "src/agents/reasoning/networks/bayesian_network_7x7.json"
+  bn8x8: "src/agents/reasoning/networks/bayesian_network_8x8.json"
+  bn9x9: "src/agents/reasoning/networks/bayesian_network_9x9.json"
+  bn10x10: "src/agents/reasoning/networks/bayesian_network_10x10.json"
+  bn20x20: "src/agents/reasoning/networks/bayesian_network_20x20.json"
+  bn32x32: "src/agents/reasoning/networks/bayesian_network_32x32.json"
+  bn64x64: "src/agents/reasoning/networks/bayesian_network_64x64.json"
+  gn2x2: "src/agents/reasoning/networks/grid_network_2x2.json"
+  gn3x3: "src/agents/reasoning/networks/grid_network_3x3.json"
+  gn4x4: "src/agents/reasoning/networks/grid_network_4x4.json"
+  gn5x5: "src/agents/reasoning/networks/grid_network_5x5.json"
+  gn6x6: "src/agents/reasoning/networks/grid_network_6x6.json"
+  gn7x7: "src/agents/reasoning/networks/grid_network_7x7.json"
+  gn8x8: "src/agents/reasoning/networks/grid_network_8x8.json"
+  gn9x9: "src/agents/reasoning/networks/grid_network_9x9.json"
+  gn10x10: "src/agents/reasoning/networks/grid_network_10x10.json"
+  gn20x20: "src/agents/reasoning/networks/grid_network_20x20.json"
+  gn32x32: "src/agents/reasoning/networks/grid_network_32x32.json"
+  gn64x64: "src/agents/reasoning/networks/grid_network_64x64.json"

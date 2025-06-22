@@ -1,7 +1,10 @@
-from typing import Dict
+
+import numpy as np
+
+from typing import Dict, List, Tuple, Union
 
 class InterpretabilityHelper:
-    """Helper to explain evaluation results in plain language"""
+    """Helper to explain evaluation results in plain language with enhanced interpretability features"""
     
     @staticmethod
     def explain_performance(score: float, threshold: float = 0.8) -> str:
@@ -63,6 +66,106 @@ class InterpretabilityHelper:
             f"- Requirement Coverage: {metrics['coverage']}"
         )
 
+    @staticmethod
+    def explain_attention_pattern(attention: np.ndarray, tokens: List[str]) -> str:
+        """Explain attention patterns in natural language"""
+        max_idx = np.unravel_index(np.argmax(attention), attention.shape)
+        min_idx = np.unravel_index(np.argmin(attention), attention.shape)
+        
+        explanation = (
+            f"The model focuses most on '{tokens[max_idx[1]]}' when processing '{tokens[max_idx[0]]}'. "
+            f"The weakest attention is between '{tokens[min_idx[0]]}' and '{tokens[min_idx[1]]}'."
+        )
+        
+        # Check for diagonal dominance
+        diag = np.diag(attention)
+        if np.mean(diag) > 0.7:
+            explanation += " Strong diagonal pattern suggests token-to-self attention dominance."
+            
+        return explanation
+
+    @staticmethod
+    def explain_anomaly(anomaly_score: float, thresholds: Dict[str, float]) -> str:
+        """Explain attention anomaly scores"""
+        if anomaly_score > thresholds.get('critical', 0.9):
+            return f"CRITICAL anomaly ({anomaly_score:.3f}): Possible adversarial manipulation"
+        elif anomaly_score > thresholds.get('high', 0.7):
+            return f"High anomaly ({anomaly_score:.3f}): Potential attention hijacking"
+        elif anomaly_score > thresholds.get('medium', 0.5):
+            return f"Moderate anomaly ({anomaly_score:.3f}): Unusual attention patterns"
+        else:
+            return "Normal attention patterns detected"
+
+    @staticmethod
+    def explain_entropy(entropy: float, normal_range: Tuple[float, float]) -> str:
+        """Explain attention entropy values"""
+        low, high = normal_range
+        if entropy < low:
+            return (f"Low attention entropy ({entropy:.3f}): Model is focusing too narrowly, "
+                    "potentially ignoring contextual information")
+        elif entropy > high:
+            return (f"High attention entropy ({entropy:.3f}): Model is attending too broadly, "
+                    "potentially lacking focus")
+        else:
+            return f"Normal attention entropy ({entropy:.3f}): Balanced focus distribution"
+
+    @staticmethod
+    def explain_security_assessment(assessment: Dict) -> str:
+        """Generate human-readable security assessment"""
+        status = "SECURE" if assessment['secure'] else "VULNERABLE"
+        confidence = assessment.get('confidence', 0.0)
+        
+        report = [
+            f"Security Status: {status}",
+            f"Confidence: {confidence:.1%}",
+            "Findings:"
+        ]
+        
+        for finding in assessment.get('findings', []):
+            report.append(f"- {finding}")
+            
+        if assessment.get('recommendations'):
+            report.append("Recommendations:")
+            for rec in assessment['recommendations']:
+                report.append(f"- {rec}")
+                
+        return "\n".join(report)
+
+    @staticmethod
+    def explain_head_importance(importances: List[float]) -> str:
+        """Explain attention head importance distribution"""
+        if not importances:
+            return "No head importance data available"
+            
+        max_idx = np.argmax(importances)
+        min_idx = np.argmin(importances)
+        variance = np.var(importances)
+        
+        explanation = (
+            f"Head #{max_idx} has the strongest influence ({importances[max_idx]:.3f}), "
+            f"while head #{min_idx} has the weakest ({importances[min_idx]:.3f}). "
+        )
+        
+        if variance > 0.1:
+            explanation += "Significant variance in head importance suggests specialized roles."
+        else:
+            explanation += "Consistent head importance suggests redundant processing."
+            
+        return explanation
+
+    @staticmethod
+    def attention_to_text(attention: np.ndarray, tokens: List[str]) -> str:
+        """Convert attention matrix to human-readable text representation"""
+        output = []
+        for i, row in enumerate(attention):
+            focus_idx = np.argmax(row)
+            output.append(
+                f"When processing '{tokens[i]}', "
+                f"the model focuses most on '{tokens[focus_idx]}' "
+                f"(attention: {row[focus_idx]:.2f})"
+            )
+        return "\n".join(output)
+
 if __name__ == "__main__":
     helper = InterpretabilityHelper()
     
@@ -106,3 +209,41 @@ if __name__ == "__main__":
         'tp': 120, 'fp': 15,
         'tn': 200, 'fn': 25
     }))
+    
+    # Test new methods
+    print("\n=== Enhanced Interpretability ===")
+    attention_matrix = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.7, 0.2],
+        [0.1, 0.3, 0.6]
+    ])
+    tokens = ["The", "movie", "was"]
+    
+    print("\nAttention Pattern Explanation:")
+    print(helper.explain_attention_pattern(attention_matrix, tokens))
+    
+    print("\nAnomaly Explanation:")
+    print(helper.explain_anomaly(0.85, {'critical': 0.9, 'high': 0.7, 'medium': 0.5}))
+    
+    print("\nEntropy Explanation:")
+    print(helper.explain_entropy(0.25, (0.4, 0.8)))
+    
+    print("\nSecurity Assessment:")
+    print(helper.explain_security_assessment({
+        'secure': False,
+        'confidence': 0.65,
+        'findings': [
+            "Low attention entropy detected",
+            "High variance in head importance"
+        ],
+        'recommendations': [
+            "Investigate attention patterns in layer 4",
+            "Apply attention regularization"
+        ]
+    }))
+    
+    print("\nHead Importance Explanation:")
+    print(helper.explain_head_importance([0.4, 0.1, 0.3, 0.2]))
+    
+    print("\nAttention to Text:")
+    print(helper.attention_to_text(attention_matrix, tokens))

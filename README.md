@@ -112,6 +112,7 @@ Note: If you see an error about execution policy:
 
 3. Install requirements:
    ```console
+   pip install ConcurrentLogHandler
    pip install librosa
    pip install music21
    pip install mido
@@ -162,13 +163,18 @@ Note: If you see an error about execution policy:
    pip install flask>=2.0.0
    pip install django>=4.0
    pip install fastapi>=0.85
+   pip install rotary_embedding_torch
+   pip install lz4
    pip install gym
+   pip install pgmpy
+   pip install einops
    pip install gymnasium
    pip install opencv-python
    pip install pyperclip
    pip install psutil
    pip install pytz
    pip install torch
+   pip install rdflib
    pip install pyyaml
    pip install pandas
    pip install dotenv

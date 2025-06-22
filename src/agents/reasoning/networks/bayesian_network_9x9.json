@@ -1,0 +1,142 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I"
+  ],
+  "edges": [
+    [
+      "A",
+      "D"
+    ],
+    [
+      "B",
+      "E"
+    ],
+    [
+      "C",
+      "F"
+    ],
+    [
+      "D",
+      "G"
+    ],
+    [
+      "E",
+      "H"
+    ],
+    [
+      "F",
+      "I"
+    ]
+  ],
+  "cpt": {
+    "A": {
+      "prior": 0.6
+    },
+    "B": {
+      "prior": 0.5
+    },
+    "C": {
+      "prior": 0.7
+    },
+    "D": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "E": {
+      "True": {
+        "True": 0.85,
+        "False": 0.15
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "F": {
+      "True": {
+        "True": 0.88,
+        "False": 0.12
+      },
+      "False": {
+        "True": 0.25,
+        "False": 0.75
+      }
+    },
+    "G": {
+      "True": {
+        "True": 0.95,
+        "False": 0.05
+      },
+      "False": {
+        "True": 0.1,
+        "False": 0.9
+      }
+    },
+    "H": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.2,
+        "False": 0.8
+      }
+    },
+    "I": {
+      "True": {
+        "True": 0.93,
+        "False": 0.07
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    }
+  },
+  "description": "9-node 3-layer Bayesian network: A\u2192D\u2192G, B\u2192E\u2192H, C\u2192F\u2192I",
+  "metadata": {
+    "node_descriptions": {
+      "A": "Input node 1",
+      "B": "Input node 2",
+      "C": "Input node 3",
+      "D": "Hidden node under A",
+      "E": "Hidden node under B",
+      "F": "Hidden node under C",
+      "G": "Output node under D",
+      "H": "Output node under E",
+      "I": "Output node under F"
+    },
+    "dependency_types": {
+      "directed": [
+        "A\u2192D",
+        "D\u2192G",
+        "B\u2192E",
+        "E\u2192H",
+        "C\u2192F",
+        "F\u2192I"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

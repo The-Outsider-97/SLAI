@@ -10,7 +10,7 @@ safety_margins:
 
 service_discovery:
   mode: "static"  # Options: static|consul|k8s
-  static_nodes: ["gpu-node1"] # OR add "node1", "node2",
+  static_nodes: [] # OR add "node1", "node2", "gpu-node1"
   consul_url: "http://localhost:8500"
   k8s_api: "https://kubernetes.default.svc"
   k8s_token: ""
@@ -49,7 +49,7 @@ task_scheduler:
     delay: 10
 
 heuristic_selector:
-  heuristic_priority: ["RL", "GB", "DT"]
+  heuristic_priority: ["RL", "GB", "DT", "UA"]
   min_rl_sequence_length: 3
   max_dt_depth: 5
   speed_threshold: 0.1  # seconds
@@ -101,6 +101,12 @@ reinforcement_learning_heuristic:
     use_resource_check: true
     use_temporal_features: true
 
+uncertainty_aware_heuristic:
+  uncertainty_threshold: 0.15
+  model_type: "BNN" # GP or BNN
+  feature_config: {}
+  bnn_config: {}
+
 planning_memory:
   checkpoints_dir: "src/agents/planning/checkpoints/"
   max_checkpoints: 100                 # Maximum stored planning states
@@ -137,6 +143,8 @@ planning_types:
   cost: 1.0
 
 planning_executor:
+  check_interval: 0.5
+  divergence_threshold: 2
   state_checks_enabled: true
   precondition_checks_enabled: true
   snapshot_interval: 3.0              # Seconds between state checks
@@ -147,6 +155,11 @@ planning_executor:
     cpu: 1.0
     battery: 100.0
     temperature: 50.0
+
+probabilistic_planner:
+  gamma: 0.99
+  convergence_threshold: 0.0001
+  max_iterations: 1000
 
 safety_planning: {}
 
@@ -164,3 +177,10 @@ learning_retraining_scheduler:
   base_duration_per_requirement: 300  # 5 minutes per requirement
   efficiency_attribute: "efficiency"
   max_concurrent_training: 3
+
+meta_controller:
+  check_interval_seconds: 60
+  performance_window: 50
+  min_analysis_samples: 10
+  cooldown_period_seconds: 300
+  retraining_thresholds: {}

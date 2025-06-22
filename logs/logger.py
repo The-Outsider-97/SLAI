@@ -11,6 +11,8 @@ import statistics
 import atexit
 import shutil
 import pprint
+import msvcrt
+import uuid
 
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -23,6 +25,11 @@ if os.name == 'nt':
     os.system("")
 
 sys.stdout.isatty = lambda: True
+
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir, exist_ok=True)
+    os.chmod(log_dir, 0o755)  # Read/write for owner, read for others
 
 COLOR_CODES = {
     'RESET': "\033[0m",
@@ -295,58 +302,63 @@ class RotatingHandler(RotatingFileHandler):
 
     def doRollover(self):
         current_time = time.time()
+
         if current_time - self.last_rollover_time < self.rollover_cooldown:
             return  # Skip if we tried recently
 
         self.last_rollover_time = current_time
 
-        if self.stream:
+        # Flush and close all handlers to release file locks
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
             try:
-                self.stream.flush()
-                self.stream.close()
+                handler.flush()
+                handler.close()
             except Exception:
                 pass
-            self.stream = None
-    
-        dfn = self.rotation_filename(self.baseFilename + ".1")
-    
+
+        self.stream = None
+
+        #dfn = self.rotation_filename(self.baseFilename + ".1")
+        dfn = self.rotation_filename(self.baseFilename + f".{int(time.time())}_{uuid.uuid4().hex[:6]}")
+
         try:
-            # Attempt to rename with lock check
             if os.path.exists(dfn):
                 try:
-                    # Check if file is locked
-                    with open(dfn, 'a') as test_lock:
+                    with open(dfn, 'a'):
                         pass
                     os.remove(dfn)
                 except (PermissionError, IOError):
                     logging.debug(f"Backup file {dfn} is locked, skipping removal")
-                    
+
             if os.path.exists(self.baseFilename):
                 try:
-                    # Check if main log is locked
-                    with open(self.baseFilename, 'a') as test_lock:
-                        pass
-                    os.rename(self.baseFilename, dfn)
-                except (PermissionError, IOError):
-                    # Use copy+remove fallback ONLY if file is not locked
-                    try:
-                        with open(self.baseFilename, 'rb') as src, open(dfn, 'wb') as dst:
+                    with open(self.baseFilename, 'r+b') as src:
+                        msvcrt.locking(src.fileno(), msvcrt.LK_LOCK, 1)
+                        with open(dfn, 'wb') as dst:
                             shutil.copyfileobj(src, dst)
-                        os.remove(self.baseFilename)
-                    except Exception as e:
-                        logging.warning(f"Log rotation fallback failed: {str(e)}")
-                        return
+                        msvcrt.locking(src.fileno(), msvcrt.LK_UNLCK, 1)
+                    os.remove(self.baseFilename)
+                except Exception as e:
+                    logging.warning(f"Log rotation fallback failed: {str(e)}")
+                    return
 
+                else:
+                    logging.warning(f"Log file {self.baseFilename} is locked, skipping rotation")
+                    return
+    
         except Exception as e:
             logging.error(f"Log rotation error: {str(e)}")
             return
-
+    
         if not self.delay:
             try:
                 self.stream = self._open()
             except Exception:
                 self.stream = None
-    
+
+        self._enforce_log_limits(max_total_gb=40, max_files=300)
+
         self._compress_queue.append(dfn)
         self._manage_compression()
 
@@ -362,6 +374,30 @@ class RotatingHandler(RotatingFileHandler):
                 os.remove(old_log)
             except PermissionError as e:
                 logging.error(f"Failed to compress {old_log}: {e}")
+
+    def _enforce_log_limits(self, max_total_gb=40, max_files=300):
+        max_total_bytes = max_total_gb * (1024**3)
+        log_files = sorted(
+            [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.startswith("app.log")],
+            key=os.path.getmtime
+        )
+    
+        total_size = 0
+        files_to_delete = []
+    
+        for f in reversed(log_files):  # Start from newest
+            size = os.path.getsize(f)
+            total_size += size
+            if len(log_files) > max_files or total_size > max_total_bytes:
+                files_to_delete.append(f)
+                log_files.remove(f)
+    
+        for f in files_to_delete:
+            try:
+                os.remove(f)
+                logging.info(f"Deleted old log file to enforce limits: {f}")
+            except Exception as e:
+                logging.warning(f"Failed to delete {f}: {e}")
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):

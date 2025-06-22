@@ -1,3 +1,6 @@
+enabled: True
+namespace: "http://slaiknowledge.org/ontology#"
+
 relevance_weights:
   semantic: 0.4
   contextual: 0.3
@@ -8,51 +11,38 @@ temporal_decay:
   half_life_days: 30  # How fast relevance decays over time
 
 knowledge_memory:
-  # Storage & Capacity
   max_entries: 10000            # Maximum number of memory entries
   cache_size: 1000              # Size of local retrieval cache
-
-  # Relevance & Retrieval
-  relevance_weights: {}
   relevance_mode: "hybrid"      # Options: tfidf, embedding, hybrid
   similarity_threshold: 0.2     # Cosine similarity threshold for retrieval
   decay_factor: 0.8             # Contextual search decay for older entries
   context_window: 3             # Number of past contexts to include
-
-  # Inference & Ontology
   enable_ontology_expansion: true
   enable_rule_engine: true
   auto_discover_rules: true
   min_rule_support: 0.1         # For ML-based rule discovery (Apriori)
-
-  # Semantic Embeddings
   use_embedding_fallback: true
   embedding_model: "all-MiniLM-L6-v2"
-
-  # Persistence
   persist_file: "src/agents/knowledge/data/knowledge_memory.json"
   knowledge_dir: "src/agents/knowledge/data/knowledge_docs/"
   autoload_on_startup: true
-
-  # Logging & Monitoring
   log_retrieval_hits: true
   log_context_updates: true
   log_inference_events: true
 
 rule_engine:
-  enabled: true
   verbose_logging: true
   auto_discover: true
   min_rule_confidence: 0.6
   slow_rule_threshold: 0.5
   rule_sources:
-    - "src/agents/knowledge/rules/physics_rules.yaml"
-    - "src/agents/knowledge/rules/logic_rules.json"
+    - "src/agents/knowledge/templates/scientific_rules.json"  # "src/agents/knowledge/rules/physics_rules.yaml"
+    - "src/agents/knowledge/templates/civic_rules.json"
+  rules_dir: "src/agents/knowledge/templates/"
   save_inferred: true
   max_facts_per_rule: 10
 
 governor:
-  enabled: true
   realtime_monitoring: true
   bias_categories: "src/agents/knowledge/templates/bias_categories.json"
   sensitive_attributes: ["gender", "age_group", "race", "education_level"]
@@ -60,6 +50,7 @@ governor:
   freshness_threshold: 720        # 30 days in hours
   enforcement_mode: "log"         # Options: log, alert, restrict
   max_audit_history: 100          # Max stored audit records
+  rule_complexity_threshold: 5
   guideline_paths:
     - "src/agents/safety/guidelines/ai_ethics.yaml"
     - "src/agents/safety/guidelines/safety_protocols.json"
@@ -71,8 +62,7 @@ governor:
     warning: 2048                 # Memory warning threshold in MB
     critical: 3072  
 
-perform_action:
-  enabled: True                   # Global toggle for action execution
+perform_action:                # Global toggle for action execution
   allowed_action_types: ["http", "database", "shell"]
   retry_attempts: 3               # Max retries on transient failures
   retry_delay: 2.0                # Seconds between retry attempts
@@ -86,11 +76,15 @@ perform_action:
   confirmation_required: false    # Require human approval for高危actions
 
 knowledge_cache:
+  stopwords: "src/agents/language/templates/stopwords.json"
   max_size: 1000                  # Max items in cache (LRU enforced)
   enable_encryption: True         # Encrypt cached data
   hashing_method: "simhash"       # Options: md5, simhash
   simhash_bits: 64                # Bit-length for SimHash
   tokenizer: "word"               # Tokenizer for semantic hashing (word/char)
+  use_tf_weights: True
+  character_ngram: 3
+  shingle_size: 4
 
 knowledge_monitor:
   enabled: True                  # Master switch for monitoring system
@@ -120,10 +114,10 @@ knowledge_monitor:
   plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
   auto_archive_outdated: false  # Automatically archive outdated sources
 
+auto_sync:
+  interval: 3600  # Seconds between syncs
+
 knowledge_sync:
-  auto_sync:
-    enabled: True
-    interval: 3600  # Seconds between syncs
   conflict_resolution:
     strategy: "semantic"  # Options: timestamp, confidence, semantic, governance
     similarity_threshold: 0.85
@@ -131,13 +125,28 @@ knowledge_sync:
   versioning:
     enabled: True
     max_versions: 10
-  external_sources:
-    - data/external_knowledge_1.yaml
-    - data/external_knowledge_2.json
-    - type: "api"
-      endpoint: "https://api.knowledgebase/v1/updates"
-      auth_type: "bearer_token"
-      update_interval: 86400
-    - type: "database"
-      connection_string: "postgresql://user:pass@knowledge-db:5432/main"
-      tables: ["public.research_papers", "public.datasets"]
+
+external_sources:
+  - data/external_knowledge_1.yaml
+  - data/external_knowledge_2.json
+  - type: "api"
+    endpoint: "https://api.knowledgebase/v1/updates"
+    auth_type: "bearer_token"
+    update_interval: 86400
+  - type: "database"
+    connection_string: "postgresql://user:pass@knowledge-db:5432/main"
+    tables: ["public.research_papers", "public.datasets"]
+
+ontology_manager:
+  use_ontology_expansion: True
+  knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
+  conflict_resolution: "semantic"  # timestamp|confidence|semantic|governance
+  auto_quarantine: True
+  output_path: "src/agents/knowledge/export/ontology.ttl"
+  version_dir: "src/agents/knowledge/export/"
+
+graph_database:
+  type: "rdflib"   # or "neo4j"
+  neo4j_uri: "bolt://localhost:7687"
+  neo4j_user: "neo4j"
+  neo4j_password: "password"

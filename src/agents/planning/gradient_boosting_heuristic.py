@@ -11,18 +11,20 @@ by learning from historical execution data. For instance, if a robot must naviga
 algorithm (e.g., A* or RRT) has the highest chance of success under current conditions like battery level or system load.
 """
 
-import joblib
 import numpy as np
-import os
 import yaml, json
+import traceback
+import joblib
+import os
 
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from typing import List
+from typing import List, Any, Dict, Tuple
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.base_heuristic import BaseHeuristics
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Gradient Boosting Heuristic")
@@ -32,7 +34,7 @@ class DotDict(dict):
     def __getattr__(self, item):
         return self.get(item)
 
-class GradientBoostingHeuristic:
+class GradientBoostingHeuristic(BaseHeuristics):
     def __init__(self):
         self.config = load_global_config()
 
@@ -93,9 +95,17 @@ class GradientBoostingHeuristic:
             base_features.extend(['cpu_available', 'memory_available'])
         return base_features
 
-    def predict_success_prob(self, task, world_state, method_stats):
+    def predict_success_prob(
+        self,
+        task: Dict[str, Any],
+        world_state: Dict[str, Any],
+        method_stats: Dict[Tuple[str, str], Dict[str, int]],
+        method_id: str
+    ) -> float:
         printer.status("INIT", "Success prob predictor succesfully initialized", "info")
-
+        original_method = task.get("selected_method")
+        task["selected_method"] = method_id
+        
         try:
             if not self.trained:
                 model_path = os.path.join(self.heuristic_model_path, 'gb_heuristic_model.pkl')
@@ -108,7 +118,19 @@ class GradientBoostingHeuristic:
         except Exception as e:
             logger.error(f"Prediction failed: {str(e)}")
             return 0.5  # Fallback to neutral probability
-                
+
+        # Call existing implementation
+        prob = self._predict_success_prob(task, world_state, method_stats)
+
+        # Restore original method
+        if original_method is not None:
+            task["selected_method"] = original_method
+        else:
+            del task["selected_method"]
+
+        return prob
+
+    def _predict_success_prob(self, task, world_state, method_stats) -> float:
         features = self.extract_features(task, world_state, method_stats)
         scaled_features = self.scaler.transform(features.reshape(1, -1))
         return self.model.predict_proba(scaled_features)[0][1]
@@ -122,6 +144,7 @@ class GradientBoostingHeuristic:
             
             # Base features
             features[feature_idx] = self._calculate_task_depth(task)
+            
             feature_idx += 1
             
             features[feature_idx] = self._calculate_goal_overlap(task, world_state)
@@ -144,41 +167,11 @@ class GradientBoostingHeuristic:
                 features[feature_idx] = world_state.get('memory_available', 0)
                 feature_idx += 1
         except Exception as e:
-            logger.error(f"Feature extraction failed: {str(e)}")
+            logger.error(f"Feature extraction failed: {str(e)}\n{traceback.format_exc()}")
             return np.zeros(len(self.feature_names))
 
         return features.astype(np.float32)
 
-    def _calculate_task_depth(self, task):
-        printer.status("INIT", "task depth calculation succesfully initialized", "info")
-
-        depth = 0
-        current = task
-        while current and isinstance(current, dict) and current.get("parent"):
-            depth += 1
-            current = current["parent"]
-        return depth / 10  # Normalized
-
-    def _calculate_goal_overlap(self, task, world_state):
-        printer.status("INIT", "Goal overlap calculation succesfully initialized", "info")
-    
-        goal_state = task.get("goal_state", {})
-        return len(set(goal_state.keys()) & set(world_state.keys())) / len(goal_state) if goal_state else 0.0
-
-    def _calculate_method_failure_rate(self, task, method_stats):
-        printer.status("INIT", "Failure rate calculation succesfully initialized", "info")
-    
-        key = (task.get("name"), task.get("selected_method"))
-        stats = method_stats.get(key, {'success': 1, 'total': 2})
-        return 1 - (stats['success'] / stats['total']) if stats['total'] > 0 else 1.0
-
-    def _calculate_state_diversity(self, world_state):
-        printer.status("INIT", "State diversity calculation succesfully initialized", "info")
-
-        state_vals = [float(v) for v in world_state.values() 
-                     if isinstance(v, (int, float))]
-        return np.std(state_vals) if state_vals else 0
-    
     def load_training_data(self):
         """Load and preprocess historical execution data"""
         printer.status("INIT", "Training data loaded", "info")
@@ -271,19 +264,18 @@ class GradientBoostingHeuristic:
     def select_best_method(self, task, world_state, candidate_methods):
         """Select method with highest predicted success probability"""
         printer.status("INIT", "Method selecter succesfully initialized", "info")
-
+    
         best_method = None
         best_prob = -1
         
         for method_id in candidate_methods:
-            task["selected_method"] = method_id
-            prob = self.predict_success_prob(task, world_state, {})
+            prob = self.predict_success_prob(task, world_state, {}, method_id)
             if prob > best_prob:
                 best_prob = prob
                 best_method = method_id
                 
         return best_method, best_prob
-    
+
     def update_model(self, task, world_state, outcome):
         """Update model with new execution result"""
         printer.status("INIT", "Model update succesfully initialized", "info")
@@ -298,8 +290,22 @@ class GradientBoostingHeuristic:
         features = self.extract_features(task, world_state, {})
         
         # Partial model update
-        self.model.partial_fit(features.reshape(1, -1), [label])
-        
+        # self.model.partial_fit(features.reshape(1, -1), [label])
+
+        # Append to training database
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), self.planning_db_path)
+        with open(db_path, "r+", encoding="utf-8") as f:
+            data = json.load(f)
+            data["tasks"].append({**task, "outcome": outcome})
+            data["world_states"].append(world_state)
+            f.seek(0)
+            json.dump(data, f, indent=2)
+            f.truncate()
+
+        # Retrain the model using the updated data
+        X, y = self.load_training_data()
+        self.train(X, y)
+
         # Update feature importances
         self.feature_importances_ = self.model.feature_importances_
         logger.info("Model updated with new execution data")
@@ -338,6 +344,7 @@ if __name__ == "__main__":
     stats = {
         ("navigate_to_room", 0): {"success": 8, "total": 10}
     }
+    id = 784545
 
     features = planner02.extract_features(task=task, world_state=state, method_stats=stats)
     printer.pretty("Extracted Features:", features, "Success")

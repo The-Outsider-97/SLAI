@@ -2,21 +2,19 @@
 The probabilistic circuit operations are designed to be tractable while
 supporting the complex reasoning required by ProbabilisticModels.
 """
+import random
 import time
 import math
+import traceback
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Tuple, Dict, Any, List
 
-#from src.agents.base.utils.math_science import (
-#    sigmoid, sigmoid_derivative, relu, relu_derivative, tanh, tanh_derivative,
-#    leaky_relu, leaky_relu_derivative, elu, elu_derivative, swish, swish_derivative,
-#    cross_entropy, cross_entropy_derivative)
 from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from src.agents.reasoning.utils.nodes import SumNode, ProductNode
 from logs.logger import get_logger, PrettyPrinter
@@ -24,31 +22,19 @@ from logs.logger import get_logger, PrettyPrinter
 logger = get_logger("Model Compute")
 printer = PrettyPrinter
 
-#=====================================================
-# Activation Functions and their Derivatives
-#=====================================================
-
-#ACTIVATION_FUNCTIONS: Dict[str, Tuple[Callable, Callable, bool]] = {
-#    'sigmoid': (sigmoid, sigmoid_derivative, False),
-#    'relu': (relu, relu_derivative, False),
-#    'tanh': (tanh, tanh_derivative, False),
-#    'leaky_relu': (leaky_relu, leaky_relu_derivative, True),
-#    'elu': (elu, elu_derivative, True),
-#    'swish': (swish, swish_derivative, False),
-#    'entropy': (cross_entropy, cross_entropy_derivative, False),
-#    'linear': (lambda x: x, lambda x: 1.0, False)
-#}
-
-class ModelCompute:
+class ModelCompute(nn.Module):
     """Probabilistic circuit operations manager"""
     def __init__(self, circuit: nn.Module = None):
-        printer.section_header("Probabilistic Inference")
+        super().__init__()
         self.config = load_global_config()
-        self.validation_config = get_config_section('model_compute')
+        self.learning_rate = self.config.get('learning_rate')
+
+        self.model_config = get_config_section('model_compute')
+        self.schema_version = self.model_config.get('schema_version')
+        self.reduction = self.model_config.get('reduction')
 
         # Initialize probabilistic circuit
         try:
-            self._circuit = None
             self.optimizer = None
             self.loss_fn = nn.KLDivLoss(reduction='batchmean')
             self.circuit = circuit 
@@ -58,9 +44,8 @@ class ModelCompute:
 
         # Epistemic state tracking
         self.belief_history = {}
-        self.schema_version = 1.0
 
-        logger.info(f"Model Compute succesfully initialized with: Schema V.{self.schema_version}")
+        printer.status("INIT", f"Model Compute succesfully initialized with: Schema V.{self.schema_version}", "success")
 
     @property
     def circuit(self):
@@ -72,21 +57,19 @@ class ModelCompute:
         if value is not None:
             self.optimizer = optim.Adam(
                 value.parameters(), 
-                lr=self.config.get('lr', 0.001)
+                self.learning_rate
             )
             logger.info("Optimizer initialized with circuit parameters")
         else:
             self.optimizer = None
             logger.warning("Circuit set to None - optimizer disabled")
 
-    def _default_circuit(self) -> nn.Module:
-        """Default probabilistic circuit architecture"""
-        return nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            ProbabilisticLayer(256, 128),
-            nn.Softmax(dim=1)
-        )
+    def _tensor_to_state(self, probs: torch.Tensor) -> Dict[str, float]:
+        """Convert tensor output to state dictionary"""
+        return {
+            var: probs[0, i].item()
+            for i, var in enumerate(self.circuit.output_vars)
+        }
 
     #=====================================================
     # Core Probabilistic Circuit Operations
@@ -94,8 +77,22 @@ class ModelCompute:
 
     def compute_marginal_probability(self, variables: Tuple[str], evidence: Dict[str, Any]) -> float:
         """Compute marginal probability using circuit with evidence clamping"""
-        if not self.circuit:
+        # Robust circuit validation
+        if self.circuit is None:
             raise ValueError("Circuit not initialized")
+        if not hasattr(self.circuit, 'input_vars'):
+            raise AttributeError("Circuit missing 'input_vars' attribute")
+        if not hasattr(self.circuit, 'var_index'):
+            raise AttributeError("Circuit missing 'var_index' attribute")
+        if not isinstance(self.circuit.input_vars, list) or len(self.circuit.input_vars) == 0:
+            raise ValueError("Circuit input_vars must be a non-empty list")
+        if not isinstance(self.circuit.var_index, dict) or len(self.circuit.var_index) == 0:
+            raise ValueError("Circuit var_index must be a non-empty dictionary")
+        
+        # Validate variables
+        invalid_vars = [v for v in variables if v not in self.circuit.var_index]
+        if invalid_vars:
+            raise ValueError(f"Variables not found in circuit: {invalid_vars}")
         
         # Convert evidence to tensor format
         input_tensor = self._evidence_to_tensor(evidence)
@@ -212,7 +209,7 @@ class ModelCompute:
         """Cognitive consistency maintenance via regularization"""
         # Add epistemic regularization term
         for param in self.circuit.parameters():
-            param.grad += 0.01 * torch.sign(param.data)  # L1 regularization
+            param.grad += 0.01 * torch.sign(param)  # L1 regularization
         
         # Apply constraints for cognitive consistency
         self.enforce_circuit_constraints()
@@ -257,11 +254,11 @@ class ModelCompute:
             # Enforce sum-to-one constraint
             for node in self.circuit.nodes:
                 if isinstance(node, SumNode):
-                    node.weights.data = F.normalize(node.weights.data, p=1, dim=0)
+                    node.weights = F.normalize(node.weights, p=1, dim=0)
             
             # Enforce non-negativity
             for param in self.circuit.parameters():
-                param.data = torch.clamp(param.data, min=0)
+                param = torch.clamp(param, min=0)
 
     #=====================================================
     # Interpretability and Explainability
@@ -291,7 +288,7 @@ class ModelCompute:
         biases = {}
         for name, param in self.circuit.named_parameters():
             if 'bias' in name:
-                biases[name] = param.data.mean().item()
+                biases[name] = param.mean().item()
         
         # Add epistemic bias metrics
         biases['schema_rigidity'] = self._calculate_schema_rigidity()
@@ -396,267 +393,38 @@ class ModelCompute:
             
         return torch.tensor(inputs), torch.tensor(targets)
 
-
-#=====================================================
-# Supporting Circuit Components
-#=====================================================
-
-class ProbabilisticLayer(nn.Module):
-    """Tractable probabilistic layer with structure constraints"""
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.weights = nn.Parameter(torch.randn(out_features, in_features))
-        self.bias = nn.Parameter(torch.zeros(out_features))
-        
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the adaptive circuit:
-        1. Validates input dimensions
-        2. Generates knowledge base features
-        3. Combines input with KB features
-        4. Processes through neural network layers
-        5. Returns probability distribution over BN nodes
-        
-        Args:
-            x: Input tensor representing states of Bayesian Network nodes.
-               Shape: (batch_size, num_bn_nodes). Values in [0,1] range.
-        
-        Returns:
-            Probability distribution over BN nodes.
-            Shape: (batch_size, num_bn_nodes). Values in (0,1) range.
-        """
-        # Validate input dimensions
-        if x.dim() != 2 or x.size(1) != self.num_bn_nodes:
-            raise ValueError(f"Input tensor must be 2D with shape (batch_size, {self.num_bn_nodes}). "
-                             f"Received shape: {tuple(x.shape)}")
-        
-        # Generate KB features (returns None if no KB embedding)
-        kb_features = self._get_kb_features_for_input(x)
-        
-        # Combine BN node states with KB features
-        if kb_features is not None:
-            # kb_features shape: (batch_size, num_bn_nodes * embedding_dim)
-            combined_input = torch.cat([x, kb_features], dim=1)
-        else:
-            combined_input = x
-        
-        # Neural network processing pipeline
-        # Layer 1: Fully connected + ReLU
-        h1 = self.fc1(combined_input)
-        h1_activated = F.relu(h1)
-        
-        # Normalization and regularization
-        h1_norm = self.bn_layer_norm(h1_activated)
-        h1_dropped = self.dropout(h1_norm)
-        
-        # Layer 2: Fully connected + ReLU
-        h2 = self.fc2(h1_dropped)
-        h2_activated = F.relu(h2)
-        
-        # Output layer: Logits for each BN node
-        logits = self.fc3(h2_activated)
-        
-        # Convert logits to probabilities
-        probabilities = torch.sigmoid(logits)
-        
-        return probabilities
-
-    def compute_scopes(self) -> Dict[str, set]:
-        """
-        Computes the scope of each node in the circuit by analyzing the computational graph.
-        The scope of a node is the set of input variables that influence its output.
-        
-        Returns:
-            Dictionary mapping layer names to sets of input variables they depend on
-        """
-        scopes = {}
-        # Initialize scopes for input nodes
-        for i, node_name in enumerate(self.input_vars):
-            scopes[f'input_{node_name}'] = {node_name}
-        
-        # Create dependency graph
-        graph = {
-            'fc1': set(self.input_vars),
-            'bn_layer_norm': {'fc1'},
-            'dropout': {'bn_layer_norm'},
-            'fc2': {'dropout'},
-            'fc3': {'fc2'},
-            'output': {'fc3'}
-        }
-        
-        # Propagate scopes through the computational graph
-        scopes['fc1'] = set(self.input_vars)
-        scopes['bn_layer_norm'] = scopes['fc1']
-        scopes['dropout'] = scopes['bn_layer_norm']
-        scopes['fc2'] = scopes['dropout']
-        scopes['fc3'] = scopes['fc2']
-        scopes['output'] = scopes['fc3']
-        
-        # Add KB embedding scope if present
-        if self.kb_embedding:
-            kb_scope = set()
-            for fact in self.knowledge_base.keys():
-                if isinstance(fact, tuple):
-                    kb_scope |= set(str(item) for item in fact)
-            graph['kb_embedding'] = kb_scope
-            scopes['kb_embedding'] = kb_scope
-            scopes['fc1'] |= kb_scope
-        
-        logger.debug(f"Computed scopes for {len(scopes)} nodes")
-        return scopes
-
-    def trace_activations(self, input_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Traces activations through the network, capturing intermediate layer outputs.
-        
-        Args:
-            input_tensor: Input to the circuit (batch_size, num_bn_nodes)
-            
-        Returns:
-            Dictionary of layer names to their activation tensors
-        """
-        activations = {}
-        with torch.no_grad():
-            # Store input
-            activations['input'] = input_tensor.clone()
-            
-            # KB features if available
-            kb_features = self._get_kb_features_for_input(input_tensor)
-            if kb_features is not None:
-                activations['kb_features'] = kb_features.clone()
-                combined_input = torch.cat([input_tensor, kb_features], dim=1)
-            else:
-                combined_input = input_tensor
-                
-            # Forward pass through layers
-            h1 = self.fc1(combined_input)
-            activations['fc1_pre_act'] = h1.clone()
-            
-            h1_relu = F.relu(h1)
-            activations['relu1'] = h1_relu.clone()
-            
-            h1_norm = self.bn_layer_norm(h1_relu)
-            activations['bn_layer_norm'] = h1_norm.clone()
-            
-            h1_dropped = self.dropout(h1_norm)
-            activations['dropout'] = h1_dropped.clone()
-            
-            h2 = self.fc2(h1_dropped)
-            activations['fc2_pre_act'] = h2.clone()
-            
-            h2_relu = F.relu(h2)
-            activations['relu2'] = h2_relu.clone()
-            
-            logits = self.fc3(h2_relu)
-            activations['fc3_logits'] = logits.clone()
-            
-            probabilities = torch.sigmoid(logits)
-            activations['output_probabilities'] = probabilities.clone()
-        
-        logger.debug(f"Traced activations for {len(activations)} layers")
-        return activations
-
-    @property
-    def nodes(self) -> List[Tuple[str, nn.Module]]:
-        """
-        Returns a list of named nodes in the circuit with their corresponding modules.
-        
-        Returns:
-            List of (node_name, module) tuples
-        """
-        node_list = [
-            ('fc1', self.fc1),
-            ('bn_layer_norm', self.bn_layer_norm),
-            ('dropout', self.dropout),
-            ('fc2', self.fc2),
-            ('fc3', self.fc3)
-        ]
-        
-        if self.kb_embedding:
-            node_list.insert(0, ('kb_embedding', self.kb_embedding))
-        
-        return node_list
-
-    @property
-    def root(self) -> nn.Module:
-        """
-        Returns the root module of the circuit (output layer).
-        
-        Returns:
-            Output layer module
-        """
-        return self.fc3
-
-    def to_evidence_dict(self, input_tensor: torch.Tensor = None) -> Dict[str, Any]:
-        """
-        Converts the circuit's state or output to an evidence dictionary.
-        If input is provided, includes output probabilities.
-        
-        Args:
-            input_tensor: Optional input to generate output evidence
-            
-        Returns:
-            Evidence dictionary containing:
-            - node_states: Current probability distributions
-            - parameters: Model metadata
-            - scopes: Variable dependencies
-        """
-        printer.status("Evidence", f"{input_tensor}")
-        evidence = {
-            'metadata': {
-                'model_type': 'AdaptiveCircuit',
-                'input_vars': self.input_vars,
-                'output_vars': self.output_vars,
-                'num_parameters': sum(p.numel() for p in self.parameters())
-            },
-            'scopes': self.compute_scopes()
-        }
-        
-        # Add current state if input is provided
-        if input_tensor is not None:
-            with torch.no_grad():
-                output = self.forward(input_tensor)
-                evidence['node_states'] = {
-                    var: output[0, i].item()
-                    for i, var in enumerate(self.output_vars)
-                }
-                evidence['timestamp'] = time.time()
-        
-        # Add parameter summaries
-        param_stats = {}
-        for name, param in self.named_parameters():
-            param_stats[name] = {
-                'mean': param.data.mean().item(),
-                'std': param.data.std().item(),
-                'min': param.data.min().item(),
-                'max': param.data.max().item()
-            }
-        evidence['parameter_stats'] = param_stats
-        
-        logger.debug("Generated evidence dictionary")
-        return evidence
-
 if __name__ == "__main__":
     print("\n=== Running Model Compute ===")
     printer.section_header("Model Compute Initialization")
 
     class TestCircuit(nn.Module):
-        """Simple circuit for testing ModelCompute"""
+        """Robust test circuit with all required attributes"""
         def __init__(self):
             super().__init__()
             self.input_vars = ['var_0', 'var_1', 'var_2']
-            self.var_index = {v: i for i, v in enumerate(self.input_vars)}
             self.output_vars = self.input_vars
+            self.var_index = {v: i for i, v in enumerate(self.input_vars)}
+            self.root = self  # Required for sampling
+            self.children = []  # Required for sampling
+            
             self.net = nn.Sequential(
                 nn.Linear(3, 10),
                 nn.ReLU(),
                 nn.Linear(10, 3),
-                nn.Softmax(dim=1)
+                nn.Sigmoid()  # Changed to sigmoid for probability outputs
             )
             
         def forward(self, x):
             return self.net(x)
+            
+        def compute_scopes(self):
+            return {v: {v} for v in self.input_vars}
+            
+        def trace_activations(self, input_tensor):
+            return {"fc1": 0.5, "relu1": 0.8, "output": 1.0}
+            
+        def to_evidence_dict(self):  # Required for sampling
+            return {v: random.random() for v in self.input_vars}
 
     test_circuit = TestCircuit()
     
@@ -674,5 +442,6 @@ if __name__ == "__main__":
                       f"Marginal probability for {query}: {result:.4f}", 
                       "success")
     except Exception as e:
+        traceback.print_exc()
         printer.status("Error", f"Computation failed: {str(e)}", "error")
     print("\n=== Successfully Model Compute ===\n")

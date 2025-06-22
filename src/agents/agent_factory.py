@@ -210,6 +210,10 @@ class AgentFactory:
 
         logger.info("Adaptation cycle complete. Global config updated.")
 
+    def validate_with_azr(self, fact_tuple):
+        self.bzr = BasicZeroReasoner()
+        return 0.0
+
 if __name__ == "__main__":
     print("\n=== Running Agent Factory Test ===\n")
     printer.status("Init", "Agent Factory initialized", "success")

@@ -1,0 +1,521 @@
+{
+  "nodes": [
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "C0",
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "D0",
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7"
+  ],
+  "edges": [
+    [
+      "A0",
+      "A1"
+    ],
+    [
+      "A1",
+      "A2"
+    ],
+    [
+      "A2",
+      "A3"
+    ],
+    [
+      "A3",
+      "A4"
+    ],
+    [
+      "A4",
+      "A5"
+    ],
+    [
+      "A5",
+      "A6"
+    ],
+    [
+      "A6",
+      "A7"
+    ],
+    [
+      "B0",
+      "B1"
+    ],
+    [
+      "B1",
+      "B2"
+    ],
+    [
+      "B2",
+      "B3"
+    ],
+    [
+      "B3",
+      "B4"
+    ],
+    [
+      "B4",
+      "B5"
+    ],
+    [
+      "B5",
+      "B6"
+    ],
+    [
+      "B6",
+      "B7"
+    ],
+    [
+      "C0",
+      "C1"
+    ],
+    [
+      "C1",
+      "C2"
+    ],
+    [
+      "C2",
+      "C3"
+    ],
+    [
+      "C3",
+      "C4"
+    ],
+    [
+      "C4",
+      "C5"
+    ],
+    [
+      "C5",
+      "C6"
+    ],
+    [
+      "C6",
+      "C7"
+    ],
+    [
+      "D0",
+      "D1"
+    ],
+    [
+      "D1",
+      "D2"
+    ],
+    [
+      "D2",
+      "D3"
+    ],
+    [
+      "D3",
+      "D4"
+    ],
+    [
+      "D4",
+      "D5"
+    ],
+    [
+      "D5",
+      "D6"
+    ],
+    [
+      "D6",
+      "D7"
+    ]
+  ],
+  "cpt": {
+    "A0": {
+      "prior": 0.6
+    },
+    "A1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "A7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B0": {
+      "prior": 0.6
+    },
+    "B1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "B7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C0": {
+      "prior": 0.6
+    },
+    "C1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "C7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D0": {
+      "prior": 0.6
+    },
+    "D1": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D2": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D3": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D4": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D5": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D6": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    },
+    "D7": {
+      "True": {
+        "True": 0.9,
+        "False": 0.1
+      },
+      "False": {
+        "True": 0.3,
+        "False": 0.7
+      }
+    }
+  },
+  "description": "32-node Bayesian network: Four independent 8-node chains (A, B, C, D)",
+  "metadata": {
+    "node_descriptions": {
+      "A0": "A0 in chain A",
+      "A1": "A1 in chain A",
+      "A2": "A2 in chain A",
+      "A3": "A3 in chain A",
+      "A4": "A4 in chain A",
+      "A5": "A5 in chain A",
+      "A6": "A6 in chain A",
+      "A7": "A7 in chain A",
+      "B0": "B0 in chain B",
+      "B1": "B1 in chain B",
+      "B2": "B2 in chain B",
+      "B3": "B3 in chain B",
+      "B4": "B4 in chain B",
+      "B5": "B5 in chain B",
+      "B6": "B6 in chain B",
+      "B7": "B7 in chain B",
+      "C0": "C0 in chain C",
+      "C1": "C1 in chain C",
+      "C2": "C2 in chain C",
+      "C3": "C3 in chain C",
+      "C4": "C4 in chain C",
+      "C5": "C5 in chain C",
+      "C6": "C6 in chain C",
+      "C7": "C7 in chain C",
+      "D0": "D0 in chain D",
+      "D1": "D1 in chain D",
+      "D2": "D2 in chain D",
+      "D3": "D3 in chain D",
+      "D4": "D4 in chain D",
+      "D5": "D5 in chain D",
+      "D6": "D6 in chain D",
+      "D7": "D7 in chain D"
+    },
+    "dependency_types": {
+      "directed": [
+        "A0\u2192A1",
+        "A1\u2192A2",
+        "A2\u2192A3",
+        "A3\u2192A4",
+        "A4\u2192A5",
+        "A5\u2192A6",
+        "A6\u2192A7",
+        "B0\u2192B1",
+        "B1\u2192B2",
+        "B2\u2192B3",
+        "B3\u2192B4",
+        "B4\u2192B5",
+        "B5\u2192B6",
+        "B6\u2192B7",
+        "C0\u2192C1",
+        "C1\u2192C2",
+        "C2\u2192C3",
+        "C3\u2192C4",
+        "C4\u2192C5",
+        "C5\u2192C6",
+        "C6\u2192C7",
+        "D0\u2192D1",
+        "D1\u2192D2",
+        "D2\u2192D3",
+        "D3\u2192D4",
+        "D4\u2192D5",
+        "D5\u2192D6",
+        "D6\u2192D7"
+      ]
+    }
+  },
+  "constraints": {
+    "sum_to_1": true,
+    "no_cycles": true,
+    "allowed_probability_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

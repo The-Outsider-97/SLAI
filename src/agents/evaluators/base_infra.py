@@ -51,13 +51,8 @@ class InfrastructureManager:
 
     def _init_tuner(self):
         """Initialize tuner using infrastructure manager config"""
-        return HyperparamTuner(
-            evaluation_function=self._agent_evaluator,
-            strategy=self.config.get('tuning_strategy', 'bayesian'),
-            n_calls=self.config.get('n_calls', 20),
-            n_random_starts=self.config.get('n_random_starts', 5),
-            config_path="src/tuning/configs/hyperparam.yaml"
-        )
+        return HyperparamTuner(model_type=None,
+            evaluation_function=self._agent_evaluator)
 
     def _agent_evaluator(self, params):
         """Integrated evaluation function using agent's metrics"""
@@ -291,16 +286,9 @@ class RollbackSystem:
 
 class HyperparamTuner(BaseTuner):
     """Extended tuner with rollback integration"""
-    def __init__(self, evaluation_function, strategy='bayesian', 
-                 n_calls=20, n_random_starts=5, **kwargs):
-        super().__init__(
-            evaluation_function=evaluation_function,
-            strategy=strategy,
-            n_calls=n_calls,
-            n_random_starts=n_random_starts,
-            config_path=self._get_config_path(strategy),
-            allow_generate=True
-        )
+    def __init__(self, evaluation_function, model_type=None, **kwargs):
+        super().__init__(model_type=None,
+            evaluation_function=evaluation_function)
         self.rollback = RollbackSystem(kwargs.get('rollback_config', {}))
         self.best_state = None
 

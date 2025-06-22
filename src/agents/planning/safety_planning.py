@@ -935,11 +935,13 @@ class ResourceMonitor:
                 return self._query_consul_cluster()
             elif self.mode == 'k8s':
                 return self._query_kubernetes_cluster()
-            else:  # Default to static config
+            else:
+                if not self.static_nodes:
+                    return ['localhost']
                 return self.static_nodes
         except Exception as e:
             logger.error(f"Service discovery failed: {str(e)}")
-            return list(self._node_cache.keys())  # Fallback to cached nodes
+            return list(self._node_cache.keys())
 
     def _query_consul_cluster(self):
         """Query Consul service discovery"""
@@ -1024,8 +1026,18 @@ class ResourceMonitor:
             nodes = self._discover_cluster_nodes()
             seen_hardware = set()
     
-            if not nodes:  # Add check for empty node list
+            if not nodes:
                 logger.warning("No cluster nodes discovered")
+                standalone_resources = ClusterResources(
+                    gpu_total=1,
+                    ram_total=32,
+                    specialized_hardware_available=[],
+                    current_allocations={}
+                )
+                if standalone_resources != self.cluster_resources:
+                    self.cluster_resources = standalone_resources
+                    # Show actual RAM value in log
+                    logger.info(f"Using standalone resource profile: 1 GPU, {standalone_resources.ram_total} GB RAM")
                 return
             
             for node_id in nodes:

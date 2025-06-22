@@ -1,0 +1,69 @@
+{
+  "nodes": [
+    "N00",
+    "N01",
+    "N10",
+    "N11"
+  ],
+  "edges": [
+    [
+      "N00",
+      "N01"
+    ],
+    [
+      "N00",
+      "N10"
+    ],
+    [
+      "N01",
+      "N11"
+    ],
+    [
+      "N10",
+      "N11"
+    ]
+  ],
+  "cpt": {
+    "N00": {
+      "prior": 0.5
+    },
+    "N01": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N10": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N11": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    }
+  }
+}

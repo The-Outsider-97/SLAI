@@ -1,0 +1,180 @@
+{
+  "nodes": [
+    "N00",
+    "N01",
+    "N02",
+    "N10",
+    "N11",
+    "N12",
+    "N20",
+    "N21",
+    "N22"
+  ],
+  "edges": [
+    [
+      "N00",
+      "N01"
+    ],
+    [
+      "N00",
+      "N10"
+    ],
+    [
+      "N01",
+      "N02"
+    ],
+    [
+      "N01",
+      "N11"
+    ],
+    [
+      "N02",
+      "N12"
+    ],
+    [
+      "N10",
+      "N11"
+    ],
+    [
+      "N10",
+      "N20"
+    ],
+    [
+      "N11",
+      "N12"
+    ],
+    [
+      "N11",
+      "N21"
+    ],
+    [
+      "N12",
+      "N22"
+    ],
+    [
+      "N20",
+      "N21"
+    ],
+    [
+      "N21",
+      "N22"
+    ]
+  ],
+  "cpt": {
+    "N00": {
+      "prior": 0.5
+    },
+    "N01": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N02": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N10": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N11": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N12": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N20": {
+      "False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N21": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    },
+    "N22": {
+      "False,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "False,True": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,False": {
+        "True": 0.6,
+        "False": 0.4
+      },
+      "True,True": {
+        "True": 0.6,
+        "False": 0.4
+      }
+    }
+  }
+}

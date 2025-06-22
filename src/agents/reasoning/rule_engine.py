@@ -9,20 +9,35 @@ from collections import defaultdict
 
 from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from src.agents.reasoning.reasoning_memory import ReasoningMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Rule Engine")
+printer = PrettyPrinter
 
 class RuleEngine:
-    def __init__(self, knowledge_base: Dict[Tuple, float] = None):
+    def __init__(self):
         self.config = load_global_config()
-        self.validation_config = get_config_section('rules')
+        self.rules_config = get_config_section('rules')
+        self.enable_learning = self.rules_config.get('enable_learning')
+        self.min_support = self.rules_config.get('min_support')
+        self.min_confidence = self.rules_config.get('min_confidence')
+        self.auto_weight_adjustment = self.rules_config.get('auto_weight_adjustment')
+        self._max_circular_depth = self.rules_config.get('max_circular_depth')
+        self.max_utterance_length = self.rules_config.get('max_utterance_length')
+        self.discourse_markers_path = self.rules_config.get('discourse_markers_path')
+        self.politeness_strategies_path = self.rules_config.get('politeness_strategies_path')
+
+        self.storage_config = get_config_section('storage')
+        self.knowledge_db_path = self.storage_config.get('knowledge_db')
+        self.lexicon_path = self.storage_config.get('lexicon_path')
+        self.dependency_rules_path = self.storage_config.get('dependency_rules_path')
 
         # Initialize core components
-        self.knowledge_base = knowledge_base or self._load_knowledge_base()
-        self.sentiment_lexicon = self._load_sentiment_lexicon()
-        self.pragmatic_heuristics = self._load_pragmatic_heuristics()
+        self.knowledge_base = self._load_knowledge_base(Path(self.knowledge_db_path))
+        self.sentiment_lexicon = self._load_sentiment_lexicon(Path(self.lexicon_path))
+        self.pos_patterns  = self._load_pos_patterns(Path(self.dependency_rules_path))
         self.dependency_rules = self._create_dependency_rules()
+        self.pragmatic_heuristics = self._load_pragmatic_heuristics()
 
         self.reasoning_memory = ReasoningMemory()
         # Initialize rule storage
@@ -37,39 +52,32 @@ class RuleEngine:
         logger.info(f" - {len(self.sentiment_lexicon['positive'])} sentiment terms")
         logger.info(f" - {len(self.dependency_rules)} dependency grammar rules")
 
-    def _load_knowledge_base(self) -> Dict[Tuple, float]:
+    @property
+    def max_circular_depth(self) -> int:
+        return self._max_circular_depth
+
+    def _load_knowledge_base(self, kb_path: Path) -> Dict[Tuple, Any]:
         """
         Load knowledge base with fact confidences.
-        This version attempts to read facts primarily from a "knowledge" key 
-        within the JSON file, expecting a dictionary of "s||p||o": confidence.
-        It includes a fallback to read from the root if "knowledge" is not found
-        or not in the expected dictionary format.
+        Handles multiple formats:
+        - "knowledge" key with dictionary of "s||p||o": confidence
+        - "knowledge" key with list of [s, p, o, confidence]
+        - "knowledge" key with list of dictionaries
+        - Fallback to root-level dictionary
         """
-        # Path to knowledge_db.json is taken from the global config
-        kb_path_str = self.config.get('storage', {}).get('knowledge_db')
-        if not kb_path_str:
-            logger.error("Knowledge base path not found in configuration (storage.knowledge_db).")
-            return {}
-        
-        kb_path = Path(kb_path_str)
-
         if not kb_path.exists():
-            logger.error(f"Knowledge base file not found: {kb_path}")
-            # Depending on strictness, you might raise FileNotFoundError here
-            # raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
-            return {}
-            
+            raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
         logger.info(f"Loading knowledge base from {kb_path}")
         parsed_kb: Dict[Tuple, float] = {}
         try:
             with open(kb_path, 'r', encoding='utf-8') as f:
                 full_kb_data = json.load(f)
-            
-            # Primary expectation: facts are under a "knowledge" key as a dictionary.
-            # e.g., "knowledge": {"cat||is_animal||True": 0.9, ...}
+
+            # Primary expectation: facts are under a "knowledge" key
             facts_data_source = full_kb_data.get('knowledge')
 
             if isinstance(facts_data_source, dict):
+                # Format: {"s||p||o": confidence}
                 logger.info(f"Found 'knowledge' dictionary in {kb_path}. Parsing facts...")
                 for k, v in facts_data_source.items():
                     if not isinstance(k, str) or "||" not in k:
@@ -77,94 +85,88 @@ class RuleEngine:
                         continue
                     try:
                         parts = k.split('||')
-                        if len(parts) == 3: # s, p, o
+                        if len(parts) == 3:
                             obj_str = parts[2]
-                            # Convert common boolean strings to actual booleans
                             if obj_str.lower() == 'true':
                                 obj_val = True
                             elif obj_str.lower() == 'false':
                                 obj_val = False
                             else:
-                                obj_val = obj_str # Keep as string if not 'true'/'false'
-                            
+                                obj_val = obj_str
                             fact_tuple = (parts[0], parts[1], obj_val)
                             parsed_kb[fact_tuple] = float(v)
                         else:
                             logger.warning(f"Fact key '{k}' in 'knowledge' dict does not have 3 parts. Skipping.")
-                    except ValueError:
-                        logger.error(f"Error converting confidence for fact '{k}': '{v}' to float. Skipping.")
                     except Exception as e:
-                        logger.error(f"Error parsing fact '{k}': {v} from 'knowledge' dict: {e}")
-            
+                        logger.error(f"Error parsing fact '{k}': {e}")
+
             elif isinstance(facts_data_source, list):
-                # This handles the case where "knowledge": [] (empty list)
-                if not facts_data_source:
-                    logger.info(f"'knowledge' field in {kb_path} is an empty list. No facts loaded from this field.")
-                else:
-                    # If it's a list of {"fact_string": "s||p||o", "confidence": 0.9}
-                    # or list of {"subject":s, "predicate":p, "object":o, "confidence":0.9}
-                    # This part would need to be more specific based on the actual list structure.
-                    # For now, we log a warning if it's a non-empty list and not a dict.
-                    logger.warning(f"'knowledge' field in {kb_path} is a list, but a dictionary was primarily expected. "
-                                   f"Attempting to parse list items if structured specifically (not fully generic).")
-                    # Example: parsing list of {"s||p||o": conf} dicts (less common)
-                    for item_dict in facts_data_source:
-                        if isinstance(item_dict, dict):
-                            for k, v in item_dict.items(): # Assuming one fact per dict in list
-                                if isinstance(k, str) and "||" in k:
-                                    parts = k.split('||')
-                                    if len(parts) == 3:
-                                        obj_str = parts[2]
-                                        if obj_str.lower() == 'true': obj_val = True
-                                        elif obj_str.lower() == 'false': obj_val = False
-                                        else: obj_val = obj_str
-                                        parsed_kb[(parts[0], parts[1], obj_val)] = float(v)
-                                    break # Process first valid key-value pair
-            
-            elif facts_data_source is None:
-                logger.warning(f"'knowledge' key not found in {kb_path}.")
-                # Fallback: Check if the root of the JSON is the fact dictionary itself
-                # This maintains compatibility if knowledge_db.json is flat like {"s||p||o": conf, ...}
-                if isinstance(full_kb_data, dict):
-                    is_flat_fact_dict = True
-                    # Heuristic: check if most keys look like facts
-                    fact_like_keys = 0
-                    if len(full_kb_data) > 0: # Avoid division by zero
-                        for k_root in full_kb_data.keys():
-                            if isinstance(k_root, str) and "||" in k_root:
-                                fact_like_keys +=1
-                        if (fact_like_keys / len(full_kb_data)) < 0.5: # If less than half keys are fact-like, probably not it
-                            is_flat_fact_dict = False
-                    else: # Empty dict
-                        is_flat_fact_dict = False
-
-
-                    if is_flat_fact_dict:
-                        logger.info(f"Treating root of {kb_path} as facts dictionary (fallback).")
-                        for k, v in full_kb_data.items():
-                            if not isinstance(k, str) or "||" not in k:
-                                # This case should ideally not be hit if is_flat_fact_dict was true
-                                logger.warning(f"Skipping invalid fact key '{k}' at root. Expected 's||p||o' format.")
-                                continue
-                            try:
-                                parts = k.split('||')
-                                if len(parts) == 3:
-                                    obj_str = parts[2]
-                                    if obj_str.lower() == 'true': obj_val = True
-                                    elif obj_str.lower() == 'false': obj_val = False
-                                    else: obj_val = obj_str
-                                    parsed_kb[(parts[0], parts[1], obj_val)] = float(v)
+                logger.info(f"Found 'knowledge' list in {kb_path}. Parsing items...")
+                for item in facts_data_source:
+                    if isinstance(item, list) and len(item) == 4:
+                        # Format: [s, p, o, confidence]
+                        try:
+                            s, p, o, conf = item
+                            if isinstance(o, str):
+                                if o.lower() == 'true':
+                                    o_val = True
+                                elif o.lower() == 'false':
+                                    o_val = False
                                 else:
-                                    logger.warning(f"Fact key '{k}' at root does not have 3 parts. Skipping.")
-                            except ValueError:
-                                logger.error(f"Error converting confidence for fact '{k}': '{v}' (root) to float. Skipping.")
-                            except Exception as e:
-                                logger.error(f"Error parsing fact '{k}': {v} (root): {e}")
+                                    o_val = o
+                            else:
+                                o_val = o
+                            fact_tuple = (s, p, o_val)
+                            parsed_kb[fact_tuple] = float(conf)
+                        except Exception as e:
+                            logger.error(f"Error parsing fact from list: {item}: {e}")
+                    elif isinstance(item, dict):
+                        # Format: {"subject": s, "predicate": p, "object": o, "confidence": c}
+                        try:
+                            s = item.get("subject")
+                            p = item.get("predicate")
+                            o = item.get("object")
+                            conf = item.get("confidence", 0.5)
+                            if s is None or p is None or o is None:
+                                logger.warning(f"Skipping incomplete fact: {item}")
+                                continue
+                            if isinstance(o, str):
+                                if o.lower() == 'true':
+                                    o_val = True
+                                elif o.lower() == 'false':
+                                    o_val = False
+                                else:
+                                    o_val = o
+                            else:
+                                o_val = o
+                            fact_tuple = (s, p, o_val)
+                            parsed_kb[fact_tuple] = float(conf)
+                        except Exception as e:
+                            logger.error(f"Error parsing fact from dict: {item}: {e}")
                     else:
-                        logger.info(f"Root of {kb_path} is not a flat facts dictionary. No facts loaded from root.")
-                else:
-                    logger.info(f"Root of {kb_path} is not a dictionary. No facts loaded from root.")
+                        logger.warning(f"Unsupported item type in knowledge list: {type(item)}")
 
+            elif facts_data_source is None:
+                logger.warning(f"'knowledge' key not found in {kb_path}. Falling back to root.")
+                # Fallback: Check if root is a dictionary of facts
+                if isinstance(full_kb_data, dict):
+                    for k, v in full_kb_data.items():
+                        if not isinstance(k, str) or "||" not in k:
+                            continue
+                        try:
+                            parts = k.split('||')
+                            if len(parts) == 3:
+                                obj_str = parts[2]
+                                if obj_str.lower() == 'true':
+                                    obj_val = True
+                                elif obj_str.lower() == 'false':
+                                    obj_val = False
+                                else:
+                                    obj_val = obj_str
+                                fact_tuple = (parts[0], parts[1], obj_val)
+                                parsed_kb[fact_tuple] = float(v)
+                        except Exception as e:
+                            logger.error(f"Error parsing root-level fact '{k}': {e}")
 
             if not parsed_kb:
                 logger.info(f"No facts were successfully parsed from {kb_path} into the knowledge base.")
@@ -173,41 +175,73 @@ class RuleEngine:
 
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON from {kb_path}: {e}")
-            # raise ValueError(f"Invalid JSON format in {kb_path}") from e # Or return {}
             return {}
         except Exception as e:
             logger.error(f"An unexpected error occurred while loading knowledge base from {kb_path}: {e}")
-            return {} # Return empty on other errors to prevent crash
+            return {}
 
         return parsed_kb
 
-    def _load_sentiment_lexicon(self) -> Dict[str, Any]:
+    def _load_sentiment_lexicon(self, lexicon_path: Path) -> Dict[Tuple, Any]:
         """Load sentiment analysis resources"""
-        lexicon_path = Path(self.config['storage']['lexicon_path'])
         if not lexicon_path.exists():
-            raise FileNotFoundError(f"Sentiment lexicon not found: {lexicon_path}")
-            
+            raise FileNotFoundError(f"Sentiment lexicon file not found: {lexicon_path}")
+        
         logger.info(f"Loading sentiment lexicon from {lexicon_path}")
         with open(lexicon_path, 'r') as f:
-            return json.load(f)
+            lexicon = json.load(f)
+
+        # Log summary instead of entire lexicon
+        num_positive = len(lexicon.get('positive', {}))
+        num_negative = len(lexicon.get('negative', {}))
+        num_intensifiers = len(lexicon.get('intensifiers', {}))
+        num_negators = len(lexicon.get('negators', []))
+        
+        logger.info(f"Loaded lexicon with {num_positive} positive, {num_negative} negative, "
+                    f"{num_intensifiers} intensifiers, and {num_negators} negators")
+                    
+        return lexicon
+
+    def _load_pos_patterns(self, patterns_path: Path) -> Dict[str, list]:
+        """Load POS patterns from JSON file"""
+        if not patterns_path.exists():
+            raise FileNotFoundError(f"POS patterns file not found: {patterns_path}")
+        
+        logger.info(f"Loading POS patterns from {patterns_path}")
+        with open(patterns_path, 'r') as f:
+            patterns_data = json.load(f)
+        
+        # Convert to pattern_name -> pattern mapping
+        return {pattern["name"]: pattern["pattern"] for pattern in patterns_data}
+
+    def _create_dependency_rules(self) -> Dict[str, list]:
+        """Create dependency rules from loaded POS patterns"""
+        # Filter for patterns that represent dependencies
+        dependency_patterns = {}
+        for name, pattern in self.pos_patterns.items():
+            # Filter for patterns that represent grammatical relationships
+            if "->" in name or any(term in name.lower() for term in ["dependency", "relation", "modifier"]):
+                dependency_patterns[name] = pattern
+        return dependency_patterns
 
     def _load_pragmatic_heuristics(self) -> Dict[str, Any]:
         """Initialize pragmatic analysis components"""
+        discourse_markers = self._load_discourse_markers()
         return {
-            "gricean_maxims": self._create_gricean_maxims(),
+            "gricean_maxims": self._create_gricean_maxims(discourse_markers),
             "sentiment_analysis": self._create_sentiment_rules(),
-            "discourse_markers": self._load_discourse_markers(),
-            "politeness_strategies": self._load_politeness_strategies()
+            "politeness_strategies": self._load_politeness_strategies(),
+            "discourse_markers": discourse_markers
         }
 
-    def _create_gricean_maxims(self) -> Dict[str, callable]:
+    def _create_gricean_maxims(self, discourse_markers: List[str]) -> Dict[str, callable]:
         """Grice's conversational maxims as executable rules"""
         return {
             "quantity": lambda utterance: len(utterance.split()) < 50,
             "quality": lambda utterance: "probably" not in utterance.lower(),
             "relation": lambda utterance: any(
                 marker in utterance.lower() 
-                for marker in self.pragmatic_heuristics['discourse_markers']
+                for marker in discourse_markers
             ),
             "manner": lambda utterance: not any(
                 filler in utterance 
@@ -226,7 +260,7 @@ class RuleEngine:
 
     def _load_discourse_markers(self) -> List[str]:
         """Load discourse markers from configured JSON file"""
-        markers_path = Path(self.config['rules']['discourse_markers_path'])
+        markers_path = Path(self.discourse_markers_path)
         if not markers_path.exists():
             raise FileNotFoundError(f"Discourse markers file not found: {markers_path}")
 
@@ -238,7 +272,7 @@ class RuleEngine:
 
     def _load_politeness_strategies(self) -> Dict[str, List[str]]:
         """Load politeness strategies from configured YAML file"""
-        strategies_path = Path(self.config['rules']['politeness_strategies_path'])
+        strategies_path = Path(self.politeness_strategies_path)
         if not strategies_path.exists():
             raise FileNotFoundError(f"Politeness strategies file not found: {strategies_path}")
 
@@ -248,17 +282,7 @@ class RuleEngine:
 
         return data.get('strategies', {})
 
-    def _create_dependency_rules(self) -> Dict[str, list]:
-        """Head-modifier grammar inspired by Universal Dependencies"""
-        return {
-            'nsubj': ['NN', 'VB'],
-            'dobj': ['VB', 'NN'],
-            'amod': ['NN', 'JJ'],
-            'advmod': ['VB', 'RB'],
-            'prep': ['IN', 'NN']
-        }
-
-    def _discover_new_rules(self, min_support: float = 0.3, min_confidence: float = 0.7):
+    def _discover_new_rules(self):
         """
         Association rule mining with Apriori algorithm adaptation.
         Implements:
@@ -283,7 +307,7 @@ class RuleEngine:
 
         # Filter by minimum support
         freq_itemsets = {k: v/len(transactions) for k, v in itemsets.items() 
-                        if v/len(transactions) >= min_support}
+                        if v/len(transactions) >= self.min_support}
 
         # Generate candidate rules
         candidate_rules = []
@@ -308,7 +332,7 @@ class RuleEngine:
             
             if ant_support > 0:
                 confidence = rule_support / ant_support
-                if confidence >= min_confidence:
+                if confidence >= self.min_confidence:
                     valid_rules.append({
                         'antecedent': ant,
                         'consequent': cons,
@@ -320,30 +344,55 @@ class RuleEngine:
         for rule in valid_rules:
             ant = rule['antecedent']
             cons = rule['consequent']
+            conf = rule['confidence']
             rule_name = f"LearnedRule_{hash(frozenset(ant+cons))}"
-            self.add_rule(rule_func, rule_name, weight=rule['confidence'], antecedents=ant, consequents=cons)
             
-            def rule_func(kb, antecedents=ant, consequents=cons, conf=rule['confidence']):
+            # Define the rule function FIRST
+            def rule_func(kb, antecedents=ant, consequents=cons, conf=conf):
                 matches = [fact for fact in kb if all(e in fact for e in antecedents)]
                 return {consequents: conf * len(matches)/(len(kb)+1e-8)}  # Prevent division by zero
-                
-            rule_name = f"LearnedRule_{hash(frozenset(ant+cons))}"
-            self.add_rule(rule_func, rule_name, weight=rule['confidence'])
+            
+            # THEN add the rule
+            self.add_rule(rule_func, rule_name, weight=conf, antecedents=ant, consequents=cons)
+            
+            # Remove the redundant rule addition below this
             self.reasoning_memory.add(
                 experience={
                     "type": "rule_discovery",
                     "rule_name": rule_name,
                     "antecedents": ant,
                     "consequents": cons,
-                    "confidence": rule['confidence']
+                    "confidence": conf
                 },
             )
+            # Check for circular dependencies before adding
+            if not self._would_create_circular_dependency(ant, cons):
+                self.add_rule(rule_func, rule_name, weight=conf, antecedents=ant, consequents=cons)
+            else:
+                logger.warning(f"Skipped circular rule: {ant} => {cons}")
 
     def add_rule(self, rule_func: Callable, name: str, weight: float, antecedents: List, consequents: List):
         self.learned_rules[name] = rule_func
         self.rule_weights[name] = weight
         self.rule_antecedents[name] = antecedents
         self.rule_consequents[name] = consequents
+
+    def _would_create_circular_dependency(self, antecedents, consequents):
+        """Check if new rule would create circular dependency"""
+        # Check if any consequent appears in existing antecedents
+        for cons in consequents:
+            if any(cons in self.rule_antecedents.get(r, []) for r in self.learned_rules):
+                return True
+        return False
+    
+    def adjust_circular_rule_weights(self, circular_chains: List[List[str]]):
+        """Reduce weights of rules in circular chains"""
+        for chain in circular_chains:
+            for rule_name in chain:
+                current_weight = self.rule_weights.get(rule_name, 1.0)
+                new_weight = max(0.1, current_weight * 0.5)  # Decay weight
+                self.rule_weights[rule_name] = new_weight
+                logger.info(f"Reduced weight for circular rule {rule_name}: {current_weight} -> {new_weight}")
 
     def detect_circular_rules(self, max_depth: int = 3) -> List[List[str]]:
         """
@@ -549,24 +598,189 @@ class RuleEngine:
         return {'score': sentiment / len(words) if len(words) > 0 else 0.0}
 
     def _analyze_dependencies(self, text: str) -> Dict[str, list]:
-        """Parse grammatical dependencies using rule-based patterns"""
-        from src.agents.language.grammar_processor import GrammarProcessor
-        dependencies = defaultdict(list)
-        words = text.split()
-        upos_map = GrammarProcessor._UPOS_MAP
+        """Analyze grammatical dependencies using POS patterns and custom rules"""
+        # Initialize NLP Engine for tokenization and POS tagging
+        try:
+            from src.agents.language.nlp_engine import NLPEngine
+        except ImportError:
+            logger.error("NLPEngine could not be imported for dependency analysis")
+            return {"error": "NLPEngine unavailable"}
+    
+        nlp_engine = NLPEngine()
+        tokens = nlp_engine.process_text(text)
         
-        # Reverse the mapping to go from UPOS → tag-like shortcut
-        reverse_upos = {v: k.upper()[:2] for k, v in upos_map.items()}  # 'NOUN' -> 'NO'
-        pos_tags = [reverse_upos.get(upos_map.get(word.lower(), 'noun').upper(), 'NN') for word in words]
+        # Convert tokens to simplified format for pattern matching
+        token_data = [
+            {"text": token.text, "pos": token.pos, "index": token.index}
+            for token in tokens
+        ]
         
-        for relation, patterns in self.dependency_rules.items():
-            for i in range(len(words)-1):
-                head_tag = pos_tags[i]
-                modifier_tag = pos_tags[i+1]
-                if [head_tag, modifier_tag] == patterns:
-                    dependencies[relation].append(f"{words[i]}->{words[i+1]}")
+        # Get sentence structure by grouping tokens
+        sentence_boundaries = self._detect_sentence_boundaries(tokens)
+        analysis_results = defaultdict(list)
+        
+        # Apply dependency patterns
+        for rule_name, pattern in self.dependency_rules.items():
+            matches = self._match_pos_pattern(token_data, pattern)
+            analysis_results[rule_name] = matches
+            
+        # Add basic clause detection
+        analysis_results["clauses"] = self._detect_clauses(token_data, sentence_boundaries)
+        
+        # Add core grammatical relationships
+        analysis_results["relations"] = self._extract_grammatical_relations(token_data)
+        
+        return dict(analysis_results)
+    
+    def _detect_sentence_boundaries(self, tokens: list) -> List[Tuple[int, int]]:
+        """Identify sentence boundaries based on punctuation"""
+        boundaries = []
+        start_idx = 0
+        for i, token in enumerate(tokens):
+            if token.text in {'.', '!', '?'}:
+                boundaries.append((start_idx, i))
+                start_idx = i + 1
+        if start_idx < len(tokens):
+            boundaries.append((start_idx, len(tokens)-1))
+        return boundaries
+    
+    def _match_pos_pattern(self, tokens: List[dict], pattern: list) -> List[dict]:
+        """Match POS patterns in token sequence with wildcard support"""
+        matches = []
+        pattern_length = len(pattern)
+        
+        for i in range(len(tokens) - pattern_length + 1):
+            window = tokens[i:i+pattern_length]
+            window_pos = [t["pos"] for t in window]
+            
+            # Check for exact match
+            if window_pos == pattern:
+                matches.append({
+                    "text": " ".join(t["text"] for t in window),
+                    "start_index": i,
+                    "end_index": i + pattern_length - 1
+                })
+                
+            # Wildcard matching (e.g., ["DET", "*", "NOUN"])
+            elif self._wildcard_match(window_pos, pattern):
+                matches.append({
+                    "text": " ".join(t["text"] for t in window),
+                    "start_index": i,
+                    "end_index": i + pattern_length - 1,
+                    "pattern": pattern,
+                    "actual": window_pos
+                })
+                
+        return matches
+    
+    def _wildcard_match(self, actual: List[str], pattern: List[str]) -> bool:
+        """Flexible pattern matching with wildcard support"""
+        if len(actual) != len(pattern):
+            return False
+            
+        for a, p in zip(actual, pattern):
+            if p == "*":
+                continue
+            if "|" in p:  # Handle alternates (e.g., "NOUN|PROPN")
+                if a not in p.split("|"):
+                    return False
+            elif a != p:
+                return False
+                
+        return True
+    
+    def _detect_clauses(self, tokens: List[dict], boundaries: List[Tuple[int, int]]) -> List[dict]:
+        """Detect basic clause structures in sentences"""
+        clauses = []
+        
+        for start, end in boundaries:
+            sent_tokens = tokens[start:end+1]
+            verbs = [i for i, t in enumerate(sent_tokens) if t["pos"] in {"VERB", "AUX"}]
+            
+            for verb_idx in verbs:
+                # Find subject (left of verb)
+                subject = None
+                for i in range(verb_idx-1, start-1, -1):
+                    if sent_tokens[i]["pos"] in {"NOUN", "PROPN", "PRON"}:
+                        subject = sent_tokens[i]
+                        break
+                        
+                # Find object (right of verb)
+                obj = None
+                for i in range(verb_idx+1, end+1):
+                    if sent_tokens[i]["pos"] in {"NOUN", "PROPN", "PRON"}:
+                        obj = sent_tokens[i]
+                        break
+                        
+                if subject or obj:
+                    clauses.append({
+                        "subject": subject["text"] if subject else None,
+                        "verb": sent_tokens[verb_idx]["text"],
+                        "object": obj["text"] if obj else None,
+                        "sentence_range": (start, end),
+                        "verb_index": verb_idx
+                    })
                     
-        return dict(dependencies)
+        return clauses
+    
+    def _extract_grammatical_relations(self, tokens: List[dict]) -> List[dict]:
+        """Extract core grammatical relationships between tokens"""
+        relations = []
+        
+        # Subject-Verb-Object relationships
+        for i, token in enumerate(tokens):
+            if token["pos"] in {"VERB", "AUX"}:
+                # Look for subjects (left of verb)
+                subj = self._find_previous(tokens, i, {"NOUN", "PROPN", "PRON"})
+                # Look for objects (right of verb)
+                obj = self._find_next(tokens, i, {"NOUN", "PROPN", "PRON"})
+                
+                if subj or obj:
+                    relations.append({
+                        "relation": "SVO",
+                        "subject": subj["text"] if subj else None,
+                        "verb": token["text"],
+                        "object": obj["text"] if obj else None
+                    })
+        
+        # Adjective-Noun relationships
+        for i, token in enumerate(tokens):
+            if token["pos"] == "ADJ":
+                # Look for modified noun (right of adjective)
+                noun = self._find_next(tokens, i, {"NOUN", "PROPN"})
+                if noun:
+                    relations.append({
+                        "relation": "AMOD",
+                        "adjective": token["text"],
+                        "noun": noun["text"]
+                    })
+        
+        # Prepositional phrases
+        for i, token in enumerate(tokens):
+            if token["pos"] == "ADP":  # Preposition
+                obj = self._find_next(tokens, i, {"NOUN", "PROPN", "PRON"})
+                if obj:
+                    relations.append({
+                        "relation": "PREP",
+                        "preposition": token["text"],
+                        "object": obj["text"]
+                    })
+        
+        return relations
+    
+    def _find_previous(self, tokens, index, target_pos):
+        """Find nearest matching token to the left"""
+        for i in range(index-1, -1, -1):
+            if tokens[i]["pos"] in target_pos:
+                return tokens[i]
+        return None
+    
+    def _find_next(self, tokens, index, target_pos):
+        """Find nearest matching token to the right"""
+        for i in range(index+1, len(tokens)):
+            if tokens[i]["pos"] in target_pos:
+                return tokens[i]
+        return None
 
 if __name__ == "__main__":
     print("\n=== Running Rule Engine ===\n")
@@ -577,21 +791,6 @@ if __name__ == "__main__":
     circular = engine.detect_circular_rules()
     conflicts = engine.detect_fact_conflicts()
     redundant = engine.redundant_fact_check()
-
-    def mock_load_global_config():
-        return {
-            "storage": {
-                "knowledge_db": "knowledge_db.json" # Path to your test DB
-            },
-            "rules": { # From reasoning_config.yaml
-                "min_confidence_to_propagate": 0.1 # Example value
-            }
-        }
-    
-    # Override the actual loader with the mock for this test
-    import src.agents.reasoning.utils.config_loader as cl
-    original_loader = cl.load_global_config
-    cl.load_global_config = mock_load_global_config
 
     # Create a dummy knowledge_db.json for testing
     test_kb_content_scenario1 = { # Scenario 1: "knowledge" key with a dict of facts
@@ -618,25 +817,6 @@ if __name__ == "__main__":
         json.dump(test_kb_content_scenario1, f) # Change this to test other scenarios
 
     print("--- Testing RuleEngine with corrected _load_knowledge_base ---")
-    try:
-        engine = RuleEngine() # This will call _load_knowledge_base
-        print(f"Loaded Knowledge Base ({len(engine.knowledge_base)} facts):")
-        for fact, conf in engine.knowledge_base.items():
-            print(f"  {fact} -> {conf}")
-        
-        if not engine.knowledge_base and "knowledge_db.json": # contains actual facts
-             print("\nWARNING: Knowledge base is empty but knowledge_db.json might have facts. Check parsing logic and file structure.")
-
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}. Ensure knowledge_db.json exists.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-    finally:
-        # Clean up dummy file
-        if Path("knowledge_db.json").exists():
-            Path("knowledge_db.json").unlink()
-        # Restore original loader
-        cl.load_global_config = original_loader
 
     utterances = [
     "I think you might perhaps want to consider this option, however it's not absolutely perfect."
