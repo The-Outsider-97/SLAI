@@ -10,7 +10,7 @@ safety_margins:
 
 service_discovery:
   mode: "static"  # Options: static|consul|k8s
-  static_nodes: ["gpu-node1"] # OR add "node1", "node2",
+  static_nodes: [] # OR add "node1", "node2", "gpu-node1"
   consul_url: "http://localhost:8500"
   k8s_api: "https://kubernetes.default.svc"
   k8s_token: ""
