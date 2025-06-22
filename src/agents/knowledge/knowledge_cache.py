@@ -26,11 +26,17 @@ class KnowledgeCache:
         self.cipher = Fernet(os.getenv('CACHE_ENCRYPTION_KEY', Fernet.generate_key())) \
             if self.cache_config.get('enable_encryption', True) else None
 
-        self.max_size = self.cache_config.get('max_size', 1000)
-        self.hashing_method = self.cache_config.get('hashing_method', "simhash")
-        self.simhash_bits = self.cache_config.get('simhash_bits', 64)
-        self.tokenizer = self.cache_config.get('tokenizer', "word")
+        self.max_size = self.cache_config.get('max_size')
+        self.hashing_method = self.cache_config.get('hashing_method')
+        self.simhash_bits = self.cache_config.get('simhash_bits')
+        self.stopwords = self.cache_config.get('stopwords')
+        self.tokenizer = self.cache_config.get('tokenizer')
+        self.shingle_size = self.cache_config.get('shingle_size')
+        self.use_tf_weights = self.cache_config.get('use_tf_weights')
+        self.character_ngram = self.cache_config.get('character_ngram')
+        self.enable_encryption = self.cache_config.get('enable_encryption')
 
+        logger.info(f"Knowledge Cache initialized with: {self.cache}")
 
     def __contains__(self, key):
         return key in self.cache
@@ -50,7 +56,7 @@ class KnowledgeCache:
         value = self.cache[key]
         
         # Decrypt if enabled (using dictionary access)
-        if self.cache_config.get('enable_encryption'):
+        if self.enable_encryption:
             return json.loads(self.cipher.decrypt(value).decode())
         return value
 
@@ -65,12 +71,12 @@ class KnowledgeCache:
         self.cache[key] = value
         
         # Evict oldest if over capacity
-        if len(self.cache) > self.cache_config.get('max_size', 1000):
+        if len(self.cache) > self.max_size:
             self.cache.popitem(last=False)
 
     def hash_query(self, query: str) -> str:
         """Semantic hashing using SimHash or MD5 with configurable methods"""
-        hashing_method = self.cache_config.get('hashing_method', "simhash")
+        hashing_method = self.hashing_method
         
         if hashing_method == "simhash":
             return self._simhash(query)
@@ -85,9 +91,9 @@ class KnowledgeCache:
         - Optimized hash selection based on required bits
         """
         # Get configuration parameters
-        simhash_bits = self.cache_config.get('simhash_bits', 64)
-        tokenizer_type = self.cache_config.get('tokenizer', 'word')
-        use_tf_weights = self.cache_config.get('use_tf_weights', True)
+        simhash_bits = self.simhash_bits
+        tokenizer_type = self.tokenizer
+        use_tf_weights = self.use_tf_weights
         
         # Tokenize with appropriate method
         tokens = self._tokenize(query, tokenizer_type)
@@ -126,7 +132,23 @@ class KnowledgeCache:
         
         # Convert to fixed-length hex string
         return self._to_fixed_length_hex(fingerprint, simhash_bits)
-    
+
+    def _calculate_token_weights(self, tokens: List[str]) -> dict:
+        """Calculate TF weights with stopword filtering"""
+        stopwords = self.stopwords
+        tf = defaultdict(int)
+        
+        for token in tokens:
+            if token not in stopwords:
+                tf[token] += 1
+        
+        return tf
+
+    def _to_fixed_length_hex(self, value: int, num_bits: int) -> str:
+        """Convert to zero-padded hex string"""
+        num_hex_digits = (num_bits + 3) // 4  # Bits to hex digits
+        return format(value, f'0{num_hex_digits}x')
+
     def _tokenize(self, text: str, tokenizer_type: str = 'word') -> List[str]:
         """Enhanced tokenizer with configurable methods"""
         text = text.lower()
@@ -138,39 +160,27 @@ class KnowledgeCache:
         
         elif tokenizer_type == "char":
             # Character n-grams (configurable length)
-            n = self.cache_config.get('char_ngram', 3)
+            n = self.character_ngram
             return [text[i:i+n] for i in range(len(text) - n + 1)]
         
         elif tokenizer_type == "shingle":
             # Word n-grams (configurable length)
-            n = self.cache_config.get('shingle_size', 4)
+            n = self.shingle_size
             words = re.sub(r'[^\w\s]', '', text).split()
             return [' '.join(words[i:i+n]) for i in range(len(words) - n + 1)]
         
         else:  # Default to whole text
             return [text]
 
-    def _calculate_token_weights(self, tokens: List[str]) -> dict:
-        """Calculate TF weights with stopword filtering"""
-        stop_words = self.cache_config.get('stop_words', set())
-        tf = defaultdict(int)
-        
-        for token in tokens:
-            if token not in stop_words:
-                tf[token] += 1
-        
-        return tf
-
-    def _to_fixed_length_hex(self, value: int, num_bits: int) -> str:
-        """Convert to zero-padded hex string"""
-        num_hex_digits = (num_bits + 3) // 4  # Bits to hex digits
-        return format(value, f'0{num_hex_digits}x')
-
 if __name__ == "__main__":
     print("\n=== Running Knowledge Cache ===\n")
     printer.status("Init", "Knowledge Cache initialized", "success")
 
     cache = KnowledgeCache()
-
     printer.status("Details", f"Cache capacity: {cache.max_size}", "info")
+
+    query="What are the ethical concerns surrounding artificial intelligence?"
+
+    printer.pretty("HASH", cache.hash_query(query=query), "success")
+
     print("\n=== Succesfully ran Knowledge Cache ===\n")
