@@ -3,14 +3,16 @@ import math
 import yaml, json
 import numpy as np
 
+from sklearn.feature_extraction.text import TfidfVectorizer
 from difflib import SequenceMatcher
 from collections import defaultdict, Counter
 from typing import Any, Optional, List, Dict, Union
 
 from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Knowledge Memory")
+printer = PrettyPrinter
 
 class KnowledgeMemory:
     """
@@ -21,14 +23,49 @@ class KnowledgeMemory:
     def __init__(self):
         self.config = load_global_config()
         self.memory_config = get_config_section('knowledge_memory')
+        self.max_entries = self.memory_config.get('max_entries')
+        self.cache_size = self.memory_config.get('cache_size')
+        self.relevance_mode = self.memory_config.get('relevance_mode')
+        self.similarity_threshold = self.memory_config.get('similarity_threshold')
+        self.decay_factor = self.memory_config.get('decay_factor')
+        self.context_window = self.memory_config.get('context_window')
+        self.enable_ontology_expansion = self.memory_config.get('enable_ontology_expansion')
+        self.enable_rule_engine = self.memory_config.get('enable_rule_engine')
+        self.auto_discover_rules = self.memory_config.get('auto_discover_rules')
+        self.min_rule_support = self.memory_config.get('min_rule_support')
+        self.use_embedding_fallback = self.memory_config.get('use_embedding_fallback')
+        self.embedding_model = self.memory_config.get('embedding_model')
+        self.knowledge_dir = self.memory_config.get('knowledge_dir')
+        self.autoload_on_startup = self.memory_config.get('autoload_on_startup')
+        self.log_retrieval_hits = self.memory_config.get('log_retrieval_hits')
+        self.log_context_updates = self.memory_config.get('log_context_updates')
+        self.log_inference_events = self.memory_config.get('log_inference_events')
+        self.persist_file = self.memory_config.get('persist_file')
+
+        if self.autoload_on_startup:
+            try:
+                self.load(self.persist_file)
+                logger.info(f"Memory autoloaded from {self.persist_file}")
+            except Exception as e:
+                logger.warning(f"Autoload failed: {e}")
+
         self._store = defaultdict(dict)  # key -> {value, metadata}
-    
+        self.vectorizer = TfidfVectorizer()
+
+        logger.info(f"Knowledge Memory initialized with: {self.vectorizer}")
+
     def update(self, key: str, value: Any, metadata: Optional[dict] = None,
                context: Optional[dict] = None, ttl: Optional[int] = None):
         """
         Store or update a local memory entry.
         """
-        if len(self._store) >= self.memory_config.get('max_entries'):
+        if self.log_context_updates and context:
+            logger.info(f"Context update for key='{key}': {context}")
+        
+        if self.log_inference_events and 'inferred' in (metadata or {}):
+            logger.info(f"Inference event stored: key='{key}', inferred={metadata.get('inferred')}")
+
+        if len(self._store) >= self.max_entries:
             oldest_key = min(self._store.items(), key=lambda kv: kv[1]["metadata"]["timestamp"])[0]
             self._store.pop(oldest_key)
         timestamp = time.time()
@@ -56,6 +93,18 @@ class KnowledgeMemory:
             raw = json.load(f)
             self._store = {k: v for k, v in raw.items()}
 
+    def add_all(self, entries: List[dict]):
+        """
+        Bulk add knowledge entries, usually rules, into memory.
+        Each entry should have a unique 'id' and at least a 'name' or 'description'.
+        """
+        for entry in entries:
+            key = entry.get("id") or entry.get("name")
+            if not key:
+                logger.warning(f"Skipping entry without ID or name: {entry}")
+                continue
+            self.update(key=key, value=entry, metadata={"type": "system_rule"})
+
     def recall(self,
                key: Optional[str] = None,
                filters: Optional[dict] = None,
@@ -66,6 +115,9 @@ class KnowledgeMemory:
         """
         now = time.time()
         entries = []
+
+        if self.log_retrieval_hits and entries:
+            logger.info(f"Retrieved {len(entries)} entries for key='{key}' filters={filters}")
 
         if key:
             item = self._store.get(key)
@@ -173,17 +225,15 @@ class KnowledgeMemory:
     
     def _fallback_semantic(self, text1: str, text2: str) -> float:
         """TF-IDF/BM25 fallback when embeddings unavailable"""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        vectorizer = TfidfVectorizer()
+
         try:
-            tfidf = vectorizer.fit_transform([text1, text2])
+            tfidf = self.vectorizer.fit_transform([text1, text2])
             return (tfidf * tfidf.T).A[0,1]
         except ValueError:
             return SequenceMatcher(None, text1, text2).ratio()
     
     def _contextual_term_score(self, value: str, context: str) -> float:
         """Weighted term importance using TF-IDF"""
-        from sklearn.feature_extraction.text import TfidfVectorizer
         try:
             # Extract key terms from context
             vectorizer = TfidfVectorizer(max_features=10)
@@ -218,84 +268,18 @@ class KnowledgeMemory:
             else:
                 return 1.0 if a == b else 0.0
         return compare(dict1, dict2)
+    
+    def shutdown(self):
+        try:
+            self.save(self.persist_file)
+            logger.info("Memory saved on shutdown.")
+        except Exception as e:
+            logger.warning(f"Failed to save memory on shutdown: {e}")
         
 if __name__ == "__main__":
-    import readline  # Enables command history and editing
-    import pprint
+    print("\n=== Knowledge Synchronizer Test ===")
+    memory = KnowledgeMemory()
+    printer.status("Initial sync:", memory,)
+    #printer.status("SYNC", sync._start_sync_thread(), "success")
 
-    km = KnowledgeMemory()
-    print("📘 KnowledgeMemory Interactive CLI")
-    print("Available commands: update, recall, keys, search, stats, save, load, delete, clear, exit")
-
-    while True:
-        try:
-            cmd = input("\n> Command: ").strip().lower()
-
-            if cmd == "update":
-                key = input("  Key: ")
-                value = input("  Value: ")
-                context = input("  Context (as text or JSON): ")
-                ttl = input("  TTL (in seconds, optional): ")
-                try:
-                    ctx_dict = json.loads(context)
-                except:
-                    ctx_dict = {"text": context}
-                ttl_val = int(ttl) if ttl.strip() else None
-                km.update(key=key, value=value, context=ctx_dict, ttl=ttl_val)
-                print("✅ Entry updated.")
-
-            elif cmd == "recall":
-                key = input("  Key (optional): ").strip()
-                filters = input("  Metadata filters as JSON (optional): ").strip()
-                sort_by = input("  Sort by (timestamp/relevance, optional): ").strip()
-                top_k = input("  Top K (optional): ").strip()
-
-                key = key or None
-                filters = json.loads(filters) if filters else None
-                sort_by = sort_by or None
-                top_k = int(top_k) if top_k else None
-
-                results = km.recall(key=key, filters=filters, sort_by=sort_by, top_k=top_k)
-                pprint.pprint(results)
-
-            elif cmd == "keys":
-                print("🔑 Keys in memory:", km.keys())
-
-            elif cmd == "search":
-                keyword = input("  Keyword: ")
-                results = km.search_values(keyword)
-                pprint.pprint(results)
-
-            elif cmd == "stats":
-                pprint.pprint(km.get_statistics())
-
-            elif cmd == "save":
-                path = input("  File path: ")
-                km.save(path)
-                print(f"💾 Saved to {path}")
-
-            elif cmd == "load":
-                path = input("  File path: ")
-                km.load(path)
-                print(f"📂 Loaded from {path}")
-
-            elif cmd == "delete":
-                key = input("  Key to delete: ")
-                km.delete(key)
-                print("🗑️ Entry deleted.")
-
-            elif cmd == "clear":
-                confirm = input("⚠️ Clear all memory? Type YES to confirm: ")
-                if confirm == "YES":
-                    km.clear()
-                    print("🧹 Memory cleared.")
-
-            elif cmd == "exit":
-                print("👋 Exiting.")
-                break
-
-            else:
-                print("❓ Unknown command.")
-
-        except Exception as e:
-            print(f"⚠️ Error: {e}")
+    print("\n=== Synchronization Test Completed ===\n")
