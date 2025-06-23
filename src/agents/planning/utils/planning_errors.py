@@ -4,7 +4,7 @@ import json
 import time
 
 from asyncio import Task
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Union
 
 # Custom Exceptions
 class AdjustmentError(Exception):
@@ -57,9 +57,10 @@ class AcademicPlanningError(Exception):
 
 class ResourceViolation(Exception):
     """Exception for unmet resource constraints"""
-    def __init__(self, message: str, required: Dict, available: Dict):
+    def __init__(self, message: str, resource_type: str, requested: Any, available: Any):
         super().__init__(message)
-        self.required = required
+        self.resource_type = resource_type
+        self.requested = requested
         self.available = available
         self.metadata = self._generate_metadata()
 
