@@ -186,6 +186,43 @@ class Wordlist:
 
         self.glove_vectors = self.glove_path
 
+    def add_word(self, word: str, metadata: dict = None):
+        word_lower = word.lower()
+        if word_lower not in self.data:
+            self.data[word_lower] = metadata or {}
+            # Update indices
+            self._update_linguistic_data(word_lower)
+
+    def _update_linguistic_data(self, text: str):
+        """
+        Updates the internal vocabulary and tag patterns based on new input text.
+        This helps the engine adapt over time with new domain-specific language.
+    
+        Args:
+            text (str): The raw input sentence to be used for updating linguistic data.
+        """
+        if not text:
+            logger.warning("No text provided for linguistic data update.")
+            return
+    
+        # Tokenize and tag the input
+        tokens = self.tokenizer.tokenize(text)
+        tagged_tokens = self.tagger.tag(tokens)
+    
+        # Update word frequency in the wordlist
+        for token, tag in tagged_tokens:
+            if self.wordlist is not None:
+                if hasattr(self.wordlist, "update_term"):
+                    self.wordlist.update_term(token)
+                elif isinstance(self.wordlist, dict):
+                    self.wordlist.setdefault("terms", []).append(token)
+    
+        # Optionally, update any learned patterns or tag associations
+        for _, tag in tagged_tokens:
+            self.tag_frequencies[tag] += 1
+    
+        logger.info(f"Linguistic data updated with {len(tagged_tokens)} tokens from new input.")
+
     def _load_glove_vectors(self) -> Dict[str, List[float]]:
         """Load pre-trained GloVe vectors from JSON file"""
         printer.status("INIT", "GloVe initialized", "info")
