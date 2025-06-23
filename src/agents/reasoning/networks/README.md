@@ -33,18 +33,18 @@ Bayesian Networks model probabilistic relationships between variables. They are 
 
 | Model / Size | File                                                     | Nodes | Structure / Key Use Case                                                                              |
 | :----------- | :------------------------------------------------------- | :---- | :---------------------------------------------------------------------------------------------------- |
-| **2-Node**   | [`bayesian_network_2x2.json`](./bayesian_network_2x2.json) | 2     | **Simple Causality**: A minimal `X → Y` structure for basic inference checks.                        |
-| **3-Node**   | [`bayesian_network_3x3.json`](./bayesian_network_3x3.json) | 3     | **Causal Chain**: A `X → Y → Z` model for testing belief propagation.                                 |
-| **4-Node**   | [`bayesian_network_4x4.json`](./bayesian_network_4x4.json) | 4     | **Common Cause (Fork)**: `X → {Y, Z, W}`. Ideal for modeling a single cause with multiple effects.      |
-| **5-Node**   | [`bayesian_network_5x5.json`](./bayesian_network_5x5.json) | 5     | **Tree Structure**: `A → {B, C}, B → {D, E}`. For hierarchical reasoning and branching paths.             |
-| **6-Node**   | [`bayesian_network_6x6.json`](./bayesian_network_6x6.json) | 6     | **Collider Structure**: `A→C←B`. Excellent for testing "explaining away" and conditional dependencies. |
-| **7-Node**   | [`bayesian_network_7x7.json`](./bayesian_network_7x7.json) | 7     | **Balanced Tree**: `A → {B, C}, B → {D, E}, C → {F, G}`. A symmetric model for hierarchical analysis. |
-| **8-Node**   | [`bayesian_network_8x8.json`](./bayesian_network_8x8.json) | 8     | **Parallel Chains**: Two independent `A→B→C→D` chains. Tests modularity and parallel inference.       |
-| **9-Node**   | [`bayesian_network_9x9.json`](./bayesian_network_9x9.json) | 9     | **Three Parallel Chains**: Three `A→D→G` structures for modeling multiple independent processes.       |
-| **10-Node**  | [`bayesian_network_10x10.json`](./bayesian_network_10x10.json) | 10    | **Mixed Structure**: A long chain and a wide fork. Good for testing hybrid reasoning tasks.           |
-| **20-Node**  | [`bayesian_network_20x20.json`](./bayesian_network_20x20.json) | 20    | **Large Parallel Chains**: Two 10-node chains for testing scalability and parallel belief propagation.  |
-| **32-Node**  | [`bayesian_network_32x32.json`](./bayesian_network_32x32.json) | 32    | **Large Modular Model**: Four independent 8-node chains for large-scale modular causal modeling.      |
-| **64-Node**  | [`bayesian_network_64x64.json`](./bayesian_network_64x64.json) | 64    | **Stress Test Model**: Eight independent 8-node chains to stress-test inference engine performance.     |
+| **2-Node**   | [`bayesian_network_2x2.json`](./bayesian_network_2x2.json) | 4     | **Simple Causality**: A minimal `X → Y` structure for basic inference checks.                        |
+| **3-Node**   | [`bayesian_network_3x3.json`](./bayesian_network_3x3.json) | 9     | **Causal Chain**: A `X → Y → Z` model for testing belief propagation.                                 |
+| **4-Node**   | [`bayesian_network_4x4.json`](./bayesian_network_4x4.json) | 16     | **Common Cause (Fork)**: `X → {Y, Z, W}`. Ideal for modeling a single cause with multiple effects.      |
+| **5-Node**   | [`bayesian_network_5x5.json`](./bayesian_network_5x5.json) | 25     | **Tree Structure**: `A → {B, C}, B → {D, E}`. For hierarchical reasoning and branching paths.             |
+| **6-Node**   | [`bayesian_network_6x6.json`](./bayesian_network_6x6.json) | 36     | **Collider Structure**: `A→C←B`. Excellent for testing "explaining away" and conditional dependencies. |
+| **7-Node**   | [`bayesian_network_7x7.json`](./bayesian_network_7x7.json) | 49     | **Balanced Tree**: `A → {B, C}, B → {D, E}, C → {F, G}`. A symmetric model for hierarchical analysis. |
+| **8-Node**   | [`bayesian_network_8x8.json`](./bayesian_network_8x8.json) | 64     | **Parallel Chains**: Two independent `A→B→C→D` chains. Tests modularity and parallel inference.       |
+| **9-Node**   | [`bayesian_network_9x9.json`](./bayesian_network_9x9.json) | 81     | **Three Parallel Chains**: Three `A→D→G` structures for modeling multiple independent processes.       |
+| **10-Node**  | [`bayesian_network_10x10.json`](./bayesian_network_10x10.json) | 100    | **Mixed Structure**: A long chain and a wide fork. Good for testing hybrid reasoning tasks.           |
+| **20-Node**  | [`bayesian_network_20x20.json`](./bayesian_network_20x20.json) | 400    | **Large Parallel Chains**: Two 10-node chains for testing scalability and parallel belief propagation.  |
+| **32-Node**  | [`bayesian_network_32x32.json`](./bayesian_network_32x32.json) | 1024    | **Large Modular Model**: Four independent 8-node chains for large-scale modular causal modeling.      |
+| **64-Node**  | [`bayesian_network_64x64.json`](./bayesian_network_64x64.json) | 4096    | **Stress Test Model**: Eight independent 8-node chains to stress-test inference engine performance.     |
 | **Custom**   | [`bayesian_network.json`](./bayesian_network.json)         | 8     | **Complex DAG**: A non-uniform, multi-layered graph with varied dependency types for advanced scenarios. |
 
 ---
