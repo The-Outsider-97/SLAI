@@ -72,7 +72,7 @@ class BayesianSearch:
         self.best_score_so_far: float = np.inf # Assuming minimization; use -np.inf for maximization
         self.best_params_so_far: Optional[Dict[str, Any]] = None
 
-        self.output_dir = Path() / output_dir_name # Standardize reports location
+        self.output_dir = Path(self.bayesian_config.get('output_dir'))
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"BayesianSearch initialized. Results will be saved to: {self.output_dir.resolve()}")
 
