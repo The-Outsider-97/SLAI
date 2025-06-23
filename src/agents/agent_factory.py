@@ -12,6 +12,7 @@ sys.path.insert(0, str(project_root))
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.factory.agent_meta_data import AgentMetaData, AgentRegistry
 from src.agents.factory.metrics_adapter import MetricsAdapter
+from src.agents.factory.reasoner import BasicZeroReasoner
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
@@ -25,6 +26,7 @@ from src.agents.learning_agent import LearningAgent
 from src.agents.planning_agent import PlanningAgent
 from src.agents.safety_agent import SafetyAgent
 from src.agents.adaptive_agent import AdaptiveAgent
+from src.agents.reasoning_agent import ReasoningAgent
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
@@ -36,16 +38,17 @@ class AgentFactory:
     adapter for runtime configuration tuning.
     """
     _agent_classes: Dict[str, Type[BaseAgent]] = {
+        'adaptive': AdaptiveAgent,
+        'alignment': AlignmentAgent,
         'evaluation': EvaluationAgent,
         'execution': ExecutionAgent,
-        'alignment': AlignmentAgent,
         'knowledge': KnowledgeAgent,
         'language': LanguageAgent,
-        'perception': PerceptionAgent,
         'learning': LearningAgent,
+        'perception': PerceptionAgent,
         'planning': PlanningAgent,
+        'reasoning': ReasoningAgent,
         'safety': SafetyAgent,
-        'adaptive': AdaptiveAgent,
     }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
