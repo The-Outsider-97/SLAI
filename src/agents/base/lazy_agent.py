@@ -34,7 +34,7 @@ class LazyAgent:
         # Additional initialization using config
         self.max_init_attempts = self.lazy_config.get('max_init_attempts', 1)
 
-        logger.info(f"Lazy Agent succesfully initialized with:\n{self._init_fn}")
+        logger.info(f"Lazy Agent succesfully initialized")
 
 
     def _ensure_initialized(self):
