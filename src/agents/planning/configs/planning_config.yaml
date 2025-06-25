@@ -1,3 +1,6 @@
+gpu_limit: 1000
+ram_limit: 128
+
 safety_margins:
   resource_buffers:
     gpu: 0.15           # 15% of available GPUs must remain unallocated
@@ -9,9 +12,10 @@ safety_margins:
     time_buffer: 120       # Minimum gap between dependent tasks (seconds)
 
 service_discovery:
+  skip_localhost_http: True
   mode: "static"  # Options: static|consul|k8s
   static_nodes: ["localhost"] # OR add "node1", "node2", "gpu-node1"
-  consul_url: "http://localhost:8500"
+  consul_url: "http://localhost:5000"
   k8s_api: "https://kubernetes.default.svc"
   k8s_token: ""
   node_port: 9100  # Port for node metrics API
@@ -164,6 +168,7 @@ probabilistic_planner:
 safety_planning: {}
 
 cluster_monitoring:
+  skip_localhost_http: True
   node_query_timeout: 2    # Seconds to wait for node response
   update_interval: 5       # Seconds between resource updates
   discovery_poll_interval: 300  # Seconds between node discovery scans
