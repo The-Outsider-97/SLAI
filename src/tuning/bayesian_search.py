@@ -82,6 +82,14 @@ class BayesianSearch:
         if 'hyperparameters' not in self.config:
             raise ValueError("Config missing 'hyperparameters' section")
         
+        if model_params is None:
+            logger.warning(f"No hyperparameters defined for model type: {self.model_type}. Using default parameters.")
+            model_params = [
+                {"name": "p", "type": "integer", "values": [0, 1, 2, 3]},
+                {"name": "d", "type": "integer", "values": [0, 1, 2]},
+                {"name": "q", "type": "integer", "values": [0, 1, 2, 3]}
+            ]
+        
         config_data = self.config
         
         # Use the instance model_type
