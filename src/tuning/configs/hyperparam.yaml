@@ -43,6 +43,17 @@ hyperparameters:
       min: 3
       max: 15
 
+  ARIMA:
+    - name: p
+      type: integer
+      values: [0, 1, 2, 3]
+    - name: d
+      type: integer
+      values: [0, 1, 2]
+    - name: q
+      type: integer
+      values: [0, 1, 2, 3]
+
 # ==========================
 # Tuning Strategy Settings
 # ==========================
