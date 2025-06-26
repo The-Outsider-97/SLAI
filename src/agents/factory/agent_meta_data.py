@@ -34,7 +34,8 @@ class AgentMetaData:
     def __post_init__(self):
         self.config = load_global_config()
         self.meta_config = get_config_section('agent_meta')
-        self.version = self.meta_config.get('default_version')
+        if self.version is None:
+            self.version = self.meta_config.get('default_version')
         self.required_fields = self.meta_config.get('required_fields')
         self.validation_rules = self.meta_config.get('validation_rules', {
             'max_name_length', 'allowed_modules'
