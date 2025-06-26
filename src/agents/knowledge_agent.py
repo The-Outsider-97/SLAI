@@ -28,6 +28,9 @@ from sentence_transformers import SentenceTransformer
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.base_agent import BaseAgent
+from src.agents.knowledge.utils.knowledge_errors import (RetrievalError, OntologyError, BiasDetectionError,
+                                                         GovernanceViolation, CacheError, MemoryUpdateError,
+                                                         InvalidDocumentError, EmbeddingError)
 from src.agents.knowledge.knowledge_cache import KnowledgeCache
 from src.agents.knowledge.perform_action import PerformAction
 from src.agents.knowledge.ontology_manager import OntologyManager
