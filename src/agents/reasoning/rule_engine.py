@@ -281,6 +281,14 @@ class RuleEngine:
             data = yaml.safe_load(f)
 
         return data.get('strategies', {})
+    
+    def get_rules_by_category(self, category: str) -> Dict[str, Callable]:
+        """
+        Get rules filtered by category. 
+        Currently returns all rules since categories aren't implemented yet.
+        """
+        logger.warning(f"Rule categories not implemented yet. Returning all rules for category '{category}'")
+        return self.learned_rules.copy()
 
     def _discover_new_rules(self):
         """
