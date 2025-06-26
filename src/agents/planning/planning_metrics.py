@@ -1,4 +1,5 @@
 
+import time
 import psutil
 
 from typing import List, Dict, Any
@@ -27,6 +28,61 @@ class PlanningMetrics(Task):
             'success', 'cost', 'time'
         })
         self.agent={}
+
+    def track_plan_start(self, plan: List[Task]) -> Dict[str, Any]:
+        """
+        Captures the start time and initial task statuses of a plan.
+    
+        Returns:
+            Dict[str, Any]: Metadata including timestamp and task names.
+        """
+        metadata = {
+            'start_time': time.time(),
+            'plan_id': f"plan_{int(time.time())}",
+            'initial_task_statuses': {task.name: task.status.name for task in plan}
+        }
+        logger.info(f"[TRACK START] Plan started with {len(plan)} tasks.")
+        return metadata
+    
+    def track_plan_completion(self, plan_meta: Dict, final_status: TaskStatus):
+        """
+        Logs the completion status of a plan and its final outcome.
+    
+        Args:
+            plan_meta (Dict): Metadata from track_plan_start
+            final_status (TaskStatus): Final success/failure of the plan
+        """
+        plan_id = plan_meta.get("plan_id", "unknown_plan")
+        duration = time.time() - plan_meta.get("start_time", time.time())
+    
+        logger.info(f"[TRACK COMPLETE] Plan '{plan_id}' completed in {duration:.2f}s with status: {final_status.name}")
+    
+    def record_planning_metrics(self, plan_length: int, planning_time: float, success_rate: float):
+        """
+        Records and logs core planning metrics.
+    
+        Args:
+            plan_length (int): Number of primitive steps
+            planning_time (float): Duration of planning in seconds
+            success_rate (float): 1.0 for success, 0.0 for failure
+        """
+        logger.info(f"[PLANNING METRICS] Length: {plan_length}, Time: {planning_time:.2f}s, Success: {success_rate:.2f}")
+        # Optionally store in DB or structured file here
+    
+    def record_execution_metrics(self, success_count: int, failure_count: int, resource_usage: Dict[str, float]):
+        """
+        Logs post-execution metrics, including task outcomes and system usage.
+    
+        Args:
+            success_count (int): Number of successful tasks
+            failure_count (int): Number of failed tasks
+            resource_usage (Dict[str, float]): e.g., {"cpu": 23.4, "memory": 65.1}
+        """
+        total = success_count + failure_count
+        success_rate = success_count / total if total else 0.0
+    
+        logger.info(f"[EXECUTION METRICS] Success: {success_count}, Failures: {failure_count}, Success Rate: {success_rate:.2f}")
+        logger.info(f"[RESOURCE USAGE] CPU: {resource_usage.get('cpu', 0):.2f}%, Memory: {resource_usage.get('memory', 0):.2f}%")
 
     @staticmethod
     def plan_length(plan: List[Task]) -> int:
