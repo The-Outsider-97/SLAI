@@ -1,5 +1,6 @@
 
 import os
+import time
 import yaml, json
 
 from enum import Enum
@@ -150,16 +151,91 @@ class TaskType(Enum):
     PRIMITIVE = 0
     ABSTRACT = 1
 
+@dataclass
+class ResourceProfile:
+    gpu: int = 0
+    ram: int = 0  # In GB
+    specialized_hardware: List[str] = field(default_factory=list)
+
+@dataclass
+class ClusterResources:
+    gpu_total: int = 0
+    ram_total: int = 0
+    specialized_hardware_available: List[str] = field(default_factory=list)
+    current_allocations: Dict[str, ResourceProfile] = field(default_factory=dict)
+
+@dataclass
+class RepairCandidate:
+    """Represents a candidate solution for repairing a failed plan"""
+    strategy: str
+    repaired_plan: List['Task']  # Forward reference
+    estimated_cost: float
+    risk_assessment: Dict[str, Any]
+
+@dataclass
+class Adjustment:
+    """Data structure for plan adjustment requests"""
+    type: str  # 'modify_task', 'add_task', 'remove_task'
+    task_id: Optional[str] = None
+    task: Optional['Task'] = None  # Forward reference
+    updates: Optional[Dict[str, Any]] = None
+    priority: int = 3
+    cascade: bool = False
+    origin: str = 'api'
+    timestamp: float = field(default_factory=time.time)
+    _retry_count: int = 0
+
+@dataclass
+class PerformanceMetrics:
+    """Captures system performance metrics at a point in time"""
+    timestamp: float = field(default_factory=time.time)
+    system_load: float = 0.0
+    network_latency: float = -1.0  # ms, -1 indicates error
+    service_health: Dict[str, str] = field(default_factory=dict)
+    plan_execution_rate: float = 0.0  # tasks/min
+
+@dataclass
+class PlanSnapshot:
+    """Snapshot of current plan state"""
+    timestamp: float = field(default_factory=time.time)
+    task_ids: List[str] = field(default_factory=list)
+    resource_utilization: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class SafetyMargins:
+    """Configuration for safety buffers"""
+    gpu_buffer: float = 0.15  # 15% buffer
+    ram_buffer: float = 0.20  # 20% buffer
+    min_task_duration: int = 30  # seconds
+    max_concurrent: int = 5
+    time_buffer: int = 120  # seconds
+
+@dataclass
+class Task:
+    """Core task representation with resource requirements"""
+    name: str = "Unnamed Task"
+    id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
+    task_type: TaskType = TaskType.ABSTRACT
+    status: TaskStatus = TaskStatus.PENDING
+    resource_requirements: ResourceProfile = field(default_factory=ResourceProfile)
+    dependencies: List[str] = field(default_factory=list)
+    execution_modes: List[str] = field(default_factory=lambda: ['full'])
+    deadline: float = 0.0
+    priority: int = 1
+    duration: float = 300.0  # seconds
+    cost: float = 1.0
+    parent_task: Optional[str] = None
 
 @dataclass
 class Task:
     name: str = "Planning Typers"
+    id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
     task_type: TaskType = TaskType.ABSTRACT
+    type: TaskType = field(init=False)  # Alias for task_type
     status: TaskStatus = TaskStatus.PENDING
     deadline: float = 0
     priority: int = 1
-    resource_requirements: List = field(default_factory=list)
-    dependencies: List = field(default_factory=list)
+    resource_requirements: ResourceProfile = field(default_factory=ResourceProfile)
     execution_modes: List = field(default_factory=list)
     input_data: Any = None
     output_target: str = None
@@ -172,26 +248,43 @@ class Task:
     effects: List[Callable] = field(default_factory=list)
     parent: Optional['Task'] = None
     selected_method: int = 0
+    goal_state: Optional[Dict] = field(default=None)
+    duration: float = 300.0
     cost: float = 1.0
-    
-    # New properties for probabilistic tasks
+    id_counter = 0
     is_probabilistic: bool = False
     probabilistic_actions: List[Any] = field(default_factory=list)  # List of ProbabilisticAction objects
     success_threshold: float = 0.9  # Default success probability threshold
+    risk_score: float = 0.0
+    dependencies: List["Task"] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)  # String-based dependencies
+    execution_modes: List[str] = field(default_factory=lambda: ['full'])  # Modes
+
+    def __post_init__(self):
+        self.type = self.task_type
 
     def copy(self) -> 'Task':
         return Task(
             name=self.name,
+            id=self.id,
             task_type=self.task_type,
             methods=self.methods,
             preconditions=self.preconditions,
             effects=self.effects,
             cost=self.cost,
-            # Copy probabilistic properties
+            goal_state=self.goal_state,
             is_probabilistic=self.is_probabilistic,
             probabilistic_actions=self.probabilistic_actions.copy(),
             success_threshold=self.success_threshold
         )
+    
+    @property
+    def requirements(self) -> ResourceProfile:
+        return self.resource_requirements
+
+    @property
+    def task(self) -> ResourceProfile:
+        return self.task_type
 
     def get_subtasks(self, method_index: Optional[int] = None) -> List['Task']:
         if self.task_type == TaskType.PRIMITIVE or not self.methods:
@@ -217,11 +310,18 @@ class Task:
         except Exception as e:
             print(f"Error applying effects for task '{self.name}': {e}")
 
+    def __hash__(self):
+        return hash(self.id)
+
+    def __eq__(self, other):
+        return isinstance(other, Task) and self.id == other.id
+
     def __repr__(self):
-        method_info = f", exec_mode={self.execution_modes}" if self.execution_modes else ""
-        task_type = self.task_type.name if self.task_type else "None"
-        status = self.status.name if self.status else "None"
-        return f"Task(name='{self.name}', type={task_type}, status={status}{method_info})"
+        #method_info = f", exec_mode={self.execution_modes}" if self.execution_modes else ""
+        #task_type = self.task_type.name if self.task_type else "None"
+        #status = self.status.name if self.status else "None"
+        return (f"Task(id='{self.id}', name='{self.name}', "
+                f"type={self.task_type.name}, status={self.status.name})")
 
 PlanStep = Tuple[int, Task, MethodSignature] # (step_id, task, method_used)
 
