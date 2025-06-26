@@ -1,3 +1,5 @@
+embedding_buffer_size: 512
+
 dqn:
   hidden_size: 128
   gamma: 0.99
@@ -53,6 +55,14 @@ learning_memory:
   checkpoint_dir: 'src/agents/learning/checkpoints/memory' # Save location
   checkpoint_freq: 1000             # Auto-save frequency
   auto_save: True                   # Auto-save toggle
+
+strategy_selector:
+  task_embedding_dim: 256
+  min_batch: 32
+  error_decay_time: 1800  # 30 minutes
+  error_thresholds: [2, 4, 6]  # More sensitive
+  lr_reduction_factor: 0.3  # Stronger LR reduction
+  error_decay_factor: 0.7  # Faster error count decay
 
 evolutionary:
   population_size: 10
