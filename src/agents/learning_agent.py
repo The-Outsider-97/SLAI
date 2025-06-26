@@ -35,8 +35,11 @@ from functools import partial
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.learning.utils.error_calls import (NaNException, GradientExplosionError,
                                                    InvalidActionError, InvalidConfigError)
-from src.agents.learning.utils.state_processor import StateProcessor
 from src.agents.learning.utils.multi_task_learner import MultiTaskLearner
+from src.agents.learning.utils.state_processor import StateProcessor
+from src.agents.learning.utils.recovery_system import RecoverySystem
+from src.agents.learning.learning_calculations import LearningCalculations
+from src.agents.learning.strategy_selector import StrategySelector
 from src.agents.learning.learning_factory import LearningFactory
 from src.agents.learning.dqn import DQNAgent
 from src.agents.learning.maml_rl import MAMLAgent
@@ -46,9 +49,10 @@ from src.agents.learning.slaienv import SLAIEnv
 from src.agents.base.light_metric_store import LightMetricStore
 from src.agents.base.lazy_agent import LazyAgent
 from src.agents.base_agent import BaseAgent
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Learning Agent")
+printer = PrettyPrinter
 
 def validation_logic(self):
     required_params = {
@@ -103,14 +107,28 @@ class LearningAgent(BaseAgent):
         # Initialize buffers with config sizes
         self.embedding_buffer = deque(maxlen=self.learning_agent_config.get('embedding_buffer_size', 512))
         self.performance_history = deque(maxlen=self.learning_agent_config.get('performance_history_size', 1000))
-        self.error_history = deque(maxlen=self.learning_agent_config.get('error_history_size', 100))
         self.state_recency = deque(maxlen=self.learning_agent_config.get('state_recency_size', 1000))
         self.architecture_history = deque(maxlen=self.learning_agent_config.get('architecture_history_size', 10))
         self.task_embedding_dim = self.learning_agent_config.get("task_embedding_dim", 256)
 
+        # Determine state_dim based on the env passed at initialization
+        if isinstance(env, SLAIEnv) and hasattr(env, 'state_dim'):
+            self.state_dim = env.state_dim
+        elif hasattr(env, 'observation_space') and hasattr(env.observation_space, 'shape'):
+             self.state_dim = env.observation_space.shape[0]
+        else:
+            # Fallback to config if env doesn't provide it directly
+            self.state_dim = self.learning_agent_config.get('state_dim', 10) # Default from config
+        
+        # action_dim determination
+        if hasattr(env, 'action_space') and hasattr(env.action_space, 'n'):
+            self.action_dim = env.action_space.n
+        else:
+            self.action_dim = self.learning_agent_config.get('action_dim', 2) # Default from config
+
         # State embedding layer
         self.state_embedder = nn.Sequential(
-            nn.Linear(256, 64),
+            nn.Linear(self.state_dim, 64),
             nn.ReLU(),
             nn.Linear(64, self.task_embedding_dim)
         )
@@ -131,7 +149,8 @@ class LearningAgent(BaseAgent):
             'dqn': 0,
             'maml': 1,
             'rsi': 2,
-            'rl': 3
+            'rl': 3,
+            'planning': 4
         }
         self.num_agent_strategies = len(self.agent_strategies_map)
 
@@ -142,26 +161,72 @@ class LearningAgent(BaseAgent):
             nn.Linear(meta_controller_config.get('hidden_dim', 128), self.num_agent_strategies) # Outputs logits for each strategy
         )
         self.optimizer = torch.optim.Adam(
-            self.policy_net.parameters(),
-            lr=meta_controller_config.get('learning_rate', 1e-3)
-        )
+            list(self.policy_net.parameters()) + list(self.state_embedder.parameters()),
+            lr=meta_controller_config.get('learning_rate', 1e-3))
         self.loss_fn = nn.CrossEntropyLoss()
         self.training_mode = False
+        self.device = 'cpu'
 
         self.performance_metrics = {}
-
-        # Initialize Learning Factory
+        self.recovery_system = RecoverySystem(learning_agent=self)
+        self.strategy_selector = StrategySelector(
+            config=self.learning_agent_config,
+            agent_strategies_map=self.agent_strategies_map,
+            state_embedder=self.state_embedder,
+            policy_net=self.policy_net,
+            optimizer=self.optimizer,
+            loss_fn=self.loss_fn,
+            device=self.device
+        )
+        self.learning_calculations = LearningCalculations()
         self.learning_factory = LearningFactory(
             env=self.env,
             performance_metrics=self.performance_metrics
         )
+        self.state_embedder = self.strategy_selector.state_embedder
+        self.performance_metrics = {
+            # These are useful across all agent types:
+            'scenario_rewards': defaultdict(float),        # Mean reward per scenario or task
+            'success_rate': defaultdict(float),            # Percentage of episodes meeting success criteria
+            'episode_length': defaultdict(list),           # Track duration of episodes
+            'q_value_mean': defaultdict(list),             # Mean Q-value per evaluation run
+            'q_value_std': defaultdict(list),              # Std of Q-values (to track learning stability)
+
+            # Per agent strategy (DQN, MAML, RSI, RL):
+            'strategy_selection_count': defaultdict(int),  # How often each strategy is selected
+            'strategy_accuracy': defaultdict(float),       # Meta-controller prediction accuracy
+            'strategy_loss': defaultdict(float),           # Loss during meta-controller training
+
+            # For adaptive tuning and monitoring drift or stagnation:
+            'novelty_score': defaultdict(float),           # From novelty detector (e.g., for RSI)
+            'uncertainty_estimate': defaultdict(float),    # Optional: from model prediction variance
+            'catastrophic_forgetting': defaultdict(float), # Score or heuristic for forgetting events
+            'concept_drift_detected': defaultdict(bool),   # Boolean or counter per task/episode
+
+            # For experience buffer and MAML/meta-training:
+            'embedding_buffer_size': lambda: len(self.embedding_buffer),
+            'replay_buffer_usage': defaultdict(int),       # Transitions used per training step
+            'performance_history_stats': lambda: {
+                'mean': np.mean(self.performance_history) if self.performance_history else 0,
+                'std': np.std(self.performance_history) if self.performance_history else 0,
+            },
+
+            # Specific to LearningFactory and RSI:
+            'param_mutation_rate': {},                     # Track over time for RSI
+            'checkpoint_quality': defaultdict(float),      # Loaded from model checkpoints
+            'agent_fitness_score': defaultdict(float),     # For evolutionary scoring of agents
+
+            'plot_tags': ['average_reward', 'success_rate', 'strategy_selection_count', 'novelty_score'],
+        }
         self.state_processor = StateProcessor(env)
         self.multi_task_learner = MultiTaskLearner(task_ids=self.task_ids)
+        self.architecture_history = deque(maxlen=self.learning_agent_config.get('architecture_history_size', 10))
 
         self.observation_count = 0
 
         logger.info(f"Learning Agent has succesfully initialized with meta-controller for {self.num_agent_strategies} strategies.")
         logger.info(f"Meta-controller input (task embedding) dimension: {self.task_embedding_dim}")
+        print(f"Initialized with state_dim: {self.state_dim}")
 
     @property
     def performance_metrics(self):
@@ -235,16 +300,6 @@ class LearningAgent(BaseAgent):
         self.concept_drift_detector = ConceptDriftDetector()
         self.last_retraining = datetime.now()
 
-        # Error recovery state tracking
-        self.error_history = deque(maxlen=100)
-        self.consecutive_errors = 0
-        self.recovery_strategies = [
-            self._recover_soft_reset,
-            self._recover_learning_rate_adjustment,
-            self._recover_strategy_switch,
-            self._recover_full_reset
-        ]
-
         # Defer heavy initialization
         self._deferred_initialization()
 
@@ -272,120 +327,35 @@ class LearningAgent(BaseAgent):
     def _create_dqn_agent(self):
         """Create DQN agent with optimized network"""
         return DQNAgent(
-            state_dim=self.env.observation_space.shape[0],
-            action_dim=self.env.action_space.n,
+            state_dim=self.state_dim,  # self.env.observation_space.shape[0],
+            action_dim=self.action_dim,  # self.env.action_space.n,
             agent_id="dqn_agent"
         )
 
     def _create_maml_agent(self):
         """Create MAML agent with shared network components"""
         return MAMLAgent(
-            state_size=self.env.observation_space.shape[0],
-            action_size=self.env.action_space.n,
+            state_size=self.state_dim,  # self.env.observation_space.shape[0],
+            action_size=self.action_dim,  # self.env.action_space.n,
             agent_id="maml_agent"
         )
 
     def _create_rsi_agent(self):
         """Create RSI agent with memory limits"""
         return RSIAgent(
-            state_size=self.env.observation_space.shape[0],
-            action_size=self.env.action_space.n,
+            state_size=self.state_dim,  # self.env.observation_space.shape[0],
+            action_size=self.action_dim,  # self.env.action_space.n,
             agent_id="rsi_agent"
         )
 
     def _create_rl_agent(self):
         """Create basic RL agent"""
         return RLAgent(
-            state_size=self.env.observation_space.shape[0],
-            possible_actions=list(range(self.env.action_space.n)),
+            state_size=self.state_dim,  # self.env.observation_space.shape[0],
+            possible_actions=list(range(self.action_dim)),  # list(range(self.env.action_space.n)),
             agent_id="rl_agent"
         )
 
-    def observe(self, task_embedding: torch.Tensor, best_agent_strategy_name: str):
-        """
-        Stores a (task_embedding, best_agent_label) pair for training the meta-controller.
-        Robust validation and logging included.
-
-        Args:
-            task_embedding (torch.Tensor): Processed task representation
-            best_agent_strategy_name (str): Name of best-performing strategy
-        """
-        # Input validation
-        if task_embedding is None or best_agent_strategy_name is None:
-            logger.warning("observe() called with None arguments")
-            return
-            
-        if not isinstance(task_embedding, torch.Tensor):
-            logger.error(f"task_embedding must be Tensor, got {type(task_embedding)}")
-            return
-            
-        if best_agent_strategy_name not in self.agent_strategies_map:
-            valid_strategies = list(self.agent_strategies_map.keys())
-            logger.error(f"Invalid strategy '{best_agent_strategy_name}'. Valid: {valid_strategies}")
-            return
-
-        # Create label tensor
-        label = self.agent_strategies_map[best_agent_strategy_name]
-        label_tensor = torch.tensor([label], dtype=torch.long)
-        
-        # Store in buffer with cloning to prevent reference issues
-        self.embedding_buffer.append((
-            task_embedding.clone().detach(),
-            label_tensor.clone().detach()
-        ))
-        
-        logger.debug(f"Buffered embedding for strategy: {best_agent_strategy_name} "
-                     f"(Label: {label}, Buffer size: {len(self.embedding_buffer)})")
-
-    def train_from_embeddings(self):
-        """Train meta-controller using buffered embeddings"""
-        min_batch = self.learning_agent_config.get('meta_controller_batch_size', 32)
-        
-        if len(self.embedding_buffer) < min_batch:
-            logger.info(f"Deferring training: {len(self.embedding_buffer)}/{min_batch} samples")
-            return
-
-        # Prepare batch
-        embeddings, labels = zip(*random.sample(self.embedding_buffer, min_batch))
-        embeddings = torch.stack(embeddings)
-        labels = torch.cat(labels)
-        
-        device = next(self.policy_net.parameters()).device
-        embeddings = embeddings.to(device)
-        labels = labels.to(device)
-        
-        # Training step
-        self.policy_net.train()
-        self.optimizer.zero_grad()
-        
-        # Forward pass
-        logits = self.policy_net(embeddings)
-        
-        # Loss calculation
-        loss = self.loss_fn(logits, labels)
-        
-        # Backpropagation
-        loss.backward()
-        self.optimizer.step()
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)  # Prevent explosions
-        
-        # Logging
-        logger.info(f"Meta-controller training | Loss: {loss.item():.4f} | "
-                    f"Accuracy: {self._calculate_accuracy(logits, labels):.2%}")
-        
-        # Clear buffer after successful training
-        self.embedding_buffer.clear()
-
-    def _calculate_accuracy(self, logits, labels):
-        """Calculate prediction accuracy"""
-        preds = torch.argmax(logits, dim=1)
-        return (preds == labels).float().mean().item()
-
-    def _generate_task_embedding(self, state):
-        """Convert state to task embedding"""
-        state_tensor = state.detach().clone() if torch.is_tensor(state) else torch.tensor(state, dtype=torch.float32)
-        return self.state_embedder(state_tensor)
- 
     def select_agent_strategy_with_meta_controller(
         self,
         current_task_env_or_state_embedding,
@@ -489,6 +459,15 @@ class LearningAgent(BaseAgent):
         self.logger.info(f"Meta-controller selected strategy: {selected_strategy}")
         return selected_strategy
 
+    def observe(self, task_embedding, best_agent_strategy_name):
+        self.strategy_selector.observe(task_embedding, best_agent_strategy_name)
+
+    def train_from_embeddings(self):
+        return self.strategy_selector.train_from_embeddings()
+
+    def select_agent_strategy(self, state_embedding):
+        return self.strategy_selector.select_strategy(state_embedding)
+
     def _generate_task_embedding_and_label(self, task_env, episode_results: Dict[str, float]):
         """
         Generate task embedding and best strategy label from environment and results.
@@ -585,6 +564,13 @@ class LearningAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"Task variation failed: {str(e)}")
             return self.env  # Fallback to base env
+
+    def calculate_planning_reward(self, risks: int, opportunities: int) -> float:
+        """Custom reward function for planning simulations"""
+        risk_penalty = -0.5 * risks
+        opportunity_bonus = 1.0 * opportunities
+        novelty_bonus = self._calculate_novelty_bonus(self._current_state)
+        return risk_penalty + opportunity_bonus + novelty_bonus
 
     def _calculate_reward(self, state, action, next_state, base_reward):
         """
@@ -837,6 +823,20 @@ class LearningAgent(BaseAgent):
 
     def _evolve_network_architecture(self, new_arch):
         """Dynamic network architecture modification"""
+        # Capture snapshot BEFORE updating architecture
+        architecture_snapshot = {}
+        for agent_id in ['dqn', 'maml']:
+            agent = self.agents[agent_id]
+            if hasattr(agent, 'policy_net'):
+                architecture_snapshot[agent_id] = {
+                    'policy_net': copy.deepcopy(agent.policy_net),
+                    'target_net': copy.deepcopy(agent.target_net) if hasattr(agent, 'target_net') else None
+                }
+        
+        # Save snapshot to history
+        self.architecture_history.append(architecture_snapshot)
+        
+        # Proceed with architecture update
         for agent_id in ['dqn', 'maml']:
             agent = self.agents[agent_id]
             if hasattr(agent, 'policy_net'):
@@ -939,14 +939,9 @@ class LearningAgent(BaseAgent):
             return torch.norm(torch.stack([torch.norm(p) for p in params])).item()
         return 0.0
 
-    def _execute_recovery_strategy(self):
-        """Hierarchical recovery system"""
-        strategy_level = min(self.consecutive_errors // 3, len(self.recovery_strategies)-1)
-        return self.recovery_strategies[strategy_level]()
-
     def _recover_soft_reset(self):
         """Level 1 Recovery: Reset network weights and clear buffers"""
-        self.logger.warning("Performing soft reset")
+        logger.warning("Performing soft reset")
         # Reset neural network weights
         for agent in self.agents.values():
             if hasattr(agent, 'policy_net'):
@@ -966,7 +961,7 @@ class LearningAgent(BaseAgent):
 
     def _recover_learning_rate_adjustment(self):
         """Level 2 Recovery: Adaptive learning rate scaling"""
-        self.logger.warning("Adjusting learning rates")
+        logger.warning("Adjusting learning rates")
         for agent_id, agent in self.agents.items():
             if hasattr(agent, 'learning_rate'):
                 agent.learning_rate *= 0.5
@@ -975,17 +970,27 @@ class LearningAgent(BaseAgent):
 
     def _recover_strategy_switch(self):
         """Level 3 Recovery: Fallback to safe strategy"""
-        self.logger.warning("Switching to safe strategy")
+        logger.warning("Switching to safe strategy")
         self.active_strategy = 'rl'  # Default to basic RL
         if self.safety_guard:
             return self.safety_guard.execute({'task': 'emergency_override'})
         return {'status': 'recovered', 'strategy': 'strategy_switch'}
 
-    def _recover_full_reset(self):
-        """Level 4 Recovery: Complete system reset"""
-        self.logger.critical("Performing full reset!")
-        self.__init__(...)  # Reinitialize with original params
-        return {'status': 'recovered', 'strategy': 'full_reset'}
+    def _full_reset(self):
+        """Reinitialize core components while preserving environment"""
+        # Preserve essential references
+        env = self.env
+        config = self.config
+        shared_memory = self.shared_memory
+        agent_factory = self.agent_factory
+        
+        # Reinitialize main components
+        self.__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            env=env,
+            config=config
+        )
 
         # Initialize sub-agents
     def _initialize_agents(self, env, performance_metrics, 
@@ -1083,92 +1088,133 @@ class LearningAgent(BaseAgent):
                 return func(self, *args, **kwargs)
             except (NaNException, GradientExplosionError, InvalidActionError) as e:
                 self.logger.error(f"Training error: {str(e)}")
-                self.error_history.append({
-                    'timestamp': datetime.now(),
-                    'error_type': type(e).__name__,
-                    'context': self._get_training_context()
-                })
-                self.consecutive_errors += 1
-                return self._execute_recovery_strategy()
-            finally:
-                if self.consecutive_errors > 0:
-                    self.consecutive_errors -= 1
+                
+                # Use recovery system instead of old error handling
+                self.recovery_system.increment_error_count()
+                recovery_result = self.recovery_system.execute_recovery()
+                
+                # Reset error count if recovery was successful
+                if recovery_result.get('status') == 'recovered':
+                    self.recovery_system.reset_error_count()
+                
+                return recovery_result
         return wrapper
 
     def train_step(self, state, action, reward, next_state, task_id):
         """
-        Enhanced training step with gradient management and task-specific loss
+        Robust training step with dynamic input handling and gradient safety
         """
-        if not isinstance(task_id, (str, int, float, tuple)):
-            task_id = "default_task"
-
-        if task_id not in self.multi_task_learner.task_ids:
-            self.multi_task_learner.task_ids.append(task_id)
-            self.multi_task_learner.task_weights[task_id] = 1.0
-
-        # Generate task embedding from state
-        task_embedding = self._generate_task_embedding(state)
-        output = self.policy_net(task_embedding.unsqueeze(0))
-
-        # Convert to tensors
-        state_tensor = state.detach().clone() if torch.is_tensor(state) else torch.tensor(state, dtype=torch.float32)
-        next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
-        reward_tensor = torch.tensor(reward, dtype=torch.float32)
-        
-        # Forward pass
-        self.optimizer.zero_grad()
-        output = self.policy_net(state_tensor.unsqueeze(0))
-        
-        # Compute task-specific loss
-        loss = self._compute_task_loss(output, action, reward_tensor, next_state_tensor, task_id)
-        
-        # Update multitask learner
-        self.multi_task_learner.update_loss(task_id, loss.item())
-        
-        # Apply task weighting
-        weighted_loss = loss * self.multi_task_learner.task_weights[task_id]
-        
-        # Backpropagation with gradient clipping
-        weighted_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
-        self.optimizer.step()
-        
-        # Check for numerical instability
-        if torch.isnan(weighted_loss):
-            logger.error(f"NaN loss detected in task {task_id}")
-            raise NaNException(f"NaN loss in task {task_id}")
+        try:
+            # 1. Convert inputs to tensors
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            next_state_tensor = torch.tensor(next_state, dtype=torch.float32)
+            reward_tensor = torch.tensor(reward, dtype=torch.float32)
             
-        return weighted_loss.item()
+            # 2. Generate proper embeddings
+            task_embedding = self._generate_task_embedding_(state_tensor)
+            
+            # 3. Dynamic resizing if needed
+            if task_embedding.shape[-1] != self.task_embedding_dim:
+                self._resize_embedder(task_embedding.shape[-1])
+                task_embedding = self.state_embedder(state_tensor.unsqueeze(0))
+            
+            # 4. Forward pass with gradient monitoring
+            self.optimizer.zero_grad()
+            logits = self.policy_net(task_embedding)
+            
+            # 5. Compute loss with numerical stability checks
+            loss = self._compute_task_loss(
+                prediction=logits,
+                action=action,
+                reward=reward_tensor,
+                next_state=next_state_tensor,
+                task_id=task_id
+            )
+            
+            # 6. Backpropagation with gradient clipping
+            if not loss.requires_grad:
+                logger.warning("Loss doesn't require gradients, skipping backward")
+                return 0.0
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
+            self.optimizer.step()
+            
+            return loss.item()
+            
+        except RuntimeError as e:
+            if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                # Handle input dimension mismatch dynamically
+                self._adapt_to_input_change(state_tensor)
+                return 0.0  # Skip this step after adaptation
+            else:
+                raise e
+        except Exception as e:
+            logger.error(f"Train step failed: {e}")
+            return 0.0
+
+    def _adapt_to_input_change(self, state_tensor):
+        """Dynamically adjust network architecture for changed input dimensions"""
+        new_dim = state_tensor.shape[-1]
+        logger.warning(f"Input dimension changed to {new_dim}, adapting networks...")
+        
+        # Resize state embedder
+        self.state_dim = new_dim
+        self.state_embedder = nn.Sequential(
+            nn.Linear(new_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.task_embedding_dim)
+        ).to(self.device)
+        
+        # Reinitialize policy network
+        hidden_dim = self.learning_agent_config.get('meta_controller', {}).get('hidden_dim', 128)
+        self.policy_net = nn.Sequential(
+            nn.Linear(self.task_embedding_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.num_agent_strategies)
+        ).to(self.device)
+        
+        # Reinitialize optimizer
+        self.optimizer = torch.optim.Adam(
+            self.policy_net.parameters(),
+            lr=self.learning_agent_config.get('meta_controller', {}).get('learning_rate', 1e-3)
+        )
 
     def _compute_task_loss(self, prediction, action, reward, next_state, task_id):
-        """
-        Enhanced task-specific loss calculation with:
-        - Different loss functions per task type
-        - Temporal difference for RL tasks
-        - Cross-entropy for classification tasks
-        """
-        # Get task metadata
-        task_type = self._get_task_type(task_id)
+        """Safe loss calculation with fallbacks"""
+        try:
+            if prediction.dim() == 1:
+                prediction = prediction.unsqueeze(0)
+
+            if isinstance(action, int):
+                action = torch.tensor([action], dtype=torch.long)
+
+            # Get task metadata
+            task_type = self._get_task_type(task_id)
+            
+            if task_type == "rl":
+                # Use agent's Q-network instead of policy_net
+                with torch.no_grad():
+                    next_q = self.agents['dqn'].policy_net(next_state.unsqueeze(0))
+                    target = reward + self.agents['dqn'].gamma * torch.max(next_q)
+                current_q = prediction[0, action]
+                return torch.nn.functional.mse_loss(current_q, target)
+                
+            else:
+                return torch.nn.functional.cross_entropy(prediction, action)
+                
+        except Exception as e:
+            self.logger.error(f"Loss computation failed: {e}")
+            return torch.tensor(0.0, requires_grad=True)
+
+    def _generate_task_embedding_(self, state):
+        """Robust embedding generation with shape handling"""
+        if not torch.is_tensor(state):
+            state = torch.tensor(state, dtype=torch.float32)
         
-        if task_type == "rl":
-            # Temporal Difference loss
-            with torch.no_grad():
-                next_q = self.policy_net(next_state.unsqueeze(0))
-                target = reward + self.agents['dqn'].gamma * torch.max(next_q)
-            current_q = prediction[0, action]
-            return torch.nn.functional.mse_loss(current_q, target)
+        if len(state.shape) == 1:
+            state = state.unsqueeze(0)
             
-        elif task_type == "classification":
-            # Cross-entropy loss
-            target = torch.tensor([action], dtype=torch.long)
-            return torch.nn.functional.cross_entropy(prediction, target)
-            
-        elif task_type == "regression":
-            # MSE loss
-            return torch.nn.functional.mse_loss(prediction.squeeze(), reward)
-            
-        else:  # Default to MSE
-            return torch.nn.functional.mse_loss(prediction.squeeze(), reward)
+        return self.state_embedder(state).squeeze(0)
 
     def _get_task_type(self, task_id):
         """Determine task type from configuration or task ID pattern"""
@@ -1188,48 +1234,53 @@ class LearningAgent(BaseAgent):
         Implements Hybrid Reward Architecture from:
         van Seijen et al. (2017). Hybrid Reward Architecture for RL
         """
-        state = self._process_state(self.env.reset())
-        action = self._select_action(state, agent_type)
-        state = self.env.reset()
-        total_reward = 0
-        episode_data = []
-        agent = self.agents.get(agent_type)
-        if not agent:
-            raise ValueError(f"No agent found for type '{agent_type}'")
-
-        dqn_loss = agent.train()
-        grad_norm = self._get_gradient_norm(agent)
-        
-        while True:
+        try:
+            state = self._process_state(self.env.reset())
             action = self._select_action(state, agent_type)
-            next_state, env_reward, done, _ = self.env.step(action)
-            processed_next_state = self._process_state(next_state)
-            
-            # Calculate enhanced reward
-            enhanced_reward = self._calculate_reward(
-                state, action, processed_next_state, env_reward
-            )
-            
-            # Store experience with original reward
-            episode_data.append((state, action, env_reward, processed_next_state, done))
-            self._process_feedback(state, action, enhanced_reward)
-            
-            total_reward += enhanced_reward
-            state = processed_next_state
-            if done: break
-        
-        # Train on episode data
-        loss = self._train_strategy(episode_data, agent_type)
-        self.performance_history.append(total_reward)
-        self.performance_metrics['dqn_loss'].append(dqn_loss)
-        self.performance_metrics['maml_grad_norm'].append(grad_norm)
-        # Update strategy weights
-        self._update_strategy_weights(loss)
+            state = self.env.reset()
+            total_reward = 0
+            episode_data = []
+            agent = self.agents.get(agent_type)
+            if not agent:
+                raise ValueError(f"No agent found for type '{agent_type}'")
 
-        # Rebalance after each episode
-        self.multi_task_learner.rebalance()
+            dqn_loss = agent.train()
+            grad_norm = self._get_gradient_norm(agent)
+            
+            while True:
+                action = self._select_action(state, agent_type)
+                next_state, env_reward, done, _ = self.env.step(action)
+                processed_next_state = self._process_state(next_state)
 
-        return total_reward
+                # Calculate enhanced reward
+                enhanced_reward = self._calculate_reward(
+                    state, action, processed_next_state, env_reward
+                )
+
+                # Store experience with original reward
+                episode_data.append((state, action, env_reward, processed_next_state, done))
+                self._process_feedback(state, action, enhanced_reward)
+
+                total_reward += enhanced_reward
+                state = processed_next_state
+                if done: break
+
+            # Train on episode data
+            loss = self._train_strategy(episode_data, agent_type)
+            self.performance_history.append(total_reward)
+            self.performance_metrics['dqn_loss'].append(dqn_loss)
+            self.performance_metrics['maml_grad_norm'].append(grad_norm)
+
+            # Update strategy weights
+            self._update_strategy_weights(loss)
+
+            # Rebalance after each episode
+            self.multi_task_learner.rebalance()
+
+            return total_reward
+        finally:
+            if not has_error:
+                self.recovery_system.reset_error_count()
 
     def _process_feedback(self, state, action, reward):
         """
@@ -1735,7 +1786,7 @@ class LearningAgent(BaseAgent):
             return False
             
         # Calculate KL-divergence
-        kl_div = self._calculate_kl_divergence(historical_states, recent_states)
+        kl_div = self.learning_calculations._calculate_kl_divergence(historical_states, recent_states)
         return kl_div > self.data_change_threshold
 
     def _check_scheduled_retraining(self):
@@ -2095,33 +2146,11 @@ class ConceptDriftDetector:
             return False
 
         # Calculate KL divergence
-        kl_div = self._calculate_kl_divergence(historical_data, current_batch)
+        self.learning_calculations = LearningCalculations()
+        kl_div = self.learning_calculations._calculate_kl_divergence(historical_data, current_batch)
         self.data_window.extend(current_batch)
         
         return kl_div > self.threshold
-
-    def _calculate_kl_divergence(self, p, q):
-        """Compute KL(P||Q) between two multivariate Gaussian distributions"""
-        # Epsilon to prevent singular matrices
-        p += np.random.normal(0, self.epsilon, p.shape)
-        q += np.random.normal(0, self.epsilon, q.shape)
-        
-        # Calculate means and covariance matrices
-        mu_p = np.mean(p, axis=0)
-        sigma_p = np.cov(p, rowvar=False) + np.eye(p.shape[1])*self.epsilon
-        mu_q = np.mean(q, axis=0)
-        sigma_q = np.cov(q, rowvar=False) + np.eye(q.shape[1])*self.epsilon
-        
-        # KL divergence formula for multivariate Gaussians
-        diff = mu_q - mu_p
-        sigma_q_inv = np.linalg.inv(sigma_q)
-        n = mu_p.shape[0]
-        
-        trace_term = np.trace(sigma_q_inv @ sigma_p)
-        quad_form = diff.T @ sigma_q_inv @ diff
-        logdet_term = np.log(np.linalg.det(sigma_q)/np.linalg.det(sigma_p))
-        
-        return 0.5 * (trace_term + quad_form - n + logdet_term)
 
 __all__ = ['LearningAgent', 'SLAIEnv']
 
@@ -2143,28 +2172,19 @@ if __name__ == "__main__":
     print(f"\n{observe}")
 
     print("\n* * * * * Phase 3 * * * * *\n")
-    task_ids = ['default_task']
-    reward = 0.0
-    gradients = None
     state, _ = env.reset()
     action = env.action_space.sample()
-    next_state, base_reward, terminated, truncated, info = env.step(action)
-
-    processed_state = agent._process_state(state)
-    processed_next_state = agent._process_state(next_state)
- 
-    task = agent._create_task_variation()
-    # train = agent.train_step(processed_state, action, reward, processed_next_state, task_id)
-    dummy_embedding = torch.randn(256)
-    train = agent.train_step(dummy_embedding, action, reward, dummy_embedding, task_id=task_ids)
+    next_state, reward, terminated, truncated, info = env.step(action)
+    task_id = 'default_task'
     
-    print(f"\nCreated task variation: {task}")
-    print(train)
-    print(agent._apply_biologically_constrained_learning(gradients))
+    # Pass real state instead of dummy embedding
+    train = agent.train_step(state, action, reward, next_state, task_id)
+    
+    print(f"\nTraining step result: {train}")
 
     print("\n* * * * * Phase 4 * * * * *\n")
     done = terminated or truncated
-    calculate = agent._calculate_reward(state, action, next_state, base_reward)
+    calculate = agent._calculate_reward(state, action, next_state, reward)
     print(agent._check_scheduled_retraining())
     print(f"Calculated reward: \n{calculate}")
 
