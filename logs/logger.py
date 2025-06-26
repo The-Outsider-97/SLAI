@@ -296,108 +296,114 @@ class RotatingHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._compress_queue = deque(maxlen=5)
-        self.compress_threshold = 5  # Number of backups before compression
+        self.compress_threshold = 5
         self.last_rollover_time = 0
-        self.rollover_cooldown = 60  # 60 seconds cooldown between rollover attempts
+        self.rollover_cooldown = 60
 
     def doRollover(self):
         current_time = time.time()
-
         if current_time - self.last_rollover_time < self.rollover_cooldown:
-            return  # Skip if we tried recently
+            return
 
         self.last_rollover_time = current_time
+        errors = []
+        
+        # Only close this handler's stream
+        self.close()
+        
+        # Generate backup filename
+        timestamp = int(time.time())
+        unique_id = uuid.uuid4().hex[:6]
+        dfn = self.rotation_filename(f"{self.baseFilename}.{timestamp}_{unique_id}")
 
-        # Flush and close all handlers to release file locks
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers:
+        # Remove existing backup if needed
+        if os.path.exists(dfn):
             try:
-                handler.flush()
-                handler.close()
-            except Exception:
-                pass
+                os.remove(dfn)
+            except OSError as e:
+                errors.append(f"Failed to remove existing backup {dfn}: {e}")
 
-        self.stream = None
+        # Rotate current log to backup
+        if os.path.exists(self.baseFilename):
+            try:
+                os.rename(self.baseFilename, dfn)  # Atomic rename
+            except OSError as e:
+                errors.append(f"Failed to rename log file: {e}")
 
-        #dfn = self.rotation_filename(self.baseFilename + ".1")
-        dfn = self.rotation_filename(self.baseFilename + f".{int(time.time())}_{uuid.uuid4().hex[:6]}")
-
-        try:
-            if os.path.exists(dfn):
-                try:
-                    with open(dfn, 'a'):
-                        pass
-                    os.remove(dfn)
-                except (PermissionError, IOError):
-                    logging.debug(f"Backup file {dfn} is locked, skipping removal")
-
-            if os.path.exists(self.baseFilename):
-                try:
-                    with open(self.baseFilename, 'r+b') as src:
-                        msvcrt.locking(src.fileno(), msvcrt.LK_LOCK, 1)
-                        with open(dfn, 'wb') as dst:
-                            shutil.copyfileobj(src, dst)
-                        msvcrt.locking(src.fileno(), msvcrt.LK_UNLCK, 1)
-                    os.remove(self.baseFilename)
-                except Exception as e:
-                    logging.warning(f"Log rotation fallback failed: {str(e)}")
-                    return
-
-                else:
-                    logging.warning(f"Log file {self.baseFilename} is locked, skipping rotation")
-                    return
-    
-        except Exception as e:
-            logging.error(f"Log rotation error: {str(e)}")
-            return
-    
+        # Reopen current log
         if not self.delay:
             try:
                 self.stream = self._open()
-            except Exception:
-                self.stream = None
+            except Exception as e:
+                errors.append(f"Failed to reopen log: {e}")
 
-        self._enforce_log_limits(max_total_gb=40, max_files=300)
+        # Enforce log limits and compression
+        try:
+            self._enforce_log_limits(max_total_gb=40, max_files=300)
+        except Exception as e:
+            errors.append(f"Log limits enforcement failed: {e}")
+            
+        try:
+            self._compress_queue.append(dfn)
+            self._manage_compression()
+        except Exception as e:
+            errors.append(f"Compression failed: {e}")
 
-        self._compress_queue.append(dfn)
-        self._manage_compression()
-
-    def _manage_compression(self):
-        while len(self._compress_queue) > self.compress_threshold:
-            old_log = self._compress_queue.popleft()
+        # Log any errors
+        if errors:
             try:
-                # Read and compress with context managers
-                with open(old_log, 'rb') as f:
-                    data = zlib.compress(f.read(), level=9)
-                with open(old_log + '.z', 'wb') as f:
-                    f.write(data)
-                os.remove(old_log)
-            except PermissionError as e:
-                logging.error(f"Failed to compress {old_log}: {e}")
+                logger = logging.getLogger("RotatingHandler")
+                for error in errors:
+                    logger.error(error)
+            except Exception:
+                pass  # Fallback if logging unavailable
 
     def _enforce_log_limits(self, max_total_gb=40, max_files=300):
         max_total_bytes = max_total_gb * (1024**3)
-        log_files = sorted(
-            [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.startswith("app.log")],
-            key=os.path.getmtime
-        )
+        log_dir_path = os.path.dirname(self.baseFilename) or '.'
+        
+        if not os.path.isdir(log_dir_path):
+            return
     
-        total_size = 0
+        file_infos = []
+        base_name = os.path.basename(self.baseFilename)
+        
+        for filename in os.listdir(log_dir_path):
+            file_path = os.path.join(log_dir_path, filename)
+            if not os.path.isfile(file_path):
+                continue
+                
+            # Only match backup files (base_name + extra characters)
+            if filename.startswith(base_name + '.'):
+                try:
+                    mtime = os.path.getmtime(file_path)
+                    size = os.path.getsize(file_path)
+                    file_infos.append((file_path, mtime, size))
+                except OSError:
+                    continue
+    
+        file_infos.sort(key=lambda x: x[1])  # Sort by mtime
+        total_size = sum(size for _, _, size in file_infos)
+        file_count = len(file_infos)
         files_to_delete = []
     
-        for f in reversed(log_files):  # Start from newest
-            size = os.path.getsize(f)
-            total_size += size
-            if len(log_files) > max_files or total_size > max_total_bytes:
-                files_to_delete.append(f)
-                log_files.remove(f)
+        for file_path, _, size in file_infos:
+            if file_count <= max_files and total_size <= max_total_bytes:
+                break
+                
+            files_to_delete.append(file_path)
+            total_size -= size
+            file_count -= 1
     
-        for f in files_to_delete:
-            try:
-                os.remove(f)
-                logging.info(f"Deleted old log file to enforce limits: {f}")
-            except Exception as e:
-                logging.warning(f"Failed to delete {f}: {e}")
+        # Delete files with retries
+        for file_path in files_to_delete:
+            for attempt in range(3):
+                try:
+                    os.remove(file_path)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logging.error(f"Failed to delete {file_path} after 3 attempts: {e}")
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):
@@ -405,6 +411,7 @@ class ResourceLogger:
         self.cpu_history = deque(maxlen=60)  # 60 samples for 1-min window
         self.mem_history = deque(maxlen=60)
         self._gpu_initialized = False
+        self.throughput_window = deque(maxlen=100)
         
     def _initialize_gpu(self):
         try:
@@ -414,6 +421,8 @@ class ResourceLogger:
             pass
 
     def collect_metrics(self) -> dict:
+        self.record_event()
+
         metrics = {
             'cpu': self._exp_smoothed_cpu(),
             'mem': psutil.virtual_memory().percent,
@@ -441,6 +450,21 @@ class ResourceLogger:
             return util.gpu
         except:
             return 0.0
+    
+    def _calc_throughput(self) -> float:
+        """
+        Calculate average throughput (events per second) based on recorded (timestamp, count) entries.
+        """
+        if len(self.throughput_window) < 2:
+            return 0.0
+    
+        timestamps, counts = zip(*self.throughput_window)
+        duration = timestamps[-1] - timestamps[0]
+    
+        if duration == 0:
+            return float('inf')
+    
+        return sum(counts) / duration
 
     def _log_entropy(self):
         # Calculate information entropy of recent logs
@@ -449,6 +473,9 @@ class ResourceLogger:
         for c in log_contents:
             prob[c] = prob.get(c, 0) + 1/len(log_contents)
         return -sum(p * math.log2(p) for p in prob.values() if p > 0)
+    
+    def record_event(self, count: int = 1):
+        self.throughput_window.append((time.time(), count))
 
 class AnomalyDetector:
     def __init__(self, window_size=100, sigma=3):
