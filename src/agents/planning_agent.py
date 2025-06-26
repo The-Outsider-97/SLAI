@@ -601,6 +601,9 @@ class PlanningAgent(BaseAgent):
                     
                     # Execute task
                     start_time = time.time()
+                    outcome = self._execute_action(task)
+                    self.heuristic_selector.heuristics["CBR"].record_outcome(
+                        task, self.world_state, method_used, outcome)
                     self._execute_action(task)
                     end_time = time.time()
                     
