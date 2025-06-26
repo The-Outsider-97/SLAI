@@ -9,6 +9,7 @@ from src.agents.planning.utils.config_loader import load_global_config, get_conf
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.uncertainty_aware_heuristic import UncertaintyAwareHeuristic
+from src.agents.planning.case_based_reasoning_heuristic import CaseBasedReasoningHeuristic
 from src.agents.planning.reinforcement_learning_heuristic import ReinforcementLearningHeuristic
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
@@ -36,7 +37,8 @@ class HeuristicSelector:
             "DT": DecisionTreeHeuristic(),
             "GB": GradientBoostingHeuristic(),
             "RL": ReinforcementLearningHeuristic(),
-            "UA": UncertaintyAwareHeuristic()
+            "UA": UncertaintyAwareHeuristic(),
+            "CBR": CaseBasedReasoningHeuristic()
         }
         self.heuristic_performance = {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
         self.last_used = {key: 0 for key in self.heuristics}
@@ -163,7 +165,11 @@ class HeuristicSelector:
         return False
     
     def _calculate_task_depth(self, task: Dict[str, Any]) -> int:
-        """Calculate depth of task hierarchy"""
+        """Calculate depth of task hierarchy with goal_state validation"""
+        if not isinstance(task.get('goal_state'), dict):
+            logger.warning("Task missing valid goal_state, using empty state")
+            task['goal_state'] = {}  # Initialize empty state
+        
         depth = 0
         current = task
         while "parent" in current and current["parent"] is not None:
@@ -228,6 +234,8 @@ class HeuristicSelector:
         elif heuristic_name == "UA":
             method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
         elif heuristic_name == "DT":
+            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        elif heuristic_name == "CBR":
             method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
         else:  # GB
             # GB doesn't take method_stats in select_best_method in the provided code
