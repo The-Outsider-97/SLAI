@@ -1,13 +1,15 @@
-__version__ = "1.9.0"
 
 import importlib
 import sys
+import inspect
 
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
+
+from . import __version__ 
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.factory.agent_meta_data import AgentMetaData, AgentRegistry
@@ -65,31 +67,40 @@ class AgentFactory:
 
         self.metrics_adapter = MetricsAdapter()
         self.registry = AgentRegistry()
-        
+
         for name, cls in self._agent_classes.items():
             self.registry.register(AgentMetaData(
                 name=name,
                 module_path=cls.__module__,
                 class_name=cls.__name__,
-                version="1.9",
+                version=__version__,
                 dependencies=self._get_agent_dependencies(cls)
             ))
-    
+
         self.agent_factory = {}
-    
+
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
+
+    def _get_agent_dependencies(self, cls) -> list[str]:
+        """Stub for future dependency inspection."""
+        return getattr(cls, "REQUIRES", [])
+    
+    def discover_agents(self):
+        import src.agents  # root module
+        for name, obj in inspect.getmembers(src.agents):
+            if inspect.isclass(obj) and issubclass(obj, BaseAgent):
+                self._agent_classes[obj.__name__.lower()] = obj
 
     def register_agent(self, metadata: AgentMetaData):
         """
-
         Registers an agent's metadata, making it available for creation.
         """
         if not isinstance(metadata, AgentMetaData):
             raise TypeError("Can only register objects of type AgentMetaData.")
-        
+
         if metadata.name in self.agent_registry:
             logger.warning(f"Agent '{metadata.name}' is already registered. Overwriting metadata.")
-        
+
         self.agent_registry[metadata.name] = metadata
         logger.info(f"Registered agent: '{metadata.name}' (version {metadata.version})")
 
@@ -135,7 +146,7 @@ class AgentFactory:
         except (ImportError, AttributeError) as e:
             logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
             raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
-            
+
         # Get the agent-specific configuration and merge with any runtime kwargs
         agent_config_key = f"{agent_type}_agent"
         agent_config = get_config_section(agent_config_key)
@@ -166,9 +177,49 @@ class AgentFactory:
             logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
             raise
 
-    def _get_agent_dependencies(self, cls) -> list[str]:
-        """Stub for future dependency inspection."""
-        return []
+    def inspect_registered_agents(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Inspects all registered agents for metadata consistency, import integrity, and instantiability.
+    
+        Returns:
+            Dict[str, Dict[str, Any]]: A dictionary keyed by agent name with diagnostic info.
+        """
+        diagnostics = {}
+    
+        for name, metadata in self.registry.agents.items():
+            info = {
+                "status": "OK",
+                "module_path": metadata.module_path,
+                "class_name": metadata.class_name,
+                "version": metadata.version,
+                "issues": []
+            }
+    
+            try:
+                module = importlib.import_module(metadata.module_path)
+                cls = getattr(module, metadata.class_name)
+    
+                if not issubclass(cls, BaseAgent):
+                    info["status"] = "Warning"
+                    info["issues"].append("Class is not a subclass of BaseAgent.")
+    
+                # Check constructor signature
+                expected_args = {"shared_memory", "agent_factory", "config"}
+                ctor_args = set(cls.__init__.__code__.co_varnames)
+                missing = expected_args - ctor_args
+    
+                if missing:
+                    info["status"] = "Warning"
+                    info["issues"].append(f"Missing constructor args: {missing}")
+    
+            except (ImportError, AttributeError) as e:
+                info["status"] = "Error"
+                info["issues"].append(f"Import or attribute error: {e}")
+    
+            diagnostics[name] = info
+    
+        printer.pretty("Agent Diagnostics", diagnostics, "debug")
+        return diagnostics
 
     def run_adaptation_cycle(self, metrics: Dict[str, Any], agent_types: list[str]):
         """
@@ -227,4 +278,12 @@ if __name__ == "__main__":
     factory = AgentFactory()
     print(factory)
     printer.status("Init", factory.create(agent_type=agent_type, shared_memory=shared_memory), "success")
+
+    print("\n* * * * * Phase 2 - Inspection * * * * *\n")
+    diagnostics = factory.inspect_registered_agents()
+    for agent, result in diagnostics.items():
+        print(f"{agent}: {result['status']}")
+        if result['issues']:
+            for issue in result['issues']:
+                print(f"  - {issue}")
     print("\n=== Successfully Ran Agent Factory ===\n")
