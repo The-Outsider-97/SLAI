@@ -1,3 +1,10 @@
+gpu_limit: 1000
+ram_limit: 128
+trained: False
+random_state: 42
+planning_db_path: "templates/planning_db.json"
+heuristic_model_path: "src/agents/planning/models/"
+
 safety_margins:
   resource_buffers:
     gpu: 0.15           # 15% of available GPUs must remain unallocated
@@ -9,9 +16,10 @@ safety_margins:
     time_buffer: 120       # Minimum gap between dependent tasks (seconds)
 
 service_discovery:
+  skip_localhost_http: True
   mode: "static"  # Options: static|consul|k8s
-  static_nodes: [] # OR add "node1", "node2", "gpu-node1"
-  consul_url: "http://localhost:8500"
+  static_nodes: ["localhost"] # OR add "node1", "node2", "gpu-node1"
+  consul_url: "http://localhost:5000"
   k8s_api: "https://kubernetes.default.svc"
   k8s_token: ""
   node_port: 9100  # Port for node metrics API
@@ -49,7 +57,7 @@ task_scheduler:
     delay: 10
 
 heuristic_selector:
-  heuristic_priority: ["RL", "GB", "DT", "UA"]
+  heuristic_priority: ["RL", "GB", "DT", "UA", "CBR"]
   min_rl_sequence_length: 3
   max_dt_depth: 5
   speed_threshold: 0.1  # seconds
@@ -106,6 +114,14 @@ uncertainty_aware_heuristic:
   model_type: "BNN" # GP or BNN
   feature_config: {}
   bnn_config: {}
+
+case_based_reasoning_heuristic:
+  similarity_threshold: 0.7
+  max_cases: 1000
+  min_similar_cases: 3
+  feature_weights: {}
+  adaptation_rules: {}
+  feature_config: {}
 
 planning_memory:
   checkpoints_dir: "src/agents/planning/checkpoints/"
@@ -164,6 +180,7 @@ probabilistic_planner:
 safety_planning: {}
 
 cluster_monitoring:
+  skip_localhost_http: True
   node_query_timeout: 2    # Seconds to wait for node response
   update_interval: 5       # Seconds between resource updates
   discovery_poll_interval: 300  # Seconds between node discovery scans
