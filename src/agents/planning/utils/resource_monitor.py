@@ -5,7 +5,9 @@ import GPUtil
 import requests
 import threading
 
+from typing import Any, Dict, List
 from threading import Lock
+from dataclasses import field
 from requests.exceptions import RequestException
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
@@ -17,7 +19,19 @@ printer = PrettyPrinter
 
 class ResourceMonitor:
     """Real-time cluster resource tracking with failure resilience"""
-    
+    gpu_utilization: Dict[str, float] = field(default_factory=dict)
+    ram_utilization: Dict[str, float] = field(default_factory=dict)
+    cpu_utilization: Dict[str, float] = field(default_factory=dict)
+    network_utilization: Dict[str, float] = field(default_factory=dict)
+    storage_utilization: Dict[str, float] = field(default_factory=dict)
+    thermal_readings: Dict[str, float] = field(default_factory=dict)
+    power_consumption: Dict[str, float] = field(default_factory=dict)
+    hardware_status: Dict[str, str] = field(default_factory=dict)
+    resource_history: List[Dict] = field(default_factory=list)
+    alert_thresholds: Dict[str, float] = field(default_factory=dict)
+    last_update: float = field(default_factory=time.time)
+    update_interval: float = 5.0  # seconds
+
     def __init__(self):
         self._node_cache = {}  # Cache last known good states
         self.config = load_global_config()
@@ -80,6 +94,42 @@ class ResourceMonitor:
             target=monitor_loop,
             daemon=True
         ).start()
+
+    def update_metrics(self, metrics: Dict[str, Any]):
+        """Update resource metrics from monitoring system"""
+        current_time = time.time()
+        if current_time - self.last_update < self.update_interval:
+            return
+            
+        self.gpu_utilization = metrics.get('gpu', {})
+        self.ram_utilization = metrics.get('ram', {})
+        self.cpu_utilization = metrics.get('cpu', {})
+        self.network_utilization = metrics.get('network', {})
+        self.storage_utilization = metrics.get('storage', {})
+        self.thermal_readings = metrics.get('temperature', {})
+        self.power_consumption = metrics.get('power', {})
+        self.hardware_status = metrics.get('status', {})
+        self.last_update = current_time
+        
+        # Add to history
+        self.resource_history.append({
+            'timestamp': current_time,
+            'metrics': metrics
+        })
+        # Keep only last 1000 entries
+        if len(self.resource_history) > 1000:
+            self.resource_history.pop(0)
+            
+    def check_violations(self) -> List[str]:
+        """Check for resource threshold violations"""
+        violations = []
+        for resource, threshold in self.alert_thresholds.items():
+            current = getattr(self, f"{resource}_utilization", {})
+            for device, usage in current.items():
+                if usage > threshold:
+                    violations.append(f"{resource} violation on {device}: {usage:.1f} > {threshold:.1f}")
+        return violations
+
 
     def _discover_cluster_nodes(self):
         """Discover nodes through configured service discovery backend"""
