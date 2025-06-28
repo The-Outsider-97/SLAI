@@ -202,6 +202,39 @@ class PlanSnapshot:
     resource_utilization: Dict[str, str] = field(default_factory=dict)
 
 @dataclass
+class TemporalConstraints:
+    """Comprehensive temporal constraint system"""
+    start_time: float = 0.0
+    end_time: float = 0.0
+    min_duration: float = 0.0
+    max_duration: float = 0.0
+    dependencies: List[str] = field(default_factory=list)  # Task IDs this task depends on
+    max_wait: float = 0.0  # Max time to wait for dependencies
+    time_buffer: float = 0.0  # Buffer time after completion
+    constraints: List[Callable] = field(default_factory=list)  # Custom constraint functions
+    
+    def validate(self, current_time: float) -> bool:
+        """Check if temporal constraints are satisfied"""
+        if self.start_time > 0 and current_time < self.start_time:
+            return False
+        if self.end_time > 0 and current_time > self.end_time:
+            return False
+        return all(constraint(current_time) for constraint in self.constraints)
+
+@dataclass
+class SafetyViolation:
+    """Detailed safety violation report"""
+    violation_type: str
+    resource: str
+    measured_value: float
+    threshold: float
+    task_id: str
+    timestamp: float = field(default_factory=time.time)
+    severity: str = "medium"  # low, medium, high, critical
+    corrective_action: str = ""
+    impact_analysis: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
 class SafetyMargins:
     """Configuration for safety buffers"""
     gpu_buffer: float = 0.15  # 15% buffer
@@ -209,22 +242,6 @@ class SafetyMargins:
     min_task_duration: int = 30  # seconds
     max_concurrent: int = 5
     time_buffer: int = 120  # seconds
-
-@dataclass
-class Task:
-    """Core task representation with resource requirements"""
-    name: str = "Unnamed Task"
-    id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
-    task_type: TaskType = TaskType.ABSTRACT
-    status: TaskStatus = TaskStatus.PENDING
-    resource_requirements: ResourceProfile = field(default_factory=ResourceProfile)
-    dependencies: List[str] = field(default_factory=list)
-    execution_modes: List[str] = field(default_factory=lambda: ['full'])
-    deadline: float = 0.0
-    priority: int = 1
-    duration: float = 300.0  # seconds
-    cost: float = 1.0
-    parent_task: Optional[str] = None
 
 @dataclass
 class Task:
@@ -259,9 +276,54 @@ class Task:
     dependencies: List["Task"] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)  # String-based dependencies
     execution_modes: List[str] = field(default_factory=lambda: ['full'])  # Modes
+    description: str = "No description provided"
+    created_at: float = field(default_factory=time.time)
+    last_updated: float = field(default_factory=time.time)
+    owner: str = "system"
+    required_skills: List[str] = field(default_factory=list)
+    progress: float = 0.0  # 0.0 to 1.0
+    estimated_duration: float = 0.0
+    actual_duration: float = 0.0
+    required_tools: List[str] = field(default_factory=list)
+    location: str = "unspecified"
+    retry_count: int = 0
+    max_retries: int = 3
+    timeout: float = 0.0  # Time after which task is considered failed
+    criticality: str = "medium"  # low, medium, high, critical
+    category: str = "general"
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    precondition_errors: List[str] = field(default_factory=list)
+    effect_errors: List[str] = field(default_factory=list)
+    history: List[Dict] = field(default_factory=list)
+    children: List['Task'] = field(default_factory=list)
+    context: Dict[str, Any] = field(default_factory=dict)
+    energy_consumption: float = 0.0
+    data_requirements: Dict[str, Any] = field(default_factory=dict)
+    safety_constraints: List[str] = field(default_factory=list)
+    quality_metrics: Dict[str, float] = field(default_factory=dict)
+    failure_reason: str = ""
+    recovery_strategy: str = ""
+    parallelizable: bool = False
+    human_interaction_required: bool = False
+    verification_method: str = "automatic"
+    documentation: str = ""
+    tags: List[str] = field(default_factory=list)
+    version: str = "1.0"
+    source: str = "internal"
+    expected_outcome: str = ""
+    actual_outcome: str = ""
+    sensor_requirements: List[str] = field(default_factory=list)
+    communication_requirements: Dict[str, Any] = field(default_factory=dict)
+    environmental_constraints: Dict[str, Any] = field(default_factory=dict)
+    compliance_requirements: List[str] = field(default_factory=list)
+    optimization_metrics: List[str] = field(default_factory=list)
+    learning_curve: float = 0.0  # How much the task improves with repetition
 
     def __post_init__(self):
         self.type = self.task_type
+        # Set estimated_duration to duration if not specified
+        if self.estimated_duration == 0.0 and self.duration > 0:
+            self.estimated_duration = self.duration
 
     def copy(self) -> 'Task':
         return Task(
@@ -275,7 +337,33 @@ class Task:
             goal_state=self.goal_state,
             is_probabilistic=self.is_probabilistic,
             probabilistic_actions=self.probabilistic_actions.copy(),
-            success_threshold=self.success_threshold
+            success_threshold=self.success_threshold,
+            description=self.description,
+            owner=self.owner,
+            required_skills=self.required_skills.copy(),
+            required_tools=self.required_tools.copy(),
+            location=self.location,
+            max_retries=self.max_retries,
+            criticality=self.criticality,
+            category=self.category,
+            parameters=self.parameters.copy(),
+            context=self.context.copy(),
+            energy_consumption=self.energy_consumption,
+            data_requirements=self.data_requirements.copy(),
+            safety_constraints=self.safety_constraints.copy(),
+            parallelizable=self.parallelizable,
+            human_interaction_required=self.human_interaction_required,
+            verification_method=self.verification_method,
+            tags=self.tags.copy(),
+            version=self.version,
+            source=self.source,
+            expected_outcome=self.expected_outcome,
+            sensor_requirements=self.sensor_requirements.copy(),
+            communication_requirements=self.communication_requirements.copy(),
+            environmental_constraints=self.environmental_constraints.copy(),
+            compliance_requirements=self.compliance_requirements.copy(),
+            optimization_metrics=self.optimization_metrics.copy(),
+            learning_curve=self.learning_curve
         )
     
     @property
