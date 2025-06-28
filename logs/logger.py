@@ -1,4 +1,5 @@
 from __future__ import annotations
+import gzip
 import logging
 import os, sys
 import time
@@ -325,10 +326,15 @@ class RotatingHandler(RotatingFileHandler):
 
         # Rotate current log to backup
         if os.path.exists(self.baseFilename):
-            try:
-                os.rename(self.baseFilename, dfn)  # Atomic rename
-            except OSError as e:
-                errors.append(f"Failed to rename log file: {e}")
+            for attempt in range(5):
+                try:
+                    os.rename(self.baseFilename, dfn)
+                    break
+                except OSError as e:
+                    if attempt == 4:
+                        errors.append(f"Failed to rename log file: {e}")
+                    else:
+                        time.sleep(0.5)
 
         # Reopen current log
         if not self.delay:
@@ -404,6 +410,20 @@ class RotatingHandler(RotatingFileHandler):
                 except Exception as e:
                     if attempt == 2:
                         logging.error(f"Failed to delete {file_path} after 3 attempts: {e}")
+        
+    def _manage_compression(self):
+        while self._compress_queue:
+            path = self._compress_queue.popleft()
+            if not os.path.exists(path):
+                continue
+            gz_path = path + '.gz'
+            try:
+                with open(path, 'rb') as f_in:
+                    with gzip.open(gz_path, 'wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                os.remove(path)
+            except Exception as e:
+                logging.getLogger("RotatingHandler").error(f"Compression error for {path}: {e}")
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):
