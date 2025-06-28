@@ -143,8 +143,17 @@ class PlanningAgent(BaseAgent):
 
         # Initialize probabilistic actions if applicable
         if task.is_probabilistic:
-            for action in task.probabilistic_actions:
-                self.probabilistic_planner.register_action(action)
+            for prob_action in task.probabilistic_actions:
+                if isinstance(prob_action, tuple) and len(prob_action) == 2:
+                    probability, effect = prob_action
+                    # Optionally wrap in your own ProbabilisticAction type if you have one
+                    self.probabilistic_planner.register_action({
+                        "task_name": task.name,
+                        "probability": probability,
+                        "effect": effect
+                    })
+                else:
+                    logger.warning(f"Skipping malformed probabilistic action for task {task.name}")
 
         # Initialize stats for Bayesian method selection if it's an abstract task
         if task.task_type == TaskType.ABSTRACT:
@@ -194,7 +203,7 @@ class PlanningAgent(BaseAgent):
 
         # Base case: If the task is primitive, it's already decomposed.
         if task_to_decompose.task_type == TaskType.PRIMITIVE:
-            if task_to_decompose.check_preconditions(self.world_state):
+            if task_to_decompose.check_preconditions(current_state):
                 if task_to_decompose.start_time is None:
                     task_to_decompose.start_time = time.time()
                 return [task_to_decompose]
@@ -259,8 +268,7 @@ class PlanningAgent(BaseAgent):
         logger.debug(f"Trying method {method_index_to_try} for task '{task_to_decompose.name}' with subtasks: {[st.name for st in subtasks_template]}")
 
         fully_decomposed_plan: List[Task] = []
-        # Keep track of the world state simulation for this decomposition path
-        simulated_world_state = self.world_state.copy()
+        simulated_world_state = current_state.copy()
 
         for subtask_template in subtasks_template:
              # Create a runtime instance of the subtask
@@ -289,7 +297,7 @@ class PlanningAgent(BaseAgent):
                       primitive_task.apply_effects(simulated_world_state)
 
         # If loop completes, the decomposition for this method was successful
-        logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}.")
+        logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}. Current state: {current_state}")
         return fully_decomposed_plan
 
     def _find_alternative_methods(self, task: Task) -> List[int]:
@@ -476,7 +484,11 @@ class PlanningAgent(BaseAgent):
             risk_assessor=self.shared_memory.get('risk_assessor'),
             state=self.world_state
         )
-        
+
+        if not schedule:
+            logger.error("Scheduling failed, a valid schedule could not be created. Aborting plan.")
+            return None
+
         self._planning_end_time = time.time()
         self.current_plan = self._convert_to_plan(schedule)
         
@@ -490,8 +502,23 @@ class PlanningAgent(BaseAgent):
             success_rate=1.0 if plan else 0.0
         )
         self.expected_state_projections = self._generate_state_projections(plan)
-        return plan
 
+        # Calculate estimated completion time from the schedule
+        max_completion_time = 0.0
+        if schedule:
+            end_times = [assignment.get('end_time', 0) for assignment in schedule.values()]
+            if end_times:
+                max_completion_time = max(end_times)
+
+        # Return a structured dictionary instead of just the plan list
+        plan_list = {
+            "plan_steps": plan,
+            "estimated_completion": max_completion_time,
+            "schedule": schedule
+        }
+    
+        return plan_list
+    
     def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
         """Generate expected state after each task execution"""
         projections = {}
