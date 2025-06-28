@@ -60,11 +60,13 @@ heuristic_selector:
   heuristic_priority: ["RL", "GB", "DT", "UA", "CBR"]
   min_rl_sequence_length: 3
   max_dt_depth: 5
+  min_cases_for_cbr: 10
   speed_threshold: 0.1  # seconds
   accuracy_weight: 0.7
   speed_weight: 0.3
   time_budget: 0.5
   performance_log_path: "heuristic_performance.log"
+  cbr_task_types: ["troubleshooting", "support", "repair"]
 
 global_heuristic:
   max_depth: 8
