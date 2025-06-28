@@ -2,7 +2,8 @@
 import time
 import psutil
 
-from typing import List, Dict, Any
+from dataclasses import field
+from typing import List, Dict, Any, Tuple
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus
@@ -16,6 +17,18 @@ class PlanningMetrics(Task):
     Calculates and tracks various metrics related to planning performance.
     Inspired by metrics used in the International Planning Competition (IPC).
     """
+    planning_time: float = 0.0
+    execution_time: float = 0.0
+    plan_length: int = 0
+    success_rate: float = 0.0
+    resource_efficiency: Dict[str, float] = field(default_factory=dict)
+    temporal_efficiency: float = 0.0  # (planned time / actual time)
+    task_success_rates: Dict[str, float] = field(default_factory=dict)
+    method_success_rates: Dict[Tuple[str, int], float] = field(default_factory=dict)
+    failure_analysis: Dict[str, Dict] = field(default_factory=dict)
+    quality_metrics: Dict[str, float] = field(default_factory=dict)
+    cost_metrics: Dict[str, float] = field(default_factory=dict)
+
     def __init__(self):
         super().__init__(name="Metrics", status=TaskStatus.SUCCESS, cost=0.0)
         self.config = load_global_config()
@@ -57,7 +70,7 @@ class PlanningMetrics(Task):
     
         logger.info(f"[TRACK COMPLETE] Plan '{plan_id}' completed in {duration:.2f}s with status: {final_status.name}")
     
-    def record_planning_metrics(self, plan_length: int, planning_time: float, success_rate: float):
+    def record_planning_metrics(self, plan: List[Task], start_time: float, end_time: float, success_rate: float):
         """
         Records and logs core planning metrics.
     
@@ -66,10 +79,12 @@ class PlanningMetrics(Task):
             planning_time (float): Duration of planning in seconds
             success_rate (float): 1.0 for success, 0.0 for failure
         """
-        logger.info(f"[PLANNING METRICS] Length: {plan_length}, Time: {planning_time:.2f}s, Success: {success_rate:.2f}")
+        self.planning_time = end_time - start_time
+        self.plan_length = len(plan)
+        logger.info(f"[PLANNING METRICS] Length: {self.plan_length}, Time: {self.planning_time:.2f}s, Success: {success_rate:.2f}")
         # Optionally store in DB or structured file here
     
-    def record_execution_metrics(self, success_count: int, failure_count: int, resource_usage: Dict[str, float]):
+    def record_execution_metrics(self, success_count: int, failure_count: int, resource_usage: Dict[str, float], execution_result: Dict):
         """
         Logs post-execution metrics, including task outcomes and system usage.
     
@@ -78,11 +93,20 @@ class PlanningMetrics(Task):
             failure_count (int): Number of failed tasks
             resource_usage (Dict[str, float]): e.g., {"cpu": 23.4, "memory": 65.1}
         """
+        self.execution_time = execution_result.get('total_time', 0)
+        self.success_rate = execution_result.get('success_rate', 0)
+        self.resource_efficiency = execution_result.get('resource_efficiency', {})
         total = success_count + failure_count
         success_rate = success_count / total if total else 0.0
     
         logger.info(f"[EXECUTION METRICS] Success: {success_count}, Failures: {failure_count}, Success Rate: {success_rate:.2f}")
         logger.info(f"[RESOURCE USAGE] CPU: {resource_usage.get('cpu', 0):.2f}%, Memory: {resource_usage.get('memory', 0):.2f}%")
+
+    def calculate_efficiency_score(self) -> float:
+        """Calculate overall efficiency score"""
+        time_score = min(1.0, self.temporal_efficiency)
+        resource_score = sum(self.resource_efficiency.values()) / len(self.resource_efficiency) if self.resource_efficiency else 1.0
+        return (0.4 * self.success_rate) + (0.3 * time_score) + (0.3 * resource_score)
 
     @staticmethod
     def plan_length(plan: List[Task]) -> int:
