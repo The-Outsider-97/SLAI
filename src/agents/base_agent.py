@@ -39,14 +39,15 @@ class BaseAgent(abc.ABC):
         self.max_error_log_size = self.config.get('max_error_log_size', 50)
         self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
         self.max_task_retries = self.config.get('max_task_retries', 0)
-        self.task_timeout_seconds = self.config.get('task_timeout_seconds', None)
         self.task_timeout_seconds = None
 
         self.metric_store = LightMetricStore()
         
         # Initialize lazy components system
         self._component_initializers = {
-            'performance_metrics': lambda: defaultdict(lambda: deque(maxlen=500))
+            'performance_metrics': lambda: defaultdict(
+                lambda: deque(maxlen=self._get_metric_buffer_size())
+            )
         }
         self._lazy_components = OrderedDict()
 
@@ -58,15 +59,27 @@ class BaseAgent(abc.ABC):
         self.register_default_known_issue_handlers()
         self._init_core_components()
 
+    def _get_metric_buffer_size(self):
+        """Determine metric buffer size based on memory profile"""
+        if self.memory_profile == 'low':
+            return 100
+        elif self.memory_profile == 'medium':
+            return 500
+        else:  # 'high' or default
+            return 1000
+
     def _init_core_components(self):
-        """Initialize essential components first"""
+        """Initialize essential components first with compression setting"""
         # Create LazyAgent instance for expensive components
-        self.lazy_agent = LazyAgent(lambda: self._create_expensive_components())
+        compression_enabled = self.network_compression
+        self.lazy_agent = LazyAgent(
+            lambda: self._create_expensive_components(compression_enabled))
         
-    def _create_expensive_components(self):
+    def _create_expensive_components(self, compression_enabled=False):
         """Create components that should be lazily initialized"""
         return {
-            'performance_metrics': defaultdict(lambda: deque(maxlen=500))
+            'performance_metrics': defaultdict(
+                lambda: deque(maxlen=self._get_metric_buffer_size()))
         }
 
     def register_default_known_issue_handlers(self):
@@ -142,9 +155,12 @@ class BaseAgent(abc.ABC):
         """
         retries_done = 0
         last_exception_in_retry_loop = None
+        if self.defer_initialization and not hasattr(self, 'lazy_agent'):
+            self.logger.info(f"[{self.name}] Initializing deferred components")
+            self._init_core_components()
+
         self.metric_store.start_tracking('execute', 'performance')
         try:
-
             # --- STAGE 1: Perform Task (with retries) ---
             while retries_done <= self.max_task_retries:
                 try:
@@ -327,14 +343,13 @@ class BaseAgent(abc.ABC):
             self.logger.warning(f"[{self.name}] Alt exec: Sanitization/simplification step failed: {e_sanitize}. Using raw task_data as string for fallback.")
             cleaned_input_str = str(task_data)[:self.config.get('alt_exec_max_clean_len', 500)] # Best effort if sanitization crashes
 
-        # Strategy 2: Try with a very generic LLM prompt if an LLM component is available
-        llm_component = getattr(self, "llm", None) # Safely get llm
+        # Strategy 2: Try with a very generic LLM prompt if available
+        llm_component = getattr(self, "llm", None)
         if llm_component and callable(getattr(llm_component, "generate", None)):
-            fallback_prompt = (
-                f"The primary processing of an input failed with an error: '{str(original_error)[:150]}'. "
-                f"The (simplified) input that caused the failure was: '{cleaned_input_str}'. "
-                f"Please provide a safe, general-purpose response, summary, or interpretation based on this input and error context."
-            )
+            # Apply network compression if enabled
+            compression = self.network_compression
+            fallback_prompt = self._build_fallback_prompt(
+                original_error, cleaned_input_str, compression)
             self.logger.info(f"[{self.name}] Alt exec: Trying LLM with generic fallback prompt.")
             try:
                 llm_result = llm_component.generate(fallback_prompt)
@@ -371,6 +386,19 @@ class BaseAgent(abc.ABC):
             self.logger.warning(f"[{self.name}] Alt exec: No usable cleaned input to echo. Returning total failure message.")
             return "[Fallback failure] Unable to process your request via alternative methods, and input could not be simplified or interpreted."
 
+    def _build_fallback_prompt(self, error, input_str, compression_enabled):
+        """Build fallback prompt with compression optimization"""
+        base_prompt = (
+            f"The primary processing of an input failed with an error: "
+            f"'{str(error)[:150]}'. "
+            f"The (simplified) input was: '{input_str}'. "
+            f"Please provide a safe, general-purpose response."
+        )
+        
+        if compression_enabled:
+            # Truncate and simplify for network efficiency
+            return base_prompt[:min(len(base_prompt), 512)] + " [COMPRESSED]"
+        return base_prompt
 
     def is_similar(self, task_data_1: Any, task_data_2: Any) -> bool:
         """
