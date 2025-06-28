@@ -4,7 +4,7 @@ import time
 import copy
 import json, yaml
 
-from typing import Union, Dict, Any
+from typing import Optional, Union, Dict, Any
 from collections import deque, defaultdict
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
@@ -60,6 +60,13 @@ class PlanningMemory:
                 self.load_checkpoint(-1)
         except Exception as e:
             logger.error(f"Checkpoint load failed: {e}")
+
+    def get_task_outcome(self, task_id: str) -> Optional[bool]:
+        """Retrieve actual outcome of a task (True=success, False=failure)"""
+        if task_id in self.base_state['execution_history']:
+            entry = self.base_state['execution_history'][task_id]
+            return entry.get('status') == 'success'
+        return None
 
     def get_method_success_rate(self, method_name: str) -> float:
         """Get historical success rate for a method"""
