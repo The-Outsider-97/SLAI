@@ -1,19 +1,22 @@
-from collections import defaultdict
+
 import threading
 import json, yaml
 import time, copy
 import requests
 
-from requests.exceptions import RequestException
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import field
 from queue import PriorityQueue
+from collections import defaultdict
+from requests.exceptions import RequestException
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                        SafetyMarginError, ResourceViolation)
 from src.agents.planning.utils.planning_calculations import PlanningCalculations
 from src.agents.planning.utils.resource_monitor import ResourceMonitor
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus, ResourceProfile, ClusterResources, RepairCandidate
+from src.agents.planning.planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
+                                                ClusterResources, RepairCandidate, SafetyViolation)
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
 
@@ -22,7 +25,12 @@ printer = PrettyPrinter
 
 class SafetyPlanning:
     """Core module for safe distributed planning with interactive adjustments"""
-    
+    safety_margins: Dict[str, float] = field(default_factory=dict)
+    violation_history: List[SafetyViolation] = field(default_factory=list)
+    current_violations: List[SafetyViolation] = field(default_factory=list)
+    safety_policies: Dict[str, Callable] = field(default_factory=dict)
+    resource_monitor: ResourceMonitor = field(default_factory=ResourceMonitor)
+
     def __init__(self):
         self.config = load_global_config()
         self.ram_limit = self.config.get('ram_limit')
@@ -449,9 +457,10 @@ class SafetyPlanning:
         current_time = time.time()
         buffer = 60  # 1 minute buffer
         
-        if getattr(task, 'start_time', 0) < current_time:
-            task.start_time = current_time + buffer
-            
+        # Always reset start time to current time + buffer
+        task.start_time = current_time + buffer
+        
+        # Reset deadline if it's invalid
         if getattr(task, 'deadline', 0) < task.start_time:
             if hasattr(task, 'duration'):
                 task.deadline = task.start_time + task.duration
@@ -463,45 +472,50 @@ class SafetyPlanning:
         resource_usage = defaultdict(float)
         current_time = time.time()
         
+        # Process each task in the plan
         for task in plan:
-            self._reset_temporal_attributes(task)
-            # Validate temporal constraints
+            # Get safety margin values
+            gpu_margin = self.margins_config.get('gpu_buffer', 0.15)
+            ram_margin = self.margins_config.get('ram_buffer', 0.20)
+            
+            # GPU buffer check
+            req = task.resource_requirements
+            if req.gpu > self.gpu_limit * (1 - gpu_margin):
+                violation = SafetyViolation(
+                    violation_type="ResourceExceeded",
+                    resource="gpu",
+                    measured_value=req.gpu,
+                    threshold=self.gpu_limit * (1 - gpu_margin),
+                    task_id=task.id,
+                    severity="high",
+                    corrective_action="Reduce GPU usage"
+                )
+                self.current_violations.append(violation)
+                return False
+            
+            # RAM buffer check
+            if req.ram > self.ram_limit * (1 - ram_margin):
+                violation = SafetyViolation(
+                    violation_type="ResourceExceeded",
+                    resource="ram",
+                    measured_value=req.ram,
+                    threshold=self.ram_limit * (1 - ram_margin),
+                    task_id=task.id,
+                    severity="high",
+                    corrective_action="Reduce RAM usage"
+                )
+                self.current_violations.append(violation)
+                return False
+    
+            # Validate temporal constraints for this task
             if task.start_time < current_time:
                 raise TemporalViolation(f"Task {task.name} starts in past")
             if task.deadline and task.deadline < task.start_time:
                 raise TemporalViolation(f"Task {task.name} has invalid deadline")
-            
-            # Validate resource requirements
-            req = task.resource_requirements
-            resource_usage['gpu'] += req.gpu
-            resource_usage['ram'] += req.ram
-            
-            if resource_usage['gpu'] > self.gpu_limit:
-                raise ResourceViolation(
-                    f"GPU limit exceeded by {task.name}",
-                    "gpu",
-                    resource_usage['gpu'],
-                    self.gpu_limit
-                )
-            if resource_usage['ram'] > self.ram_limit:
-                raise ResourceViolation(
-                    f"RAM limit exceeded by {task.name}",
-                    "ram",
-                    resource_usage['ram'],
-                    self.ram_limit
-                )
-            
-            # Validate specialized hardware
-            for hw in req.specialized_hardware:
-                if hw not in self.resource_monitor.available_hardware:
-                    raise ResourceViolation(
-                        f"Missing hardware {hw} for {task.name}",
-                        hw,
-                        1,
-                        0
-                    )
         
         return True
+    
+
 
     def log_adjustment(self, adjustment: Dict) -> None:
         """Comprehensive adjustment logging with contextual metadata"""
@@ -876,6 +890,25 @@ class SafetyPlanning:
     # Additional Core Methods
     def dynamic_replanning_pipeline(self, failed_task: Task) -> List[Task]:
         """Full safety-aware replanning workflow"""
+        alternatives = []
+        
+        # Strategy 1: Reduce resource requirements
+        reduced_resource_task = failed_task.copy()
+        reduced_resource_task.resource_requirements.gpu *= 0.8
+        reduced_resource_task.resource_requirements.ram *= 0.8
+        self._reset_temporal_attributes(reduced_resource_task)  # Reset temporal attributes
+        if self.safety_check([reduced_resource_task]):
+            alternatives.append([reduced_resource_task])
+            
+        # Strategy 2: Alternative method with lower requirements
+        if failed_task.task_type == TaskType.ABSTRACT:
+            for method_idx in range(len(failed_task.methods)):
+                alt_task = failed_task.copy()
+                alt_task.selected_method = method_idx
+                self._reset_temporal_attributes(alt_task)  # Reset temporal attributes
+                if self.safety_check([alt_task]):
+                    alternatives.append(alt_task.get_subtasks())
+
         with self.lock:
             try:
                 candidates = self._generate_repair_candidates(failed_task)
@@ -887,6 +920,8 @@ class SafetyPlanning:
             except ReplanningError as e:
                 logger.error(f"Emergency shutdown triggered: {str(e)}")
                 self._emergency_shutdown_procedure()
+        
+        return alternatives
 
     def _generate_repair_candidates(self, failed_task: Task) -> List['RepairCandidate']:
         """
