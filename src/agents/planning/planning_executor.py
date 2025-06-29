@@ -13,6 +13,8 @@ printer = PrettyPrinter
 class PlanningExecutor:
     def __init__(self):
         self.config = load_global_config()
+        self.monitor_snapshot = self.config.get('monitor_snapshot')
+
         self.executor_config = get_config_section('planning_executor')
         self.state_checks_enabled = self.executor_config.get('state_checks_enabled')
         self.precondition_checks_enabled = self.executor_config.get('precondition_checks_enabled')
@@ -20,6 +22,8 @@ class PlanningExecutor:
         self.max_deviation_threshold = self.executor_config.get('max_deviation_threshold')
         self.check_interval = self.executor_config.get('check_interval')
         self.divergence_threshold = self.executor_config.get('divergence_threshold')
+        self.precondition_lookahead = self.executor_config.get('precondition_lookahead')
+        self.max_tolerable_deviations = self.executor_config.get('max_tolerable_deviations', 2)
 
         self.agent = {}
         self.plan: List[Task] = []
@@ -100,7 +104,9 @@ class PlanningExecutor:
         while not self.stop_event.is_set():
             try:
                 # Capture state snapshot for later analysis
-                self.memory.save_checkpoint(label="monitor_snapshot")
+                checkpoint = self.memory.save_checkpoint(label="monitor_snapshot")
+                checkpoint_path = self.memory.ensure_checkpoint_access(self.monitor_snapshot)
+                self.memory.to_json(checkpoint_path)
                 
                 # Check upcoming task preconditions
                 if self.precondition_checks_enabled:
@@ -120,13 +126,13 @@ class PlanningExecutor:
 
     def _check_upcoming_preconditions(self, plan: List[Task]):
         """Check preconditions of upcoming tasks in the plan"""
-        printer.status("EXEC", "Looping monitor...", "info")
+        printer.status("EXEC", "Checking preconditions...", "info")
 
         current_index = self._get_current_task_index(plan)
         if current_index is None:
             return
             
-        lookahead = min(current_index + self.executor_config.get('precondition_lookahead', 3), len(plan))
+        lookahead = min(current_index + self.precondition_lookahead, len(plan))
         for i in range(current_index, lookahead):
             task = plan[i]
             if task.status != TaskStatus.PENDING:
@@ -151,7 +157,7 @@ class PlanningExecutor:
         
         if deviation_score > self.max_deviation_threshold:
             self.state_deviation_count += 1
-            if self.state_deviation_count > self.executor_config.get('max_tolerable_deviations', 2):
+            if self.state_deviation_count > self.max_tolerable_deviations:
                 logger.error(f"Significant state deviation detected: {deviation_score:.2f}")
                 self.trigger_event('state_deviation', deviation_score)
         else:
@@ -212,7 +218,8 @@ class PlanningExecutor:
 
     def _check_perception_events(self):
         """Check perception system for relevant events"""
-        perception = self.agent.shared_memory.get('perception')
+        shared_memory = getattr(self.agent, 'shared_memory', None) or self.agent.get('shared_memory')
+        perception = shared_memory.get('perception') if shared_memory else None
         if not perception:
             return
             
