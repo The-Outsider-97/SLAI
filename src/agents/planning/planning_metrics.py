@@ -43,12 +43,16 @@ class PlanningMetrics(Task):
         self.agent={}
 
     def track_plan_start(self, plan: List[Task]) -> Dict[str, Any]:
-        """
-        Captures the start time and initial task statuses of a plan.
-    
-        Returns:
-            Dict[str, Any]: Metadata including timestamp and task names.
-        """
+        """Captures the start time and initial task statuses of a plan."""
+        # Handle empty/None plan case
+        if not plan:
+            logger.warning("Tracking started for empty plan")
+            return {
+                'start_time': time.time(),
+                'plan_id': f"empty_plan_{int(time.time())}",
+                'initial_task_statuses': {}
+            }
+        
         metadata = {
             'start_time': time.time(),
             'plan_id': f"plan_{int(time.time())}",
