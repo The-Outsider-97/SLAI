@@ -245,14 +245,14 @@ class SafetyMargins:
 
 @dataclass
 class Task:
-    name: str = "Planning Typers"
     id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
+    name: str = "Planning Typers"
     task_type: TaskType = TaskType.ABSTRACT
     type: TaskType = field(init=False)  # Alias for task_type
     status: TaskStatus = TaskStatus.PENDING
     deadline: float = 0
     priority: int = 1
-    resource_requirements: ResourceProfile = field(default_factory=ResourceProfile)
+    resource_requirements: ResourceProfile = field(default_factory=lambda: ResourceProfile())
     execution_modes: List = field(default_factory=list)
     input_data: Any = None
     output_target: str = None
@@ -318,17 +318,31 @@ class Task:
     compliance_requirements: List[str] = field(default_factory=list)
     optimization_metrics: List[str] = field(default_factory=list)
     learning_curve: float = 0.0  # How much the task improves with repetition
+    example_goal: Optional[Dict] = field(default=None)
+
+    #def __init__(self, **kwargs):
+    #    # Set default values for critical attributes
+    #    self.start_time = kwargs.get('start_time', time.time() + 60)
+    #    self.deadline = kwargs.get('deadline', time.time() + 3600)
+    #    self.duration = kwargs.get('duration', 300)
+        # ... other attributes ...
+        
+        # Auto-set derived fields
+    #    if not hasattr(self, 'end_time'):
+    #        self.end_time = self.start_time + self.duration
 
     def __post_init__(self):
         self.type = self.task_type
+        if not hasattr(self, 'methods'):
+            self.methods = []
         # Set estimated_duration to duration if not specified
         if self.estimated_duration == 0.0 and self.duration > 0:
             self.estimated_duration = self.duration
 
     def copy(self) -> 'Task':
-        return Task(
-            name=self.name,
+        new_task = Task(
             id=self.id,
+            name=self.name,
             task_type=self.task_type,
             methods=self.methods,
             preconditions=self.preconditions,
@@ -363,8 +377,9 @@ class Task:
             environmental_constraints=self.environmental_constraints.copy(),
             compliance_requirements=self.compliance_requirements.copy(),
             optimization_metrics=self.optimization_metrics.copy(),
-            learning_curve=self.learning_curve
+            learning_curve=self.learning_curve,
         )
+        return new_task
     
     @property
     def requirements(self) -> ResourceProfile:
