@@ -270,7 +270,7 @@ class BaseAgent(abc.ABC):
         if not callable(handler_func):
             raise ValueError(f"Handler function for '{issue_pattern_or_id}' must be callable.")
         self._known_issue_handlers[issue_pattern_or_id] = handler_func
-        self.logger.debug(f"[{self.name}] Registered known issue handler for '{issue_pattern_or_id}' using '{handler_func.__name__}'.")
+        logger.debug(f"[{self.name}] Registered known issue handler for '{issue_pattern_or_id}' using '{handler_func.__name__}'.")
 
     def handle_known_issue(self, task_data, error_info: dict):
         """
@@ -279,7 +279,7 @@ class BaseAgent(abc.ABC):
         {"status": "failed", "reason": "..."} if they cannot handle this specific instance or their attempt fails.
         If a handler itself raises an unhandled exception, it's caught here.
         """
-        self.logger.debug(f"[{self.name}] Checking known issue handlers for error: type='{error_info.get('error_type')}', msg='{error_info.get('error_message', '')[:100]}...'")
+        logger.debug(f"[{self.name}] Checking known issue handlers for error: type='{error_info.get('error_type')}', msg='{error_info.get('error_message', '')[:100]}...'")
         error_message_lower = error_info.get("error_message", "").lower()
         error_type_lower = error_info.get("error_type", "").lower()
 
@@ -287,25 +287,25 @@ class BaseAgent(abc.ABC):
             # Match if issue_id_pattern (case-insensitive) is in error message or type
             pattern_lower = issue_id_pattern.lower()
             if pattern_lower in error_message_lower or pattern_lower == error_type_lower: # Exact match for type, substring for message
-                self.logger.info(f"[{self.name}] Potential known issue match with pattern '{issue_id_pattern}'. Attempting handler '{handler_func.__name__}'.")
+                logger.info(f"[{self.name}] Potential known issue match with pattern '{issue_id_pattern}'. Attempting handler '{handler_func.__name__}'.")
                 try:
                     result = handler_func(self, task_data, error_info) # Handler attempts to resolve
                     
                     # If handler explicitly returns a dict with "status": "failed", it means it matched but couldn't fix THIS instance.
                     if isinstance(result, dict) and result.get("status") == "failed":
-                        self.logger.info(f"[{self.name}] Handler '{handler_func.__name__}' for '{issue_id_pattern}' reported it could not resolve: {result.get('reason')}")
+                        logger.info(f"[{self.name}] Handler '{handler_func.__name__}' for '{issue_id_pattern}' reported it could not resolve: {result.get('reason')}")
                         # In this design, if a specific handler matches and explicitly fails, we stop and report this failure.
                         # Alternative: `continue` to try other handlers if the match was weak or handler was too specific.
                         return result 
                     else: # Handler succeeded (returned something not a failure dict)
-                        self.logger.info(f"[{self.name}] Known issue '{issue_id_pattern}' handled successfully by '{handler_func.__name__}'.")
+                        logger.info(f"[{self.name}] Known issue '{issue_id_pattern}' handled successfully by '{handler_func.__name__}'.")
                         return result 
                 except Exception as handler_ex: # Handler itself crashed
-                    self.logger.error(f"[{self.name}] Handler '{handler_func.__name__}' for known issue '{issue_id_pattern}' raised an exception: {handler_ex}")
-                    self.logger.debug(traceback.format_exc())
+                    logger.error(f"[{self.name}] Handler '{handler_func.__name__}' for known issue '{issue_id_pattern}' raised an exception: {handler_ex}")
+                    logger.debug(traceback.format_exc())
                     return {"status": "failed", "reason": f"Handler for '{issue_id_pattern}' crashed: {handler_ex}"}
         
-        self.logger.info(f"[{self.name}] No specific known issue handler matched or resolved the error.")
+        logger.info(f"[{self.name}] No specific known issue handler matched or resolved the error.")
         return {"status": "failed", "reason": "No applicable or successful known issue handler found."}
     
     def alternative_execute(self, task_data, original_error=None):
@@ -316,7 +316,17 @@ class BaseAgent(abc.ABC):
             task_data: The original input data.
             original_error: The initial exception that triggered fallbacks. (Optional, for context)
         """
-        self.logger.info(f"[{self.name}] Entering alternative execution for task (original error: {str(original_error)[:100]}...).")
+        logger.info(f"[{self.name}] Entering alternative execution for task (original error: {str(original_error)[:100]}...).")
+
+        # First try replanning if agent is a planner and has a goal
+        if "PlanningAgent" in self.name and hasattr(self, 'replan') and callable(self.replan) and hasattr(self, 'current_goal') and self.current_goal:
+            try:
+                logger.info(f"[{self.name}] Alt exec: Attempting to replan from current goal.")
+                new_plan = self.replan(self.current_goal)
+                if new_plan:
+                    return self.execute_plan(new_plan)
+            except Exception as e:
+                logger.error(f"Replanning failed during alternative execution: {str(e)}")
         
         cleaned_input_str = ""
         # Strategy 1: Generic Input Sanitization & Simplification to a string
@@ -338,9 +348,9 @@ class BaseAgent(abc.ABC):
             if len(cleaned_input_str) > self.config.get('alt_exec_max_clean_len', 500): 
                 cleaned_input_str = cleaned_input_str[:self.config.get('alt_exec_max_clean_len', 500) -3] + "..."
             
-            self.logger.debug(f"[{self.name}] Alt exec: Sanitized/simplified input string: '{cleaned_input_str[:100]}...'")
+            logger.debug(f"[{self.name}] Alt exec: Sanitized/simplified input string: '{cleaned_input_str[:100]}...'")
         except Exception as e_sanitize:
-            self.logger.warning(f"[{self.name}] Alt exec: Sanitization/simplification step failed: {e_sanitize}. Using raw task_data as string for fallback.")
+            logger.warning(f"[{self.name}] Alt exec: Sanitization/simplification step failed: {e_sanitize}. Using raw task_data as string for fallback.")
             cleaned_input_str = str(task_data)[:self.config.get('alt_exec_max_clean_len', 500)] # Best effort if sanitization crashes
 
         # Strategy 2: Try with a very generic LLM prompt if available
@@ -350,7 +360,7 @@ class BaseAgent(abc.ABC):
             compression = self.network_compression
             fallback_prompt = self._build_fallback_prompt(
                 original_error, cleaned_input_str, compression)
-            self.logger.info(f"[{self.name}] Alt exec: Trying LLM with generic fallback prompt.")
+            logger.info(f"[{self.name}] Alt exec: Trying LLM with generic fallback prompt.")
             try:
                 llm_result = llm_component.generate(fallback_prompt)
                 response_text = None
@@ -360,7 +370,7 @@ class BaseAgent(abc.ABC):
                 if response_text and isinstance(response_text, str) and response_text.strip():
                     return f"[Fallback LLM Response] {response_text.strip()}" # Success for this strategy
             except Exception as e_llm:
-                self.logger.warning(f"[{self.name}] Alt exec: LLM fallback attempt failed: {e_llm}")
+                logger.warning(f"[{self.name}] Alt exec: LLM fallback attempt failed: {e_llm}")
                 # Fall through to next strategy
 
         # Strategy 3: Simplified Grammar Processor (if available and applicable for short inputs)
@@ -369,21 +379,21 @@ class BaseAgent(abc.ABC):
             # Only attempt if cleaned_input_str is short and potentially structured
             if cleaned_input_str and len(cleaned_input_str.split()) < 15: 
                 facts_for_grammar = {"event": "fallback_processing_attempt", "input_snippet": cleaned_input_str[:60]}
-                self.logger.info(f"[{self.name}] Alt exec: Trying GrammarProcessor with simple facts from input.")
+                logger.info(f"[{self.name}] Alt exec: Trying GrammarProcessor with simple facts from input.")
                 try:
                     grammar_result = grammar_component.compose_sentence(facts_for_grammar)
                     if grammar_result and isinstance(grammar_result, str) and grammar_result.strip():
                         return f"[Fallback Grammar Response] {grammar_result.strip()}" # Success
                 except Exception as e_grammar:
-                    self.logger.warning(f"[{self.name}] Alt exec: GrammarProcessor fallback attempt failed: {e_grammar}")
+                    logger.warning(f"[{self.name}] Alt exec: GrammarProcessor fallback attempt failed: {e_grammar}")
                     # Fall through
 
         # Strategy 4: Echo cleaned/simplified input as a last resort before total failure message
         if cleaned_input_str: # If we have some form of simplified input
-            self.logger.info(f"[{self.name}] Alt exec: Echoing cleaned/simplified input string as final fallback response.")
+            logger.info(f"[{self.name}] Alt exec: Echoing cleaned/simplified input string as final fallback response.")
             return f"[Fallback Response] Input processed after error. Simplified input: {cleaned_input_str}"
         else: # If even cleaning/simplification failed or produced nothing usable
-            self.logger.warning(f"[{self.name}] Alt exec: No usable cleaned input to echo. Returning total failure message.")
+            logger.warning(f"[{self.name}] Alt exec: No usable cleaned input to echo. Returning total failure message.")
             return "[Fallback failure] Unable to process your request via alternative methods, and input could not be simplified or interpreted."
 
     def _build_fallback_prompt(self, error, input_str, compression_enabled):
@@ -494,15 +504,23 @@ class BaseAgent(abc.ABC):
 
 #    @abc.abstractmethod
     def perform_task(self, task_data: Any) -> Any:
-        """Handle query execution as the primary task"""
-        self.logger.info(f"Executing task with data: {task_data}")
-    
-        if isinstance(task_data, dict) and "query" in task_data:
-            return self.retrieve(task_data["query"])
-        elif isinstance(task_data, str):
-            return self.retrieve(task_data)
+        """Overrides BaseAgent.perform_task to handle planning-specific commands."""
+        self.logger.info(f"Executing planning task with data: {task_data}")
+
+        if not isinstance(task_data, dict):
+            raise ValueError("Unsupported input format for PlanningAgent, expected a dictionary.")
+
+        command = task_data.get("command")
+
+        if command == "execute_plan":
+            # This allows the training loop's call to work without crashing,
+            # executing whatever plan is currently loaded in the agent.
+            if not self.current_plan:
+                self.logger.warning("Command 'execute_plan' received, but no current plan exists.")
+                return {"status": "AWAITING_PLAN", "message": "No plan to execute."}
+            return self.execute_plan(self.current_plan, self.current_goal)
         else:
-            raise ValueError("Unsupported task format")
+            raise ValueError(f"Unsupported command for PlanningAgent: '{command}'")
 
     def evaluate_performance(self, metrics: dict):
         """
