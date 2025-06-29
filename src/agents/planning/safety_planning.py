@@ -1,4 +1,5 @@
 
+import random
 import threading
 import json, yaml
 import time, copy
@@ -469,11 +470,19 @@ class SafetyPlanning:
 
     def safety_check(self, plan: List[Task]) -> bool:
         """Comprehensive safety validation for plans"""
-        resource_usage = defaultdict(float)
+        # resource_usage = defaultdict(float)
         current_time = time.time()
-        
+
         # Process each task in the plan
         for task in plan:
+
+            # Handle missing temporal attributes
+            if not hasattr(task, 'start_time') or task.start_time is None:
+                task.start_time = current_time + 60  # Default 1min buffer
+
+            if not hasattr(task, 'deadline') or task.deadline is None:
+                task.deadline = task.start_time + 3600  # Default 1hr
+
             # Get safety margin values
             gpu_margin = self.margins_config.get('gpu_buffer', 0.15)
             ram_margin = self.margins_config.get('ram_buffer', 0.20)
@@ -509,8 +518,10 @@ class SafetyPlanning:
     
             # Validate temporal constraints for this task
             if task.start_time < current_time:
+                task.start_time = current_time + 10
                 raise TemporalViolation(f"Task {task.name} starts in past")
             if task.deadline and task.deadline < task.start_time:
+                task.deadline = task.start_time + 300  # Default 5min duration
                 raise TemporalViolation(f"Task {task.name} has invalid deadline")
         
         return True
@@ -916,12 +927,14 @@ class SafetyPlanning:
                     c for c in candidates
                     if self.safety_check(c.repaired_plan)
                 ]
+                if not validated:
+                    return None
                 return self._select_optimal_repair(validated)
             except ReplanningError as e:
                 logger.error(f"Emergency shutdown triggered: {str(e)}")
                 self._emergency_shutdown_procedure()
         
-        return alternatives
+        return None or alternatives
 
     def _generate_repair_candidates(self, failed_task: Task) -> List['RepairCandidate']:
         """
@@ -1077,38 +1090,39 @@ class SafetyPlanning:
         return dependents
 
     def _create_repair_plan(self, failed_task: Task, replacement_tasks: List[Task], 
-                           victims: List[Task] = None) -> List[Task]:
-        """Creates a repaired plan by replacing the failed task with new tasks"""
-        new_plan = []
-        replaced = False
-        victims = victims or []
-        
-        for task in self.current_plan:
-            if task.name == failed_task.name:
-                new_plan.extend(replacement_tasks)
-                replaced = True
-            elif task in victims:
-                # Pause victim tasks for resource reallocation
-                paused_task = copy.deepcopy(task)
-                paused_task.status = TaskStatus.PENDING
-                paused_task.priority = min(paused_task.priority, 1)  # Demote priority
-                new_plan.append(paused_task)
-            else:
-                # Copy existing tasks, updating dependencies if needed
-                new_task = copy.deepcopy(task)
-                
-                # Update dependencies if they point to the failed task
-                if failed_task.id in new_task.dependencies:
-                    new_task.dependencies = [
-                        dep for dep in new_task.dependencies if dep != failed_task.id
-                    ] + [t.id for t in replacement_tasks]
-                
-                new_plan.append(new_task)
-        
-        if not replaced:
-            raise ReplanningError(f"Failed task {failed_task.id} not found", failed_task)
-        
-        return new_plan
+                               victims: List[Task] = None) -> List[Task]:
+            """Creates a repaired plan by replacing the failed task with new tasks"""
+            new_plan = []
+            replaced = False
+            victims = victims or []
+            
+            for task in self.current_plan:
+                if task.id == failed_task.id:  # or task.name == failed_task.name: 
+                    new_plan.extend(replacement_tasks)
+                    replaced = True
+                elif task in victims:
+                    # Pause victim tasks for resource reallocation
+                    paused_task = copy.deepcopy(task)
+                    paused_task.status = TaskStatus.PENDING
+                    paused_task.priority = min(paused_task.priority, 1)  # Demote priority
+                    new_plan.append(paused_task)
+                else:
+                    # Copy existing tasks, updating dependencies if needed
+                    new_task = copy.deepcopy(task)
+                    
+                    # Update dependencies if they point to the failed task
+                    if failed_task.id in new_task.dependencies:
+                        new_task.dependencies = [
+                            dep for dep in new_task.dependencies if dep != failed_task.id
+                        ] + [t.id for t in replacement_tasks]
+                    
+                    new_plan.append(new_task)
+            
+            if not replaced:
+                logger.warning(f"Failed task {failed_task.id} not in current plan. Creating new plan from replacements.")
+                return replacement_tasks
+            
+            return new_plan
 
     def _select_optimal_repair(self, candidates: List['RepairCandidate']) -> List[Task]:
         """
@@ -1422,19 +1436,29 @@ class DistributedOrchestrator:
     
         for method in task.methods:
             try:
-                subtasks = method.get_subtasks()
-                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks")
+                method_idx = 0
+                #subtasks = method.get_subtasks(method_idx)
+                #logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks")
+
+                subtasks = method_list
+                if not subtasks:
+                    continue
+
+                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks using one of its methods.")
     
                 # Distribute subtasks across compute nodes (this is pseudo-coded for orchestration)
                 distributed = []
-                for subtask in subtasks:
-                    assigned_node = self.resource_allocator.select_node(subtask)
-                    subtask.assigned_node = assigned_node
-                    distributed.append(subtask)
-    
+                for subtask_template in subtasks:
+                    #assigned_node = self.resource_allocator.select_node(subtask)
+                    #subtask.assigned_node = assigned_node
+                    new_task = subtask_template.copy()
+                    new_task.id = f"{subtask_template.name}_{int(time.time()*1000)}_{random.randint(0,999)}"
+                    new_task.parent = task
+                    distributed.append(new_task)
+
                 return distributed
             except Exception as e:
-                logger.warning(f"Method failed during decomposition of '{task.name}': {e}")
+                logger.error(f"Decomposition failed: {str(e)}")
                 continue
     
         logger.error(f"Failed to decompose and distribute task '{task.name}'")
