@@ -77,6 +77,7 @@ class KnowledgeAgent(BaseAgent):
         self.directory_path = self.knowledge_config.get('directory_path')
         self.embedding_model = self.knowledge_config.get('embedding_model')
         self.use_graph_ontology = self.knowledge_config.get('use_graph_ontology')
+        self.embedding_model_path = self.knowledge_config.get('embedding_model_path')
         self.similarity_threshold = self.knowledge_config.get('similarity_threshold')
         self.bias_detection_enabled = self.knowledge_config.get('bias_detection_enabled')
         self.use_ontology_expansion = self.knowledge_config.get('use_ontology_expansion')
@@ -97,16 +98,56 @@ class KnowledgeAgent(BaseAgent):
         self.doc_vectors = {}
         self.doc_tf_idf_vectors = {}
         self.sorted_vocab = []
+        
         self.governor = self._initialize_governance()
+        self.stopwords = self._load_stopwords(self.stopwords)
+
+        required_configs = [
+            'similarity_threshold', 
+            'bias_threshold',
+            'cache_size'
+        ]
+        for param in required_configs:
+            current_value = getattr(self, param, None)
+            if current_value is None:
+                logger.debug(f"Missing config '{param}', using default")
+                if param == 'similarity_threshold':
+                    setattr(self, param, 0.3)
+                elif param == 'bias_threshold':
+                    setattr(self, param, 0.7)
+                elif param == 'cache_size':
+                    setattr(self, param, 1000)
 
         logger.info(f"Knowledge Agent Initialized with SBERT model: {self.embedding_model if self.sbert_model else 'Failed to load'}")
 
     def _initialize_sbert_model(self):
         try:
-            self.sbert_model = SentenceTransformer(self.embedding_model)
-            logger.info(f"SentenceTransformer model '{self.embedding_model}' loaded successfully.")
+            if isinstance(self.embedding_model, str):
+                # Check if path exists and is directory
+                if os.path.exists(self.embedding_model) and os.path.isdir(self.embedding_model):
+                    # Download model if directory is empty
+                    if not os.listdir(self.embedding_model):
+                        model_name = os.path.basename(self.embedding_model)
+                        logger.info(f"Downloading model '{model_name}' into empty directory: {self.embedding_model}")
+                        model = SentenceTransformer(model_name)
+                        model.save(self.embedding_model)
+                        self.sbert_model = model
+                    else:
+                        self.sbert_model = SentenceTransformer(self.embedding_model)
+                else:
+                    # Create directory if it doesn't exist
+                    os.makedirs(self.embedding_model, exist_ok=True)
+                    # Download model to new directory
+                    model_name = os.path.basename(self.embedding_model)
+                    logger.info(f"Downloading model '{model_name}' to new directory: {self.embedding_model}")
+                    model = SentenceTransformer(model_name)
+                    model.save(self.embedding_model)
+                    self.sbert_model = model
+            else:
+                self.sbert_model = SentenceTransformer(self.embedding_model)
+            logger.info(f"SentenceTransformer model loaded from: {self.embedding_model}")
         except Exception as e:
-            logger.error(f"Failed to load SentenceTransformer model '{self.embedding_model}': {e}. Dense retrieval will be impaired.")
+            logger.error(f"Failed to load model: {e}")
             self.sbert_model = None
 
     def _initialize_governance(self):
@@ -117,6 +158,15 @@ class KnowledgeAgent(BaseAgent):
             return governor
         logger.info("Governance subsystem disabled")
         return None
+    
+    def _load_stopwords(self, path: str) -> list:
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+                return data.get('Stopword', [])
+        except Exception as e:
+            logger.error(f"Failed to load stopwords: {e}")
+            return []
 
     def load_from_directory(self):
         """Loads all .txt and .json files in the directory as knowledge documents."""
@@ -153,9 +203,24 @@ class KnowledgeAgent(BaseAgent):
                 logger.error(f"Failed to load {fname}: {str(e)}", exc_info=True)
     
         return len(self.knowledge_agent) - initial_count
+    
+    def retrieve_documents_by_type(self, doc_type: str) -> List[Dict]:
+        return [
+            json.loads(doc["text"]) for doc in self.knowledge_agent
+            if doc.get("metadata", {}).get("type") == doc_type
+        ]
 
     def add_document(self, text, doc_id=None, metadata=None):
         """Store documents, generate TF-IDF, and dense embeddings."""
+        if self.sbert_model is not None:  # Check if model is actually loaded
+            try:
+                embedding = self.sbert_model.encode(text, show_progress_bar=False)
+                self.doc_embeddings[doc_id] = embedding
+            except Exception as e:
+                logger.error(f"Error generating embedding: {e}")
+        else:
+            logger.warning("SBERT model unavailable - skipping embedding")
+
         if isinstance(text, tuple) and len(text) == 3:
             self.ontology_manager.add_triple(*text)
             self.add_to_ontology(*text) # Local ontology cache update
@@ -301,10 +366,10 @@ class KnowledgeAgent(BaseAgent):
 
         # --- TF-IDF Retrieval ---
         tfidf_similarities = []
-        if self.retrieval_mode in ["tfidf", "hybrid"] and self.knowledge_agent:
+        if self.retrieval_mode in ["tfidf", "hybrid", "dense"] and self.knowledge_agent:
             query_tokens = self._preprocess(expanded_query_text)
             if query_tokens:
-                query_tfidf_vector_dict = self._calculate_tfidf(query_tokens, is_query=True)
+                query_tfidf_vector_dict = self._calculate_tfidf(query_tokens)
                 # Convert query TF-IDF dict to NumPy array based on current vocabulary for consistent comparison
                 # This requires a stable, sorted vocabulary list
                 current_sorted_vocab = sorted(list(self.vocabulary)) # Get a stable order
