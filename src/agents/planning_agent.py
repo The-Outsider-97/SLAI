@@ -66,6 +66,7 @@ class PlanningAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
 
+        self.current_goal: Optional[Task] = None
         self.task_library: Dict[str, Task] = {} # Stores registered task templates
         self.current_plan: List[Task] = [] # The sequence of primitive tasks to execute
         self.world_state: Dict[str, Any] = {} # Current state of the world
@@ -136,6 +137,14 @@ class PlanningAgent(BaseAgent):
         if not self._validate_task_safety(task):
             logger.error(f"Task {task.name} failed safety validation")
             return
+        
+        if not task.name:
+            raise AcademicPlanningError("Task name cannot be empty")
+        if not isinstance(task.task_type, TaskType):
+            raise TypeError("Invalid task type")
+
+        if task.name in self.task_library:
+            logger.warning(f"Task '{task.name}' already registered. Overwriting.")
 
         self.task_library[task.name] = task
         if task.name in self.task_library:
@@ -156,13 +165,11 @@ class PlanningAgent(BaseAgent):
                     logger.warning(f"Skipping malformed probabilistic action for task {task.name}")
 
         # Initialize stats for Bayesian method selection if it's an abstract task
-        if task.task_type == TaskType.ABSTRACT:
-            for i in range(len(task.methods)):
-                key = (task.name, i)
-                self.method_stats[key]
+        if task.task_type == TaskType.ABSTRACT and not task.methods:
+            logger.warning(f"Abstract task {task.name} has no methods. Adding default fallback.")
 
-        fallback_task = Task(
-            name="fallback_goal",
+        fallback = Task(
+            name=f"{task.name}_fallback",
             task_type=TaskType.PRIMITIVE,
             preconditions=[lambda state: True],
             effects=[lambda state: state.update({'fallback_completed': True})],
@@ -170,11 +177,12 @@ class PlanningAgent(BaseAgent):
                 gpu=0.1,
                 ram=0.5,
                 specialized_hardware=[]
-            ),
-            # Add proper temporal attributes
-            start_time=(datetime.now() + timedelta(seconds=10)).timestamp(),
-            deadline=(datetime.now() + timedelta(seconds=3600)).timestamp()
+            )
+            #start_time=time.time() + 10,  # Start in 10 seconds
+            #deadline=time.time() + 3600,  # 1 hour deadline
+            #duration=300  # 5 minute duration
         )
+        task.methods = [[fallback]]  # Single method with fallback task
 
     def _validate_task_safety(self, task: Task) -> bool:
         """Ensure task meets basic safety constraints before registration"""
@@ -450,6 +458,15 @@ class PlanningAgent(BaseAgent):
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
         self._planning_start_time = time.time()
+        self.current_goal = goal_task
+
+        # Validate goal task temporal attributes
+        current_time = time.time()
+        if not hasattr(goal_task, 'start_time') or not goal_task.start_time or goal_task.start_time < current_time:
+            goal_task.start_time = current_time + 10  # Start in 10s buffer
+
+        if not hasattr(goal_task, 'deadline') or not goal_task.deadline or goal_task.deadline < goal_task.start_time:
+            goal_task.deadline = goal_task.start_time + 3600 # Default 1hr deadline
 
         # Use probabilistic planner for probabilistic tasks
         if goal_task.is_probabilistic:
@@ -470,6 +487,7 @@ class PlanningAgent(BaseAgent):
         
         # Integrated safety check
         try:
+            self.safety_planner.current_plan = plan
             if not self.safety_planner.safety_check(plan):
                 raise AcademicPlanningError("Plan failed initial safety validation")
         except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
@@ -517,7 +535,8 @@ class PlanningAgent(BaseAgent):
             "schedule": schedule
         }
     
-        return plan_list
+        self.current_plan = plan
+        return self.current_plan # plan_list
     
     def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
         """Generate expected state after each task execution"""
@@ -539,7 +558,7 @@ class PlanningAgent(BaseAgent):
         candidates = self.safety_planner.dynamic_replanning_pipeline(task)
         
         for candidate in candidates:
-            if self.safety_planner.safety_check(candidate):
+            if self.safety_planner.safety_check([candidate]):
                 logger.info("Safety-compliant alternative found")
                 return candidate
                 
@@ -598,107 +617,120 @@ class PlanningAgent(BaseAgent):
         }
 
     def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
-        execution_metrics = {
-            'success_count': 0,
-            'failure_count': 0,
-            'total_cost': 0.0,
-            'resource_usage': defaultdict(float)
-        }
-
-
-        # Start execution monitoring
-        self.executor.start_monitoring(plan, self.expected_state_projections)
-        self.execution_interrupted = False
-        
-        # Track plan start
-        plan_meta = self.metrics.track_plan_start(plan)
-        
         try:
-            for task in plan:
-                if self.execution_interrupted:
-                    logger.warning("Execution interrupted by monitor")
-                    break
-                    
-                try:
-                    task.status = TaskStatus.EXECUTING    # Update task status
-                    
-                    # Pre-execution safety check
-                    self.safety_planner._validate_equipment_constraints(task)
-                    self.safety_planner._validate_temporal_constraints(task)
-                    
-                    # Execute task
-                    start_time = time.time()
-                    outcome = self._execute_action(task)
-                    self.heuristic_selector.heuristics["CBR"].record_outcome(
-                        task, self.world_state, method_used, outcome)
-                    self._execute_action(task)
-                    end_time = time.time()
-                    
-                    # Update execution times
-                    task.start_time = start_time
-                    task.end_time = end_time
-                    task.status = TaskStatus.COMPLETED
+            execution_metrics = {
+                'success_count': 0,
+                'failure_count': 0,
+                'total_cost': 0.0,
+                'resource_usage': defaultdict(float)
+            }
 
-                    self.safety_planner.update_allocations(task)    # Update resource allocations
-                    
-                    # Update metrics
-                    execution_metrics['success_count'] += 1
-                    execution_metrics['total_cost'] += task.cost
-                    self._update_resource_metrics(execution_metrics, task)
-                    
-                    # Add to execution history
-                    self.memory.base_state['execution_history'].append({
-                        'task': task.name,
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'status': 'success',
-                        'state_snapshot': self.world_state.copy()
-                    })
-                    
-                except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
-                    logger.warning(f"Execution safety violation: {str(e)}")
-                    execution_metrics['failure_count'] += 1
-                    task.status = TaskStatus.FAILED
-                    
-                    # Attempt recovery
-                    recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
-                    if recovery_plan:
-                        recovery_result = self.execute_plan(recovery_plan, goal_task)
-                        if recovery_result.get('status') == 'SUCCESS':
-                            execution_metrics['success_count'] += 1
-                        else:
-                            execution_metrics['failure_count'] += 1
 
-                    self.memory.base_state['execution_history'].append({
-                        'task': task.name,
-                        'start_time': start_time if 'start_time' in locals() else None,
-                        'end_time': end_time if 'end_time' in locals() else None,
-                        'status': 'failed',
-                        'error': str(e),
-                        'state_snapshot': self.world_state.copy()
-                    })
-                    
-        finally:
-            self.executor.stop_monitoring()    # Stop monitoring regardless of outcome
+            # Start execution monitoring
+            self.executor.start_monitoring(plan, self.expected_state_projections)
+            self.execution_interrupted = False
             
-        # Determine final status
-        final_status = TaskStatus.SUCCESS if execution_metrics['failure_count'] == 0 else TaskStatus.FAILED
+            # Track plan start
+            plan_meta = self.metrics.track_plan_start(plan)
+            
+            try:
+                for task in plan:
+                    if self.execution_interrupted:
+                        logger.warning("Execution interrupted by monitor")
+                        break
+                        
+                    try:
+                        task.status = TaskStatus.EXECUTING    # Update task status
+                        
+                        # Pre-execution safety check
+                        self.safety_planner._validate_equipment_constraints(task)
+                        self.safety_planner._validate_temporal_constraints(task)
+                        
+                        # Execute task
+                        start_time = time.time()
+                        outcome = self._execute_action(task)
+                        self.heuristic_selector.heuristics["CBR"].record_outcome(
+                            task, self.world_state, method_used, outcome)
+                        self._execute_action(task)
+                        end_time = time.time()
+                        
+                        # Update execution times
+                        task.start_time = start_time
+                        task.end_time = end_time
+                        task.status = TaskStatus.COMPLETED
 
-        self.metrics.track_plan_completion(plan_meta, final_status)    # Track plan completion
-        
-        # Record execution metrics
-        self.metrics.record_execution_metrics(
-            success_count=execution_metrics['success_count'],
-            failure_count=execution_metrics['failure_count'],
-            resource_usage=execution_metrics['resource_usage']
-        )
-        execution_summary = {
-            "status": final_status.name,
-            "world_state": self.world_state,
-            "metrics": execution_metrics
-        }
-        self._log_performance(execution_summary)
-        return execution_summary
+                        self.safety_planner.update_allocations(task)    # Update resource allocations
+                        
+                        # Update metrics
+                        execution_metrics['success_count'] += 1
+                        execution_metrics['total_cost'] += task.cost
+                        self._update_resource_metrics(execution_metrics, task)
+                        
+                        # Add to execution history
+                        self.shared_memory.base_state['execution_history'].append({
+                            'task': task.name,
+                            'start_time': start_time,
+                            'end_time': end_time,
+                            'status': 'success',
+                            'state_snapshot': self.world_state.copy()
+                        })
+                        
+                    except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
+                        logger.warning(f"Execution safety violation: {str(e)}")
+                        execution_metrics['failure_count'] += 1
+                        task.status = TaskStatus.FAILED
+                        
+                        # Attempt recovery
+                        recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
+                        if recovery_plan:
+                            recovery_result = self.execute_plan(recovery_plan, goal_task)
+                            if recovery_result.get('status') == 'SUCCESS':
+                                execution_metrics['success_count'] += 1
+                            else:
+                                execution_metrics['failure_count'] += 1
+
+                        self.shared_memory.base_state['execution_history'].append({
+                            'task': task.name,
+                            'start_time': start_time if 'start_time' in locals() else None,
+                            'end_time': end_time if 'end_time' in locals() else None,
+                            'status': 'failed',
+                            'error': str(e),
+                            'state_snapshot': self.world_state.copy()
+                        })
+                        
+            finally:
+                self.executor.stop_monitoring()    # Stop monitoring regardless of outcome
+                
+            # Determine final status
+            final_status = TaskStatus.SUCCESS if execution_metrics['failure_count'] == 0 else TaskStatus.FAILED
+
+            self.metrics.track_plan_completion(plan_meta, final_status)    # Track plan completion
+            
+            # Record execution metrics
+            self.metrics.record_execution_metrics(
+                success_count=execution_metrics['success_count'],
+                failure_count=execution_metrics['failure_count'],
+                resource_usage=execution_metrics['resource_usage']
+            )
+            execution_summary = {
+                "status": final_status.name,
+                "world_state": self.world_state,
+                "metrics": execution_metrics
+            }
+            self._log_performance(execution_summary)
+            return execution_summary
+    
+        except TemporalViolation as e:
+            logger.error(f"Temporal failure: {str(e)}")
+            # Auto-reschedule all tasks
+            current_time = time.time()
+            for task in plan:
+                if task.start_time < current_time:
+                    task.start_time = current_time + 10
+            return self.execute_plan(plan, goal_task)  # Retry
+        except Exception as e:
+            logger.critical(f"Critical execution failure: {str(e)}")
+            return {"status": "CRITICAL_FAILURE"}
 
     def replan_from_execution_failure(self, task: Optional[Task], reason: str):
         """Handle execution failures detected by monitor"""
@@ -913,6 +945,10 @@ class PlanningAgent(BaseAgent):
         performance_logs.append(log_entry)
         self.shared_memory.set(log_key, performance_logs)
         logger.debug(f"Logged performance data to '{log_key}'.")
+
+    def needs_new_plan(self) -> bool:
+        # Simple stub logic: always return True for now
+        return not self.current_plan  # or any other condition you want
 
 def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
     """Full planning-execution cycle with safety and metrics"""
@@ -1353,7 +1389,7 @@ class ExplanatoryPlanner(PlanningAgent):
         
         # Validate and select best candidate
         for candidate in candidates:
-            if self.safety_planner.safety_check(candidate):
+            if self.safety_planner.safety_check([candidate]):
                 logger.info("Found valid safety-compliant alternative plan")
                 return candidate
                 
