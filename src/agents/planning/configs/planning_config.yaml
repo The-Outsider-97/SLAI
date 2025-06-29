@@ -4,6 +4,7 @@ trained: False
 random_state: 42
 planning_db_path: "templates/planning_db.json"
 heuristic_model_path: "src/agents/planning/models/"
+monitor_snapshot: "src/agents/planning/checkpoints/monitor_snapshot.json"
 
 safety_margins:
   resource_buffers:
@@ -165,6 +166,7 @@ planning_executor:
   divergence_threshold: 2
   state_checks_enabled: true
   precondition_checks_enabled: true
+  precondition_lookahead: 3
   snapshot_interval: 3.0              # Seconds between state checks
   max_deviation_threshold: 0.25        # 25% state deviation tolerance
   max_tolerable_deviations: 3          # Max deviations before replan
