@@ -11,6 +11,7 @@ from dataclasses import field
 from requests.exceptions import RequestException
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.planning_errors import ResourceAcquisitionError
 from src.agents.planning.planning_types import ResourceProfile, ClusterResources
 from logs.logger import get_logger, PrettyPrinter
 
@@ -53,6 +54,46 @@ class ResourceMonitor:
         self.allocations = {}
         self.resource_graph = {}
 
+    def _init_monitoring_thread(self):
+        def monitor_loop():
+            time.sleep(0.1)  # short delay to ensure full object init
+            while True:
+                self._update_resource_map()
+                time.sleep(self.update_interval)
+
+        threading.Thread(
+            target=monitor_loop,
+            daemon=True
+        ).start()
+
+    def acquire_resources(self, requirements: ResourceProfile, task_id: str = None) -> bool:
+        """
+        Attempt to reserve resources. Returns True if successful, else raises ResourceAcquisitionError.
+        """
+        with self._lock:
+            available = self.get_available_resources()
+    
+            # Check if requested resources are available
+            if (
+                requirements.gpu > available.gpu_total or
+                requirements.ram > available.ram_total or
+                not set(requirements.specialized_hardware).issubset(set(available.specialized_hardware_available))
+            ):
+                raise ResourceAcquisitionError(f"Insufficient resources for task {task_id or 'unknown'}")
+    
+            # Perform the allocation
+            self.cluster_resources.gpu_total -= requirements.gpu
+            self.cluster_resources.ram_total -= requirements.ram
+            self.cluster_resources.specialized_hardware_available = [
+                hw for hw in self.cluster_resources.specialized_hardware_available
+                if hw not in requirements.specialized_hardware
+            ]
+    
+            if task_id:
+                self.cluster_resources.current_allocations[task_id] = requirements
+    
+            return True
+
     def get_available_resources(self) -> ClusterResources:
         """Return current available cluster resources after subtracting allocations."""
         self._lock.acquire()
@@ -82,18 +123,6 @@ class ResourceMonitor:
             )
         finally:
             self._lock.release()
-
-    def _init_monitoring_thread(self):
-        def monitor_loop():
-            time.sleep(0.1)  # short delay to ensure full object init
-            while True:
-                self._update_resource_map()
-                time.sleep(self.update_interval)
-
-        threading.Thread(
-            target=monitor_loop,
-            daemon=True
-        ).start()
 
     def update_metrics(self, metrics: Dict[str, Any]):
         """Update resource metrics from monitoring system"""
