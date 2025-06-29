@@ -17,6 +17,8 @@ class PlanningMemory:
     """Maintains planning state checkpoints and statistical memory"""
     def __init__(self):
         self.config = load_global_config()
+        self.monitor_snapshot = self.config.get('monitor_snapshot')
+
         self.memory_config = get_config_section('planning_memory')
         self.checkpoints_dir = self.memory_config.get('checkpoints_dir')
         self.max_checkpoints = self.memory_config.get('max_checkpoints')
@@ -214,7 +216,7 @@ class PlanningMemory:
     def to_json(self, file_path: str = None):
         """Serialize checkpoints to JSON format"""
         data = {
-            'config': vars(self.config),
+            'config': self.config,
             'checkpoints': list(self.checkpoints)
         }
         return json.dumps(data, indent=2) if not file_path else json.dump(data, open(file_path, 'w'))
