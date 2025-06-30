@@ -137,13 +137,15 @@ class EvaluationAgent(BaseAgent):
         self.autonomous_tasks = self._load_autonomous_tasks()
         self.anomaly_model = self._init_anomaly_detector()
         self.issue_db = self._connect_issue_database()
+
+        protocol = None
         
         # Core services with fallback initialization
         self.evaluators = self._init_evaluators_modules()
         self.protocol = self._init_validation_protocol()
         self.interpreter = InterpretabilityHelper()
         self.calculations = EvaluatorsCalculations()
-        self.validation_suite = AIValidationSuite()
+        self.validation_suite = AIValidationSuite(protocol=protocol)
         self.risk_model = self._init_risk_model()
         self.tuner = self._init_hyperparam_tuner()
 
@@ -628,6 +630,16 @@ class EvaluationAgent(BaseAgent):
             # Add aggregated metrics
             results.update(self._gather_core_metrics(results))
 
+            # Financial health assessment
+            financial_health = self._evaluate_financial_health(
+                params.get('portfolio_state', {}),
+                params.get('dashboard_data', {})
+            )
+            results.update(financial_health)
+            
+            # Determine overall status
+            results['status'] = self._determine_system_status(results)
+
             return results
         except Exception as e:
             logger.error(f"Validation cycle failed: {str(e)}")
@@ -655,6 +667,38 @@ class EvaluationAgent(BaseAgent):
             ]
         }
         return dataset
+    
+    def _evaluate_financial_health(self, portfolio: Dict, dashboard: Dict) -> Dict:
+        """Financial-specific risk assessment"""
+        metrics = {
+            'value_at_risk': portfolio.get('value_at_risk', 0),
+            'drawdown': portfolio.get('current_drawdown', 0),
+            'liquidity_ratio': portfolio.get('cash', 0) / portfolio.get('portfolio_value', 1)
+        }
+        
+        # Check against thresholds
+        critical_issues = []
+        if metrics['value_at_risk'] > 0.15:
+            critical_issues.append('VaR exceeds 15% threshold')
+        if metrics['drawdown'] > 0.1:
+            critical_issues.append('Drawdown exceeds 10% limit')
+        if metrics['liquidity_ratio'] < 0.2:
+            critical_issues.append('Liquidity ratio below 20%')
+            
+        return {
+            'financial_metrics': metrics,
+            'critical_issues': critical_issues
+        }
+    
+    def _determine_system_status(self, results: Dict) -> str:
+        """Determine overall system health status"""
+        if results.get('safety', {}).get('compliance_rate', 0) < 0.8:
+            return 'critical'
+        if results.get('financial_metrics', {}).get('critical_issues'):
+            return 'critical'
+        if results.get('performance', {}).get('accuracy', 0) < 0.7:
+            return 'warning'
+        return 'normal'
 
     def _connect_issue_database(self):
         """Robust database connection with fallback handling"""
