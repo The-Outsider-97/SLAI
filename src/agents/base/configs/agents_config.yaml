@@ -42,6 +42,11 @@ browser_agent: {}
 
 evaluation_agent:
     risk_threshold: 0.5
+    memory_warning_threshold: 0.7
+    memory_critical_threshold: 0.9
+    model_dir: "src/agents/evaluators/models/"
+    anomaly_detector: "src/agents/evaluators/models/anomaly_detector.joblib"
+    deep_anomaly: "src/agents/evaluators/models/deep_anomaly.pt"
     initial_hazard_rates:
         system_failure: 0.000001
         sensor_failure: 0.00001
@@ -51,12 +56,43 @@ evaluation_agent:
     risk_thresholds:
         warning: [0.4, 0.7]
         critical: [0.7, 1.0]
-    issue_database:
-        host: 'localhost'
-        port: 5432
-        database: 'ai_issues'
-        user: 'user'
-        password: ''    
+    risk_adaptation: {}
+    autonomous_tasks:
+        - id: "nav_test"
+    type: "navigation"
+    path: [[0,0], [1,1], [2,2]]
+    optimal_path: [[0,0], [2,2]]
+    completion_time: 10.0
+    energy_consumed: 100
+    collisions: 0
+    success: true
+
+issue_database:
+    host: 'localhost'
+    port: 5432
+    database: 'ai_issues'
+    user: 'user'
+    password: ''
+
+operations_notification:
+  email:
+    enabled: true
+    from: "ai-agent@yourdomain.com"
+    to: "ops@yourdomain.com"
+    subject: "URGENT: AI System Hazard"
+    smtp_host: "smtp.yourdomain.com"
+    smtp_port: 587
+    username: "ai-agent"
+    password: "secure-password"
+    use_tls: true
+
+  webhook:
+    enabled: true
+    url: "https://hooks.slack.com/services/..."
+
+  external_logging:
+    enabled: true
+    url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
 
