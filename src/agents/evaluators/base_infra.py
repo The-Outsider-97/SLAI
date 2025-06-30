@@ -12,38 +12,30 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
 from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, rollforward_to_next_tag, get_sorted_tags
 from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity, rollforward_model
 from src.tuning.tuner import HyperparamTuner as BaseTuner
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Infrastructure Manager")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class InfrastructureManager:
     """Orchestrates core infrastructure operations"""
     
-    def __init__(self, config_path=CONFIG_PATH):
-        self.full_config = load_config(config_path)
-        # Extract infrastructure manager specific config
-        self.config = self.full_config.get('infrastructure_manager', {})
-        
+    def __init__(self):
+        self.config = load_global_config()
+        self.manager_config = get_config_section('infrastructure_manager')
+        self.hazard_config = get_config_section('initial_hazard_rates')
+        self.system_failure = self.hazard_config.get('system_failure')
+        self.sensor_failure = self.hazard_config.get('sensor_failure')
+        self.unexpected_behavior = self.hazard_config.get('unexpected_behavior')
+
         # Initialize components with proper configuration
-        self.memory = EvaluatorsMemory(self.full_config)
-        self.rollback = RollbackSystem(self.config)
+        self.memory = EvaluatorsMemory()
+        #self.rollback = RollbackSystem()
         self.tuner = self._init_tuner()
 
         logger.info("Infrastructure Manager initialized with %s strategy",
@@ -51,13 +43,13 @@ class InfrastructureManager:
 
     def _init_tuner(self):
         """Initialize tuner using infrastructure manager config"""
-        return HyperparamTuner(model_type=None,
+        return EvalTuner(model_type=None,
             evaluation_function=self._agent_evaluator)
 
     def _agent_evaluator(self, params):
         """Integrated evaluation function using agent's metrics"""
         # Actual implementation would use agent's performance metrics
-        risk_score = self.config['risk_adaptation'].get('initial_hazard_rates', 0.2)
+        risk_score = self.config.get('initial_hazard_rates', 0.2)
         return risk_score * np.random.rand()  # Placeholder
 
     def full_tuning_cycle(self):
@@ -68,14 +60,11 @@ class InfrastructureManager:
             return result
         except Exception as e:
             logger.error("Tuning cycle failed: %s", str(e))
-            self.rollback.full_rollback()
+            self.rollback.full_rollback(
+                commit_hash=snapshot['commit_hash'],
+                model_version=snapshot['model_hash'][:8]
+            )
             raise
-
-    def _update_risk_profile(self, tuning_result):
-        """Update risk adaptation parameters based on tuning results"""
-        new_rate = tuning_result.get('score', 0.2) * 0.95
-        self.config['risk_adaptation']['initial_hazard_rates'] = new_rate
-        logger.info("Updated risk profile to %.2f", new_rate)
 
     def automated_tuning_cycle(self):
         """Complete tuning cycle with safety mechanisms"""
@@ -85,14 +74,23 @@ class InfrastructureManager:
             logger.error(f"Automated tuning cycle failed: {str(e)}")
             return None
 
+    def _update_risk_profile(self, tuning_result):
+        """Update risk adaptation parameters based on tuning results"""
+        new_rate = tuning_result.get('score', 0.2) * 0.95
+        self.config['initial_hazard_rates'] = new_rate
+        logger.info("Updated risk profile to %.2f", new_rate)
+        return new_rate
+
     def emergency_rollback(self):
         """Safe rollback entry point"""
+        commit_hash = None
+        model_version = None
         status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
         if status.strip():
             logger.error("Aborting rollback: Uncommitted changes detected")
             raise RuntimeError("Commit changes before rollback")
         
-        return self.rollback.full_rollback()
+        return self.rollback.full_rollback(commit_hash, model_version)
 
     def _get_last_stable_version(self) -> Dict[str, str]:
         """Retrieve last validated system state by checking git and model backups."""
@@ -203,7 +201,6 @@ class RollbackSystem:
         return self._commit_rollbacks(selected_code, selected_model)
 
     def get_available_code_versions(self):
-        
         return [(tag, ts.isoformat()) for tag, ts in get_sorted_tags()]
 
     def get_available_model_versions(self):
@@ -218,8 +215,6 @@ class RollbackSystem:
         ]
 
     def _create_backup(self):
-        pass
-
         try:
             # Check for uncommitted changes
             status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
@@ -284,7 +279,7 @@ class RollbackSystem:
             logger.error(f"Code rollforward failed: {str(e)}")
             return False
 
-class HyperparamTuner(BaseTuner):
+class EvalTuner(BaseTuner):
     """Extended tuner with rollback integration"""
     def __init__(self, evaluation_function, model_type=None, **kwargs):
         super().__init__(model_type=None,
@@ -307,10 +302,15 @@ class HyperparamTuner(BaseTuner):
     def _model_checksum(self) -> str:
         """Generate content hash for current model"""
         model_file = self.rollback.model_dir / "current.pt"
+        if not model_file.exists():
+            logger.warning("Model file not found: %s", model_file)
+            return "00000000"  # fallback hash
         return hashlib.sha256(model_file.read_bytes()).hexdigest()
 
     def run_safe_tuning(self):
         """Execute tuning with automatic rollback on failure"""
+        if not result or result.get('score', 0) < self.config.get('tuning', {}).get('min_score', 0.7):
+            raise ValueError("Tuning resulted in suboptimal model or failed")
         initial_state = self._create_snapshot()
         
         try:
@@ -338,24 +338,20 @@ class HyperparamTuner(BaseTuner):
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
-    print("\n=== Running Adaptive Risk ===\n")
+    print("\n=== Running Infrastructure Manager ===\n")
+    printer.status("Init", "Infrastructure Manager initialized", "info")
 
     infra = InfrastructureManager()
-    
-    try:
-        print("\nAttempting code rollforward...")
-        if infra.rollforward_code():
-            print("✅ Successfully rolled forward code version")
-            
-        print("\nAttempting model rollforward...")
-        if infra.rollforward():
-            print("✅ Successfully rolled forward model version")
-            
-    except Exception as e:
-        print(f"❌ Rollforward failed: {str(e)}")
-    
+    print(infra)
+
     print(f"\n* * * * * Phase 2 * * * * *\n")
+    result = {'score': 0.85}
+    update_risk = infra._update_risk_profile(tuning_result=result)
+    auto_tune = infra.automated_tuning_cycle()
+
+    printer.pretty("AUTO", auto_tune, "success" if auto_tune else "error")
+    printer.pretty("CYCLE", update_risk, "success" if update_risk else "error")
 
     print(f"\n* * * * * Phase 3 * * * * *\n")
 
-    print("\n=== Successfully Ran Adaptive Risk ===\n")
+    print("\n=== Successfully Ran Infrastructure Manager ===\n")
