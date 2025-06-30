@@ -102,6 +102,9 @@ class AdaptiveAgent(BaseAgent):
         logger.info(f"State Dim: {self.state_dim}, Actions: {self.num_actions}")
         logger.info(f"Handlers: {self.num_handlers}, Max Steps: {self.max_episode_steps}")
 
+    def is_initialized(self) -> bool:
+        return True
+
     def perform_task(self, task_data: Any) -> Any:
         """
         Primary task execution method:
@@ -487,6 +490,79 @@ class AdaptiveAgent(BaseAgent):
                 return {"data": self.current_state[:, :target_features], "is_reshaped": True}
         
         return task_data
+    
+    def supports_fail_operational(self) -> bool:
+        """
+        Determine whether the agent supports fail-operational capabilities.
+        
+        Fail-operational capability means the agent can continue operating 
+        safely and effectively even when partial failures occur in its components.
+        
+        This implementation checks:
+        - Presence of recovery strategies
+        - Integrity of local memory
+        - Policy redundancy or reset mechanisms
+        - Minimum episode reward thresholds
+        
+        Returns:
+            bool: True if agent has sufficient fail-operational strategies in place.
+        """
+        try:
+            # Check for valid recovery strategies
+            has_recovery = (
+                hasattr(self, 'recovery_strategies') and
+                isinstance(self.recovery_strategies, list) and
+                len(self.recovery_strategies) > 0
+            )
+    
+            # Check if policy and memory modules are connected
+            policy_intact = (
+                hasattr(self, 'policy') and
+                self.policy.memory is not None and
+                hasattr(self.policy, 'get_action')
+            )
+    
+            # Check if agent can reset parameters
+            reset_capable = any(
+                callable(getattr(s, '__call__', None)) 
+                for s in getattr(self, 'recovery_strategies', [])
+            )
+    
+            # Evaluate episode reward resilience (optional)
+            reward_resilient = getattr(self, 'episode_reward', 0) > -100
+    
+            return all([has_recovery, policy_intact, reset_capable, reward_resilient])
+        
+        except Exception as e:
+            logger.error(f"[Fail-Operational Check] Error: {e}")
+            return False
+        
+    def has_redundant_safety_channels(self) -> bool:
+        """
+        Determines if the agent has multiple independent channels for safety-critical decisions.
+    
+        Returns:
+            bool: True if redundant safety mechanisms are active.
+        """
+        try:
+            # Example: check if multiple independent monitors or handlers are active
+            safety_checks = [
+                hasattr(self.env, 'safety_monitor') and self.env.safety_monitor.is_active(),
+                hasattr(self.policy, 'safety_policy') and self.policy.safety_policy.is_enabled(),
+                hasattr(self, 'emergency_stop') and callable(self.emergency_stop)
+            ]
+    
+            active_channels = [check for check in safety_checks if check]
+            if len(active_channels) >= 2:
+                logger.info("Redundant safety channels verified.")
+                return True
+            else:
+                logger.warning("Insufficient redundancy in safety channels.")
+                return False
+    
+        except Exception as e:
+            logger.error(f"Safety channel validation failed: {str(e)}")
+            return False
     
 if __name__ == "__main__":
     print("\n=== Running Adaptive Agent ===\n")
