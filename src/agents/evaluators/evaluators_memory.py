@@ -9,29 +9,25 @@ from threading import Lock
 from collections import defaultdict, OrderedDict
 from typing import Any, Dict, List, Optional
 
-from logs.logger import get_logger
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Evaluators Memory")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
-
+printer = PrettyPrinter
 
 class EvaluatorsMemory:
     """Memory system for evaluation processes with advanced caching, checkpointing, and tagging"""
-    def __init__(self, config):
-        self.config = config.get('evaluators_memory', {})
-        self._setup_defaults()
+    def __init__(self):
+        self.config = load_global_config()
+        self.memory_config = get_config_section('evaluators_memory')
+        self.max_size = self.memory_config.get('max_size')
+        self.eviction_policy = self.memory_config.get('eviction_policy')
+        self.auto_save = self.memory_config.get('auto_save')
+        self.tag_retention = self.memory_config.get('tag_retention')
+        self.priority_levels = self.memory_config.get('priority_levels')
+        self.access_count = self.memory_config.get('access_count')
+        self.checkpoint_freq = self.memory_config.get('checkpoint_freq')
+        self.checkpoint_dir = self.memory_config.get('checkpoint_dir')
         
         # Core storage with access ordering
         self.store = OrderedDict()
@@ -44,28 +40,11 @@ class EvaluatorsMemory:
         self._init_checkpoint_dir()
         self.last_checkpoint = None
 
-        logger.info(f"EvaluatorsMemory initialized with {self.config['max_size']} entry capacity")
-
-    def _setup_defaults(self):
-        """Set default configuration parameters"""
-        self.config['max_size'] = int(self.config['max_size'])
-        self.config['checkpoint_freq'] = int(self.config['checkpoint_freq'])
-        self.config['tag_retention'] = int(self.config['tag_retention'])
-        defaults = {
-            'max_size': 5000,
-            'eviction_policy': 'LRU',  # LRU or FIFO
-            'checkpoint_dir': 'src/agents/evaluators/checkpoints',
-            'checkpoint_freq': 500,
-            'auto_save': True,
-            'tag_retention': 7,  # Days to keep tagged entries
-            'priority_levels': 3  # Low, Medium, High
-        }
-        for key, value in defaults.items():
-            self.config.setdefault(key, value)
+        logger.info(f"EvaluatorsMemory initialized with {self.max_size} entry capacity")
 
     def _init_checkpoint_dir(self):
         """Ensure checkpoint directory exists"""
-        os.makedirs(self.config['checkpoint_dir'], exist_ok=True)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
     def add(self, entry: Any, tags: List[str] = None, priority: str = 'medium'):
         """
@@ -101,7 +80,7 @@ class EvaluatorsMemory:
             self._manage_capacity()
             self.access_counter += 1
 
-            if self.config['auto_save'] and (self.access_counter % self.config['checkpoint_freq'] == 0):
+            if self.auto_save and (self.access_counter % self.checkpoint_freq == 0):
                 self.create_checkpoint()
 
     def get(self, entry_id: str = None, tag: str = None):
@@ -111,7 +90,7 @@ class EvaluatorsMemory:
                 entry = self.store.get(entry_id)
                 if entry:
                     entry['metadata']['access_count'] += 1
-                    if self.config['eviction_policy'] == 'LRU':
+                    if self.eviction_policy == 'LRU':
                         self.store.move_to_end(entry_id)
                 return entry
             
@@ -160,8 +139,8 @@ class EvaluatorsMemory:
 
     def _manage_capacity(self):
         """Apply eviction policies when capacity is reached"""
-        while len(self.store) >= self.config['max_size']:
-            if self.config['eviction_policy'] == 'FIFO':
+        while len(self.store) >= self.max_size:
+            if self.eviction_policy == 'FIFO':
                 self._evict_oldest()
             else:
                 self._evict_low_priority()
@@ -192,7 +171,7 @@ class EvaluatorsMemory:
     def create_checkpoint(self, name: str = None):
         """Save current memory state to disk"""
         checkpoint_name = name or f"eval_memory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        checkpoint_path = os.path.join(self.config['checkpoint_dir'], checkpoint_name)
+        checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_name)
         
         try:
             with open(checkpoint_path, 'w') as f:
@@ -234,13 +213,13 @@ class EvaluatorsMemory:
             'memory_usage': sum(entry['metadata']['size'] for entry in self.store.values()),
             'checkpoint_info': {
                 'last_checkpoint': self.last_checkpoint,
-                'checkpoint_dir': self.config['checkpoint_dir']
+                'checkpoint_dir': self.checkpoint_dir
             }
         }
 
     def clean_expired_tags(self):
         """Remove entries with expired tags based on retention policy"""
-        cutoff = time.time() - (self.config['tag_retention'] * 86400)
+        cutoff = time.time() - (self.tag_retention * 86400)
         to_remove = []
         
         with self.lock:
@@ -327,8 +306,7 @@ class EvaluatorsMemory:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Adaptive Risk ===\n")
-    config = load_config()
-    memory = EvaluatorsMemory(config)
+    memory = EvaluatorsMemory()
     
     # Store evaluation results with tags
     memory.add(
