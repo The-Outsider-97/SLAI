@@ -8,6 +8,12 @@ base_agent:
     error_similarity_threshold: 0.75
     max_task_retries: 0
     task_timeout_seconds: None
+    task_similarity_str_threshold: 0.9
+    jaccard_threshold: 0.5
+    jaccard_min_for_no_shared: 0.7
+    final_key_threshold: 0.7
+    final_value_threshold: 0.7
+    task_similarity_seq_elem_threshold: 0.8
 
 collaborative_agent: {}
 
