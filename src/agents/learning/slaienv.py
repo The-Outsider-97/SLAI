@@ -137,6 +137,9 @@ class SLAIEnv(gym.Env):
             B[2, 5] = 0.1   # Increase x-velocity
             
         return B
+    
+    def set_task_context(self, context: str):
+        return {}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
