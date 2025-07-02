@@ -1,5 +1,6 @@
 __version__ = "1.9.0"
 
+import re
 import os, sys
 import abc
 import time
@@ -36,10 +37,18 @@ class BaseAgent(abc.ABC):
         self.defer_initialization = self.config.get('defer_initialization')
         self.memory_profile = self.config.get('memory_profile')
         self.network_compression = self.config.get('network_compression')
-        self.max_error_log_size = self.config.get('max_error_log_size', 50)
-        self.error_similarity_threshold = self.config.get('error_similarity_threshold', 0.75)
-        self.max_task_retries = self.config.get('max_task_retries', 0)
+        self.max_error_log_size = self.config.get('max_error_log_size')
+        self.error_similarity_threshold = self.config.get('error_similarity_threshold')
+        self.max_task_retries = self.config.get('max_task_retries')
+        self.task_similarity_str_threshold = self.config.get('task_similarity_str_threshold')
+        self.jaccard_threshold = self.config.get('jaccard_threshold')
+        self.jaccard_min_for_no_shared = self.config.get('jaccard_min_for_no_shared')
+        self.final_key_threshold = self.config.get('final_key_threshold')
+        self.final_value_threshold = self.config.get('final_value_threshold')
+        self.task_similarity_seq_elem_threshold = self.config.get('task_similarity_seq_elem_threshold')
         self.task_timeout_seconds = None
+        self.current_plan = []
+        self.current_goal = []
 
         self.metric_store = LightMetricStore()
         
@@ -306,109 +315,92 @@ class BaseAgent(abc.ABC):
                     return {"status": "failed", "reason": f"Handler for '{issue_id_pattern}' crashed: {handler_ex}"}
         
         logger.info(f"[{self.name}] No specific known issue handler matched or resolved the error.")
-        return {"status": "failed", "reason": "No applicable or successful known issue handler found."}
+        return {"status": "failed", "reason": "No applicable or successful known issue handler found."}    
     
     def alternative_execute(self, task_data, original_error=None):
         """
-        Fallback logic when normal execution and known issue handling fail.
-        It tries a series of increasingly general strategies to process the task_data.
-        Args:
-            task_data: The original input data.
-            original_error: The initial exception that triggered fallbacks. (Optional, for context)
+        Fallback logic without LLM dependencies. Uses:
+        1. Replanning (for planning agents)
+        2. Input sanitization/simplification
+        3. Rule-based grammar processing
+        4. Echo strategy
         """
-        logger.info(f"[{self.name}] Entering alternative execution for task (original error: {str(original_error)[:100]}...).")
-
-        # First try replanning if agent is a planner and has a goal
-        if "PlanningAgent" in self.name and hasattr(self, 'replan') and callable(self.replan) and hasattr(self, 'current_goal') and self.current_goal:
-            try:
-                logger.info(f"[{self.name}] Alt exec: Attempting to replan from current goal.")
-                new_plan = self.replan(self.current_goal)
-                if new_plan:
-                    return self.execute_plan(new_plan)
-            except Exception as e:
-                logger.error(f"Replanning failed during alternative execution: {str(e)}")
-        
-        cleaned_input_str = ""
-        # Strategy 1: Generic Input Sanitization & Simplification to a string
-        try:
-            if isinstance(task_data, str):
-                cleaned_input_str = task_data.strip().lower().replace('\n', ' ').replace('\r', '')
-            elif isinstance(task_data, dict):
-                # Prioritize common text fields, then stringify if not found or not string
-                text_content = task_data.get("text", task_data.get("query", task_data.get("user_input", task_data.get("message"))))
-                if isinstance(text_content, str):
-                    cleaned_input_str = text_content.strip().lower().replace('\n', ' ').replace('\r', '')
-                else: # Fallback to stringifying the whole dict if no primary text field or it's not a string
-                    cleaned_input_str = json.dumps(task_data, ensure_ascii=False, default=str) # Robust stringification
-                    cleaned_input_str = cleaned_input_str.strip().lower().replace('\n', ' ').replace('\r', '')
-            else: # For lists, other objects
-                cleaned_input_str = str(task_data).strip().lower().replace('\n', ' ').replace('\r', '')
-            
-            # Truncate very long stringified complex objects to prevent overly long prompts/logs
-            if len(cleaned_input_str) > self.config.get('alt_exec_max_clean_len', 500): 
-                cleaned_input_str = cleaned_input_str[:self.config.get('alt_exec_max_clean_len', 500) -3] + "..."
-            
-            logger.debug(f"[{self.name}] Alt exec: Sanitized/simplified input string: '{cleaned_input_str[:100]}...'")
-        except Exception as e_sanitize:
-            logger.warning(f"[{self.name}] Alt exec: Sanitization/simplification step failed: {e_sanitize}. Using raw task_data as string for fallback.")
-            cleaned_input_str = str(task_data)[:self.config.get('alt_exec_max_clean_len', 500)] # Best effort if sanitization crashes
-
-        # Strategy 2: Try with a very generic LLM prompt if available
-        llm_component = getattr(self, "llm", None)
-        if llm_component and callable(getattr(llm_component, "generate", None)):
-            # Apply network compression if enabled
-            compression = self.network_compression
-            fallback_prompt = self._build_fallback_prompt(
-                original_error, cleaned_input_str, compression)
-            logger.info(f"[{self.name}] Alt exec: Trying LLM with generic fallback prompt.")
-            try:
-                llm_result = llm_component.generate(fallback_prompt)
-                response_text = None
-                if isinstance(llm_result, str): response_text = llm_result
-                elif isinstance(llm_result, dict): response_text = llm_result.get("text", llm_result.get("response", llm_result.get("completion")))
-                
-                if response_text and isinstance(response_text, str) and response_text.strip():
-                    return f"[Fallback LLM Response] {response_text.strip()}" # Success for this strategy
-            except Exception as e_llm:
-                logger.warning(f"[{self.name}] Alt exec: LLM fallback attempt failed: {e_llm}")
-                # Fall through to next strategy
-
-        # Strategy 3: Simplified Grammar Processor (if available and applicable for short inputs)
-        grammar_component = getattr(self, "grammar", None)
-        if grammar_component and callable(getattr(grammar_component, "compose_sentence", None)):
-            # Only attempt if cleaned_input_str is short and potentially structured
-            if cleaned_input_str and len(cleaned_input_str.split()) < 15: 
-                facts_for_grammar = {"event": "fallback_processing_attempt", "input_snippet": cleaned_input_str[:60]}
-                logger.info(f"[{self.name}] Alt exec: Trying GrammarProcessor with simple facts from input.")
+        logger.info(f"[{self.name}] Entering alternative execution (error: {str(original_error)[:100]}...)")
+    
+        # Strategy 1: Replanning for planning agents
+        if "PlanningAgent" in self.name and hasattr(self, 'replan') and callable(self.replan):
+            if hasattr(self, 'current_goal') and self.current_goal:
                 try:
-                    grammar_result = grammar_component.compose_sentence(facts_for_grammar)
-                    if grammar_result and isinstance(grammar_result, str) and grammar_result.strip():
-                        return f"[Fallback Grammar Response] {grammar_result.strip()}" # Success
-                except Exception as e_grammar:
-                    logger.warning(f"[{self.name}] Alt exec: GrammarProcessor fallback attempt failed: {e_grammar}")
-                    # Fall through
-
-        # Strategy 4: Echo cleaned/simplified input as a last resort before total failure message
-        if cleaned_input_str: # If we have some form of simplified input
-            logger.info(f"[{self.name}] Alt exec: Echoing cleaned/simplified input string as final fallback response.")
-            return f"[Fallback Response] Input processed after error. Simplified input: {cleaned_input_str}"
-        else: # If even cleaning/simplification failed or produced nothing usable
-            logger.warning(f"[{self.name}] Alt exec: No usable cleaned input to echo. Returning total failure message.")
-            return "[Fallback failure] Unable to process your request via alternative methods, and input could not be simplified or interpreted."
-
-    def _build_fallback_prompt(self, error, input_str, compression_enabled):
-        """Build fallback prompt with compression optimization"""
-        base_prompt = (
-            f"The primary processing of an input failed with an error: "
-            f"'{str(error)[:150]}'. "
-            f"The (simplified) input was: '{input_str}'. "
-            f"Please provide a safe, general-purpose response."
-        )
+                    logger.info(f"[{self.name}] Alt exec: Attempting replanning")
+                    new_plan = self.replan(self.current_goal)
+                    if new_plan:
+                        return self.execute_plan(new_plan)
+                except Exception as e:
+                    logger.error(f"Replanning failed: {str(e)}")
         
-        if compression_enabled:
-            # Truncate and simplify for network efficiency
-            return base_prompt[:min(len(base_prompt), 512)] + " [COMPRESSED]"
-        return base_prompt
+        # Strategy 2: Input sanitization
+        sanitized_input = self.sanitize_input(task_data)
+        logger.debug(f"[{self.name}] Sanitized input: {sanitized_input[:100]}...")
+        
+        # Strategy 3: Rule-based processing
+        rule_based_result = self.apply_rule_based_processing(sanitized_input)
+        if rule_based_result:
+            return rule_based_result
+        
+        # Strategy 4: Echo strategy
+        return self.echo_strategy(sanitized_input)
+    
+    def sanitize_input(self, task_data):
+        """Generic input sanitization without LLM dependencies"""
+        if isinstance(task_data, str):
+            return task_data.strip().replace('\n', ' ').replace('\r', '')[:500]
+        
+        if isinstance(task_data, dict):
+            # Extract possible content fields
+            content_keys = ['text', 'query', 'input', 'message', 'data']
+            for key in content_keys:
+                if key in task_data and isinstance(task_data[key], str):
+                    return task_data[key].strip()[:500]
+            
+            # Fallback to JSON stringification
+            try:
+                return json.dumps({k: v for k, v in task_data.items() if isinstance(v, (str, int, float))})[:500]
+            except:
+                return str(task_data)[:500]
+        
+        return str(task_data)[:500]
+    
+    def apply_rule_based_processing(self, sanitized_input):
+        """Rule-based fallback using predefined patterns"""
+        # Common error patterns and responses
+        error_patterns = {
+            r"connection (timeout|refused)": "Network unavailable. Please check connectivity",
+            r"invalid (format|input)": "Input format error. Please verify your request structure",
+            r"out of memory": "Resource constraints detected. Try reducing request complexity",
+            r"authentication failed": "Credentials invalid or expired. Please re-authenticate"
+        }
+        original_error=None
+        
+        for pattern, response in error_patterns.items():
+            if re.search(pattern, sanitized_input, re.IGNORECASE):
+                logger.info(f"[{self.name}] Rule-based match: {pattern}")
+                return f"[Fallback] {response}"
+        
+        # Try grammar processor if available
+        if hasattr(self, 'grammar') and callable(getattr(self.grammar, "compose_sentence", None)):
+            try:
+                facts = {"input": sanitized_input[:100], "error": str(original_error)[:100]}
+                return f"[Grammar Response] {self.grammar.compose_sentence(facts)}"
+            except Exception as e:
+                logger.warning(f"Grammar processing failed: {str(e)}")
+        
+        return None
+
+    def echo_strategy(self, sanitized_input):
+        """Final fallback strategy"""
+        if sanitized_input:
+            return f"[Fallback] Processed input: {sanitized_input}"
+        return "[Fallback] Unable to process request through alternative methods"
 
     def is_similar(self, task_data_1: Any, task_data_2: Any) -> bool:
         """
@@ -425,7 +417,7 @@ class BaseAgent(abc.ABC):
             if not s1 and not s2: return True # Both empty strings are similar
             if not s1 or not s2: return False # One empty, one not
             # Using SequenceMatcher for string similarity, threshold can be configured
-            return difflib.SequenceMatcher(None, s1, s2).ratio() > self.config.get('task_similarity_str_threshold', 0.9)
+            return difflib.SequenceMatcher(None, s1, s2).ratio() > self.task_similarity_str_threshold
 
         # Handle dict-based structured tasks
         if isinstance(task_data_1, dict): # task_data_2 is also dict
@@ -441,12 +433,12 @@ class BaseAgent(abc.ABC):
             key_jaccard_sim = key_intersection / key_union if key_union > 0 else 0.0
 
             # If key structure is too different, consider them not similar
-            if key_jaccard_sim < self.config.get('task_similarity_dict_key_jaccard_threshold', 0.5):
+            if key_jaccard_sim < self.jaccard_threshold:
                 return False
 
             shared_keys = keys1.intersection(keys2)
             if not shared_keys: # No common keys, but Jaccard might be high if key sets are small subsets
-                 return key_jaccard_sim > self.config.get('task_similarity_dict_key_jaccard_min_for_no_shared', 0.7) 
+                 return key_jaccard_sim > self.jaccard_min_for_no_shared
 
             value_similarity_scores = []
             for key in shared_keys:
@@ -460,14 +452,14 @@ class BaseAgent(abc.ABC):
                     value_similarity_scores.append(0.0) 
             
             if not value_similarity_scores: # Should not happen if shared_keys is non-empty
-                return key_jaccard_sim > self.config.get('task_similarity_dict_key_jaccard_min_for_no_shared', 0.7) 
+                return key_jaccard_sim > self.jaccard_min_for_no_shared
 
             avg_value_similarity = sum(value_similarity_scores) / len(value_similarity_scores)
             
             # Combine key similarity and value similarity
             # Example: require high key similarity AND high average value similarity
-            return (key_jaccard_sim >= self.config.get('task_similarity_dict_final_key_threshold', 0.7) and 
-                    avg_value_similarity >= self.config.get('task_similarity_dict_final_value_threshold', 0.7))
+            return (key_jaccard_sim >= self.final_key_threshold and 
+                    avg_value_similarity >= self.final_value_threshold)
 
         # Handle list/tuple based tasks
         if isinstance(task_data_1, (list, tuple)): # task_data_2 also same type
@@ -481,7 +473,7 @@ class BaseAgent(abc.ABC):
             
             if not element_similarities: return True # Should not happen if len > 0
             avg_element_similarity = sum(element_similarities) / len(element_similarities)
-            return avg_element_similarity >= self.config.get('task_similarity_seq_elem_threshold', 0.8)
+            return avg_element_similarity >= self.task_similarity_seq_elem_threshold
 
         # Fallback for other directly comparable types (bool, NoneType, numbers if not caught by dict logic)
         return task_data_1 == task_data_2
@@ -522,6 +514,272 @@ class BaseAgent(abc.ABC):
         else:
             raise ValueError(f"Unsupported command for PlanningAgent: '{command}'")
 
+    def execute_plan(self, plan: Any, goal: Any = None) -> Any:
+        """
+        Generic plan execution framework with:
+        - Progress tracking
+        - Error handling
+        - Resource monitoring
+        - Result validation
+        
+        Args:
+            plan: Iterable of steps (dicts, objects, or functions)
+            goal: Optional target state/objective
+        
+        Returns:
+            Execution result with status metadata
+        """
+        # Validate plan structure
+        if not hasattr(plan, '__iter__'):
+            return {"status": "error", "reason": "Invalid plan format"}
+        
+        results = []
+        step_context = {}
+        resource_monitor = ResourceMonitor()
+        
+        try:
+            # Pre-execution validation
+            if not self.validate_plan(plan):
+                return {"status": "error", "reason": "Plan validation failed"}
+            
+            for i, step in enumerate(plan):
+                step_name = step.get('name', f"step_{i+1}")
+                logger.info(f"[{self.name}] Executing {step_name}...")
+                
+                # Monitor resources before execution
+                if resource_monitor.is_critical():
+                    return {"status": "interrupted", "reason": "Resource limits exceeded"}
+                
+                # Execute step with error handling
+                try:
+                    result = self.execute_step(step, step_context)
+                    results.append(result)
+                    
+                    # Update context for next steps
+                    if isinstance(result, dict):
+                        step_context.update(result.get('context', {}))
+                    
+                    # Validate intermediate results
+                    if goal and self.check_goal_achieved(step_context, goal):
+                        logger.info(f"[{self.name}] Early goal achievement at step {i+1}")
+                        return self.compile_results(results, True)
+                
+                except Exception as e:
+                    logger.error(f"Step {step_name} failed: {str(e)}")
+                    results.append({
+                        "step": step_name,
+                        "status": "error",
+                        "error": str(e)
+                    })
+                    
+                    # Attempt step recovery
+                    if not self.recover_step(step, step_context):
+                        return self.compile_results(results, False)
+            
+            return self.compile_results(results, True)
+        
+        finally:
+            # Post-execution cleanup
+            self.cleanup_resources()
+            logger.info(f"[{self.name}] Plan execution completed")
+
+    def validate_plan(self, plan):
+        """Basic plan validation logic"""
+        required_attrs = ['name', 'handler'] if isinstance(plan[0], dict) else None
+        for step in plan:
+            if required_attrs:
+                if not all(attr in step for attr in required_attrs):
+                    return False
+        return True
+
+    def execute_step(self, step, context):
+        """Flexible step execution handling multiple formats"""
+        # Function-based step
+        if callable(step):
+            return step(context)
+        
+        # Dict-based step
+        if isinstance(step, dict):
+            handler_name = step.get('handler')
+            if handler_name and hasattr(self, handler_name):
+                handler = getattr(self, handler_name)
+                return handler(step.get('params', {}), context)
+            
+            # Direct module/action specification
+            if 'module' in step and 'action' in step:
+                return self.call_external(
+                    step['module'],
+                    step['action'],
+                    step.get('params', {})
+                )
+        
+        # String-based command
+        if isinstance(step, str):
+            return self.process_command(step, context)
+        
+        raise ValueError(f"Unsupported step type: {type(step)}")
+
+    def check_goal_achieved(self, step_context: dict, goal: Any) -> bool:
+        """
+        Checks if the current context indicates the goal has been achieved.
+        Default implementation requires exact match of goal keys in context.
+        Subclasses should override with domain-specific goal checking.
+        """
+        if isinstance(goal, dict):
+            # Check if all goal key-value pairs exist in context
+            for key, target_value in goal.items():
+                if key not in step_context:
+                    return False
+                current_value = step_context[key]
+                if isinstance(target_value, (int, float)):
+                    # Numeric comparison with tolerance
+                    if abs(current_value - target_value) > 1e-6:
+                        return False
+                elif current_value != target_value:
+                    return False
+            return True
+        
+        # For simple types, direct comparison
+        return step_context.get('result') == goal
+
+    def compile_results(self, results, success):
+        """Standardized result compilation"""
+        return {
+            "status": "success" if success else "partial_success",
+            "steps_executed": len(results),
+            "success_rate": sum(1 for r in results if r.get('status') == 'success') / len(results),
+            "results": results,
+            "timestamp": time.time()
+        }
+    
+    def recover_step(self, step: Any, step_context: dict) -> bool:
+        """
+        Attempts to recover from a failed step execution.
+        Returns True if recovery was successful, False otherwise.
+        """
+        step_name = step.get('name', "unknown_step")
+        logger.warning(f"[{self.name}] Attempting recovery for failed step: {step_name}")
+        
+        # Strategy 1: Check if step has a recovery handler
+        if isinstance(step, dict) and 'recovery_handler' in step:
+            handler_name = step['recovery_handler']
+            if hasattr(self, handler_name):
+                try:
+                    recovery_func = getattr(self, handler_name)
+                    recovery_result = recovery_func(step, step_context)
+                    if recovery_result:
+                        logger.info(f"[{self.name}] Step recovery successful using handler '{handler_name}'")
+                        return True
+                except Exception as e:
+                    logger.error(f"Recovery handler '{handler_name}' failed: {str(e)}")
+        
+        # Strategy 2: Default retry
+        try:
+            logger.info(f"[{self.name}] Attempting step retry...")
+            self.execute_step(step, step_context)
+            logger.info(f"[{self.name}] Step recovery successful through retry")
+            return True
+        except Exception as e:
+            logger.error(f"Step retry failed: {str(e)}")
+            return False
+        
+    def cleanup_resources(self):
+        """
+        Releases any resources acquired during plan execution.
+        Base implementation handles common resource types.
+        """
+        logger.info(f"[{self.name}] Cleaning up resources...")
+        
+        # Close file handles if any
+        if hasattr(self, 'open_files'):
+            for file in self.open_files:
+                try:
+                    file.close()
+                except Exception as e:
+                    logger.warning(f"Error closing file: {str(e)}")
+            self.open_files = []
+        
+        # Release network connections
+        if hasattr(self, 'active_connections'):
+            for conn in self.active_connections:
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.warning(f"Error closing connection: {str(e)}")
+            self.active_connections = []
+        
+        # Clear temporary data
+        if hasattr(self, 'temporary_data'):
+            self.temporary_data.clear()
+
+    def call_external(self, module: str, action: str, params: dict) -> Any:
+        """
+        Calls an external module/action with parameters.
+        Uses agent_factory to locate and execute the module.
+        """
+        logger.info(f"[{self.name}] Calling external: {module}.{action}()")
+        
+        try:
+            # Get module agent from factory
+            module_agent = self.agent_factory.create(module)
+            
+            # Get the action method
+            if not hasattr(module_agent, action):
+                raise AttributeError(f"Module '{module}' has no action '{action}'")
+            
+            action_method = getattr(module_agent, action)
+            
+            # Execute with parameters
+            return action_method(**params)
+        except Exception as e:
+            logger.error(f"External call failed: {module}.{action} - {str(e)}")
+            raise
+    
+    def process_command(self, command: str, context: dict) -> Any:
+        """
+        Processes a string-based command within the current context.
+        Supports basic operations and context manipulation.
+        """
+        logger.info(f"[{self.name}] Processing command: {command}")
+        
+        # Simple command parsing
+        parts = command.split(' ', 1)
+        cmd_type = parts[0].lower()
+        payload = parts[1] if len(parts) > 1 else ""
+        
+        try:
+            if cmd_type == "log":
+                # log <message>
+                logger.info(f"[Command] {payload}")
+                return {"status": "logged", "message": payload}
+            
+            elif cmd_type == "set":
+                # set <key> <value>
+                key, value = payload.split(' ', 1)
+                context[key] = value
+                return {"status": "set", "key": key, "value": value}
+            
+            elif cmd_type == "get":
+                # get <key>
+                value = context.get(payload, "NOT_FOUND")
+                return {"status": "retrieved", "key": payload, "value": value}
+            
+            elif cmd_type == "incr":
+                # incr <key> [increment=1]
+                parts = payload.split(' ')
+                key = parts[0]
+                increment = float(parts[1]) if len(parts) > 1 else 1
+                current = float(context.get(key, 0))
+                context[key] = current + increment
+                return {"status": "incremented", "key": key, "value": context[key]}
+            
+            else:
+                raise ValueError(f"Unknown command: {cmd_type}")
+        
+        except Exception as e:
+            logger.error(f"Command processing failed: {command} - {str(e)}")
+            return {"status": "error", "command": command, "error": str(e)}
+    
     def evaluate_performance(self, metrics: dict):
         """
         Evaluates performance based on extracted metrics, logs them, and checks thresholds for retraining.
@@ -656,41 +914,38 @@ class BaseAgent(abc.ABC):
         else:
             self.logger.info(f"[{self.name}] No valid warm-start state found at key '{warm_start_key}'. Proceeding with fresh initialization.")
 
-
-    def create_lightweight_network(self, input_dim: int = 10, output_dim: int = 2) -> object:
+    def create_lightweight_network(self, input_dim: int = 10, output_dim: int = 2) -> nn.Module:
         """
-        Returns a basic, shallow neural network-like structure for demonstration or simple tasks.
-        This is a placeholder; real agents would use more sophisticated models (e.g., PyTorch nn.Module).
+        Returns a basic PyTorch neural network module.
         """
         class PolicyNet(nn.Module):
             def __init__(self, input_dim: int, output_dim: int):
                 super().__init__()
                 self.input_dim = input_dim
                 self.output_dim = output_dim
-                # Initialize weights and biases (e.g., Xavier/He initialization for small nets)
-                self.weights = np.random.randn(input_dim, output_dim).astype(np.float32) * np.sqrt(1.0 / input_dim)
-                self.bias = np.zeros(output_dim, dtype=np.float32)
+                # Proper PyTorch parameter initialization
+                self.weights = nn.Parameter(
+                    torch.randn(input_dim, output_dim) * torch.sqrt(torch.tensor(1.0 / input_dim)))
+                self.bias = nn.Parameter(torch.zeros(output_dim))
                 logger.debug(f"PolicyNet initialized with input_dim={input_dim}, output_dim={output_dim}")
-
+    
             def predict(self, state: Any) -> Any:
-                # Ensure state is a 1D numpy array of the correct input dimension
                 try:
-                    state_vec = np.array(state, dtype=np.float32).flatten()
+                    # Convert to tensor and flatten
+                    state_vec = torch.tensor(state, dtype=torch.float32).flatten()
                     if state_vec.shape[0] != self.input_dim:
                         raise ValueError(f"Input state dimension {state_vec.shape[0]} "
                                          f"does not match network input dimension {self.input_dim}")
+                    
+                    # Use PyTorch matrix multiplication
+                    logits = torch.matmul(state_vec, self.weights) + self.bias
+                    # Return action index
+                    return torch.argmax(logits).item()
+                    
                 except Exception as e:
                     logger.error(f"PolicyNet: Error processing input state: {e}")
-                    # Return a default action or raise, depending on desired behavior
-                    return np.random.randint(self.output_dim) # Example: random action on error
-
-                logits = np.dot(state_vec, self.weights) + self.bias
-                # For classification, typically argmax of logits or softmax for probabilities
-                return np.argmax(logits) 
-                # To return probabilities:
-                # exp_logits = np.exp(logits - np.max(logits)) # Stabilized softmax
-                # probs = exp_logits / np.sum(exp_logits)
-                # return probs
+                    # Return random action on error
+                    return torch.randint(0, self.output_dim, (1,)).item()
         
         return PolicyNet(input_dim=input_dim, output_dim=output_dim)
     
@@ -800,6 +1055,22 @@ class RetrainingManager:
         else:
             self.logger.debug(f"No retraining flag set for agent '{self.agent.name}'.")
 
+class ResourceMonitor:
+    """Lightweight resource monitoring"""
+    def __init__(self):
+        self.warning_threshold = 0.7
+        self.critical_threshold = 0.9
+    
+    def is_critical(self):
+        """Check system resource levels"""
+        # Simplified actual implementation would use:
+        # psutil.cpu_percent(), psutil.virtual_memory().percent
+        current_cpu = 0.6  # Mock value
+        current_mem = 0.8  # Mock value
+        
+        if current_cpu > self.critical_threshold or current_mem > self.critical_threshold:
+            return True
+        return False
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
