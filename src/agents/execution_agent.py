@@ -32,6 +32,7 @@ Real-World Application:
     where tasks have dependencies, retries, and require stateful agents.
 """
 
+import json
 import torch
 import copy
 import time
@@ -132,6 +133,21 @@ class ExecutionAgent(BaseAgent):
 
     def perform_task(self, task_data: Dict) -> Dict:
         printer.status("EXECUTION", "Task Performer", "info")
+
+        if isinstance(task_data, str):
+            try:
+                # Attempt to convert string to dictionary
+                task_data = json.loads(task_data)
+            except json.JSONDecodeError:
+                return {
+                    "status": "failed",
+                    "reason": f"Invalid task_data format: {task_data}"
+                }
+        elif not isinstance(task_data, dict):
+            return {
+                "status": "failed",
+                "reason": f"Expected dict, got {type(task_data).__name__}"
+            }
     
         # Check if task is already being handled
         if self.shared_memory.get(f"task_in_progress:{task_data['name']}"):
