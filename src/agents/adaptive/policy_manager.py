@@ -1,5 +1,7 @@
+from datetime import datetime
+from typing import Dict
 import numpy as np
-import yaml, json
+import yaml
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,301 +11,437 @@ from src.agents.learning.utils.policy_network import PolicyNetwork
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
 from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("Parameter Tuner")
+logger = get_logger("Policy Manager")
 printer = PrettyPrinter
 
 class PolicyManager:
+    """
+    Manager for hierarchical skill selection.
+    """
+    _manager_instance = None
+
     def __init__(self):
+        super().__init__()
         self.config = load_global_config()
         self.manager_config = get_config_section('policy_manager')
-        self.hidden_layers = self.manager_config.get('hidden_layers')
-        self.activation = self.manager_config.get('activation')
+        self.skills = None
+        self.num_skills = 0
+        self.state_dim = self.manager_config.get('state_dim', 32)
+        self.hidden_layers = self.manager_config.get('hidden_layers', [64, 32])
+        self.activation = self.manager_config.get('activation', 'tanh')
+        self.explore=self.manager_config.get('explore', True)
         
-        self.rl_config = get_config_section('rl')
-        self.state_dim = self.rl_config.get('state_dim')
-        self.action_dim = self.rl_config.get('action_dim')
-
+        # Memory and tracking
         self.memory = MultiModalMemory()
+        self.active_skill = None
+        self.skill_start_state = None
+        self.skill_history = []
+        
+        # Policy network for skill selection
+        self.policy_network = None
+        
+        # Learning parameters
+        self.skill_gamma = self.manager_config.get('skill_discount_factor', 0.99)
+        self.learning_rate = self.manager_config.get('manager_learning_rate', 0.001)
+        self._steps = 0
+        
+        logger.info("Policy Manager base initialized")
+        logger.info(f"State Dim: {self.state_dim}")
+
+    def set_task_goal(self, goal: str):
+        self.current_goal = goal
+        logger.info(f"Task goal set to: {goal}")
+    
+    def set_task_type(self, task_type: str):
+        self.current_task_type = task_type
+        logger.info(f"Task type set to: {task_type}")
+
+    def initialize_skills(self, skills: dict):
+        """Initialize the manager with specific skills"""
+        if not skills:
+            raise ValueError("Cannot initialize PolicyManager with empty skills dictionary")
+        
+        self.skills = skills
+        self.num_skills = len(skills)
+        
+        # Always reinitialize policy network to match current state_dim
+        if hasattr(self, 'policy_network'):
+            del self.policy_network
+            
         self.policy_network = PolicyNetwork(
             state_size=self.state_dim,
-            action_size=self.action_dim
+            action_size=self.num_skills
         )
-
-        self.weights = None # self._initialize_weights()
-        self.network = None # self._build_network()
-        self._steps = 0
-        self.sample = 0
-
-        # Policy performance tracking
-        self.param_history = []
-        logger.info("Policy Manager initialized with:")
-        logger.info(f"State Dim: {self.state_dim}, Action Dim: {self.action_dim}")
-
-    def _initialize_weights(self) -> dict:
-        """Initialize policy network weights using Xavier initialization"""
-        printer.status("INIT", "Weights succesfully initialized")
-
-        return {
-            'input': nn.init.xavier_uniform_(torch.empty(self.state_dim, 64)),
-            'hidden': nn.init.xavier_uniform_(torch.empty(64, 32)),
-            'output': nn.init.xavier_uniform_(torch.empty(32, self.action_dim))
-        }
-
-    def _build_network(self) -> nn.Sequential:
-        """Create policy network architecture"""
-        printer.status("INIT", "Network builder succesfully initialized")
-
-        return nn.Sequential(
-            nn.Linear(self.state_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.Tanh(),
-            nn.Linear(32, self.action_dim),
-            nn.Softmax(dim=-1)
-        )
-
-    def attach_policy_network(self, policy_network):
-        """
-        Attach an external PolicyNetwork instance.
-        """
-        printer.status("INIT", "Policy attacher succesfully initialized")
-
-        self.policy_network = policy_network
-        state_size = self.state_dim 
-        action_size = self.action_dim
-        self.config = self.manager_config
-        policy_network = PolicyNetwork(
-            state_size=state_size,
-            action_size=action_size)
-        logger.info("External PolicyNetwork attached to PolicyManager.")
-    
-    def compute_policy(self, state: np.ndarray) -> np.ndarray:
-        printer.status("INIT", "Policy compute succesfully initialized")
-
-        state_tensor = torch.FloatTensor(state).unsqueeze(0) if state.ndim == 1 else torch.FloatTensor(state)
-        with torch.no_grad():
-            if self.policy_network:
-                probs = self.policy_network.forward(state_tensor)
-            else:
-                probs = self.network(state_tensor)
-        return probs.squeeze(0).numpy()
-
-    def update_policy(self, states, actions, advantages):
-        """
-        Update policy using collected experiences
-        - states: Batch of states
-        - actions: Batch of actions taken
-        - advantages: Computed advantages for each transition
-        """
-        rewards = [exp['reward'] for exp in self.memory.episodic]
-        advantages = self.advantage_calculation(rewards)
-
-        # Convert to tensors
-        states_t = torch.FloatTensor(states)
-        actions_t = torch.LongTensor(actions)
-        advantages_t = torch.FloatTensor(advantages)
         
-        # Compute policy gradients
-        probs = self.policy_network(states_t)
-        log_probs = torch.log(probs.gather(1, actions_t.unsqueeze(1)))
-        loss = -(log_probs * advantages_t).mean()
-        
-        # Backpropagate and update
-        self.policy_network.backward(loss)
-        self.policy_network.update_parameters()
-        
-        # Analyze parameter impact periodically
-        if len(self.param_history) % 100 == 0:
-            impact = self.memory.analyze_parameter_impact()
-            logger.debug(f"Parameter impacts: {impact}")
+        logger.info(f"Policy Manager skills initialized with {self.num_skills} skills")
+        logger.info(f"Skill Space: {self.num_skills}")
 
-    def update(self, state: np.ndarray, action: int, td_error: float, learning_rate: float = 0.01):
-        """Single-sample update method (for compatibility)"""
-        # Validate state dimensions
-        if len(state) != self.state_dim:
-            logger.warning(f"State dimension mismatch in update: expected {self.state_dim}, got {len(state)}")
-            state = state[:self.state_dim]
-
-        if self.policy_network:
-            # Construct dL/dlogits assuming Softmax output and REINFORCE-style gradient
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            probs = self.policy_network.forward(state_tensor)
-            grad_logits = torch.zeros_like(probs)
-            grad_logits[0, action] = 1.0
-            grad_logits -= probs
-            grad_logits *= td_error
-    
-            self.policy_network.backward(grad_logits)
-            self.policy_network.update_parameters()
-        else:
-            # fallback to manual update
-            state_tensor = torch.FloatTensor(state).requires_grad_(True)
-            probs = self.network(state_tensor)
-            log_prob = torch.log(probs[action])
-            log_prob.backward()
-            with torch.no_grad():
-                for param in self.network.parameters():
-                    param -= learning_rate * td_error * param.grad
-                self.network.zero_grad()
-
-    def advantage_calculation(self, rewards, gamma=0.99, normalize=True):
+    def select_skill(self, state: np.ndarray, explore: bool = True) -> int:
         """
-        Calculate advantages from a list of rewards using discounted return.
-    
+        Select a skill based on current high-level state.
+        
         Args:
-            rewards (list or np.ndarray): List of rewards for each step in an episode.
-            gamma (float): Discount factor.
-            normalize (bool): Whether to normalize advantages to zero mean and unit variance.
-    
+            state: High-level state representation
+            explore: Whether to allow exploration
+            
         Returns:
-            np.ndarray: Array of advantages (discounted returns).
+            skill_id: Selected skill identifier
         """
-        printer.status("CALC", "Starting advantage calculation")
+        if self.policy_network is None:
+            raise RuntimeError("Policy network is not initialized. Call `initialize_skills()` first.")
     
-        R = 0
-        advantages = []
-    
-        # Calculate discounted returns in reverse
-        for r in reversed(rewards):
-            R = r + gamma * R
-            advantages.insert(0, R)
-    
-        advantages = np.array(advantages)
-    
-        if normalize:
-            mean = advantages.mean()
-            std = advantages.std() + 0.0000001
-            advantages = (advantages - mean) / std
-    
-        printer.status("CALC", "Advantage calculation completed")
-        return advantages
-
-    def _step_count(self):
-        return self._steps
-
-    def get_action(self, state, explore=True, context=None):
-        """Get action with state validation and memory integration"""
         # Validate state dimensions
         if len(state) != self.state_dim:
             logger.warning(f"State dimension mismatch: expected {self.state_dim}, got {len(state)}")
             state = state[:self.state_dim]  # Truncate to expected dimensions
         
         # Convert state to tensor
-        state_t = torch.FloatTensor(state).unsqueeze(0)
-
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        
         # Retrieve relevant memories
-        memory_context = context or {"state": state}
+        memory_context = {"state": state, "type": "skill_selection"}
         memories = self.memory.retrieve(
             query="policy_decision",
             context=memory_context
         )
         
-        # Use policy network for primary decision
-        state_t = torch.FloatTensor(state).unsqueeze(0)
+        # Get skill probabilities
         with torch.no_grad():
-            probs = self.policy_network(state_t).numpy()[0]
+            probs = self.policy_network(state_tensor).numpy()[0]
         
         # Exploration adjustment based on memory
         if explore and memories:
             memory_bias = self.memory._generate_memory_bias(memories)
             adjusted_probs = self._adjust_probs(probs, memory_bias)
-            return np.random.choice(self.action_dim, p=adjusted_probs)
+            skill_id = np.random.choice(self.num_skills, p=adjusted_probs)
+        else:
+            skill_id = np.argmax(probs) if not explore else np.random.choice(self.num_skills, p=probs)
+        
+        # Track skill activation
+        self.active_skill = skill_id
+        self.skill_start_state = state
+        logger.debug(f"Selected skill: {skill_id}")
+        
+        return skill_id
 
-        return np.argmax(probs) if not explore else np.random.choice(self.action_dim, p=probs)
-    
-    def _adjust_probs(self, probs: np.ndarray, memory_bias: np.ndarray) -> np.ndarray:
+    def finalize_skill(self, final_reward: float, success: bool = False):
         """
-        Adjust policy probabilities using memory-based bias.
-        Applies multiplicative adjustment to action probabilities using:
-            adjusted_probs = probs * exp(memory_bias)
-        Followed by normalization to ensure valid probability distribution.
+        Complete skill execution and update manager policy.
         
         Args:
-            probs: Original action probabilities from policy network
-            memory_bias: Bias vector from memory system
-            
-        Returns:
-            Adjusted probability distribution over actions
+            final_reward: Cumulative reward from skill execution
+            success: Whether skill achieved its objective
         """
+        if self.active_skill is None:
+            logger.warning("Skill finalized with no active skill")
+            return
+            
+        # Manager reward based on skill success
+        manager_reward = 1.0 if success else -0.1
+        
+        # Store experience
+        self.store_experience(
+            state=self.skill_start_state,
+            action=self.active_skill,
+            reward=manager_reward
+        )
+        
+        # Add to skill history
+        self.skill_history.append({
+            "skill": self.active_skill,
+            "reward": final_reward,
+            "success": success,
+            "steps": self._steps
+        })
+        
+        # Reset tracking
+        self.active_skill = None
+        self.skill_start_state = None
+        self._steps += 1
+        
+        # Update policy periodically
+        if len(self.skill_history) % self.manager_config.get('update_frequency', 10) == 0:
+            self.update_policy()
+
+    def update_policy(self):
+        """Update manager policy based on stored experiences"""
+        if self.memory.size()['episodic'] < self.manager_config.get('min_batch_size', 16):
+            return
+            
+        # Sample experiences
+        batch_size = min(self.manager_config.get('batch_size', 32), self.memory.size()['episodic'])
+        experiences = self.memory.retrieve("", {}, limit=batch_size)
+        
+        # Prepare training data
+        states, skills, rewards = [], [], []
+        for exp in experiences:
+            if exp['type'] == 'episodic' and 'state' in exp['data'] and 'action' in exp['data']:
+                states.append(exp['data']['state'])
+                skills.append(exp['data']['action'])
+                rewards.append(exp['data']['reward'])
+        
+        if len(states) == 0:
+            return
+            
+        # Calculate advantages
+        advantages = self.advantage_calculation(rewards)
+        
+        # Update policy network
+        states_t = torch.FloatTensor(np.array(states))
+        skills_t = torch.LongTensor(np.array(skills))
+        advantages_t = torch.FloatTensor(np.array(advantages))
+        
+        # Forward pass
+        probs = self.policy_network(states_t)
+        log_probs = torch.log(probs.gather(1, skills_t.unsqueeze(1)))
+        
+        # Policy gradient loss
+        loss = -(log_probs * advantages_t).mean()
+        
+        # Backpropagate and update
+        self.policy_network.backward(loss)
+        self.policy_network.update_parameters()
+        
+        logger.info(f"Manager policy updated | Loss: {loss.item():.4f}")
+
+    def advantage_calculation(self, rewards, gamma=0.99, normalize=True):
+        """
+        Calculate advantages from a list of rewards using discounted return.
+        """
+        R = 0
+        advantages = []
+        
+        # Calculate discounted returns in reverse
+        for r in reversed(rewards):
+            R = r + gamma * R
+            advantages.insert(0, R)
+        
+        advantages = np.array(advantages)
+        
+        if normalize:
+            mean = advantages.mean()
+            std = advantages.std() + 1e-8
+            advantages = (advantages - mean) / std
+        
+        return advantages
+
+    def _adjust_probs(self, probs: np.ndarray, memory_bias: np.ndarray) -> np.ndarray:
+        """
+        Adjust skill probabilities using memory-based bias.
+        """
+        probs = probs.flatten()
+        memory_bias = memory_bias.flatten()
+        # Ensure bias matches number of skills
+        if len(memory_bias) != len(probs):
+            logger.warning(f"Memory bias dimension mismatch: expected {len(probs)}, got {len(memory_bias)}")
+            return probs
+        
         # Ensure valid probability distribution
         if not np.isclose(np.sum(probs), 1.0) or np.any(probs < 0):
             logger.warning("Invalid probability distribution in bias adjustment")
             return probs
         
-        # Apply exponential scaling to create multiplicative factor
+        # Apply exponential scaling
         adjustment_factor = np.exp(memory_bias)
-        
-        # Apply adjustment
         adjusted_probs = probs * adjustment_factor
         
-        # Normalize to valid probability distribution
+        # Normalize
         total = np.sum(adjusted_probs)
-        if total < 1e-8:  # Avoid division by zero
+        if total < 1e-8:
             logger.warning("Adjusted probabilities sum to zero, using uniform distribution")
             return np.ones_like(probs) / len(probs)
         
-        adjusted_probs /= total
-        return adjusted_probs
+        return adjusted_probs / total
 
-    def save_weights(self, path: str) -> None:
-        """Save policy weights to file"""
-        torch.save({
-            'network_state': self.network.state_dict(),
-            'weights': self.weights
-        }, path)
-
-    def load_weights(self, path: str) -> None:
-        """Load policy weights from file"""
-        checkpoint = torch.load(path)
-        self.network.load_state_dict(checkpoint['network_state'])
-        self.weights = checkpoint['weights']
-
-    def store_experience(self, state, action, reward, 
-        next_state=None, done=False, context=None, params=None):
+    def store_experience(self, state, action, reward, next_state=None, done=True, context=None, params=None):
+        """
+        Store manager-level experience in memory.
+        """
+        experience = {
+            'state': state,
+            'action': action,  # skill_id
+            'reward': reward,
+            'timestamp': datetime.now(),
+            'type': 'manager_decision'
+        }
         
-        experience = self.memory.store_experience(
+        # Store in memory
+        self.memory.store_experience(
             state=state,
             action=action,
             reward=reward,
-            next_state=next_state,
-            done=done,
             context=context,
             params=params
         )
         
+        # Log parameters if provided
         if params:
-            # Create properly formatted parameters for logging
             log_params = {
-                'learning_rate': params.get('learning_rate', np.nan),  # Fixed key
-                'exploration_rate': params.get('exploration_rate', np.nan),
-                'discount_factor': params.get('discount_factor', np.nan),
+                'learning_rate': params.get('learning_rate', np.nan),
                 'temperature': params.get('temperature', np.nan)
             }
             self.memory.log_parameters(reward, log_params)
 
+    def get_action(self, state, context: Dict) -> dict:
+        """
+        Select a high-level skill (action) based on the current state and optional task context.
+    
+        Args:
+            state (np.ndarray): Current environment state vector
+            context (Dict): Optional metadata (e.g., task goal, type, position info)
+    
+        Returns:
+            dict: {
+                'skill_id': int,
+                'skill_name': str,
+                'probabilities': List[float],
+                'context_hash': str,
+                'raw_state': np.ndarray
+            }
+        """
+        if self.policy_network is None:
+            raise RuntimeError("Policy network not initialized. Call `initialize_skills()`.")
+    
+        # Ensure correct shape
+        if len(state) != self.state_dim:
+            logger.warning(f"State dimension mismatch: expected {self.state_dim}, got {len(state)}")
+            state = state[:self.state_dim]
+    
+        # Convert to tensor
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+    
+        # Memory context
+        memory_context = {
+            "state": state.tolist(),  # for hashable memory indexing
+            "goal": context.get("goal", None),
+            "type": context.get("type", None),
+            "episode": context.get("episode", -1)
+        }
+        def _sanitize_context(obj):
+            if isinstance(obj, dict):
+                return {k: _sanitize_context(v) for k, v in obj.items()}
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+        
+        clean_context = _sanitize_context(context)
+        context_hash = self.memory._generate_context_hash(clean_context)
+    
+        # Skill probabilities
+        with torch.no_grad():
+            raw_probs = self.policy_network(state_tensor).numpy()[0]
+    
+        # Memory-based bias adjustment
+        memory_bias = None
+        retrieved = self.memory.retrieve(query="skill", context=memory_context)
+        if retrieved:
+            memory_bias = self.memory._generate_memory_bias(memories=retrieved)
+            if memory_bias.size == raw_probs.size:
+                memory_bias = memory_bias.flatten()
+                probs = self._adjust_probs(raw_probs.flatten(), memory_bias)
+            else:
+                logger.warning(f"Memory bias shape mismatch: {memory_bias.shape} != {raw_probs.shape}")
+                probs = raw_probs
+        else:
+            probs = raw_probs
+    
+        # Skill selection
+        if self.explore:
+            skill_id = np.random.choice(self.num_skills, p=probs)
+        else:
+            skill_id = np.argmax(probs)
+    
+        # Now skill_id is defined, so we can use it
+        skill_worker = self.skills.get(skill_id)
+        if skill_worker is not None:
+            skill_name = skill_worker.name
+        else:
+            skill_name = f"skill_{skill_id}"
+    
+        self.active_skill = skill_id
+        self.skill_start_state = state
+
+        logger.debug(f"Selected skill {skill_id} ({skill_name}) with probs: {np.round(probs, 3).tolist()}")
+    
+        return {
+            "skill_id": skill_id,
+            "skill_name": skill_name,
+            "probabilities": probs.tolist(),
+            "context_hash": context_hash,
+            "raw_state": state
+        }
+
+    def get_skill_report(self) -> dict:
+        """Generate performance report for skills"""
+        if not self.skill_history:
+            return {}
+            
+        skill_stats = {}
+        for skill_id in range(self.num_skills):
+            skill_data = [s for s in self.skill_history if s['skill'] == skill_id]
+            if not skill_data:
+                continue
+                
+            skill_stats[skill_id] = {
+                'usage_count': len(skill_data),
+                'success_rate': sum(s['success'] for s in skill_data) / len(skill_data),
+                'avg_reward': sum(s['reward'] for s in skill_data) / len(skill_data),
+                'last_used': max(s['steps'] for s in skill_data)
+            }
+        
+        return {
+            'total_skill_invocations': len(self.skill_history),
+            'skill_stats': skill_stats,
+            'recent_success_rate': sum(s['success'] for s in self.skill_history[-10:]) / min(10, len(self.skill_history))
+        }
+
     def consolidate_memory(self):
-        """Apply memory forgetting mechanisms"""
+        """Apply memory consolidation and forgetting mechanisms"""
         self.memory.consolidate()
 
     def save_checkpoint(self, path):
-        """Save policy and memory state"""
+        """Save manager state"""
         torch.save({
             'policy_state': self.policy_network.get_weights(),
-            'memory_state': self.memory.state_dict()
+            'memory_state': self.memory.state_dict(),
+            'skill_history': self.skill_history,
+            'steps': self._steps
         }, path)
 
     def load_checkpoint(self, path):
-        """Load full agent state"""
+        """Load manager state"""
         checkpoint = torch.load(path)
         self.policy_network.set_weights(checkpoint['policy_state'])
         self.memory.load_state_dict(checkpoint['memory_state'])
+        self.skill_history = checkpoint.get('skill_history', [])
+        self._steps = checkpoint.get('steps', 0)
 
 if __name__ == "__main__":
-    print("\n=== Running Policy Manager ===\n")
+    # Example skills (in real system these would be RL workers)
+    skills = {
+        0: {"name": "navigate_to_A", "state_dim": 8},
+        1: {"name": "collect_item_B", "state_dim": 6},
+        2: {"name": "avoid_obstacles", "state_dim": 10}
+    }
+    
+    print("\n=== Testing Policy Manager ===\n")
     printer.status("TEST", "Starting Policy Manager tests", "info")
 
     manager = PolicyManager()
+    manager.initialize_skills(skills)
     print(manager)
 
-    print("\n* * * * * Phase 2 * * * * *\n")
+    # Test skill selection
+    state = np.random.randn(manager.state_dim)
+    skill_id = manager.select_skill(state, explore=True)
+    printer.pretty("Selected skill", skill_id, "success")
+
+    # Simulate skill completion
+    manager.finalize_skill(final_reward=2.5, success=True)
+    printer.pretty("Skill finalized", manager.skill_history[-1], "success")
+
+    # Test reporting
+    report = manager.get_skill_report()
+    printer.pretty("Skill report", report, "success")
+
     print("\nAll tests completed successfully!\n")
