@@ -30,6 +30,7 @@ class RuleEngine:
             self.rule_config['slow_rule_threshold'] = 0.5  # Default 500ms
         self.sector_rules = defaultdict(list)
         self.rules = []
+        self.category_rules = defaultdict(list)
         self.sector_rules = {
             "civic": [],
             "medical": [],
@@ -126,6 +127,11 @@ class RuleEngine:
         for tag in rule["tags"]:
             if (sector := tag.lower()) in self.SECTORS:
                 self.sector_rules[sector].append(rule)
+            self.category_rules[tag].append(rule)
+
+    def get_rules_by_category(self, category: str) -> list:
+        """Return rules matching a specific category/tag"""
+        return self.category_rules.get(category, [])
 
     def smart_apply(self, knowledge_base: dict, verbose=False) -> dict:
         """Applies rules from the most relevant sector or all if no specific match."""
