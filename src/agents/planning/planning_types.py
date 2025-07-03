@@ -247,6 +247,7 @@ class SafetyMargins:
 class Task:
     id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
     name: str = "Planning Typers"
+    task_description: str = ""
     task_type: TaskType = TaskType.ABSTRACT
     type: TaskType = field(init=False)  # Alias for task_type
     status: TaskStatus = TaskStatus.PENDING
