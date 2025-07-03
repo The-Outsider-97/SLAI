@@ -81,24 +81,24 @@ issue_database:
     password: ''
 
 operations_notification:
-  email:
-    enabled: true
-    from: "ai-agent@yourdomain.com"
-    to: "ops@yourdomain.com"
-    subject: "URGENT: AI System Hazard"
-    smtp_host: "smtp.yourdomain.com"
-    smtp_port: 587
-    username: "ai-agent"
-    password: "secure-password"
-    use_tls: true
+    email:
+        enabled: true
+        from: "ai-agent@yourdomain.com"
+        to: "ops@yourdomain.com"
+        subject: "URGENT: AI System Hazard"
+        smtp_host: "smtp.yourdomain.com"
+        smtp_port: 587
+        username: "ai-agent"
+        password: "secure-password"
+        use_tls: true
 
-  webhook:
-    enabled: true
-    url: "https://hooks.slack.com/services/..."
+    webhook:
+        enabled: true
+        url: "https://hooks.slack.com/services/..."
 
-  external_logging:
-    enabled: true
-    url: "https://logging-service.yourdomain.com/ingest"
+    external_logging:
+        enabled: true
+        url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
 
@@ -119,8 +119,8 @@ knowledge_agent:
     similarity_threshold: 0.35
     use_ontology_expansion: True
     first_pass: True
-    decay_factor: 0.8
-    context_window: 3
+    decay_factor: 0.95
+    context_window: 10
     knowledge_tag: "knowledge_snippet"
     ttl: 600
     retrieval_mode: "hybrid"
