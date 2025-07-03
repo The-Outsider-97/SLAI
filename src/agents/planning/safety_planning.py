@@ -1309,10 +1309,14 @@ class SafetyPlanning:
         gpu_efficiency = total_gpu / max_gpu
         ram_efficiency = total_ram / max_ram
         
+        # Handle division by zero cases
+        if gpu_efficiency == 0 and ram_efficiency == 0:
+            return 0.0
+        if gpu_efficiency == 0 or ram_efficiency == 0:
+            return max(gpu_efficiency, ram_efficiency)
+        
         # Use harmonic mean for balanced efficiency
-        if gpu_efficiency + ram_efficiency == 0:
-            return 0
-        return 2 / (1/gpu_efficiency + 1/ram_efficiency)    
+        return 2 * (gpu_efficiency * ram_efficiency) / (gpu_efficiency + ram_efficiency) 
 
     def _emergency_shutdown_procedure(self):
         """Internal emergency handling"""
