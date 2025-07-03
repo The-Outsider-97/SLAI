@@ -43,7 +43,7 @@ from typing import Dict, Union, Tuple, Optional, Any, Type
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.execution.utils.execution_error import (TimeoutError, InvalidContextError, ExecutionError,
-                StaleCheckpointError, DeadlockError, ActionFailureError, CookieMismatchError)
+    StaleCheckpointError, DeadlockError, ActionFailureError, CookieMismatchError, ActionInterruptionError)
 from src.agents.execution.task_coordinator import TaskCoordinator, TaskState
 from src.agents.execution.action_selector import ActionSelector
 from src.agents.execution.actions.base_action import BaseAction
@@ -72,6 +72,7 @@ class ExecutionAgent(BaseAgent):
             agent_factory=agent_factory,
             config=config, 
         )
+        self.adaptive_agent = None
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
@@ -205,6 +206,9 @@ class ExecutionAgent(BaseAgent):
 
                 try:
                     self._execution_step()
+                except ActionInterruptionError as e:
+                    logger.warning(f"Action interrupted: {e}")
+                    self.task_coordinator.pause_task(self.current_task['name'])
                 except ActionFailureError as e:
                     # SPECIAL HANDLING FOR MOVEMENT FAILURES
                     if "move_to" in str(e):
@@ -247,7 +251,6 @@ class ExecutionAgent(BaseAgent):
         printer.status("EXECUTION", "Execution loop", "info")
 
         context = self._gather_context()
-
         if self._is_task_complete(context):
             self.task_coordinator.complete_task(self.current_task['name'])
             return
@@ -385,6 +388,11 @@ class ExecutionAgent(BaseAgent):
             "current_load": len(self.task_coordinator.tasks),
             "efficiency": self.config.get("efficiency", 1.0)
         }
+    
+    def attach_adaptive(self, adaptive_agent):
+        """Connect AdaptiveAgent to ExecutionAgent"""
+        self.adaptive_agent = adaptive_agent
+        logger.info("Adaptive agent attached to Execution agent")
 
 if __name__ == "__main__":
     print("\n=== Running Execution Task Coordinator ===\n")
