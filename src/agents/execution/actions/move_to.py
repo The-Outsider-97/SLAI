@@ -6,6 +6,7 @@ import heapq
 from typing import Dict, Any, Tuple, List, Optional
 
 from src.agents.execution.utils.config_loader import load_global_config, get_config_section
+from src.agents.execution.utils.execution_error import ActionInterruptionError
 from src.agents.execution.actions.base_action import BaseAction, ActionStatus
 from logs.logger import get_logger, PrettyPrinter
 
@@ -543,6 +544,9 @@ if __name__ == "__main__":
 
     print("\n* * * * * Phase 4 - Execute * * * * *\n")
 
-    printer.pretty("EXECUTION", move_action._execute(), "success")
+    try:
+        printer.pretty("EXECUTION", move_action._execute(), "success")
+    except ActionInterruptionError:
+        printer.pretty("INTERRUPT", "Action safely interrupted", "warning")
 
     print("\n=== All tests completed successfully! ===\n")
