@@ -255,33 +255,38 @@ class ExecutionAgent(BaseAgent):
             self.task_coordinator.complete_task(self.current_task['name'])
             return
 
-        # Generate potential actions for the selector
-        potential_actions = [
-            {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
-            for name, cls in self.action_class_registry.items()
-        ]
+        try:
+            # Generate potential actions for the selector
+            potential_actions = [
+                {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
+                for name, cls in self.action_class_registry.items()
+            ]
 
-        selected_action_dict = self.action_selector.select(potential_actions, context)
-        action_name = selected_action_dict.get("name")
-        action_class = self.action_class_registry.get(action_name)
+            selected_action_dict = self.action_selector.select(potential_actions, context)
+            action_name = selected_action_dict.get("name")
+            action_class = self.action_class_registry.get(action_name)
 
-        if not action_class:
-            raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
+            if not action_class:
+                raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
 
-        # Instantiate and execute the chosen action
-        action_instance = action_class(context=context)
-        success = action_instance.execute()
+            # Instantiate and execute the chosen action
+            action_instance = action_class(context=context)
+            success = action_instance.execute()
 
-        if not success:
-            reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
-            raise ActionFailureError(action_name, reason)
+            if not success:
+                reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
+                raise ActionFailureError(action_name, reason)
 
-        # Update agent's master state from the action's resulting context
-        self._update_state_from_action(action_instance)
-        
-        # Update task progress (example: based on distance or sub-goals)
-        progress = self._calculate_task_progress(context)
-        self.task_coordinator.update_task_progress(self.current_task['name'], progress)
+            # Update agent's master state from the action's resulting context
+            self._update_state_from_action(action_instance)
+            
+            # Update task progress (example: based on distance or sub-goals)
+            progress = self._calculate_task_progress(context)
+            self.task_coordinator.update_task_progress(self.current_task['name'], progress)
+        except ActionInterruptionError as e:
+            logger.warning(f"Action interrupted: {e}")
+            # Add pause task functionality to TaskCoordinator
+            self.task_coordinator.pause_task(self.current_task['name'])
 
     def _gather_context(self) -> Dict[str, Any]:
         """Merges agent state and task details into a comprehensive context object."""
