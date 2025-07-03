@@ -113,8 +113,8 @@ knowledge_agent:
     cache_size: 1000
     bias_threshold: 0.75
     bias_detection_enabled: True
-    # embedding_model: "all-MiniLM-L6-v2"
     embedding_model: "src/agents/knowledge/models/all-MiniLM-L6-v2"
+    embedding_model_path: "src/agents/knowledge/models/all-MiniLM-L6-v2"
     directory_path: "src/agents/knowledge/templates/"
     similarity_threshold: 0.35
     use_ontology_expansion: True
