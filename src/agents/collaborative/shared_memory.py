@@ -101,6 +101,7 @@ class SharedMemory:
         self._priority_queue = []
         self._last_cleanup_time = None
         self._last_cleanup_count = 0
+        self.base_state = {}
 
         # Start background cleanup thread
         self._start_expiration_cleaner()
