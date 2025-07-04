@@ -1177,6 +1177,80 @@ class ReasoningAgent(BaseAgent, nn.Module):
         except Exception as e:
             logger.error(f"[ReasoningAgent] Failed to parse goal '{goal_description}': {e}")
             raise
+    
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts the confidence level for a given fact or query.
+        
+        Args:
+            state (Any, optional): Can be:
+                - A fact tuple (subject, predicate, object)
+                - A natural language query string
+                - None (returns random fact)
+                
+        Returns:
+            Dict[str, Any]: Structured prediction containing:
+                - fact: The fact being evaluated
+                - confidence: Confidence score (0.0-1.0)
+                - type: Prediction type (random_fact, direct_query, parsed_query)
+        """
+        # Handle None state - return random fact
+        if state is None:
+            if not self.knowledge_base:
+                return {"fact": None, "confidence": 0.0, "type": "empty_knowledge_base"}
+            
+            fact = random.choice(list(self.knowledge_base.keys()))
+            return {
+                "fact": fact,
+                "confidence": self.knowledge_base[fact],
+                "type": "random_fact"
+            }
+        
+        # Handle tuple input - direct fact lookup
+        if isinstance(state, tuple) and len(state) == 3:
+            confidence = self.knowledge_base.get(state, 0.0)
+            return {
+                "fact": state,
+                "confidence": confidence,
+                "type": "direct_query"
+            }
+        
+        # Handle string input - parse and evaluate
+        if isinstance(state, str):
+            try:
+                # Try to parse the string into a fact
+                parsed_fact = self._parse_statement(state)
+                confidence = self.knowledge_base.get(parsed_fact, 0.0)
+                return {
+                    "fact": parsed_fact,
+                    "confidence": confidence,
+                    "type": "parsed_query"
+                }
+            except ValueError:
+                # Fallback to keyword-based confidence
+                matching_facts = [
+                    (fact, conf) 
+                    for fact, conf in self.knowledge_base.items()
+                    if any(term in str(fact) for term in state.split())
+                ]
+                if matching_facts:
+                    best_fact, confidence = max(matching_facts, key=lambda x: x[1])
+                    return {
+                        "fact": best_fact,
+                        "confidence": confidence,
+                        "type": "keyword_match"
+                    }
+                return {
+                    "fact": None,
+                    "confidence": 0.0,
+                    "type": "no_matches"
+                }
+        
+        # Unsupported input type
+        return {
+            "error": "Unsupported input type",
+            "type": "input_error"
+        }
 
 if __name__ == "__main__":
     print("\n=== Running Reasoning Agent ===\n")
