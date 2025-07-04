@@ -95,6 +95,7 @@ class PlanningAgent(BaseAgent):
         self.expected_state_projections = {}
         self.execution_interrupted = False
         self._node_cache = {}
+        self.adaptive_context = {}
 
         logger.info(f"PlanningAgent succesfully initialized")
 
@@ -261,17 +262,17 @@ class PlanningAgent(BaseAgent):
             return self.memo_table[memo_key]
 
         if not (0 <= method_index_to_try < len(library_task.methods)):
-             logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
-             task_to_decompose.status = TaskStatus.FAILED
-             return None
+            logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
+            task_to_decompose.status = TaskStatus.FAILED
+            return None
 
         # Get the list of subtasks for the selected method
         subtasks_template = library_task.get_subtasks(method_index_to_try)
         if not subtasks_template:
-             logger.warning(f"Method {method_index_to_try} for task '{task_to_decompose.name}' has no subtasks or is invalid.")
-             # Optionally, try another method here if implementing replanning/backtracking within decompose
-             task_to_decompose.status = TaskStatus.FAILED
-             return None
+            logger.warning(f"Method {method_index_to_try} for task '{task_to_decompose.name}' has no subtasks or is invalid.")
+            # Optionally, try another method here if implementing replanning/backtracking within decompose
+            task_to_decompose.status = TaskStatus.FAILED
+            return None
 
         logger.debug(f"Trying method {method_index_to_try} for task '{task_to_decompose.name}' with subtasks: {[st.name for st in subtasks_template]}")
 
@@ -279,30 +280,33 @@ class PlanningAgent(BaseAgent):
         simulated_world_state = current_state.copy()
 
         for subtask_template in subtasks_template:
-             # Create a runtime instance of the subtask
-             subtask_instance = subtask_template.copy()
-             subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
+            # Create a runtime instance of the subtask
+            subtask_instance = subtask_template.copy()
+            subtask_instance.start_time = getattr(subtask_template, 'start_time', time.time() + 60)
+            subtask_instance.deadline = getattr(subtask_template, 'deadline', time.time() + 3600)
+            subtask_instance.duration = getattr(subtask_template, 'duration', 300)
+            subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
 
-             # Check subtask preconditions in the *current* (simulated) world state
-             if not subtask_instance.check_preconditions(simulated_world_state):
-                 logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
-                 # Backtracking would happen here: try another method for task_to_decompose
-                 return None # Abort this decomposition path
+            # Check subtask preconditions in the *current* (simulated) world state
+            if not subtask_instance.check_preconditions(simulated_world_state):
+                logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
+                # Backtracking would happen here: try another method for task_to_decompose
+                return None # Abort this decomposition path
 
-             decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
+            decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
 
-             if decomposed_subplan is None:
-                 logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
-                 # Backtracking point: Try a different method for task_to_decompose if possible
-                 return None # Indicate failure for this decomposition path
+            if decomposed_subplan is None:
+                logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
+                # Backtracking point: Try a different method for task_to_decompose if possible
+                return None # Indicate failure for this decomposition path
 
-             fully_decomposed_plan.extend(decomposed_subplan)
+            fully_decomposed_plan.extend(decomposed_subplan)
 
-             # Update the simulated world state by applying effects of the *primitive* tasks just added
-             # This is crucial for the preconditions of subsequent subtasks in the *same* method.
-             for primitive_task in decomposed_subplan:
-                  if primitive_task.task_type == TaskType.PRIMITIVE:
-                      primitive_task.apply_effects(simulated_world_state)
+            # Update the simulated world state by applying effects of the *primitive* tasks just added
+            # This is crucial for the preconditions of subsequent subtasks in the *same* method.
+            for primitive_task in decomposed_subplan:
+                if primitive_task.task_type == TaskType.PRIMITIVE:
+                    primitive_task.apply_effects(simulated_world_state)
 
         # If loop completes, the decomposition for this method was successful
         logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}. Current state: {current_state}")
@@ -481,9 +485,9 @@ class PlanningAgent(BaseAgent):
             return None
         plan = self.decompose_task(goal_task, self.world_state)
 
-        if plan is None:
-            logger.error("Plan decomposition failed - returning None")
-            return None  # Prevent safety check on None
+        # Wrap single task in a list if needed
+        if isinstance(plan, Task):
+            plan = [plan]
         
         # Integrated safety check
         try:
@@ -946,9 +950,65 @@ class PlanningAgent(BaseAgent):
         self.shared_memory.set(log_key, performance_logs)
         logger.debug(f"Logged performance data to '{log_key}'.")
 
-    def needs_new_plan(self) -> bool:
-        # Simple stub logic: always return True for now
-        return not self.current_plan  # or any other condition you want
+    def needs_new_plan(self, synapse: Task) -> bool:
+        """
+        Determine whether a new plan is required for the incoming synapse.
+    
+        Factors to consider:
+            - If the task has been seen before (cache/memory check)
+            - If system load is high, and a simpler plan is needed
+            - If previous plan failed or degraded in performance
+            - If adaptive signals indicate poor response quality
+        
+        Returns:
+            bool: True if a new plan should be generated, False otherwise
+        """
+        # Example: Look at system load and performance feedback
+        load = self.adaptive_context.get("system_load", 0)
+        feedback = self.adaptive_context.get("performance_feedback", {})
+        score = feedback.get("score", 1.0) if isinstance(feedback, dict) else feedback
+    
+        # High load or low score? Trigger replanning
+        if load > 85:
+            return True
+        if score < 0.6:
+            return True
+    
+        # If this is a completely new task
+        if not hasattr(synapse, 'history') or not synapse.history:
+            return True
+    
+        # Otherwise, stick to previous plan
+        return False
+    
+    def set_adaptive_context(self, context: dict):
+        self.adaptive_context = context or {}
+
+    def sync_with_shared_memory(self, shared_memory):
+        """Synchronize planning agent with shared memory state"""
+        self.shared_memory = shared_memory
+        # Update resource monitor with current resource usage
+        resource_usage = shared_memory.get('resource_usage') or {}
+        self.resource_monitor.gpu_usage = resource_usage.get('gpu', 0)
+        self.resource_monitor.ram_usage = resource_usage.get('ram', 0)
+        logger.info("PlanningAgent synchronized with shared memory")
+
+    def update_shared_memory(self, shared_memory):
+        """Update shared memory with current state"""
+        shared_memory.base_state.update(self.world_state)
+        shared_memory.set('resource_usage', {
+            'gpu': self.resource_monitor.gpu_usage,
+            'ram': self.resource_monitor.ram_usage
+        })
+
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """Minimal implementation to satisfy factory requirements"""
+        return {
+            "agent": "PlanningAgent",
+            "status": "active",
+            "current_goal": self.current_goal.name if self.current_goal else None,
+            "plan_length": len(self.current_plan)
+        }
 
 def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
     """Full planning-execution cycle with safety and metrics"""
