@@ -51,15 +51,6 @@ from logs.logger import get_logger, PrettyPrinter
 logger = get_logger("Evaluation Agent")
 printer = PrettyPrinter
 
-# ------------------------ Operational Infrastructure ------------------------ #
-@dataclass
-class EvaluationProtocol:
-    """Unified configuration for evaluation pipelines"""
-    static_analysis: bool = True
-    behavioral_tests: int = 100
-    reward_constraints: Dict = None
-    optimization_targets: List[str] = None
-
 class FallbackEvaluatorAgent(BaseAgent):
     def __init__(self,
                  shared_memory, 
@@ -569,10 +560,17 @@ class EvaluationAgent(BaseAgent):
                     'static_analysis_explanation': self._explain_static_results(static_results)
                 })
         
+            # Create agent properly
+            agent = self.create_agent()
+            
             # Behavioral Testing
             if self.protocol.behavioral_testing['test_types']:
-                test_suite = self.evaluators['behavioral'].execute_test_suite(
-                    sut=self.create_agent()
+                test_suite = self.evaluators['behavioral'].execute_test_suite(agent)
+                
+            # Autonomous Task Evaluation - use validated tasks
+            if self.autonomous_tasks:
+                results['autonomous'] = self.evaluators['autonomous'].evaluate_task_set(
+                    self._get_validated_tasks()
                 )
                 results['behavioral'] = test_suite
                 results['test_explanation'] = self._explain_test_results(test_suite)
@@ -598,14 +596,13 @@ class EvaluationAgent(BaseAgent):
         
         
             statistical_data = self._prepare_statistical_dataset()
-            if len(statistical_data['current_run']) >= self.evaluators['statistical'].min_sample_size:
-                # Statistical Evaluation (requires historical context)
+            if len(statistical_data['current_run']) > 0 and len(statistical_data['current_run']) >= self.evaluators['statistical'].min_sample_size:
                 results['statistical'] = self.evaluators['statistical'].evaluate(
                     datasets=statistical_data
                 )
             else:
-                logger.warning("Skipping statistical evaluation - insufficient data")
-                results['statistical'] = {'error': 'Insufficient data samples'}
+                logger.info("Skipping statistical evaluation - insufficient data")
+                results['statistical'] = {'status': 'skipped', 'reason': 'Insufficient data'}
 
             # Autonomous Task Evaluation
             if self.autonomous_tasks:
@@ -692,7 +689,9 @@ class EvaluationAgent(BaseAgent):
     
     def _determine_system_status(self, results: Dict) -> str:
         """Determine overall system health status"""
-        if results.get('safety', {}).get('compliance_rate', 0) < 0.8:
+        min_success = self.risk_thresholds.get('min_success_rate', 0.8)  # Default value
+        
+        if results.get('safety', {}).get('compliance_rate', 0) < min_success:
             return 'critical'
         if results.get('financial_metrics', {}).get('critical_issues'):
             return 'critical'
@@ -799,6 +798,21 @@ class EvaluationAgent(BaseAgent):
             "safety_compliance": raw_results.get('safety', {}).get('compliance_rate', 0.0)
         }
         return metrics
+    
+    def _get_validated_tasks(self) -> List[Dict]:
+        """Ensure tasks have required structure"""
+        return [
+            {
+                'id': f"task_{i}",
+                'path': task.get('path', []),
+                'optimal_path': task.get('optimal_path', []),
+                'completion_time': task.get('completion_time', 0.0),
+                'energy_consumed': task.get('energy_consumed', 0.0),
+                'collisions': task.get('collisions', 0),
+                'success': task.get('success', False)
+            }
+            for i, task in enumerate(self.autonomous_tasks)
+        ]
 
     def create_agent(self) -> BaseAgent:  
         """Factory method with fault tolerance"""
@@ -837,6 +851,40 @@ class EvaluationAgent(BaseAgent):
                 agent_factory=self.agent_factory,
                 config=self.config
             )
+        
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts evaluation metrics based on current system state.
+        
+        Args:
+            state (Any, optional): Input state for prediction. Uses system health if None.
+        
+        Returns:
+            Dict[str, Any]: Predicted metrics including safety, performance, and resource usage
+        """
+        try:
+            # Get current health status as base prediction
+            health = self.get_overall_system_health()
+            
+            # If state is provided, run a lightweight evaluation cycle
+            if state is not None:
+                light_results = self.execute_validation_cycle(
+                    {"lightweight": True, "input_state": state}
+                )
+                health["predicted_metrics"] = light_results.get('metrics', {})
+            
+            return {
+                "status": "success",
+                "prediction": health,
+                "confidence": 0.85  # Base confidence score
+            }
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "confidence": 0.0
+            }
 
     def _get_safety_compliance(self) -> str:
         """Check against protocol safety requirements"""
@@ -1014,73 +1062,6 @@ class EvaluationAgent(BaseAgent):
         if response.status_code != 200:
             logger.warning(f"External log failed: {response.status_code} {response.text}")
 
-    def get_overall_system_health(self) -> Dict[str, Any]:
-        """
-        Returns a high-level system health snapshot, useful for diagnostics API.
-        Combines safety, performance, efficiency, and statistical confidence.
-        """
-        try:
-            latest_metrics = self.shared_memory.get("latest_metrics") or {}
-            
-            # Provide default values for missing metrics
-            safety_score = latest_metrics.get("safety_score", 0.0)
-            accuracy = latest_metrics.get("accuracy", 0.0)
-            efficiency = latest_metrics.get("efficiency", 0.0)
-            resource_usage = latest_metrics.get("resource_usage", 1.0)
-            stat_sig = latest_metrics.get("statistical_significance", 1.0)
-    
-            # Composite status categories
-            def score_status(score, thresholds):
-                if score >= thresholds["good"]:
-                    return "Good"
-                elif score >= thresholds["warning"]:
-                    return "Warning"
-                else:
-                    return "Critical"
-    
-            thresholds = {
-                "accuracy": {"good": 0.85, "warning": 0.65},
-                "safety": {"good": 0.80, "warning": 0.60},
-                "efficiency": {"good": 0.70, "warning": 0.50},
-                "stat_sig": {"good": 0.01, "warning": 0.05}  # lower is better here
-            }
-    
-            health_summary = {
-                "status": "OK" if safety_score >= 0.8 and accuracy >= 0.85 else "Degraded",
-                "metrics": {
-                    "accuracy": {
-                        "value": round(accuracy, 4),
-                        "status": score_status(accuracy, thresholds["accuracy"])
-                    },
-                    "safety_score": {
-                        "value": round(safety_score, 4),
-                        "status": score_status(safety_score, thresholds["safety"])
-                    },
-                    "efficiency": {
-                        "value": round(efficiency, 4),
-                        "status": score_status(efficiency, thresholds["efficiency"])
-                    },
-                    "resource_usage": {
-                        "value": round(resource_usage, 4),
-                        "status": "Normal" if resource_usage <= 0.8 else "High"
-                    },
-                    "statistical_significance": {
-                        "value": round(stat_sig, 4),
-                        "status": "Significant" if stat_sig < 0.05 else "Not Significant"
-                    }
-                },
-                "timestamp": time.time()
-            }
-    
-            return health_summary
-        except Exception as e:
-            logger.error(f"Failed to compute system health: {e}", exc_info=True)
-            return {
-                "status": "Unknown",
-                "error": str(e),
-                "timestamp": time.time()
-            }
-
     def supports_fail_operational(self) -> bool:
         """
         Determines if the agent is capable of fail-operational behavior:
@@ -1182,7 +1163,7 @@ class EvaluationAgent(BaseAgent):
 class AIValidationSuite:
     """Certification-grade validation for regulatory compliance"""
     
-    def __init__(self, protocol: EvaluationProtocol):
+    def __init__(self, protocol: ValidationProtocol):
         self.protocol = protocol
         self.artifacts = {
             'static_report': None,
@@ -1367,7 +1348,7 @@ if __name__ == "__main__":
     #printer.pretty("MODEL1", model1, "success" if model1 else "error")
     #printer.pretty("DEEP", detector, "success" if detector else "error")
     print(f"\n* * * * * Phase 6 - Validation Suit * * * * *\n")
-    protocol = EvaluationProtocol()
+    protocol = ValidationProtocol()
     suite = AIValidationSuite(protocol=protocol)
     codebase_path = os.getcwd()
 
