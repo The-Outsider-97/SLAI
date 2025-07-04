@@ -52,7 +52,7 @@ class SharedMemoryProxy(NamespaceProxy):
 
 class SharedMemory:
     """
-    A thread-safe shared memory implementation for single-process use.
+    A thread-safe shared memory implementation for multy- and single-process use.
 
     Provides versioned storage, expiration, access tracking, priority queuing,
     and basic locking for conflict resolution.
