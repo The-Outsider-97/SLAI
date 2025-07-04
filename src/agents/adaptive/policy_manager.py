@@ -90,6 +90,19 @@ class PolicyManager:
         if self.policy_network is None:
             raise RuntimeError("Policy network is not initialized. Call `initialize_skills()` first.")
     
+        # Convert string states to zero arrays with warning
+        if isinstance(state, str):
+            logger.error(f"Invalid string state received: '{state}'. Using zero state.")
+            state = np.zeros(self.state_dim, dtype=np.float32)
+        
+        # Ensure state is numeric array
+        if not isinstance(state, (np.ndarray, list)):
+            try:
+                state = np.array(state, dtype=np.float32)
+            except:
+                logger.error("Failed to convert state to array. Using zeros.")
+                state = np.zeros(self.state_dim, dtype=np.float32)
+    
         # Validate state dimensions
         if len(state) != self.state_dim:
             logger.warning(f"State dimension mismatch: expected {self.state_dim}, got {len(state)}")
