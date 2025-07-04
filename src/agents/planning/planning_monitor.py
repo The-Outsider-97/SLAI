@@ -1,48 +1,36 @@
 
-import yaml
 import psutil
 import time
 
 from collections import deque, defaultdict
-from typing import Dict, Union, List
-from types import SimpleNamespace
+from typing import Dict, List
 
+from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus
 from src.agents.planning.planning_metrics import PlanningMetrics
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Monitor")
-
-CONFIG_PATH = "src/agents/planning/configs/planning_config.yaml"
-
-def dict_to_namespace(d):
-    """Recursively convert dicts to SimpleNamespace for dot-access."""
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(i) for i in d]
-    return d
-
-def get_config_section(section: Union[str, Dict], config_file_path: str):
-    if isinstance(section, dict):
-        return dict_to_namespace(section)
-    
-    with open(config_file_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    if section not in config:
-        raise KeyError(f"Section '{section}' not found in config file: {config_file_path}")
-    return dict_to_namespace(config[section])
+printer = PrettyPrinter
 
 class PlanningMonitor:
     """Monitors planning system health and operational metrics"""
-    def __init__(self, agent=None,
-                 config_section_name: str = "planning_monitor",
-                 config_file_path: str = CONFIG_PATH):
-        self.config = get_config_section(config_section_name, config_file_path)
-        self.agent = agent
+    def __init__(self):
+        self.config = load_global_config()
+        self.task_config = get_config_section('planning_monitor')
+        self.metrics_window = self.task_config.get('metrics_window')
+        self.method_analysis_depth = self.task_config.get('method_analysis_depth')
+        self.anomaly_thresholds = self.task_config.get('anomaly_thresholds', {
+            'success_rate', 'cpu_peak', 'memory_peak'
+        })
+        self.check_intervals = self.task_config.get('check_intervals', {
+            'plan_execution', 'resource_scan'
+        })
+
+        self.agent = {}
         self._reset_tracking()
 
     def _reset_tracking(self):
@@ -254,15 +242,12 @@ if __name__ == "__main__":
     print("")
     print("\n=== Running Planning Monitor ===")
     print("")
-    from unittest.mock import Mock
-    mock_agent = Mock()
-    mock_agent.shared_memory = {}
-    monitor = PlanningMonitor(agent=mock_agent)
+    monitor = PlanningMonitor()
 
     # Example stubs:
-    dt_heuristic = DecisionTreeHeuristic(agent=mock_agent)
-    gb_heuristic = GradientBoostingHeuristic(agent=mock_agent)
-    scheduler = DeadlineAwareScheduler(agent=mock_agent)
+    dt_heuristic = DecisionTreeHeuristic()
+    gb_heuristic = GradientBoostingHeuristic()
+    scheduler = DeadlineAwareScheduler()
 
     monitor.monitor_decision_tree_heuristic(dt_heuristic)
     monitor.monitor_gradient_boosting_heuristic(gb_heuristic)

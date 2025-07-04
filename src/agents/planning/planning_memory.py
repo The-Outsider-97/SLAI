@@ -4,7 +4,7 @@ import time
 import copy
 import json, yaml
 
-from typing import Union, Dict, Any
+from typing import Optional, Union, Dict, Any
 from collections import deque, defaultdict
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
@@ -17,6 +17,8 @@ class PlanningMemory:
     """Maintains planning state checkpoints and statistical memory"""
     def __init__(self):
         self.config = load_global_config()
+        self.monitor_snapshot = self.config.get('monitor_snapshot')
+
         self.memory_config = get_config_section('planning_memory')
         self.checkpoints_dir = self.memory_config.get('checkpoints_dir')
         self.max_checkpoints = self.memory_config.get('max_checkpoints')
@@ -61,12 +63,37 @@ class PlanningMemory:
         except Exception as e:
             logger.error(f"Checkpoint load failed: {e}")
 
+    def get_task_outcome(self, task_id: str) -> Optional[bool]:
+        """Retrieve actual outcome of a task (True=success, False=failure)"""
+        if task_id in self.base_state['execution_history']:
+            entry = self.base_state['execution_history'][task_id]
+            return entry.get('status') == 'success'
+        return None
+
     def get_method_success_rate(self, method_name: str) -> float:
         """Get historical success rate for a method"""
         stats = self.base_state['method_stats'].get(method_name)
         if stats and stats['total'] > 0:
             return stats['success'] / stats['total']
         return 0.0
+    
+    def get_min_duration(self, task_name: str) -> float:
+        """Retrieve the minimum observed duration for a given task"""
+        durations = []
+    
+        for entry in self.base_state['execution_history']:
+            if entry.get('name') == task_name:
+                start = entry.get('start_time')
+                end = entry.get('end_time')
+    
+                if start is not None and end is not None and end > start:
+                    durations.append(end - start)
+    
+        if durations:
+            return min(durations)
+    
+        logger.warning(f"No valid duration data found for task '{task_name}'. Returning infinity.")
+        return float('inf')
 
     def is_sequential_task(self, task: Dict[str, Any], min_length: int) -> bool:
         """Check task sequence using execution history"""
@@ -189,7 +216,7 @@ class PlanningMemory:
     def to_json(self, file_path: str = None):
         """Serialize checkpoints to JSON format"""
         data = {
-            'config': vars(self.config),
+            'config': self.config,
             'checkpoints': list(self.checkpoints)
         }
         return json.dumps(data, indent=2) if not file_path else json.dump(data, open(file_path, 'w'))

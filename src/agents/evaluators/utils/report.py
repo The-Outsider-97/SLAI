@@ -9,42 +9,29 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QPainter, QPixmap, QColor, QFont, QPen
 from PyQt5.QtCore import Qt, QRect, QPointF, QSize, QBuffer
 
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
 from src.agents.evaluators.utils.certification_framework import CertificationManager
 from src.agents.evaluators.utils.documentation import AuditTrail, DocumentVersioner, AuditBlock
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Performance Visualizer")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 _global_visualizer = None
 
 def get_visualizer(config=None):
     global _global_visualizer
     if not _global_visualizer:
-        config = config or load_config()
-        _global_visualizer = PerformanceVisualizer(config)
+        config = config or load_global_config()
+        _global_visualizer = PerformanceVisualizer()
     return _global_visualizer
 
 class PerformanceVisualizer:
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('performance_visualizer', {})
-        self.max_points = self.config.get('max_points', 100)
-        
-        # Initialize metrics with configurable initial values
-        initial_metrics = self.config.get('initial_metrics', {})
+    def __init__(self):
+        self.config = load_global_config()
+        self.visualizer_config = get_config_section('performance_visualizer')
+        self.max_points = self.visualizer_config.get('max_points')
+        initial_metrics = self.visualizer_config.get('initial_metrics', {})
         self.metrics = {
             'rewards': deque(maxlen=self.max_points),
             'risks': deque(maxlen=self.max_points),
@@ -53,8 +40,7 @@ class PerformanceVisualizer:
             'hazard_rates': deque(initial_metrics.get('hazard_rates', []), maxlen=self.max_points),
             'operational_times': deque(initial_metrics.get('operational_times', []), maxlen=self.max_points)
         }
-    
-        # Load color scheme from config with fallback defaults
+
         default_colors = {
             'background': QColor(30, 30, 30),
             'text': QColor(255, 255, 255),
@@ -63,24 +49,24 @@ class PerformanceVisualizer:
             'success': QColor(0, 191, 99),
             'failure': QColor(231, 76, 60)
         }
-        config_colors = self.config.get('colors', {})
+        config_colors = self.visualizer_config.get('colors', {})
         self.colors = {
             key: QColor(*config_colors.get(key, default_color.getRgb()[:3]))
             for key, default_color in default_colors.items()
         }
     
         # Load visualization parameters
-        line_styles = self.config.get('line_styles', {})
+        line_styles = self.visualizer_config.get('line_styles', {})
         self.line_thickness = line_styles.get('thickness', 2)
         self.grid_style = Qt.DotLine if line_styles.get('grid_style', 'dot') == 'dot' else Qt.SolidLine
     
         # Store chart dimensions from config
-        self.chart_dimensions = self.config.get('chart_dimensions', {})
+        self.chart_dimensions = self.visualizer_config.get('chart_dimensions', {})
 
-        # Add certification and documentation components
-        self.cert_manager = CertificationManager(config)
-        self.audit_trail = AuditTrail(config)
-        self.doc_versioner = DocumentVersioner(config)
+        # Certification and documentation components
+        self.cert_manager = CertificationManager()
+        self.audit_trail = AuditTrail()
+        self.doc_versioner = DocumentVersioner()
 
         logger.info(f"Performance Visualizer succesfully initialized")
 
@@ -116,7 +102,7 @@ class PerformanceVisualizer:
         """Render risk-reward tradeoff as QPixmap"""
         if not size:
             # Get dimensions from config
-            tradeoff_dims = self.config.get('chart_dimensions', {}).get('tradeoff', [800, 600])
+            tradeoff_dims = self.visualizer_config.get('chart_dimensions', {}).get('tradeoff', [800, 600])
             size = QSize(*tradeoff_dims)
         pixmap = QPixmap(size)
         pixmap.fill(self.colors['background'])
@@ -158,39 +144,6 @@ class PerformanceVisualizer:
         except Exception as e:
             logger.error(f"Failed to compute performance metric: {e}")
             return 0.0
-
-    def render_temporal_chart(self, size, metric):
-        """Generic time-series chart renderer"""
-        valid_metrics = ['hazard_rates', 'operational_times']
-        if metric not in valid_metrics:
-            return QPixmap()
-            
-        pixmap = QPixmap(size)
-        pixmap.fill(self.colors['background'])
-        painter = QPainter(pixmap)
-        
-        # Calculate bounds
-        data = list(self.metrics[metric])
-        max_val = max(data) if data else 1
-        x_step = size.width() / self.max_points
-        
-        # Draw line
-        color = self.colors['reward_line'] if metric == 'operational_times' else self.colors['risk_line']
-        pen = QPen(color, 2)
-        painter.setPen(pen)
-        
-        for i in range(1, len(data)):
-            x1 = (i-1) * x_step
-            y1 = size.height() - (data[i-1]/max_val) * size.height()
-            x2 = i * x_step
-            y2 = size.height() - (data[i]/max_val) * size.height()
-            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-        
-        # Add labels
-        label = "Operational Time" if metric == 'operational_times' else "Hazard Rate"
-        self._draw_labels(painter, size, "Time Steps", label)
-        painter.end()
-        return pixmap
 
     def _draw_grid(self, painter, size, x_max=1, y_max=1):
         """Draw chart grid with labels"""
@@ -333,7 +286,6 @@ class PerformanceVisualizer:
         # Create new audit block
         prev_hash = self.audit_trail.chain[-1].hash if self.audit_trail.chain else "0"*64
         new_block = AuditBlock(
-            config=load_config(),
             data=audit_data,
             previous_hash=prev_hash
         )
@@ -348,9 +300,7 @@ if __name__ == "__main__":
     print("\n=== Running Adaptive Risk ===\n")
     import sys
 
-    config = load_config()
-
-    visual = PerformanceVisualizer(config)
+    visual = PerformanceVisualizer()
     logger.info(visual)
     print(f"\n* * * * * Phase 2 * * * * *\n")
     evaluation_data = {
@@ -364,7 +314,7 @@ if __name__ == "__main__":
     print(visual.get_current_metrics())
     print(f"\n* * * * * Phase 3 * * * * *\n")
     app = QApplication(sys.argv)
-    chart_size = QSize(*visual.config['chart_dimensions']['tradeoff'])
+    chart_size = QSize(*visual.chart_dimensions['tradeoff'])
     chart = visual.render_tradeoff_chart(chart_size)
 
     test_pixmap = QPixmap(chart_size)

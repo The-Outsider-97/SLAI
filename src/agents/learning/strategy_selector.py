@@ -5,7 +5,7 @@ import random
 from collections import deque
 from torch import nn
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.learning_calculations import LearningCalculations
 from logs.logger import get_logger, PrettyPrinter
 
@@ -19,7 +19,7 @@ class StrategySelector:
 
         self.strategy_config = get_config_section('strategy_selector')
         self.task_embedding_dim = self.strategy_config.get('task_embedding_dim')
-        self.min_batch = self.strategy_config.get('meta_controller_batch_size')
+        self.min_batch = self.strategy_config.get('min_batch')
 
         self.agent_strategies_map = agent_strategies_map
         self.state_embedder = state_embedder
@@ -28,10 +28,12 @@ class StrategySelector:
         self.loss_fn = loss_fn
         self.device = device
 
-    def generate_task_embedding(self, state):
-        if not torch.is_tensor(state):
-            state = torch.tensor(state, dtype=torch.float32)
-        
+    def generate_task_embedding(self, state: np.ndarray) -> torch.Tensor:
+        """Generate task embedding from state vector"""
+        state_tensor = torch.tensor(state, dtype=torch.float32)
+        if state_tensor.ndim == 1:
+            state_tensor = state_tensor.unsqueeze(0)
+
         # Handle 1D vs 2D tensors
         if state.ndim == 1:
             state = state.unsqueeze(0)

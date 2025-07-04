@@ -224,3 +224,9 @@ class StaleCheckpointError(ExecutionError):
             },
             remediation_guidance="Ensure proper checkpoint tagging and expiry. Avoid reuse of outdated execution state."
         )
+
+
+class ActionInterruptionError(ExecutionError):
+    """Raised when an action is intentionally interrupted"""
+    level = "MEDIUM"
+    code = "ACTION_INTERRUPTION"

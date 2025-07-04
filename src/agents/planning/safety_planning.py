@@ -1,45 +1,42 @@
+
+import random
 import threading
 import json, yaml
 import time, copy
 import requests
 
-from requests.exceptions import RequestException
-from abc import ABC, abstractmethod
-from typing import Dict, List, Union
+from dataclasses import field
 from queue import PriorityQueue
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-from threading import Lock
+from collections import defaultdict
+from requests.exceptions import RequestException
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                        SafetyMarginError, ResourceViolation)
-from src.agents.planning.planning_types import Task, TaskType
+from src.agents.planning.utils.planning_calculations import PlanningCalculations
+from src.agents.planning.utils.resource_monitor import ResourceMonitor
+from src.agents.planning.planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
+                                                ClusterResources, RepairCandidate, SafetyViolation)
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Safety Planning")
 printer = PrettyPrinter
 
-# Data Structures
-@dataclass
-class ResourceProfile:
-    gpu: int = 0
-    ram: int = 0  # In GB
-    specialized_hardware: List[str] = None
-
-@dataclass
-class ClusterResources:
-    gpu_total: int = 0
-    ram_total: int = 0
-    specialized_hardware_available: List[str] = field(default_factory=list)
-    current_allocations: Dict[str, ResourceProfile] = field(default_factory=dict)
-
 class SafetyPlanning:
     """Core module for safe distributed planning with interactive adjustments"""
-    
+    safety_margins: Dict[str, float] = field(default_factory=dict)
+    violation_history: List[SafetyViolation] = field(default_factory=list)
+    current_violations: List[SafetyViolation] = field(default_factory=list)
+    safety_policies: Dict[str, Callable] = field(default_factory=dict)
+    resource_monitor: ResourceMonitor = field(default_factory=ResourceMonitor)
+
     def __init__(self):
         self.config = load_global_config()
+        self.ram_limit = self.config.get('ram_limit')
+        self.gpu_limit = self.config.get('gpu_limit')
+
         self.safety_config = get_config_section('safety_planning')
         self.margins_config = get_config_section('safety_margins')
         self.resource_buffers = self.margins_config.get('resource_buffers', {
@@ -50,6 +47,7 @@ class SafetyPlanning:
         })
         self.lock = threading.RLock()
         self.memory = PlanningMemory()
+        self.calculations = PlanningCalculations()
         self.adjustment_queue = PriorityQueue()
         self.resource_monitor = ResourceMonitor()
         self.distributed_orchestrator = DistributedOrchestrator()
@@ -100,7 +98,7 @@ class SafetyPlanning:
         if adjustment_type == "modify_task":
             updated = False
             for i, task in enumerate(adjusted_plan):
-                if task.id == task_id:
+                if task.name == task_id:
                     for key, value in adjustment.get("updates", {}).items():
                         if hasattr(task, key):
                             setattr(task, key, value)
@@ -451,19 +449,84 @@ class SafetyPlanning:
                 self.resource_monitor.cluster_resources
             )
 
-        return self.distributed_orchestrator.decompose_and_distribute(
-            task,
-            self.agent.task_library,
-            self.resource_monitor.current_loads
-        )
+        #return self.distributed_orchestrator.decompose_and_distribute(
+        #    task, self.agent.task_library, self.resource_monitor.current_loads)
+        return self.distributed_orchestrator.decompose_and_distribute(task)
+
+    def _reset_temporal_attributes(self, task: Task) -> None:
+        """Reset temporal attributes to current time + buffer"""
+        current_time = time.time()
+        buffer = 60  # 1 minute buffer
+        
+        # Always reset start time to current time + buffer
+        task.start_time = current_time + buffer
+        
+        # Reset deadline if it's invalid
+        if getattr(task, 'deadline', 0) < task.start_time:
+            if hasattr(task, 'duration'):
+                task.deadline = task.start_time + task.duration
+            else:
+                task.deadline = task.start_time + 300  # Default 5 minutes
 
     def safety_check(self, plan: List[Task]) -> bool:
         """Comprehensive safety validation for plans"""
+        # resource_usage = defaultdict(float)
+        current_time = time.time()
+
+        # Process each task in the plan
         for task in plan:
-            self._validate_equipment_constraints(task)
-            self._validate_temporal_constraints(task)
-            self._validate_safety_margins(task)
+
+            # Handle missing temporal attributes
+            if not hasattr(task, 'start_time') or task.start_time is None:
+                task.start_time = current_time + 60  # Default 1min buffer
+
+            if not hasattr(task, 'deadline') or task.deadline is None:
+                task.deadline = task.start_time + 3600  # Default 1hr
+
+            # Get safety margin values
+            gpu_margin = self.margins_config.get('gpu_buffer', 0.15)
+            ram_margin = self.margins_config.get('ram_buffer', 0.20)
+            
+            # GPU buffer check
+            req = task.resource_requirements
+            if req.gpu > self.gpu_limit * (1 - gpu_margin):
+                violation = SafetyViolation(
+                    violation_type="ResourceExceeded",
+                    resource="gpu",
+                    measured_value=req.gpu,
+                    threshold=self.gpu_limit * (1 - gpu_margin),
+                    task_id=task.id,
+                    severity="high",
+                    corrective_action="Reduce GPU usage"
+                )
+                self.current_violations.append(violation)
+                return False
+            
+            # RAM buffer check
+            if req.ram > self.ram_limit * (1 - ram_margin):
+                violation = SafetyViolation(
+                    violation_type="ResourceExceeded",
+                    resource="ram",
+                    measured_value=req.ram,
+                    threshold=self.ram_limit * (1 - ram_margin),
+                    task_id=task.id,
+                    severity="high",
+                    corrective_action="Reduce RAM usage"
+                )
+                self.current_violations.append(violation)
+                return False
+    
+            # Validate temporal constraints for this task
+            if task.start_time < current_time:
+                task.start_time = current_time + 10
+                raise TemporalViolation(f"Task {task.name} starts in past")
+            if task.deadline and task.deadline < task.start_time:
+                task.deadline = task.start_time + 300  # Default 5min duration
+                raise TemporalViolation(f"Task {task.name} has invalid deadline")
+        
         return True
+    
+
 
     def log_adjustment(self, adjustment: Dict) -> None:
         """Comprehensive adjustment logging with contextual metadata"""
@@ -636,113 +699,227 @@ class SafetyPlanning:
                 ]
                 
                 # Track per-task allocation
-                self.resource_monitor.current_allocations[task.id] = requirements
-                logger.info(f"Allocated resources for task {task.id}: {requirements}")
+                self.resource_monitor.current_allocations[task.name] = requirements  # Changed task.id -> task.name
+                logger.info(f"Allocated resources for task {task.name}: {requirements}")  # Changed task.id -> task.name
                 
             except Exception as e:
-                logger.error(f"Resource allocation failed for {task.id}: {str(e)}")
+                logger.error(f"Resource allocation failed for {task.name}: {str(e)}")  # Changed task.id -> task.name
                 # Rollback changes
                 self.resource_monitor.cluster_resources.gpu_total += requirements.gpu
                 self.resource_monitor.cluster_resources.ram_total += requirements.ram
                 raise ResourceViolation(
-                    f"Allocation rollback for {task.id}",
+                    f"Allocation rollback for {task.name}",  # Changed task.id -> task.name
                     requirements,
                     available
                 )
 
     def _validate_temporal_constraints(self, task: Task) -> None:
-        """Validate task timing against current plan and system state."""
-        current_time = time.time()
-        
-        # Hard deadline validation
-        if task.deadline < current_time:
-            raise ValueError(f"Task {task.id} deadline {task.deadline} is in the past")
-            
-        # Schedule feasibility check
-        estimated_duration = self._calculate_estimated_duration(task)
-        if (current_time + estimated_duration) > task.deadline:
-            raise TemporalViolation(
-                f"Insufficient time to complete task {task.id}. "
-                f"Required: {estimated_duration}s, Available: {task.deadline - current_time:.1f}s",
-                required_duration=estimated_duration,
-                available_window=task.deadline - current_time
-            )
-
-        # Dependency chain validation
-        if task.dependencies:
-            latest_prereq_end = max(
-                t.end_time for t in self.current_plan
-                if t.id in task.dependencies
-            )
-            if task.start_time < latest_prereq_end:
+        """Comprehensive temporal validation with dependency resolution and timeline projection"""
+        try:
+            # Initialize with safe defaults if attributes are missing
+            current_time = time.time()
+            task_deadline = getattr(task, 'deadline', current_time + 3600)  # Default 1hr deadline
+            task_start = getattr(task, 'start_time', current_time + 60)  # Default 1min buffer
+            task_duration = getattr(task, 'duration', 300)  # Default 5min duration
+            dependencies = getattr(task, 'dependencies', [])
+    
+            # Timeline validation
+            if task_start and task_start < time.time():
                 raise TemporalViolation(
-                    f"Task {task.id} starts before dependency completion",
-                    dependency_end=latest_prereq_end,
-                    scheduled_start=task.start_time
+                    f"Task {getattr(task, 'name', 'unknown')} scheduled in past",
+                    scheduled_time=task_start,
+                    current_time=current_time
                 )
-
-    def _validate_safety_margins(self, task: Task) -> None:
-        """Ensure resource allocations maintain safety buffers."""
-        available = self.resource_monitor.get_available_resources()
-        
-        # Calculate safety buffers
-        gpu_buffer = available.gpu * self.resource_buffers.gpu
-        ram_buffer = available.ram * self.resource_buffers.ram
-        specialized_buffer = self.resource_buffers.specialized_hardware
-        
-        # Check GPU safety margin
-        if (available.gpu - task.resource_requirements.gpu) < gpu_buffer:
-            raise SafetyMarginError(
-                f"GPU allocation violates safety buffer. "
-                f"Available: {available.gpu}, Requested: {task.resource_requirements.gpu}, "
-                f"Minimum buffer: {gpu_buffer}",
-                resource_type='gpu',
-                buffer_amount=gpu_buffer
-            )
             
-        # Check specialized hardware availability
-        required_specialized = set(task.resource_requirements.specialized_hardware)
-        reserved_hardware = set(available.specialized_hardware) - set(specialized_buffer)
-        if not required_specialized.issubset(reserved_hardware):
-            missing = required_specialized - reserved_hardware
-            raise SafetyMarginError(
-                f"Specialized hardware buffer violated. Missing: {missing}",
-                resource_type='specialized_hardware',
-                buffer_amount=specialized_buffer
-            )
-
-        # Temporal safety buffer (minimum idle time between tasks)
-        if task.duration < self.temporal.min_task_duration:
-            raise SafetyMarginError(
-                f"Task duration too short for safe execution. "
-                f"Current: {task.duration}s, Minimum: {self.temporal.min_task_duration}s",
-                resource_type='temporal',
-                buffer_amount=self.temporal.min_task_duration
-            )
-
+            if task_deadline < (task_start + task_duration):
+                raise TemporalViolation(
+                    f"Insufficient time for task {getattr(task, 'name', 'unknown')}",
+                    required_duration=task_duration,
+                    available_window=task_deadline - task_start
+                )
+            
+            # Dependency validation
+            if dependencies:
+                dependency_end_times = []
+                for dep_id in dependencies:
+                    dep_task = next((t for t in self.current_plan if getattr(t, 'id', None) == dep_id), None)
+                    if dep_task:
+                        dep_end = getattr(dep_task, 'end_time', getattr(dep_task, 'start_time', 0) + getattr(dep_task, 'duration', 0))
+                        dependency_end_times.append(dep_end)
+                    else:
+                        logger.warning(f"Dependency task {dep_id} not found in current plan")
+                
+                if dependency_end_times:
+                    latest_dep_end = max(dependency_end_times)
+                    if task_start < latest_dep_end:
+                        raise TemporalViolation(
+                            f"Task {getattr(task, 'name', 'unknown')} starts before dependency completion",
+                            dependency_end=latest_dep_end,
+                            scheduled_start=task_start
+                        )
+            
+            # Schedule conflict detection
+            concurrent_tasks = [t for t in self.current_plan 
+                               if getattr(t, 'start_time', 0) <= task_start <= getattr(t, 'end_time', 0)]
+            if len(concurrent_tasks) > self.temporal.get('max_concurrent', 5):
+                raise TemporalViolation(
+                    f"Too many concurrent tasks at start time",
+                    max_allowed=self.temporal.get('max_concurrent', 5),
+                    scheduled_count=len(concurrent_tasks)
+                )
+                
+        except Exception as e:
+            logger.error(f"Temporal validation failed: {str(e)}")
+            raise
+    
+    def _validate_safety_margins(self, task: Task) -> None:
+        """Resource buffer validation with dynamic margin calculation"""
+        try:
+            # Get available resources with fallback
+            available = self.resource_monitor.get_available_resources() if self.resource_monitor else ClusterResources()
+            
+            # Handle and convert resource requirements
+            if not hasattr(task, 'resource_requirements') or not isinstance(task.resource_requirements, ResourceProfile):
+                logger.warning(f"Task {getattr(task, 'name', 'unknown')} has invalid resource requirements, converting to ResourceProfile")
+                task.resource_requirements = ResourceProfile()
+                
+            req = task.resource_requirements
+            
+            # Calculate safety buffers
+            gpu_buffer = self.resource_buffers.get('gpu', 0.1) * getattr(available, 'gpu_total', 1)
+            ram_buffer = self.resource_buffers.get('ram', 0.1) * getattr(available, 'ram_total', 8)
+            hw_buffer = self.resource_buffers.get('specialized_hardware', [])
+            
+            # GPU margin validation
+            if getattr(req, 'gpu', 0) > 0:
+                available_gpu = getattr(available, 'gpu_total', 0) - getattr(available, 'gpu_allocated', 0)
+                if (available_gpu - req.gpu) < gpu_buffer:
+                    raise SafetyMarginError(
+                        f"GPU allocation violates safety buffer",
+                        resource_type='gpu',
+                        requested=req.gpu,
+                        available=available_gpu,
+                        buffer_needed=gpu_buffer
+                    )
+            
+            # RAM margin validation
+            if getattr(req, 'ram', 0) > 0:
+                available_ram = getattr(available, 'ram_total', 0) - getattr(available, 'ram_allocated', 0)
+                if (available_ram - req.ram) < ram_buffer:
+                    raise SafetyMarginError(
+                        f"RAM allocation violates safety buffer",
+                        resource_type='ram',
+                        requested=req.ram,
+                        available=available_ram,
+                        buffer_needed=ram_buffer
+                    )
+            
+            # Specialized hardware validation
+            required_hw = set(getattr(req, 'specialized_hardware', []) or [])
+            if required_hw:
+                available_hw = set(getattr(available, 'specialized_hardware_available', []) or [])
+                reserved_hw = available_hw - set(hw_buffer)
+                
+                if not required_hw.issubset(reserved_hw):
+                    missing = required_hw - reserved_hw
+                    raise SafetyMarginError(
+                        f"Specialized hardware buffer violated",
+                        resource_type='specialized_hardware',
+                        missing_hardware=list(missing),
+                        buffer_hardware=hw_buffer
+                    )
+            
+            # Temporal safety buffer
+            min_duration = self.temporal.get('min_task_duration', 10)
+            if getattr(task, 'duration', 0) < min_duration:
+                raise SafetyMarginError(
+                    f"Task duration too short for safe execution",
+                    resource_type='temporal',
+                    current_duration=getattr(task, 'duration', 0),
+                    minimum_duration=min_duration
+                )
+                
+        except Exception as e:
+            logger.error(f"Safety margin validation failed: {str(e)}")
+            raise
+    
     def _validate_equipment_constraints(self, task: Task) -> None:
-        """Enhanced equipment validation with dynamic resource checking"""
-        req = task.resource_requirements
-        available = self.resource_monitor.get_available_resources()
-
-        if req.gpu > available.gpu:
-            raise ResourceViolation(
-                f"GPU required: {req.gpu}, available: {available.gpu}",
-                req.gpu,
-                available.gpu
-            )
-        if req.specialized_hardware and not available.specialized_hardware:
-            missing = set(req.specialized_hardware) - \
-                     set(available.specialized_hardware)
-            raise ResourceViolation(
-                f"Missing specialized hardware: {missing}",
-                req.specialized_hardware,
-                available.specialized_hardware
-            )
+        """Resource availability validation with comprehensive error handling"""
+        try:
+            # Handle and convert resource requirements
+            if not hasattr(task, 'resource_requirements') or not isinstance(task.resource_requirements, ResourceProfile):
+                logger.warning(f"Task {getattr(task, 'name', 'unknown')} has invalid resource requirements, converting to ResourceProfile")
+                task.resource_requirements = ResourceProfile()
+                
+            req = task.resource_requirements
+            available = self.resource_monitor.get_available_resources() if self.resource_monitor else ClusterResources()
+            
+            # GPU validation
+            if getattr(req, 'gpu', 0) > 0:
+                available_gpu = getattr(available, 'gpu_total', 0) - getattr(available, 'gpu_allocated', 0)
+                if req.gpu > available_gpu:
+                    raise ResourceViolation(
+                        f"Insufficient GPU resources",
+                        'gpu',
+                        req.gpu,
+                        available_gpu
+                    )
+            
+            # RAM validation
+            if getattr(req, 'ram', 0) > 0:
+                available_ram = getattr(available, 'ram_total', 0) - getattr(available, 'ram_allocated', 0)
+                if req.ram > available_ram:
+                    raise ResourceViolation(
+                        f"Insufficient RAM resources",
+                        'ram',
+                        req.ram,
+                        available_ram
+                    )
+            
+            # Specialized hardware validation
+            required_hw = set(getattr(req, 'specialized_hardware', []) or [])
+            if required_hw:
+                available_hw = set(getattr(available, 'specialized_hardware_available', []) or [])
+                missing_hw = required_hw - available_hw
+                
+                if missing_hw:
+                    raise ResourceViolation(
+                        f"Missing specialized hardware",
+                        'specialized_hardware',
+                        list(missing_hw),
+                        list(available_hw)
+                    )
+                    
+            # Edge case: No resource requirements
+            if not any([req.gpu, req.ram, required_hw]):
+                logger.info(f"Task {getattr(task, 'name', 'unknown')} has no resource requirements")
+                
+        except Exception as e:
+            logger.error(f"Equipment validation failed: {str(e)}")
+            raise
 
     # Additional Core Methods
     def dynamic_replanning_pipeline(self, failed_task: Task) -> List[Task]:
         """Full safety-aware replanning workflow"""
+        alternatives = []
+        
+        # Strategy 1: Reduce resource requirements
+        reduced_resource_task = failed_task.copy()
+        reduced_resource_task.resource_requirements.gpu *= 0.8
+        reduced_resource_task.resource_requirements.ram *= 0.8
+        self._reset_temporal_attributes(reduced_resource_task)  # Reset temporal attributes
+        if self.safety_check([reduced_resource_task]):
+            alternatives.append([reduced_resource_task])
+            
+        # Strategy 2: Alternative method with lower requirements
+        if failed_task.task_type == TaskType.ABSTRACT:
+            for method_idx in range(len(failed_task.methods)):
+                alt_task = failed_task.copy()
+                alt_task.selected_method = method_idx
+                self._reset_temporal_attributes(alt_task)  # Reset temporal attributes
+                if self.safety_check([alt_task]):
+                    alternatives.append(alt_task.get_subtasks())
+
         with self.lock:
             try:
                 candidates = self._generate_repair_candidates(failed_task)
@@ -750,10 +927,396 @@ class SafetyPlanning:
                     c for c in candidates
                     if self.safety_check(c.repaired_plan)
                 ]
+                if not validated:
+                    return None
                 return self._select_optimal_repair(validated)
             except ReplanningError as e:
                 logger.error(f"Emergency shutdown triggered: {str(e)}")
                 self._emergency_shutdown_procedure()
+        
+        return None or alternatives
+
+    def _generate_repair_candidates(self, failed_task: Task) -> List['RepairCandidate']:
+        """
+        Generates multiple repair candidates for a failed task using various strategies.
+        Implements academic principles from task repair literature and distributed systems.
+        """
+        candidates = []
+        logger.info(f"Generating repair candidates for failed task: {failed_task.name}")
+
+        # Strategy 1: Simple Retry (with resource boost)
+        try:
+            retry_task = copy.deepcopy(failed_task)
+            retry_task.status = TaskStatus.PENDING
+            self._reset_temporal_attributes(retry_task) 
+
+            # Apply resource boost for retry attempts
+            available = self.resource_monitor.get_available_resources()
+            retry_task.resource_requirements.gpu = min(
+                retry_task.resource_requirements.gpu * 1.5,
+                available.gpu_total
+            )
+            retry_task.resource_requirements.ram = min(
+                retry_task.resource_requirements.ram * 1.2,
+                available.ram_total
+            )
+            
+            repair_plan = self._create_repair_plan(failed_task, [retry_task])
+            candidates.append(RepairCandidate(
+                strategy="retry_with_boost",
+                repaired_plan=repair_plan,
+                estimated_cost=self._estimate_repair_cost(retry_task),
+                risk_assessment=self._assess_repair_risk(retry_task, "retry")
+            ))
+
+        except Exception as e:
+            logger.error(f"Retry candidate generation failed: {str(e)}", exc_info=True)
+
+        # Strategy 2: Alternative Method Execution
+        try:
+            if failed_task.task_type == TaskType.ABSTRACT and failed_task.methods:
+                for method_idx in range(len(failed_task.methods)):
+                    if method_idx == failed_task.selected_method:
+                        continue  # Skip the failed method
+                    
+                    subtasks = failed_task.get_subtasks(method_idx)
+                    repair_plan = self._create_repair_plan(failed_task, subtasks)
+                    
+                    candidates.append(RepairCandidate(
+                        strategy=f"alt_method_{method_idx}",
+                        repaired_plan=repair_plan,
+                        estimated_cost=self._estimate_repair_cost(subtasks),
+                        risk_assessment=self._assess_repair_risk(subtasks, "alt_method")
+                    ))
+        except Exception as e:
+            logger.error(f"Alternative method candidate failed: {str(e)}")
+
+        # Strategy 3: Task Decomposition
+        try:
+            decomposed = self.distributed_orchestrator.decompose_and_distribute(failed_task)
+            if decomposed:
+                # Reset temporal attributes for all subtasks
+                for task in decomposed:
+                    self._reset_temporal_attributes(task)
+                repair_plan = self._create_repair_plan(failed_task, decomposed)
+                candidates.append(RepairCandidate(
+                    strategy="distributed_decomposition",
+                    repaired_plan=repair_plan,
+                    estimated_cost=self._estimate_repair_cost(decomposed),
+                    risk_assessment=self._assess_repair_risk(decomposed, "decomposition")
+                ))
+        except Exception as e:
+            logger.error(f"Decomposition candidate failed: {str(e)}", exc_info=True)
+
+        # Strategy 4: Partial Execution Mode
+        try:
+            if 'partial' in getattr(failed_task, 'execution_modes', []):
+                partial_task = copy.deepcopy(failed_task)
+                partial_task.execution_mode = 'partial'
+                self._reset_temporal_attributes(partial_task)
+                repair_plan = self._create_repair_plan(failed_task, [partial_task])
+                
+                candidates.append(RepairCandidate(
+                    strategy="partial_execution",
+                    repaired_plan=repair_plan,
+                    estimated_cost=self._estimate_repair_cost(partial_task),
+                    risk_assessment=self._assess_repair_risk(partial_task, "partial")
+                ))
+        except Exception as e:
+            logger.error(f"Partial execution candidate failed: {str(e)}", exc_info=True)
+
+        # Strategy 5: Resource Reallocation
+        try:
+            if self._can_reallocate_resources(failed_task):
+                reallocated_task = copy.deepcopy(failed_task)
+                self._reset_temporal_attributes(reallocated_task)
+                victims = self._find_resource_victims(failed_task)
+                
+                repair_plan = self._create_repair_plan(failed_task, [reallocated_task], victims)
+                
+                candidates.append(RepairCandidate(
+                    strategy="resource_reallocation",
+                    repaired_plan=repair_plan,
+                    estimated_cost=self._estimate_repair_cost(reallocated_task, victims),
+                    risk_assessment=self._assess_repair_risk(reallocated_task, "reallocation", victims)
+                ))
+        except Exception as e:
+            logger.error(f"Resource reallocation candidate failed: {str(e)}", exc_info=True)
+
+        # Fallback strategy: Skip and Replan
+        try:
+            pruned_plan = self._create_pruned_plan(self.current_plan, failed_task)
+            candidates.append(RepairCandidate(
+                strategy="skip_and_replan",
+                repaired_plan=pruned_plan,
+                estimated_cost=0,  # Cost will come from later replanning
+                risk_assessment={
+                    "risk_score": 0.9,
+                    "risk_level": "high",
+                    "details": "Task skipped, requires manual review"
+                }
+            ))
+        except Exception as e:
+            logger.error(f"Skip candidate failed: {str(e)}", exc_info=True)
+
+        logger.info(f"Generated {len(candidates)} repair candidates")
+        return candidates
+    
+    def _create_pruned_plan(self, original_plan: List[Task], failed_task: Task) -> List[Task]:
+        """
+        Generates a pruned version of the original plan by removing the failed task and its dependents.
+        """
+        if failed_task not in original_plan:
+            logger.warning(f"Failed task '{failed_task.name}' not in original plan")
+            return original_plan
+    
+        # Build a dependency graph if needed
+        dependents = self._get_dependent_tasks(original_plan, failed_task)
+    
+        pruned_plan = [t for t in original_plan if t != failed_task and t not in dependents]
+    
+        logger.info(f"Pruned plan: removed {1 + len(dependents)} tasks")
+        return pruned_plan
+    
+    def _get_dependent_tasks(self, plan: List[Task], task: Task) -> List[Task]:
+        """
+        Recursively finds all tasks in the plan that depend on the given task.
+        """
+        dependents = []
+        for t in plan:
+            if task.id in t.dependencies:
+                dependents.append(t)
+                dependents += self._get_dependent_tasks(plan, t)
+        return dependents
+
+    def _create_repair_plan(self, failed_task: Task, replacement_tasks: List[Task], 
+                               victims: List[Task] = None) -> List[Task]:
+            """Creates a repaired plan by replacing the failed task with new tasks"""
+            new_plan = []
+            replaced = False
+            victims = victims or []
+            
+            for task in self.current_plan:
+                if task.id == failed_task.id:  # or task.name == failed_task.name: 
+                    new_plan.extend(replacement_tasks)
+                    replaced = True
+                elif task in victims:
+                    # Pause victim tasks for resource reallocation
+                    paused_task = copy.deepcopy(task)
+                    paused_task.status = TaskStatus.PENDING
+                    paused_task.priority = min(paused_task.priority, 1)  # Demote priority
+                    new_plan.append(paused_task)
+                else:
+                    # Copy existing tasks, updating dependencies if needed
+                    new_task = copy.deepcopy(task)
+                    
+                    # Update dependencies if they point to the failed task
+                    if failed_task.id in new_task.dependencies:
+                        new_task.dependencies = [
+                            dep for dep in new_task.dependencies if dep != failed_task.id
+                        ] + [t.id for t in replacement_tasks]
+                    
+                    new_plan.append(new_task)
+            
+            if not replaced:
+                logger.warning(f"Failed task {failed_task.id} not in current plan. Creating new plan from replacements.")
+                return replacement_tasks
+            
+            return new_plan
+
+    def _select_optimal_repair(self, candidates: List['RepairCandidate']) -> List[Task]:
+        """
+        Selects the optimal repair candidate using a multi-criteria decision analysis approach.
+        Considers cost, risk, resource usage, and temporal constraints.
+        """
+        if not candidates:
+            raise ReplanningError("No valid repair candidates available", None)
+        
+        logger.info(f"Selecting optimal repair from {len(candidates)} candidates")
+        
+        # Score each candidate using weighted factors
+        scored_candidates = []
+        weights = self.config.get('replanning_weights', {
+            'cost': 0.4,
+            'risk': 0.3,
+            'time': 0.2,
+            'resource': 0.1
+        })
+        
+        for candidate in candidates:
+            # Normalize scores (lower is better for cost and risk)
+            cost_score = self._normalize_cost(candidate.estimated_cost)
+            risk_score = self._normalize_risk(candidate.risk_assessment)
+            time_score = self._estimate_time_efficiency(candidate.repaired_plan)
+            resource_score = self._assess_resource_efficiency(candidate.repaired_plan)
+            
+            # Calculate composite score
+            composite_score = (
+                weights['cost'] * cost_score +
+                weights['risk'] * risk_score +
+                weights['time'] * time_score +
+                weights['resource'] * resource_score
+            )
+            
+            scored_candidates.append((composite_score, candidate))
+        
+        # Select candidate with highest composite score
+        scored_candidates.sort(key=lambda x: x[0], reverse=True)
+        best_candidate = scored_candidates[0][1]
+        
+        logger.info(f"Selected repair strategy: {best_candidate.strategy} "
+                   f"(score: {scored_candidates[0][0]:.2f})")
+        
+        return best_candidate.repaired_plan
+
+    # Helper methods for candidate evaluation
+    def _estimate_repair_cost(self, tasks: Union[Task, List[Task]], victims: List[Task] = None) -> float:
+        """Estimates the cost of a repair operation"""
+        if not isinstance(tasks, list):
+            tasks = [tasks]
+        
+        victim_cost = sum(v.cost for v in (victims or [])) if victims else 0
+        task_cost = sum(t.cost for t in tasks)
+        
+        # Add overhead cost based on strategy complexity
+        overhead = self.config.get('repair_overheads', {
+            'retry': 0.1,
+            'alt_method': 0.2,
+            'decomposition': 0.3,
+            'partial': 0.4,
+            'reallocation': 0.5
+        }).get(tasks[0].strategy if hasattr(tasks[0], 'strategy') else 'unknown', 0.3)
+        
+        return (task_cost + victim_cost) * (1 + overhead)
+
+    def _assess_repair_risk(self, tasks: Union[Task, List[Task]], strategy: str, 
+                           victims: List[Task] = None) -> Dict[str, Any]:
+        """Assesses the risk of a repair strategy using historical data"""
+        risk_factors = {
+            'success_rate': self.memory.get_method_success_rate(strategy),
+            'resource_margin': self.calculations.calculate_resource_margin(tasks),
+            'temporal_margin': self.calculations.calculate_temporal_margin(tasks),
+            'dependency_risk': self.calculations.calculate_dependency_risk(tasks),
+            'victim_impact': len(victims) if victims else 0
+        }
+        
+        # Calculate composite risk score (0-1, higher is riskier)
+        risk_score = min(1.0, (
+            0.4 * (1 - risk_factors['success_rate']) +
+            0.3 * risk_factors['resource_margin'] +
+            0.2 * risk_factors['temporal_margin'] +
+            0.1 * risk_factors['dependency_risk'] +
+            0.05 * min(1.0, risk_factors['victim_impact'] / 5.0)
+        ))
+
+        try:
+            success_rate = self.memory.get_method_success_rate(strategy)
+        except AttributeError:
+            success_rate = 0.5
+        
+        return {
+            'risk_score': risk_score,
+            'factors': risk_factors,
+            'risk_level': 'low' if risk_score < 0.3 else 'medium' if risk_score < 0.6 else 'high'
+        }
+
+    def _can_reallocate_resources(self, task: Task) -> bool:
+        """Determines if resource reallocation is possible"""
+        required_gpu = task.resource_requirements.gpu
+        required_ram = task.resource_requirements.ram
+        
+        # Check if lower priority tasks exist that could free resources
+        return any(
+            t for t in self.current_plan 
+            if t.priority > task.priority and 
+            t.id != task.id and
+            t.status == TaskStatus.EXECUTING and
+            (t.resource_requirements.gpu >= required_gpu or 
+             t.resource_requirements.ram >= required_ram)
+        )
+
+    def _find_resource_victims(self, task: Task) -> List[Task]:
+        """Finds lower priority tasks to pause for resource reallocation"""
+        required_gpu = task.resource_requirements.gpu
+        required_ram = task.resource_requirements.ram
+        candidates = []
+        
+        # Find suitable candidates to pause
+        for t in self.current_plan:
+            if (t.priority > task.priority and 
+                t.id != task.id and
+                t.status == TaskStatus.EXECUTING):
+                
+                # Check if this task could free sufficient resources
+                if (t.resource_requirements.gpu >= required_gpu and
+                    t.resource_requirements.ram >= required_ram):
+                    return [t]  # Found a single victim
+                
+                # Otherwise collect partial matches
+                if (t.resource_requirements.gpu > 0 or 
+                    t.resource_requirements.ram > 0):
+                    candidates.append(t)
+        
+        # Try to find a combination of victims
+        gpu_total = 0
+        ram_total = 0
+        selected = []
+        
+        for t in sorted(candidates, key=lambda x: x.priority):
+            if gpu_total < required_gpu or ram_total < required_ram:
+                gpu_total += t.resource_requirements.gpu
+                ram_total += t.resource_requirements.ram
+                selected.append(t)
+        
+        if gpu_total >= required_gpu and ram_total >= required_ram:
+            return selected
+        
+        return []  # No suitable combination found
+
+    # Helper methods for optimal selection
+    def _normalize_cost(self, cost: float) -> float:
+        """Normalizes cost to a 0-1 scale (1 is best)"""
+        max_cost = self.config.get('replanning_max_cost', 100.0)
+        return max(0, 1 - min(cost / max_cost, 1.0))
+
+    def _normalize_risk(self, risk_assessment: Dict) -> float:
+        """Normalizes risk to a 0-1 scale (1 is best)"""
+        return 1 - risk_assessment.get('risk_score', 1.0)
+
+    def _estimate_time_efficiency(self, plan: List[Task]) -> float:
+        """Estimates the time efficiency of a plan (0-1, higher is better)"""
+        total_time = sum(t.duration for t in plan if hasattr(t, 'duration'))
+        min_possible = sum(self.memory.get_min_duration(t.name) for t in plan)
+        
+        if min_possible == 0:
+            return 0.5  # Neutral score if no data
+        
+        return min(1.0, min_possible / total_time)
+
+    def _assess_resource_efficiency(self, plan: List[Task]) -> float:
+        """Assesses resource utilization efficiency (0-1, higher is better)"""
+        total_gpu = sum(t.resource_requirements.gpu for t in plan)
+        total_ram = sum(t.resource_requirements.ram for t in plan)
+        
+        # Get available cluster resources
+        cluster = self.resource_monitor.get_available_resources()
+        max_gpu = cluster.gpu_total
+        max_ram = cluster.ram_total
+        
+        if max_gpu == 0 or max_ram == 0:
+            return 0.5  # Neutral score if no resource data
+        
+        gpu_efficiency = total_gpu / max_gpu
+        ram_efficiency = total_ram / max_ram
+        
+        # Handle division by zero cases
+        if gpu_efficiency == 0 and ram_efficiency == 0:
+            return 0.0
+        if gpu_efficiency == 0 or ram_efficiency == 0:
+            return max(gpu_efficiency, ram_efficiency)
+        
+        # Use harmonic mean for balanced efficiency
+        return 2 * (gpu_efficiency * ram_efficiency) / (gpu_efficiency + ram_efficiency) 
 
     def _emergency_shutdown_procedure(self):
         """Internal emergency handling"""
@@ -866,216 +1429,44 @@ class DistributedOrchestrator:
                 hybrid_tasks[i].dependencies.append(hybrid_tasks[i-1].id)
                 
         return hybrid_tasks
-
-class ResourceMonitor:
-    """Real-time cluster resource tracking with failure resilience"""
     
-    def __init__(self):
-        self._node_cache = {}  # Cache last known good states
-        self.config = load_global_config()
-        self.resource_config = get_config_section('service_discovery')
-        self.mode = self.resource_config.get('mode')
-        self.static_nodes = self.resource_config.get('static_nodes')
-        self.consul_url = self.resource_config.get('consul_url')
-        self.k8s_api = self.resource_config.get('k8s_api')
-        self.k8s_token = self.resource_config.get('k8s_token')
-        self.node_port = self.resource_config.get('node_port')
-
-        self.cluster_resources = ClusterResources()
-        self.update_interval = 5  # seconds
-        self.node_query_timeout = 2  # seconds
-        self._lock = Lock()
-        self._init_monitoring_thread()
-        self.allocations = {}
-        self.resource_graph = {}
-
-    def get_available_resources(self) -> ClusterResources:
-        """Return current available cluster resources after subtracting allocations."""
-        with self._lock:
-            allocated_gpu = 0
-            allocated_ram = 0
-            allocated_hw = set()
+    def decompose_and_distribute(self, task: Task) -> Optional[List[Task]]:
+        """
+        Decomposes a complex task and distributes its components across available agents or nodes.
+        """
+        if not task.methods:
+            logger.warning(f"Using default decomposition for {task.name}")
+            return [task]
     
-            for profile in self.cluster_resources.current_allocations.values():
-                allocated_gpu += profile.gpu
-                allocated_ram += profile.ram
-                if profile.specialized_hardware:
-                    allocated_hw.update(profile.specialized_hardware)
-    
-            available_gpu = self.cluster_resources.gpu_total - allocated_gpu
-            available_ram = self.cluster_resources.ram_total - allocated_ram
-            available_hw = [
-                hw for hw in self.cluster_resources.specialized_hardware_available
-                if hw not in allocated_hw
-            ]
-    
-            return ClusterResources(
-                gpu_total=available_gpu,
-                ram_total=available_ram,
-                specialized_hardware_available=available_hw,
-                current_allocations={}  # Optional: omit or keep original for full state
-            )
+        for method in task.methods:
+            try:
+                method_idx = 0
+                #subtasks = method.get_subtasks(method_idx)
+                #logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks")
 
-    def _init_monitoring_thread(self):
-        def monitor_loop():
-            time.sleep(0.1)  # short delay to ensure full object init
-            while True:
-                self._update_resource_map()
-                time.sleep(self.update_interval)
-
-        threading.Thread(
-            target=monitor_loop,
-            daemon=True
-        ).start()
-
-    def _discover_cluster_nodes(self):
-        """Discover nodes through configured service discovery backend"""
-        try:
-            if self.mode == 'consul':
-                return self._query_consul_cluster()
-            elif self.mode == 'k8s':
-                return self._query_kubernetes_cluster()
-            else:
-                if not self.static_nodes:
-                    return ['localhost']
-                return self.static_nodes
-        except Exception as e:
-            logger.error(f"Service discovery failed: {str(e)}")
-            return list(self._node_cache.keys())
-
-    def _query_consul_cluster(self):
-        """Query Consul service discovery"""
-        try:
-            response = requests.get(
-                f"{self.consul_url}/v1/catalog/nodes",
-                timeout=self.node_query_timeout
-            )
-            response.raise_for_status()
-            return [node['Node'] for node in response.json()]
-        except RequestException as e:
-            logger.error(f"Consul query failed: {str(e)}")
-            return []
-
-    def _query_kubernetes_cluster(self):
-        """Query Kubernetes API for nodes"""
-        try:
-            headers = {"Authorization": f"Bearer {self.k8s_token}"}
-            response = requests.get(
-                f"{self.k8s_api}/api/v1/nodes",
-                headers=headers,
-                timeout=self.node_query_timeout
-            )
-            response.raise_for_status()
-            return [item['metadata']['name'] for item in response.json()['items']]
-        except RequestException as e:
-            logger.error(f"Kubernetes API error: {str(e)}")
-            return []
-
-    def _query_node_resources(self, node_id):
-        """Make RPC call to node's resource endpoint"""
-        try:
-            # First check cache for recent data
-            if node_id in self._node_cache:
-                cached = self._node_cache[node_id]
-                if time.time() - cached['timestamp'] < self.update_interval * 2:
-                    return cached['data']
-
-            # Make HTTP call to node's metrics endpoint
-            response = requests.get(
-                f"http://{node_id}:{self.node_port}/metrics",
-                timeout=self.node_query_timeout
-            )
-            response.raise_for_status()
-            
-            # Parse response
-            metrics = response.json()
-            resource_data = {
-                'gpu_available': metrics['gpu']['free'],
-                'ram_available': metrics['memory']['free'],
-                'specialized_hw': metrics.get('specialized_hw', []),
-                'gpu_allocated': metrics['gpu']['total'] - metrics['gpu']['free'],
-                'ram_allocated': metrics['memory']['total'] - metrics['memory']['free'],
-                'specialized_allocated': metrics.get('specialized_allocated', [])
-            }
-            
-            # Update cache
-            self._node_cache[node_id] = {
-                'data': resource_data,
-                'timestamp': time.time()
-            }
-            
-            return resource_data
-            
-        except RequestException as e:
-            logger.warning(f"Resource query failed for {node_id}: {str(e)}")
-            # Return cached data if available
-            if node_id in self._node_cache:
-                return self._node_cache[node_id]['data']
-            return None
-
-    def _update_resource_map(self):
-        """Thread-safe resource map update"""
-        with self._lock:
-            new_resources = ClusterResources(
-                gpu_total=0,
-                ram_total=0,
-                specialized_hardware_available=[],
-                current_allocations={}
-            )
-            
-            nodes = self._discover_cluster_nodes()
-            seen_hardware = set()
-    
-            if not nodes:
-                logger.warning("No cluster nodes discovered")
-                standalone_resources = ClusterResources(
-                    gpu_total=1,
-                    ram_total=32,
-                    specialized_hardware_available=[],
-                    current_allocations={}
-                )
-                if standalone_resources != self.cluster_resources:
-                    self.cluster_resources = standalone_resources
-                    # Show actual RAM value in log
-                    logger.info(f"Using standalone resource profile: 1 GPU, {standalone_resources.ram_total} GB RAM")
-                return
-            
-            for node_id in nodes:
-                node_data = self._query_node_resources(node_id)
-                if not node_data:
+                subtasks = method_list
+                if not subtasks:
                     continue
-                
-                # Update totals
-                new_resources.gpu_total += node_data['gpu_available']
-                new_resources.ram_total += node_data['ram_available']
-                
-                # Track specialized hardware
-                for hw in node_data['specialized_hw']:
-                    if hw not in seen_hardware:
-                        new_resources.specialized_hardware_available.append(hw)
-                        seen_hardware.add(hw)
-                
-                # Store node allocation
-                new_resources.current_allocations[node_id] = ResourceProfile(
-                    gpu=node_data['gpu_allocated'],
-                    ram=node_data['ram_allocated'],
-                    specialized_hardware=node_data['specialized_allocated']
-                )
-            
-            # Only update if significant changes occur
-            if new_resources != self.cluster_resources:
-                self.cluster_resources = new_resources
-                logger.info("Cluster resource map updated")
 
-    def allocate_resources(self, requirements: ResourceProfile):
-        """Track resource consumption"""
-        with self._lock:
-            self.cluster_resources.gpu_total -= requirements.gpu
-            self.cluster_resources.ram_total -= requirements.ram
-            self.cluster_resources.specialized_hardware_available = [
-                hw for hw in self.cluster_resources.specialized_hardware_available 
-                if hw not in requirements.specialized_hardware
-            ]
+                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks using one of its methods.")
+    
+                # Distribute subtasks across compute nodes (this is pseudo-coded for orchestration)
+                distributed = []
+                for subtask_template in subtasks:
+                    #assigned_node = self.resource_allocator.select_node(subtask)
+                    #subtask.assigned_node = assigned_node
+                    new_task = subtask_template.copy()
+                    new_task.id = f"{subtask_template.name}_{int(time.time()*1000)}_{random.randint(0,999)}"
+                    new_task.parent = task
+                    distributed.append(new_task)
+
+                return distributed
+            except Exception as e:
+                logger.error(f"Decomposition failed: {str(e)}")
+                continue
+    
+        logger.error(f"Failed to decompose and distribute task '{task.name}'")
+        return None
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
@@ -1083,7 +1474,7 @@ if __name__ == "__main__":
     adjustment = None
     task = Task()
     task.resource_requirements = ResourceProfile(gpu=1, ram=16, specialized_hardware=[])
-    task.deadline = time.time() + 3600  # Optional: Set a deadline
+    task.deadline = time.time() + 3600
     task.dependencies = []  
 
     safety = SafetyPlanning()
@@ -1096,9 +1487,21 @@ if __name__ == "__main__":
     print(f"Selected action: {safety}")
     print(orchestrator)
 
-    print("\n* * * * * Phase 2 * * * * *\n")
-    monitor = ResourceMonitor()
-    monitor._init_monitoring_thread()
+    print("\n* * * * * Phase 2 * * * * *\n") 
+    failed_task = Task(
+        name="evacuate_building",
+        id="task_evacuate",
+        task_type=TaskType.PRIMITIVE,
+        status=TaskStatus.FAILED,
+        resource_requirements=ResourceProfile(gpu=1, ram=4),
+        start_time=time.time() + 60,  # Start in 1 minute
+        deadline=time.time() + 300,   # 5 minutes from now
+        duration=200
+    )
 
-    print(monitor)
+    safety.current_plan = [failed_task]
+    
+    pipeline = safety.dynamic_replanning_pipeline(failed_task=failed_task)
+
+    printer.pretty("REPLAN", pipeline, "success" if pipeline else "error")
     print("\n=== Successfully Ran Safety Planning ===\n")

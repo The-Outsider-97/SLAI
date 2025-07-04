@@ -15,56 +15,58 @@ from typing import List, Any, Dict, Optional
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QSize
 
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
+from src.agents.evaluators.utils.evaluation_errors import (
+    EvaluationError, ConfigLoadError, ValidationFailureError,
+    MetricCalculationError, ReportGenerationError, TemplateError,
+    VisualizationError, MemoryAccessError
+)
+from src.agents.evaluators.utils.report import get_visualizer
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Efficiency Evaluator")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 DEFAULT_WEIGHTS = {}
 
 class EfficiencyEvaluator:
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('efficiency_evaluator', {})
-        memory = EvaluatorsMemory(config)
-        self.memory = memory
-        self.baseline_measurements = self.config.get('baselines', {}) or {}
-        self.complexity_metrics = self.config.get('complexity_metrics', True)
+    def __init__(self):
+        self.config = load_global_config()
+        self.trans_config = get_config_section('efficiency_evaluator')
+        self.energy_model = self.trans_config.get('energy_model')
+        self.report_template = self.trans_config.get('report_template')
+        self.complexity_metrics = self.trans_config.get('complexity_metrics')
+        self.recommendation_template_path = self.trans_config.get('recommendation_template_path')
+        self.current_flops = float(self.trans_config.get('current_flops'))
+        self.efficiency_weights = self.trans_config.get('efficiency_weights', {})
+        self.linguistic_weights = self.trans_config.get('linguistic_weights', {})
+        self.baselines = {
+            k: float(v) if isinstance(v, (int, float, str)) else v 
+            for k, v in self.trans_config.get('baselines', {}).items()
+        }
 
-        # Initialize NLP components
-        self.tokenizer = self._initialize_tokenizer()
-        self.nlp_engine = self._initialize_nlp_engine()
+        self.memory = EvaluatorsMemory()
+        self.calculations = EvaluatorsCalculations()
 
-        logger.info(f"Efficiency Evaluator succesfully initialized")
+        self.tokenizer = None
+        self.nlp_engine = None
 
-    def _initialize_tokenizer(self):
-        """Initialize tokenizer from perception config"""
-        from src.agents.perception.modules.tokenizer import Tokenizer, load_config as load_perception_config
-        try:
-            perception_config = load_perception_config()
-            return Tokenizer(perception_config)
-        except Exception as e:
-            logger.error(f"Tokenizer initialization failed: {e}")
-            return None
+        logger.info(f"Efficiency Evaluator successfully initialized")
 
     def _initialize_nlp_engine(self):
         """Initialize NLP engine from language config"""
-        from src.agents.language.nlp_engine import NLPEngine
         try:
-            return NLPEngine()
+            from src.agents.language.nlp_engine import NLPEngine
+            self.nlp_engine = NLPEngine()
+            return self.nlp_engine
+        except ImportError as e:
+            raise ConfigLoadError(
+                config_path="language_config",
+                section="nlp_engine",
+                error_details=f"NLP Engine import failed: {str(e)}"
+            )
         except Exception as e:
             logger.error(f"NLP Engine initialization failed: {e}")
             return None
@@ -77,306 +79,259 @@ class EfficiencyEvaluator:
         else:
             start_mem = 0
 
-        # Base metrics
-        metrics = {
-            'temporal': self._calculate_temporal(outputs),
-            'spatial': self._calculate_spatial(outputs),
-            'computational': self._calculate_computational(),
-            'token_efficiency': self._calculate_token_efficiency(outputs)
-        }
-
-        # Advanced linguistic metrics
-        if self.complexity_metrics and self.nlp_engine:
-            ling_complexity = self._calculate_linguistic_complexity(outputs)
-            metrics.update({
-                'syntactic_complexity': ling_complexity['dependency_complexity'],
-                'semantic_density': ling_complexity['entity_density'],
-                'structural_variety': ling_complexity['pos_diversity']
-            })
-
-        # Resource monitoring
-        if resource:
-            end_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        else:
-            end_mem = 0
+        metrics = {}
+        try:
+            # Base metrics
+            metric_functions = {
+                'temporal': self.calculations._calculate_temporal,
+                'spatial': self.calculations._calculate_spatial,
+                'computational': lambda _: self.calculations._calculate_computational(),
+                'token_efficiency': self.calculations._calculate_token_efficiency
+            }
             
-        metrics.update({
-            'memory_usage_mb': (end_mem - start_mem) / 1024,
-            'execution_time': time.perf_counter() - start_time,
-            'score': self._calculate_composite_score(metrics)
-        })
-
-        if self.config.get('store_results', False):
-            self.memory.add(
-                entry=metrics,
-                tags=["efficiency_eval"],
-                priority="medium"
-            )
-            if self.memory.access_counter % self.memory.config.get("checkpoint_freq", 500) == 0:
-                self.memory.create_checkpoint()
-
-        return metrics
-
-    def _calculate_linguistic_complexity(self, outputs: List[Any]) -> Dict[str, float]:
-        """Analyze text complexity using NLP Engine"""
-        complexity = {
-            'avg_sentence_length': 0.0,
-            'pos_diversity': 0.0,
-            'dependency_complexity': 0.0,
-            'entity_density': 0.0
-        }
-        
-        if not self.nlp_engine:
-            return complexity
-
-        total_sentences = 0
-        pos_counts = defaultdict(int)
-        total_dependencies = 0
-        total_entities = 0
-        total_tokens = 0
-
-        for output in outputs:
-            if not isinstance(output, str):
-                continue
-                
-            try:
-                # Process text through full NLP pipeline
-                tokens = self.nlp_engine.process_text(output)
-                sentences = [tokens]  # Simple sentence split
-                deps = self.nlp_engine.apply_dependency_rules(tokens)
-                entities = self.nlp_engine.resolve_coreferences(sentences)
-
-                # Update metrics
-                total_sentences += len(sentences)
-                total_tokens += len(tokens)
-                total_dependencies += len(deps)
-                total_entities += len(entities)
-                
-                for token in tokens:
-                    pos_counts[token.pos] += 1
-
-            except Exception as e:
-                logger.warning(f"Complexity analysis failed for output: {e}")
-
-        # Calculate final metrics
-        if total_sentences > 0:
-            complexity['avg_sentence_length'] = total_tokens / total_sentences
-            
-        if pos_counts:
-            complexity['pos_diversity'] = len(pos_counts) / total_tokens
-            
-        if total_tokens > 0:
-            complexity['dependency_complexity'] = total_dependencies / total_tokens
-            complexity['entity_density'] = total_entities / total_tokens
-
-        return complexity
-
-    def _calculate_token_efficiency(self, outputs: List[Any]) -> float:
-        """Enhanced token efficiency with subword awareness"""
-        total_tokens = 0
-        
-        for o in outputs:
-            text = str(o)
-            if self.tokenizer:
+            for metric_name, metric_fn in metric_functions.items():
                 try:
-                    encoded = self.tokenizer.encode(text)
-                    total_tokens += len(encoded['input_ids'])
-                except:
-                    total_tokens += len(text.split())
-            else:
-                total_tokens += len(text.split())
-        
-        avg_tokens = total_tokens / len(outputs) if outputs else 0
-        baseline = self.config.get('nlg', {}).get('avg_token_baseline', 50)
-        return baseline / (avg_tokens + sys.float_info.epsilon)
+                    metrics[metric_name] = metric_fn(outputs)
+                except Exception as e:
+                    raise MetricCalculationError(
+                        metric_name=metric_name,
+                        inputs=outputs[:5],
+                        reason=str(e)
+                    )
 
-    def _calculate_temporal(self, outputs: List[Any]) -> float:
-        """Response latency efficiency using generation time metadata.
-        
-        Steps:
-        1. Extract generation time from output metadata
-        2. Use baseline latency per output type
-        3. Calculate efficiency ratio with smoothing
-        """
-        # Fallback if no temporal data exists
-        if not any(isinstance(o, dict) and 'generation_time' in o for o in outputs):
-            logger.warning("Temporal efficiency: No generation_time metadata found")
-            return 0.0  # Missing data penalty
-    
-        total_time = 0.0
-        valid_outputs = 0
-        
-        for output in outputs:
-            if isinstance(output, dict) and 'generation_time' in output:
-                total_time += output['generation_time']
-                valid_outputs += 1
-        
-        # Get baseline from config (per-output or batch)
-        time_baseline = self.baseline_measurements.get('time_per_output', 0.5)
-        if 'time_baseline' in self.baseline_measurements:
-            baseline = self.baseline_measurements['time_baseline']  # Batch baseline
-        else:
-            baseline = time_baseline * valid_outputs  # Per-output baseline
-            
-        # Calculate efficiency ratio with smoothing
-        return baseline / (total_time + sys.float_info.epsilon)
-
-    def _calculate_spatial(self, outputs: List[Any]) -> float:
-        """Memory footprint efficiency with serialization.
-        
-        Steps:
-        1. Measure serialized size of outputs
-        2. Compare against content-aware baselines
-        3. Handle different output types
-        """
-        total_size = 0
-        content_types = defaultdict(int)
-        
-        for output in outputs:
-            # Prefer metadata if available
-            if isinstance(output, dict) and 'serialized_size' in output:
-                total_size += output['serialized_size']
-                content_types[output.get('content_type', 'unknown')] += 1
-                continue
-                
-            try:
-                # Serialize and measure payload size
-                if isinstance(output, (str, bytes)):
-                    serialized = output
+            # Advanced linguistic metrics
+            if self.complexity_metrics:
+                if not self.nlp_engine:
+                    self._initialize_nlp_engine()
+                    
+                if self.nlp_engine:
+                    try:
+                        ling_complexity = self.calculations._calculate_linguistic_complexity(outputs)
+                        metrics.update({
+                            'syntactic_complexity': ling_complexity['dependency_complexity'],
+                            'semantic_density': ling_complexity['entity_density'],
+                            'structural_variety': ling_complexity['pos_diversity']
+                        })
+                    except Exception as e:
+                        raise MetricCalculationError(
+                            metric_name="linguistic_complexity",
+                            inputs=outputs[:5],
+                            reason=str(e)
+                        )
                 else:
-                    serialized = json.dumps(output).encode('utf-8')
-                total_size += len(serialized)
-                content_types['structured'] += 1
-            except (TypeError, OverflowError):
-                # Fallback for non-serializable objects
-                total_size += sys.getsizeof(output)
-                content_types['binary'] += 1
-        
-        # Get baseline based on content profile
-        baseline = self.baseline_measurements.get('memory_baseline', 1024)  # Default 1KB
-        if 'memory_per_type' in self.baseline_measurements:
-            # Calculate type-aware baseline
-            type_baselines = self.baseline_measurements['memory_per_type']
-            baseline = sum(
-                type_baselines.get(ctype, type_baselines.get('default', 512)) * count 
-                for ctype, count in content_types.items()
+                    logger.warning("NLP engine unavailable, skipping linguistic metrics")
+
+            # Resource monitoring
+            if resource:
+                end_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            else:
+                end_mem = 0
+                
+            metrics.update({
+                'memory_usage_mb': (end_mem - start_mem) / 1024,
+                'execution_time': time.perf_counter() - start_time
+            })
+            
+            # Calculate composite score
+            try:
+                # metrics['score'] = self.calculations._calculate_composite_score(metrics)
+                composite_score = 0.0
+                for metric, value in metrics.items():
+                    if metric in self.efficiency_weights:
+                        composite_score += self.efficiency_weights[metric] * value
+                metrics['score'] = composite_score
+            except Exception as e:
+                raise MetricCalculationError(
+                    metric_name="composite_score",
+                    inputs=metrics,
+                    reason=str(e)
+                )
+
+            if self.config.get('store_results', False):
+                try:
+                    self.memory.add(
+                        entry=metrics,
+                        tags=["efficiency_eval"],
+                        priority="medium"
+                    )
+                    if self.memory.access_counter % self.memory.config.get("checkpoint_freq", 500) == 0:
+                        self.memory.create_checkpoint()
+                except Exception as e:
+                    raise MemoryAccessError(
+                        operation="add",
+                        key="efficiency_metrics",
+                        error_details=str(e)
+                    )
+
+            return metrics
+        except EvaluationError as e:
+            logger.error(f"Efficiency evaluation failed: {e.to_audit_dict()}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during efficiency evaluation: {str(e)}")
+            raise MetricCalculationError(
+                metric_name="efficiency_metrics",
+                inputs={"outputs": outputs[:5], "ground_truths": ground_truths[:5]},
+                reason=str(e)
             )
-        
-        # Calculate efficiency ratio
-        return baseline / (total_size + sys.float_info.epsilon)
-
-    def _calculate_computational(self):
-        """FLOPs relative to baseline"""
-        baseline = float(self.baseline_measurements.get('flops', 1e6))
-        current = float(self.config.get('current_flops', baseline))
-        return baseline / (current + sys.float_info.epsilon)
-
-    def _calculate_composite_score(self, metrics: Dict[str, float]) -> float:
-        """Context-aware scoring with linguistic weights"""
-        weights = self.config.get('efficiency_weights', {
-            'temporal': 0.3,
-            'spatial': 0.2,
-            'computational': 0.2,
-            'token_efficiency': 0.1,
-            'syntactic_complexity': 0.1,
-            'semantic_density': 0.1
-        })
-
-        return sum(
-            weights.get(metric, 0) * min(value, 1.0)
-            for metric, value in metrics.items()
-            if not metric.startswith('memory') and metric != 'execution_time'
-        )
 
     def generate_report(self, metrics: Dict[str, float]) -> str:
         """Generate comprehensive natural language efficiency report"""
-        from src.agents.evaluators.utils.report import get_visualizer
-        report = []
-    
-        visualizer = get_visualizer()
-        visualizer.update_metrics({
-            'successes': metrics.get('successes', 0),
-            'computational': metrics.get('computational', 0)
-        })
-        
+        try:
+            report = []
+            visualizer = get_visualizer()
+            
+            # Validate required metrics
+            required_metrics = ['temporal', 'spatial', 'computational', 'token_efficiency', 'score']
+            for metric in required_metrics:
+                if metric not in metrics:
+                    raise ValidationFailureError(
+                        rule_name="required_metric",
+                        data=metrics.keys(),
+                        expected=f"Metric '{metric}' must be present"
+                    )
 
-        # Header Section
-        report.append(f"# Efficiency Evaluation Report\n")
-        report.append(f"**Generated**: {datetime.now().isoformat()}\n")
-        chart = visualizer.render_temporal_chart(QSize(600, 400), 'computational')
-        report.append(f"![Efficiency Chart](data:image/png;base64,{visualizer._chart_to_base64(chart)})")
+            try:
+                visualizer.update_metrics({
+                    'successes': metrics.get('successes', 0),
+                    'computational': metrics.get('computational', 0)
+                })
+            except Exception as e:
+                raise VisualizationError(
+                    chart_type="temporal",
+                    data=metrics,
+                    error_details=f"Failed to update visualizer metrics: {str(e)}"
+                )
 
-        # Executive Summary using Transformer Generator
-        summary = self._generate_executive_summary(metrics)
-        report.append(f"\n## Executive Summary\n{summary}")
+            # Header Section
+            report.append(f"# Efficiency Evaluation Report\n")
+            report.append(f"**Generated**: {datetime.now().isoformat()}\n")
+            try:
+                chart = visualizer.render_temporal_chart(QSize(600, 400), 'computational')
+                report.append(f"![Efficiency Chart](data:image/png;base64,{visualizer._chart_to_base64(chart)})")
+            except Exception as e:
+                raise VisualizationError(
+                    chart_type="temporal",
+                    data=metrics,
+                    error_details=f"Failed to render chart: {str(e)}"
+                )
 
-        report.append(self._generate_metric_analysis(metrics))                     # Core Metrics Analysis
-        if self.complexity_metrics and self.nlp_engine:
-            report.append(self._generate_linguistic_analysis(metrics))             # Linguistic Insights
-        report.append(self._generate_comparative_analysis(metrics))                # Comparative Analysis
-        report.append(self._generate_recommendations(metrics))                     # Recommendations
-        report.append(f"\n---\n*Report generated by {self.__class__.__name__}*")   # Footer with system info
-        
-        return "\n".join(report)
+            # Executive Summary using Transformer Generator
+            try:
+                summary = self._generate_executive_summary(metrics)
+                report.append(f"\n## Executive Summary\n{summary}")
+            except Exception as e:
+                report.append("\n## Executive Summary\n*Could not generate summary*")
+                logger.error(f"Executive summary generation failed: {str(e)}")
+
+            # Core sections with error handling
+            try:
+                report.append(self._generate_metric_analysis(metrics))
+            except Exception as e:
+                report.append("\n## Core Metrics Analysis\n*Metric analysis failed*")
+                logger.error(f"Metric analysis failed: {str(e)}")
+                
+            if self.complexity_metrics and self.nlp_engine:
+                try:
+                    report.append(self._generate_linguistic_analysis(metrics))
+                except Exception as e:
+                    report.append("\n## Linguistic Analysis\n*Linguistic analysis failed*")
+                    logger.error(f"Linguistic analysis failed: {str(e)}")
+                    
+            try:
+                report.append(self._generate_comparative_analysis(metrics))
+            except Exception as e:
+                report.append("\n## Comparative Analysis\n*Comparative analysis failed*")
+                logger.error(f"Comparative analysis failed: {str(e)}")
+                
+            try:
+                report.append(self._generate_recommendations(metrics))
+            except Exception as e:
+                report.append("\n## Recommendations\n*Recommendations generation failed*")
+                logger.error(f"Recommendations generation failed: {str(e)}")
+                
+            report.append(f"\n---\n*Report generated by {self.__class__.__name__}*")
+            
+            return "\n".join(report)
+        except EvaluationError as e:
+            logger.error(f"Report generation error: {e.to_audit_dict()}")
+            raise ReportGenerationError(
+                report_type="Efficiency",
+                template=self.report_template or "efficiency_report",
+                error_details=str(e)
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error during report generation: {str(e)}")
+            raise ReportGenerationError(
+                report_type="Efficiency",
+                template=self.report_template or "efficiency_report",
+                error_details=f"Unexpected error: {str(e)}"
+            )
 
     def _generate_executive_summary(self, metrics: Dict) -> str:
         """Generate summary using transformer-based generator with proper configuration"""
-        from src.agents.perception.encoders.text_encoder import TextEncoder
-        from src.agents.perception.modules.transformer import Generator
-        from src.agents.perception.modules.tokenizer import Tokenizer
-    
-        # Load proper configuration
-        perception_config = load_config("src/agents/perception/configs/perception_config.yaml")
+        try:
+            from src.agents.perception.encoders.text_encoder import TextEncoder
+            from src.agents.perception.decoders.text_decoder import TextDecoder
+            from src.agents.perception.modules.tokenizer import Tokenizer
+
+            tokenizer = Tokenizer()
+            text_encoder = TextEncoder().to('cuda' if torch.cuda.is_available() else 'cpu')
+            text_decoder = TextDecoder(encoder=text_encoder).to('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Create properly formatted prompt with metric data
+            prompt = (
+                "Generate an executive summary for an efficiency report with these metrics:\n"
+                f"- Overall score: {metrics.get('score', 0):.2f}/1.0\n"
+                f"- Temporal efficiency: {metrics.get('temporal', 0):.2f}\n"
+                f"- Semantic density: {metrics.get('semantic_density', 0):.2f}\n"
+                "Focus on key strengths and areas needing improvement:"
+            )
+            
+            # Tokenize and encode the prompt
+            prompt_encoding = tokenizer(prompt)
+            input_ids = prompt_encoding["input_ids"]
+            attention_mask = prompt_encoding["attention_mask"]
+            
+            # Move tensors to the same device as the encoder
+            device = next(text_encoder.parameters()).device
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            
+            # Add batch dimension
+            input_ids = input_ids.unsqueeze(0)  # Shape: [1, seq_len]
+            attention_mask = attention_mask.unsqueeze(0)  # Shape: [1, seq_len]
+            
+            # Encode prompt to create memory
+            encoded_prompt = text_encoder(input_ids, attention_mask=attention_mask)
+            
+            # Generate summary using decoder inference
+            generated_ids = text_decoder.inference(
+                memory=encoded_prompt,
+                strategy="sampling",
+                temperature=0.7,
+                top_k=25,
+                top_p=0.9
+            )
+            
+            # Decode generated token IDs to text
+            return tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         
-        # Initialize tokenizer with full config
-        tokenizer = Tokenizer(perception_config)
-        
-        # Transformer configuration with all required parameters
-        transformer_config = {
-            'transformer': perception_config['transformer'],
-            'attention': perception_config['attention'],
-            'feedforward': perception_config['feedforward'],
-            'text_encoder': perception_config['text_encoder'],
-            'tokenizer': perception_config['tokenizer']
-        }
-    
-        # Initialize text encoder with proper device mapping
-        text_encoder = TextEncoder(
-            config=transformer_config,
-            device='cpu',
-            tokenizer=tokenizer
-        )
-        
-        # Ensure hidden_dim matches text_encoder's embed_dim
-        hidden_dim = text_encoder.embed_dim
-    
-        # Initialize generator with validated parameters
-        generator = Generator(
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            vocab_size=tokenizer.vocab_size,
-            hidden_dim=text_encoder.embed_dim
-        )
-    
-        # Create properly formatted prompt with metric data
-        prompt = (
-            "Generate an executive summary for an efficiency report with these metrics:\n"
-            f"- Overall score: {metrics.get('score', 0):.2f}/1.0\n"
-            f"- Temporal efficiency: {metrics.get('temporal', 0):.2f}\n"
-            f"- Semantic density: {metrics.get('semantic_density', 0):.2f}\n"
-            "Focus on key strengths and areas needing improvement:" # . Use concise, professional language:"
-        )
-    
-        # Generate with proper attention mask dtype
-        return generator.generate(
-            prompt=prompt,
-            max_length=200,
-            temperature=0.7,
-            top_k=25,
-            top_p=0.9,
-            # attention_mask=torch.ones(len(prompt.split())),  # Create boolean mask
-            # causal=True
-        )
+        except ImportError as e:
+            raise ConfigLoadError(
+                config_path="text_generation",
+                section="text_encoder",
+                error_details=f"Required module not found: {str(e)}"
+            )
+        except Exception as e:
+            # Fallback to simple template
+            return (
+                f"Efficiency Score: {metrics.get('score', 0):.2f}/1.0\n"
+                f"Temporal Efficiency: {metrics.get('temporal', 0):.2f}\n"
+                f"Computational Efficiency: {metrics.get('computational', 0):.2f}\n"
+                f"Memory Usage: {metrics.get('memory_usage_mb', 0):.2f} MB\n"
+                "Recommendation: Focus on optimizing computational efficiency"
+            )
 
     def _describe_complexity(self, score: float) -> str:
         """Convert complexity score to descriptive text using tokenizer"""
@@ -390,9 +345,12 @@ class EfficiencyEvaluator:
         
         # Use tokenizer to process descriptor if available
         if self.tokenizer:
-            encoded = self.tokenizer.encode(str(score))
-            quantized = min(len(descriptors)-1, int(encoded['input_ids'][0] % 5))
-            return descriptors.get(quantized, "moderate")
+            try:
+                encoded = self.tokenizer.encode(str(score))
+                quantized = min(len(descriptors)-1, int(encoded['input_ids'][0] % 5))
+                return descriptors.get(quantized, "moderate")
+            except Exception:
+                pass
         
         # Fallback linear mapping
         return descriptors.get(min(4, int(score * 4)), "moderate")
@@ -426,21 +384,24 @@ class EfficiencyEvaluator:
             try:
                 with open(template_path, 'r') as f:
                     return json.load(f)
+            except json.JSONDecodeError as e:
+                raise TemplateError(
+                    template_path=str(template_path),
+                    error_details=f"Invalid JSON format: {str(e)}"
+                )
             except Exception as e:
-                logger.warning(f"Failed to load report template: {e}")
-        return {
-            'sections': [
-                'executive_summary',
-                'metric_analysis',
-                'linguistic_insights',
-                'comparisons',
-                'recommendations'
-            ]
-        }
+                raise TemplateError(
+                    template_path=str(template_path),
+                    error_details=f"Template loading failed: {str(e)}"
+                )
+        else:
+            raise TemplateError(
+                template_path=str(template_path),
+                error_details="Template file not found"
+            )
         
     def _generate_linguistic_analysis(self, metrics: Dict) -> str:
         """Enhanced linguistic analysis using NLP Engine features"""
-        
         analysis = ["\n## Advanced Linguistic Analysis\n"]
         
         if not self.nlp_engine:
@@ -496,7 +457,11 @@ class EfficiencyEvaluator:
                 total_outputs += 1
                 
         except Exception as e:
-            logger.error(f"Advanced linguistic analysis failed: {e}")
+            raise MetricCalculationError(
+                metric_name="linguistic_analysis",
+                inputs={"outputs": outputs[:3] if outputs else []},
+                reason=f"Advanced NLP processing failed: {str(e)}"
+            )
     
         if total_outputs > 0:
             # Normalize metrics
@@ -541,30 +506,61 @@ class EfficiencyEvaluator:
         analysis = ["\n## Comparative Analysis\n"]
         
         comparisons = {
-            'flops': ('FLOPs', 'computational', 'current_flops'),
-            'memory': ('Memory Usage', 'spatial', 'memory_threshold')
+            'flops': ('FLOPs', 'computational', 'flops'),
+            'memory': ('Memory Usage', 'memory_usage_mb', 'memory_threshold')
         }
         
         for key, (name, metric, baseline_key) in comparisons.items():
             current = metrics.get(metric, 0)
-            baseline = self.baseline_measurements.get(baseline_key, 1)
-            ratio = current / baseline if baseline else 0
             
-            analysis.append(
-                f"- **{name}**: {current:.2f} vs baseline {baseline}  \n"
-                f"  ({'✅ Meets' if ratio >= 1 else '❌ Below'} efficiency target)\n"
-            )
+            # Safely get and convert baseline value
+            baseline = self.baselines.get(baseline_key, 1.0)
+            if not isinstance(baseline, (int, float)):
+                try:
+                    baseline = float(baseline)
+                except (ValueError, TypeError):
+                    baseline = 1.0
+                    logger.warning(f"Invalid baseline for {baseline_key}: {self.baselines.get(baseline_key)}")
             
+            # Handle FLOPs comparison
+            if metric == 'computational':
+                try:
+                    ratio = self.current_flops / baseline if baseline else 0
+                    status = "Meets" if ratio <= 1 else "Exceeds"
+                    analysis.append(
+                        f"- **{name}**: {self.current_flops:.2e} vs baseline {baseline:.2e}\n"
+                        f"  ({status} efficiency target)\n"
+                    )
+                except Exception as e:
+                    raise MetricCalculationError(
+                        metric_name="flops_comparison",
+                        inputs={"current_flops": self.current_flops, "baseline": baseline},
+                        reason=str(e)
+                    )
+            else:
+                try:
+                    ratio = current / baseline if baseline else 0
+                    status = "Meets" if ratio <= 1 else "Exceeds"
+                    analysis.append(
+                        f"- **{name}**: {current:.2f} vs baseline {baseline:.2f}\n"
+                        f"  ({status} efficiency target)\n"
+                    )
+                except Exception as e:
+                    raise MetricCalculationError(
+                        metric_name="memory_comparison",
+                        inputs={"current": current, "baseline": baseline},
+                        reason=str(e)
+                    )
+                
         return "\n".join(analysis)
     
     def _generate_recommendations(self, metrics: Dict) -> str:
         """Actionable recommendations loaded from JSON template"""
-        template_path = Path("src/agents/evaluators/templates/recommendation_template.json")
+        template_path = Path(self.recommendation_template_path)
         try:
-            with open(template_path, 'r') as f:
-                template = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load recommendations template: {e}")
+            template = self._load_report_template(template_path)
+        except TemplateError as e:
+            logger.error(f"Recommendation template error: {str(e)}")
             return "\n## Recommendations Unavailable\n"
         
         recommendations = []
@@ -615,22 +611,19 @@ if __name__ == "__main__":
     print("\n=== Running Efficiency Evaluator ===\n")
     import sys
     app = QApplication(sys.argv)
-    config = load_config()
-
-    eval = EfficiencyEvaluator(config)
+    eval = EfficiencyEvaluator()
 
     logger.info(f"{eval}")
     print(f"\n* * * * * Phase 2 * * * * *\n")
-    outputs = [4]
-    ground_truths = [5]
-
-    results = eval.evaluate(outputs, ground_truths)
-    logger.info(f"Evaluation results: {results}")
-    print(f"\n* * * * * Phase 3 * * * * *\n")
     outputs = ["The quick brown fox jumps over the lazy dog.", 
                "Sample output for efficiency analysis."]
     ground_truths = ["Expected reference text for comparison."]
 
+    results = eval.evaluate(outputs, ground_truths)
+    printer.pretty(f"Evaluation results:", results, "success" if results else "error")
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+
+
     report = eval.generate_report(results)
-    logger.info(f"Evaluation report: {report}")
+    printer.pretty(f"Evaluation report:", report, "success" if report else "error")
     print("\n=== Successfully Ran Efficiency Evaluator ===\n")

@@ -1,5 +1,6 @@
 
 import os
+import time
 import yaml, json
 
 from enum import Enum
@@ -150,16 +151,109 @@ class TaskType(Enum):
     PRIMITIVE = 0
     ABSTRACT = 1
 
+@dataclass
+class ResourceProfile:
+    gpu: int = 0
+    ram: int = 0  # In GB
+    specialized_hardware: List[str] = field(default_factory=list)
+
+@dataclass
+class ClusterResources:
+    gpu_total: int = 0
+    ram_total: int = 0
+    specialized_hardware_available: List[str] = field(default_factory=list)
+    current_allocations: Dict[str, ResourceProfile] = field(default_factory=dict)
+
+@dataclass
+class RepairCandidate:
+    """Represents a candidate solution for repairing a failed plan"""
+    strategy: str
+    repaired_plan: List['Task']  # Forward reference
+    estimated_cost: float
+    risk_assessment: Dict[str, Any]
+
+@dataclass
+class Adjustment:
+    """Data structure for plan adjustment requests"""
+    type: str  # 'modify_task', 'add_task', 'remove_task'
+    task_id: Optional[str] = None
+    task: Optional['Task'] = None  # Forward reference
+    updates: Optional[Dict[str, Any]] = None
+    priority: int = 3
+    cascade: bool = False
+    origin: str = 'api'
+    timestamp: float = field(default_factory=time.time)
+    _retry_count: int = 0
+
+@dataclass
+class PerformanceMetrics:
+    """Captures system performance metrics at a point in time"""
+    timestamp: float = field(default_factory=time.time)
+    system_load: float = 0.0
+    network_latency: float = -1.0  # ms, -1 indicates error
+    service_health: Dict[str, str] = field(default_factory=dict)
+    plan_execution_rate: float = 0.0  # tasks/min
+
+@dataclass
+class PlanSnapshot:
+    """Snapshot of current plan state"""
+    timestamp: float = field(default_factory=time.time)
+    task_ids: List[str] = field(default_factory=list)
+    resource_utilization: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class TemporalConstraints:
+    """Comprehensive temporal constraint system"""
+    start_time: float = 0.0
+    end_time: float = 0.0
+    min_duration: float = 0.0
+    max_duration: float = 0.0
+    dependencies: List[str] = field(default_factory=list)  # Task IDs this task depends on
+    max_wait: float = 0.0  # Max time to wait for dependencies
+    time_buffer: float = 0.0  # Buffer time after completion
+    constraints: List[Callable] = field(default_factory=list)  # Custom constraint functions
+    
+    def validate(self, current_time: float) -> bool:
+        """Check if temporal constraints are satisfied"""
+        if self.start_time > 0 and current_time < self.start_time:
+            return False
+        if self.end_time > 0 and current_time > self.end_time:
+            return False
+        return all(constraint(current_time) for constraint in self.constraints)
+
+@dataclass
+class SafetyViolation:
+    """Detailed safety violation report"""
+    violation_type: str
+    resource: str
+    measured_value: float
+    threshold: float
+    task_id: str
+    timestamp: float = field(default_factory=time.time)
+    severity: str = "medium"  # low, medium, high, critical
+    corrective_action: str = ""
+    impact_analysis: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class SafetyMargins:
+    """Configuration for safety buffers"""
+    gpu_buffer: float = 0.15  # 15% buffer
+    ram_buffer: float = 0.20  # 20% buffer
+    min_task_duration: int = 30  # seconds
+    max_concurrent: int = 5
+    time_buffer: int = 120  # seconds
 
 @dataclass
 class Task:
+    id: str = field(default_factory=lambda: f"task_{int(time.time()*1000)}")
     name: str = "Planning Typers"
+    task_description: str = ""
     task_type: TaskType = TaskType.ABSTRACT
+    type: TaskType = field(init=False)  # Alias for task_type
     status: TaskStatus = TaskStatus.PENDING
     deadline: float = 0
     priority: int = 1
-    resource_requirements: List = field(default_factory=list)
-    dependencies: List = field(default_factory=list)
+    resource_requirements: ResourceProfile = field(default_factory=lambda: ResourceProfile())
     execution_modes: List = field(default_factory=list)
     input_data: Any = None
     output_target: str = None
@@ -172,26 +266,129 @@ class Task:
     effects: List[Callable] = field(default_factory=list)
     parent: Optional['Task'] = None
     selected_method: int = 0
+    goal_state: Optional[Dict] = field(default=None)
+    duration: float = 300.0
     cost: float = 1.0
-    
-    # New properties for probabilistic tasks
+    id_counter = 0
     is_probabilistic: bool = False
     probabilistic_actions: List[Any] = field(default_factory=list)  # List of ProbabilisticAction objects
     success_threshold: float = 0.9  # Default success probability threshold
+    risk_score: float = 0.0
+    dependencies: List["Task"] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)  # String-based dependencies
+    execution_modes: List[str] = field(default_factory=lambda: ['full'])  # Modes
+    description: str = "No description provided"
+    created_at: float = field(default_factory=time.time)
+    last_updated: float = field(default_factory=time.time)
+    owner: str = "system"
+    required_skills: List[str] = field(default_factory=list)
+    progress: float = 0.0  # 0.0 to 1.0
+    estimated_duration: float = 0.0
+    actual_duration: float = 0.0
+    required_tools: List[str] = field(default_factory=list)
+    location: str = "unspecified"
+    retry_count: int = 0
+    max_retries: int = 3
+    timeout: float = 0.0  # Time after which task is considered failed
+    criticality: str = "medium"  # low, medium, high, critical
+    category: str = "general"
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    precondition_errors: List[str] = field(default_factory=list)
+    effect_errors: List[str] = field(default_factory=list)
+    history: List[Dict] = field(default_factory=list)
+    children: List['Task'] = field(default_factory=list)
+    context: Dict[str, Any] = field(default_factory=dict)
+    energy_consumption: float = 0.0
+    data_requirements: Dict[str, Any] = field(default_factory=dict)
+    safety_constraints: List[str] = field(default_factory=list)
+    quality_metrics: Dict[str, float] = field(default_factory=dict)
+    failure_reason: str = ""
+    recovery_strategy: str = ""
+    parallelizable: bool = False
+    human_interaction_required: bool = False
+    verification_method: str = "automatic"
+    documentation: str = ""
+    tags: List[str] = field(default_factory=list)
+    version: str = "1.0"
+    source: str = "internal"
+    expected_outcome: str = ""
+    actual_outcome: str = ""
+    sensor_requirements: List[str] = field(default_factory=list)
+    communication_requirements: Dict[str, Any] = field(default_factory=dict)
+    environmental_constraints: Dict[str, Any] = field(default_factory=dict)
+    compliance_requirements: List[str] = field(default_factory=list)
+    optimization_metrics: List[str] = field(default_factory=list)
+    learning_curve: float = 0.0  # How much the task improves with repetition
+    example_goal: Optional[Dict] = field(default=None)
+
+    #def __init__(self, **kwargs):
+    #    # Set default values for critical attributes
+    #    self.start_time = kwargs.get('start_time', time.time() + 60)
+    #    self.deadline = kwargs.get('deadline', time.time() + 3600)
+    #    self.duration = kwargs.get('duration', 300)
+        # ... other attributes ...
+        
+        # Auto-set derived fields
+    #    if not hasattr(self, 'end_time'):
+    #        self.end_time = self.start_time + self.duration
+
+    def __post_init__(self):
+        self.type = self.task_type
+        if not hasattr(self, 'methods'):
+            self.methods = []
+        # Set estimated_duration to duration if not specified
+        if self.estimated_duration == 0.0 and self.duration > 0:
+            self.estimated_duration = self.duration
 
     def copy(self) -> 'Task':
-        return Task(
+        new_task = Task(
+            id=self.id,
             name=self.name,
             task_type=self.task_type,
             methods=self.methods,
             preconditions=self.preconditions,
             effects=self.effects,
             cost=self.cost,
-            # Copy probabilistic properties
+            goal_state=self.goal_state,
             is_probabilistic=self.is_probabilistic,
             probabilistic_actions=self.probabilistic_actions.copy(),
-            success_threshold=self.success_threshold
+            success_threshold=self.success_threshold,
+            description=self.description,
+            owner=self.owner,
+            required_skills=self.required_skills.copy(),
+            required_tools=self.required_tools.copy(),
+            location=self.location,
+            max_retries=self.max_retries,
+            criticality=self.criticality,
+            category=self.category,
+            parameters=self.parameters.copy(),
+            context=self.context.copy(),
+            energy_consumption=self.energy_consumption,
+            data_requirements=self.data_requirements.copy(),
+            safety_constraints=self.safety_constraints.copy(),
+            parallelizable=self.parallelizable,
+            human_interaction_required=self.human_interaction_required,
+            verification_method=self.verification_method,
+            tags=self.tags.copy(),
+            version=self.version,
+            source=self.source,
+            expected_outcome=self.expected_outcome,
+            sensor_requirements=self.sensor_requirements.copy(),
+            communication_requirements=self.communication_requirements.copy(),
+            environmental_constraints=self.environmental_constraints.copy(),
+            compliance_requirements=self.compliance_requirements.copy(),
+            optimization_metrics=self.optimization_metrics.copy(),
+            learning_curve=self.learning_curve,
         )
+        return new_task
+    
+    @property
+    def requirements(self) -> ResourceProfile:
+        return self.resource_requirements
+
+    @property
+    def task(self) -> ResourceProfile:
+        return self.task_type
 
     def get_subtasks(self, method_index: Optional[int] = None) -> List['Task']:
         if self.task_type == TaskType.PRIMITIVE or not self.methods:
@@ -217,11 +414,18 @@ class Task:
         except Exception as e:
             print(f"Error applying effects for task '{self.name}': {e}")
 
+    def __hash__(self):
+        return hash(self.id)
+
+    def __eq__(self, other):
+        return isinstance(other, Task) and self.id == other.id
+
     def __repr__(self):
-        method_info = f", exec_mode={self.execution_modes}" if self.execution_modes else ""
-        task_type = self.task_type.name if self.task_type else "None"
-        status = self.status.name if self.status else "None"
-        return f"Task(name='{self.name}', type={task_type}, status={status}{method_info})"
+        #method_info = f", exec_mode={self.execution_modes}" if self.execution_modes else ""
+        #task_type = self.task_type.name if self.task_type else "None"
+        #status = self.status.name if self.status else "None"
+        return (f"Task(id='{self.id}', name='{self.name}', "
+                f"type={self.task_type.name}, status={self.status.name})")
 
 PlanStep = Tuple[int, Task, MethodSignature] # (step_id, task, method_used)
 

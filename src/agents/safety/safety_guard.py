@@ -15,6 +15,7 @@ printer = PrettyPrinter
 
 class SafetyGuard:
     """Unified privacy and safety framework with layered protection"""
+    monitor_thread = True
     
     def __init__(self, privacy_params: Optional[Dict] = None):
         """

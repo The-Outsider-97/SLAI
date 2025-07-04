@@ -14,6 +14,8 @@ logger = get_logger("Policy Network")
 class Softmax(Activation):
     """Softmax activation."""
     def forward(self, z):
+        if z.size(-1) == 0:  # No actions
+            return torch.zeros_like(z)
         exp_z = torch.exp(z - torch.max(z, dim=-1, keepdim=True)[0]) # Stability
         return exp_z / torch.sum(exp_z, dim=-1, keepdim=True)
     
@@ -163,9 +165,17 @@ class PolicyNetwork(torch.nn.Module):
             logger.info("Using neural_network config for PolicyNetwork")
         
         if not self.pn_config:
-            logger.warning("PolicyNetwork configuration not found. Using defaults.")    
+            logger.warning("PolicyNetwork configuration not found. Using defaults.")
 
-        hidden_layer_sizes = self.pn_config.get('hidden_layer_sizes', [128, 64]) # Default architecture
+        hidden_layer_sizes = self.pn_config.get('hidden_layer_sizes', [128, 64])
+
+        if action_size <= 0:
+            raise ValueError(f"action_size must be positive, got {action_size}")
+        if state_size <= 0:
+            raise ValueError(f"state_size must be positive, got {state_size}")
+        if any(dim <= 0 for dim in hidden_layer_sizes):
+            raise ValueError("All hidden_layer_sizes must be positive")
+
         self.layer_dims = [state_size] + hidden_layer_sizes + [action_size]
         self.num_layers = len(self.layer_dims) - 1
 

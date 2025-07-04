@@ -82,3 +82,9 @@ class SafetyMarginError(ResourceViolation):
         self.resource_type = resource_type
         self.buffer_amount = buffer_amount
         self.metadata['violation_type'] = 'safety_margin'
+
+class ResourceAcquisitionError(ResourceViolation):
+    """Raised when a task cannot acquire the resources it needs"""
+    def __init__(self, message: str, resource_type: str = "unspecified", requested=None, available=None):
+        super().__init__(message, resource_type, requested or {}, available or {})
+        self.metadata['violation_type'] = 'acquisition_failure'

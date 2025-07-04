@@ -1,4 +1,5 @@
 
+import json
 import pandas as pd
 import numpy as np
 import hashlib
@@ -87,7 +88,8 @@ class MultiModalMemory:
         self.replay_buffer = DistributedReplayBuffer()
 
     def store_experience(self, state, action, reward, next_state=None, done=False, 
-                         context: Optional[Dict] = None, params: Optional[Dict] = None):
+                         context: Optional[Dict] = None, params: Optional[Dict] = None,
+                         **kwargs):
         """Store experience with timestamp and initial strength"""
         try:
             printer.status("INIT", "Experience storage succesfully initialized", "info")
@@ -108,7 +110,8 @@ class MultiModalMemory:
                 'params': {
                     'learning_rate': params.get('learning_rate') if params else None,
                     'exploration_rate': params.get('exploration_rate') if params else None
-                } if params else {}
+                } if params else {},
+                **kwargs
             }
 
             self.episodic.append(experience)
@@ -133,6 +136,10 @@ class MultiModalMemory:
         except Exception as e:
             logger.error(f"Exception in store_experience: {e}")
             return None
+        
+    def clear_episodic(self):
+        """Clear the episodic memory buffer"""
+        self.episodic.clear()
         
     def _fallback_context_hash(self, state, action):
         fallback_str = f"state:{state}|action:{action}"
@@ -490,6 +497,17 @@ class MultiModalMemory:
         
         # Return similarity score (avoid division by zero)
         return 1.0 / (1.0 + total_diff) if total_diff > 0 else 1.0
+    
+    def _generate_context_hash(self, context: dict) -> str:
+        def sanitize(obj):
+            if isinstance(obj, dict):
+                return {k: sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+    
+        sanitized = sanitize(context)
+        return hashlib.md5(json.dumps(sanitized, sort_keys=True).encode()).hexdigest()
     
     def _generate_memory_bias(self, memories: List[Dict]) -> np.ndarray:
         """

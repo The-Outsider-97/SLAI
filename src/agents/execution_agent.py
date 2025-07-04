@@ -32,6 +32,8 @@ Real-World Application:
     where tasks have dependencies, retries, and require stateful agents.
 """
 
+import json
+import uuid
 import torch
 import copy
 import time
@@ -42,7 +44,7 @@ from typing import Dict, Union, Tuple, Optional, Any, Type
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.execution.utils.execution_error import (TimeoutError, InvalidContextError, ExecutionError,
-                StaleCheckpointError, DeadlockError, ActionFailureError, CookieMismatchError)
+    StaleCheckpointError, DeadlockError, ActionFailureError, CookieMismatchError, ActionInterruptionError)
 from src.agents.execution.task_coordinator import TaskCoordinator, TaskState
 from src.agents.execution.action_selector import ActionSelector
 from src.agents.execution.actions.base_action import BaseAction
@@ -71,6 +73,7 @@ class ExecutionAgent(BaseAgent):
             agent_factory=agent_factory,
             config=config, 
         )
+        self.adaptive_agent = None
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
@@ -129,9 +132,72 @@ class ExecutionAgent(BaseAgent):
 
         self.shared_memory.set(f"agent_state:{self.name}", state)
         return state
+    
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts the next action the agent would take given the current state.
+        
+        Args:
+            state (Any, optional): The current state of the agent. If None, use the agent's current state.
+            
+        Returns:
+            Dict[str, Any]: A structured prediction containing:
+                - selected_action: The name of the action that would be taken
+                - confidence: Confidence score for the prediction
+                - context: Context used for decision-making
+                - task_progress: Current progress of the active task
+        """
+        # If state is provided, use it; otherwise gather current context
+        context = state if state is not None else self._gather_context()
+        
+        # Generate potential actions
+        potential_actions = [
+            {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
+            for name, cls in self.action_class_registry.items()
+        ]
+        
+        try:
+            # Select the best action
+            selected_action_dict = self.action_selector.select(potential_actions, context)
+            action_name = selected_action_dict.get("name")
+            
+            return {
+                "selected_action": action_name,
+                "confidence": 1.0,  # Action selector always returns highest confidence
+                "context": context,
+                "task_progress": self._calculate_task_progress(context) if self.current_task else 0.0
+            }
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return {
+                "selected_action": "idle",
+                "confidence": 0.0,
+                "context": context,
+                "task_progress": 0.0
+            }
 
     def perform_task(self, task_data: Dict) -> Dict:
         printer.status("EXECUTION", "Task Performer", "info")
+
+        # Ensure task has all required fields for scheduler
+        task_data.setdefault('id', f"{task_data.get('name', 'task')}_{str(uuid.uuid4())[:8]}")
+        task_data.setdefault('requirements', [])
+        task_data.setdefault('deadline', time.time() + 300)  # Default 5 min deadline
+
+        if isinstance(task_data, str):
+            try:
+                # Attempt to convert string to dictionary
+                task_data = json.loads(task_data)
+            except json.JSONDecodeError:
+                return {
+                    "status": "failed",
+                    "reason": f"Invalid task_data format: {task_data}"
+                }
+        elif not isinstance(task_data, dict):
+            return {
+                "status": "failed",
+                "reason": f"Expected dict, got {type(task_data).__name__}"
+            }
     
         # Check if task is already being handled
         if self.shared_memory.get(f"task_in_progress:{task_data['name']}"):
@@ -189,6 +255,9 @@ class ExecutionAgent(BaseAgent):
 
                 try:
                     self._execution_step()
+                except ActionInterruptionError as e:
+                    logger.warning(f"Action interrupted: {e}")
+                    self.task_coordinator.pause_task(self.current_task['name'])
                 except ActionFailureError as e:
                     # SPECIAL HANDLING FOR MOVEMENT FAILURES
                     if "move_to" in str(e):
@@ -231,38 +300,42 @@ class ExecutionAgent(BaseAgent):
         printer.status("EXECUTION", "Execution loop", "info")
 
         context = self._gather_context()
-
         if self._is_task_complete(context):
             self.task_coordinator.complete_task(self.current_task['name'])
             return
 
-        # Generate potential actions for the selector
-        potential_actions = [
-            {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
-            for name, cls in self.action_class_registry.items()
-        ]
+        try:
+            # Generate potential actions for the selector
+            potential_actions = [
+                {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
+                for name, cls in self.action_class_registry.items()
+            ]
 
-        selected_action_dict = self.action_selector.select(potential_actions, context)
-        action_name = selected_action_dict.get("name")
-        action_class = self.action_class_registry.get(action_name)
+            selected_action_dict = self.action_selector.select(potential_actions, context)
+            action_name = selected_action_dict.get("name")
+            action_class = self.action_class_registry.get(action_name)
 
-        if not action_class:
-            raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
+            if not action_class:
+                raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
 
-        # Instantiate and execute the chosen action
-        action_instance = action_class(context=context)
-        success = action_instance.execute()
+            # Instantiate and execute the chosen action
+            action_instance = action_class(context=context)
+            success = action_instance.execute()
 
-        if not success:
-            reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
-            raise ActionFailureError(action_name, reason)
+            if not success:
+                reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
+                raise ActionFailureError(action_name, reason)
 
-        # Update agent's master state from the action's resulting context
-        self._update_state_from_action(action_instance)
-        
-        # Update task progress (example: based on distance or sub-goals)
-        progress = self._calculate_task_progress(context)
-        self.task_coordinator.update_task_progress(self.current_task['name'], progress)
+            # Update agent's master state from the action's resulting context
+            self._update_state_from_action(action_instance)
+            
+            # Update task progress (example: based on distance or sub-goals)
+            progress = self._calculate_task_progress(context)
+            self.task_coordinator.update_task_progress(self.current_task['name'], progress)
+        except ActionInterruptionError as e:
+            logger.warning(f"Action interrupted: {e}")
+            # Add pause task functionality to TaskCoordinator
+            self.task_coordinator.pause_task(self.current_task['name'])
 
     def _gather_context(self) -> Dict[str, Any]:
         """Merges agent state and task details into a comprehensive context object."""
@@ -369,6 +442,11 @@ class ExecutionAgent(BaseAgent):
             "current_load": len(self.task_coordinator.tasks),
             "efficiency": self.config.get("efficiency", 1.0)
         }
+    
+    def attach_adaptive(self, adaptive_agent):
+        """Connect AdaptiveAgent to ExecutionAgent"""
+        self.adaptive_agent = adaptive_agent
+        logger.info("Adaptive agent attached to Execution agent")
 
 if __name__ == "__main__":
     print("\n=== Running Execution Task Coordinator ===\n")

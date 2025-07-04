@@ -14,22 +14,11 @@ from enum import Enum, auto
 from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
 
-from logs.logger import get_logger
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Certification Framework")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class CertificationLevel(Enum):
     """SAE J3016-inspired levels"""
@@ -83,10 +72,18 @@ class CertificationStatus:
 class CertificationManager:
     """End-to-end certification lifecycle handler"""
     
-    def __init__(self, config, domain: str = "automotive"):
-        config = load_config() or {}
-        self.config = config.get('certification_manager', {})
-        self.domain = domain
+    def __init__(self):
+        self.config = load_global_config()
+        self.template_path = self.config.get('template_path')
+    
+        self.certification_config = get_config_section('certification_manager')
+        self.system = self.certification_config.get('system')
+        self.domain = self.certification_config.get('domain')
+        self.security = self.certification_config.get('security', {})
+        self.reliability = self.certification_config.get('reliability', {})
+        self.performance = self.certification_config.get('performance', {})
+        self.maintainability = self.certification_config.get('maintainability', {})
+
         self.requirements = self._load_domain_requirements()
         self.current_level = CertificationLevel.DEVELOPMENT
         self.evidence_registry = []
@@ -95,7 +92,7 @@ class CertificationManager:
  
     def _load_domain_requirements(self) -> Dict[CertificationLevel, List[CertificationRequirement]]:
         """Load requirements from JSON template file"""
-        template_path = Path(__file__).parent.parent.parent / self.config.get('template_path')
+        template_path = Path(self.template_path)
         print(f"Looking for templates at: {template_path}")
 
         try:
@@ -131,7 +128,19 @@ class CertificationManager:
             "type": evidence["type"],
             "content_hash": hashlib.sha256(json.dumps(evidence).encode()).hexdigest()
         })
-    
+
+    def generate_certificate(self) -> Dict:
+        """ISO-compliant certification document"""
+        passed, _ = self.evaluate_certification()
+        certificate = {
+            "system": "SLAI",
+            "level": self.current_level.name,
+            "status": "PASSED" if passed else "FAILED",
+            "valid_until": "1 year from issuance",
+            "requirements": [req.description for req in self.requirements[self.current_level]]
+        }
+        return certificate
+
     def evaluate_certification(self) -> tuple[bool, List[str]]:
         """Check requirements for the current certification level"""
         unmet = []
@@ -141,24 +150,13 @@ class CertificationManager:
             if not any(self._matches_requirement(ev, req) for ev in self.evidence_registry):
                 unmet.append(req.description)
         return (len(unmet) == 0, unmet)
-    
+
     def _matches_requirement(self, evidence: Dict, requirement: CertificationRequirement) -> bool:
         """Check if evidence satisfies a requirement"""
         return all(
             doc_type in evidence["type"] 
             for doc_type in requirement.evidence_required
         )
-    
-    def generate_certificate(self) -> Dict:
-        """ISO-compliant certification document"""
-        passed, _ = self.evaluate_certification()
-        return {
-            "system": "AI Agent",
-            "level": self.current_level.name,
-            "status": "PASSED" if passed else "FAILED",
-            "valid_until": "1 year from issuance",
-            "requirements": [req.description for req in self.requirements[self.current_level]]
-        }
 
 class CertificationAuditor:
     """
@@ -215,7 +213,7 @@ class CertificationAuditor:
         return risks
 
     def generate_certificate_report(self):
-        return {
+        report = {
             "timestamp": datetime.now().isoformat(),
             "quality_check": self.status.quality_characteristics,
             "ISO25010": self.status.iso25010_pass,
@@ -223,7 +221,7 @@ class CertificationAuditor:
             "UL4600_Safety_Case": self.safety_case.export(),
             "NIST_RMF_Risks": self.status.nist_rmf_risks
         }
-
+        return report
 
 # === Example usage ===
 if __name__ == "__main__":
@@ -237,22 +235,24 @@ if __name__ == "__main__":
         "tech_debt": 0.15,
         "vuln_count": 2
     }
-    print("ISO 25010 checks:", auditor.assess_iso25010(iso_metrics))
-    print("ASIL Level:", auditor.evaluate_asil(0.96, 12000))
-    print("UL 4600:", auditor.finalize_ul4600(["Unit test log", "Simulation results"]))
-    print("NIST RMF:", auditor.integrate_nist_rmf({"distribution_shift": 0.25, "fairness_score": 0.75}))
-    print("Final Report:", auditor.generate_certificate_report())
+    printer.pretty("ISO 25010 checks:", auditor.assess_iso25010(iso_metrics), "success")
+    printer.pretty("ASIL Level:", auditor.evaluate_asil(0.96, 12000), "success")
+    printer.pretty("UL 4600:", auditor.finalize_ul4600(["Unit test log", "Simulation results"]), "success")
+    printer.pretty("NIST RMF:", auditor.integrate_nist_rmf({"distribution_shift": 0.25, "fairness_score": 0.75}), "success")
+    printer.pretty("Final Report:", auditor.generate_certificate_report(), "success")
 
     print(f"\n* * * * * Phase 2 - Evidence Submission * * * * *\n")
-    config = load_config()
-    domain = "automotive"
+    manager = CertificationManager()
     valid_evidence = {
         "timestamp": datetime.now().isoformat(),
-        "type": ["safety_report", "test_logs"],
+        "type": [
+            "FTA report",                 # <- matches Fail-operational architecture
+            "FMEA records",               # <- matches Fail-operational architecture
+            "Sensor logs",                # <- matches Sensor redundancy validation
+            "Failure recovery reports"    # <- matches Sensor redundancy validation
+        ],
         "content": "Simulation passed 10k scenario tests"
     }
-
-    manager = CertificationManager(config, domain=domain)
     manager.submit_evidence(valid_evidence)
 
     print(f"\n* * * * * Phase 3 - Certification Check * * * * *\n")

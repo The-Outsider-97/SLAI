@@ -76,16 +76,23 @@ class DeadlineAwareScheduler(TaskScheduler):
     def _validate_inputs(self, tasks, agents):
         """Consistent validation with planning_agent patterns"""
         printer.status("INIT", "Input validation succesfully initialized", "info")
-
+    
         if not tasks or not agents:
             logger.warning("Scheduling failed: empty tasks or agents")
             return False
-
-        required_keys = {'id', 'requirements', 'deadline'}
-        if not all(required_keys.issubset(t) for t in tasks):
-            logger.error("Invalid task structure")
-            return False
-
+    
+        # More flexible validation
+        for t in tasks:
+            if 'id' not in t:
+                logger.error("Task missing 'id' field")
+                return False
+            if 'requirements' not in t:
+                logger.warning("Task missing 'requirements', using default")
+                t['requirements'] = []
+            if 'deadline' not in t:
+                logger.warning("Task missing 'deadline', using default")
+                t['deadline'] = time.time() + 300  # Default 5 min deadline
+    
         return True
 
     def _prioritize_tasks(self, tasks, risk_assessor):

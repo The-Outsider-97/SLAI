@@ -6,6 +6,7 @@ import networkx as nx
 
 from typing import Dict, List, Optional, Any, Set, Tuple
 
+from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
 from logs.logger import get_logger
 
 logger = get_logger("Static Analyzer")
@@ -13,27 +14,31 @@ logger = get_logger("Static Analyzer")
 class StaticAnalyzer:  
     def __init__(self, codebase_path: str):  
         self.ast_analyzer = ASTAnalyzer(codebase_path)  
-        self.symbolic_executor = SymbolicExecutor()  
-        self.debt_calculator = TechnicalDebtCalculator()  
+        self.symbolic_executor = SymbolicExecutor()
+
+        self.calculations = EvaluatorsCalculations()
 
     def full_analysis(self) -> Dict[str, Any]:  
         """Orchestrate multi-layered analysis"""  
-        issues = []  
-        for filepath in self._discover_code_files():  
-            tree = self.ast_analyzer.parse_file(filepath)  
-            issues.extend(self.ast_analyzer.detect_anti_patterns(tree))  
+        issues = []
+        for filepath in self._discover_code_files():
+            tree = self.ast_analyzer.parse_file(filepath)
+            if tree is None:  # Handle parse failures
+                logger.warning(f"Skipping analysis for {filepath} due to parse error")
+                continue
+                
+            issues.extend(self.ast_analyzer.detect_anti_patterns(tree))
             
-            # Symbolic execution for security-critical functions  
-            for node in ast.walk(tree):  
-                if isinstance(node, ast.FunctionDef) and "security" in node.name.lower():  
-                    issues.extend(  
-                        self.symbolic_executor.analyze_security_constraints(node)  
-                    )  
-
-        return {  
-            "technical_debt": self.debt_calculator.calculate_debt(issues),  
-            "remediation_plan": self.debt_calculator.prioritize_remediation(issues),  
-            "security_metrics": self._aggregate_security_stats(issues)  
+            # Symbolic execution for security-critical functions
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and "security" in node.name.lower():
+                    issues.extend(
+                        self.symbolic_executor.analyze_security_constraints(node)
+                    )
+        return {
+            "technical_debt": self.calculations.calculate_debt(issues),
+            "remediation_plan": self.calculations.prioritize_remediation(issues),
+            "security_metrics": self._aggregate_security_stats(issues)
         }
     
     def _discover_code_files(self) -> List[str]:
@@ -228,33 +233,7 @@ class SymbolicExecutor:
         return False
     
 
-class TechnicalDebtCalculator:
-    # Weights from Baev et al.'s empirical study
-    DEBT_WEIGHTS = {
-        "nested_control": 0.3,
-        "nested_loop": 0.3,
-        "duplicate_code": 0.4,
-        "violation_of_law_of_demeter": 0.2,
-        "security_risk": 0.5
-    }  
-
-    def calculate_debt(self, issues: List[Dict]) -> float:  
-        """Compute technical debt score using weighted sum"""  
-        return sum(  
-            issue["severity"] * self.DEBT_WEIGHTS.get(issue["type"], 0.1)  
-            for issue in issues  
-        )  
-
-    def prioritize_remediation(self, issues: List[Dict]) -> List[Dict]:  
-        """Order fixes by cost/benefit ratio (Baev Eq. 4.2)"""  
-        return sorted(  
-            issues,  
-            key=lambda x: (  
-                x["severity"] * self.DEBT_WEIGHTS[x["type"]] /  
-                max(1, x.get("estimated_fix_time", 1))  
-            ),  
-            reverse=True  
-        )
+#class TechnicalDebtCalculator:
 
 class DataFlowAnalyzer:
     def __init__(self, codebase_path: str):

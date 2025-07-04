@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 """
 Reasoning Agent for Scalable Autonomous Intelligence
@@ -87,6 +87,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         self.learning_rate = self.reasoning_config.get('learning_rate')
         self.exploration_rate = self.reasoning_config.get('exploration_rate')
         self.decay = self.reasoning_config.get('decay')
+        self.knowledge_db = self.reasoning_config.get('knowledge_db')
 
         self.rule_engine = RuleEngine()
         self.validation_engine = ValidationEngine()
@@ -112,6 +113,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
             self._handle_new_fact
         )
         self.storage_path = None
+        self._init_lang_engines()
 
         logger.info(f"\nReasoning Agent Initialized...")
 
@@ -131,13 +133,22 @@ class ReasoningAgent(BaseAgent, nn.Module):
             'cpt': {}  # Conditional Probability Tables
         }
 
+    def _update_vocabulary(self, term: str):
+        """Update the vocabulary with a new term."""
+        if hasattr(self, 'wordlist') and self.wordlist is not None:
+            # Add term to vocabulary using dictionary-like access
+            term_lower = term.lower()
+            if term_lower not in self.wordlist.data:
+                self.wordlist.data[term_lower] = {}
+
+    # Modify this method to initialize properly
     def _init_lang_engines(self):
         from src.agents.language.nlu_engine import Wordlist, NLUEngine
+        self.wordlist = Wordlist()  # Initialize first
         self.nlu_engine = NLUEngine(self.wordlist)
-        self.wordlist = Wordlist()
 
     def _save_knowledge(self):
-        path = self.reasoning_config.get('knowledge_db')
+        path = self.knowledge_db
 
         # Get knowledge base and rule set
         kb = self.shared_memory.get("reasoning_agent:knowledge_base", default=[])
@@ -170,6 +181,10 @@ class ReasoningAgent(BaseAgent, nn.Module):
         Returns:
             True if fact was added/modified
         """
+        # Validate input
+        if fact is None:
+            logger.error("Attempted to add None fact")
+            return False
         contradiction_score = self.agent_factory.validate_with_azr(fact_tuple)
         if contradiction_score > 0.3:
             logger.warning(f"Fact rejected due to contradiction: {fact_tuple} (score={contradiction_score})")
@@ -350,13 +365,18 @@ class ReasoningAgent(BaseAgent, nn.Module):
             context=self.get_current_context()
         )
 
-    def multi_hop_reasoning(self, query: Tuple, max_depth: int = 3) -> float:
-        """Context-aware multi-hop reasoning"""
-        return self.probabilistic_models.multi_hop_reasoning(
-            query,
-            context=self.get_current_context(),
-            max_depth=max_depth
-        )
+    def multi_hop_reasoning(self, query: Tuple, max_depth: int = 3) -> Union[float, list]:
+        """Context-aware multi-hop reasoning with fallback"""
+        try:
+            return self.probabilistic_models.multi_hop_reasoning(
+                query,
+                context=self.get_current_context(),
+                max_depth=max_depth
+            )
+        except Exception as e:
+            logger.error(f"Multi-hop reasoning failed: {str(e)}")
+            # Return confidence score as fallback
+            return self.probabilistic_models.probabilistic_query(query)
 
     def run_bayesian_learning(self, observations: list):
         """Run Bayesian learning with agent-specific context"""
@@ -831,6 +851,233 @@ class ReasoningAgent(BaseAgent, nn.Module):
             self._save_knowledge()
 
         return updated
+    
+    def detect_risk_factors(self, task: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Detect risk factors for a given task and state using:
+        - Probabilistic inference
+        - Knowledge base patterns
+        - Contextual analysis
+        """
+        risk_factors = []
+        context = self.get_current_context()
+        evidence = self._extract_evidence_from_state(state)
+        
+        # 1. Check knowledge base for known risk patterns
+        for fact, conf in self.knowledge_base.items():
+            # Add null check and tuple validation
+            if fact is None or not isinstance(fact, tuple) or len(fact) != 3:
+                logger.warning(f"Skipping invalid fact in knowledge base: {fact}")
+                continue
+                
+            if "risk" in fact[1].lower() and conf > 0.7:
+                # Check relevance to current task/state
+                similarity = self.nlu_engine.wordlist.semantic_similarity(task, fact[0])
+                if similarity > 0.6:
+                    risk_factors.append({
+                        "type": fact[2],
+                        "description": f"Known risk pattern: {fact}",
+                        "severity": int(conf * 10),
+                        "mitigation": self._get_mitigation_strategy(fact[2]),
+                        "source": "Knowledge Base",
+                        "confidence": conf
+                    })
+        
+        # 2. Bayesian inference for hidden risks
+        risk_nodes = self.probabilistic_models.pgmpy_bn.get_risk_nodes()
+        for node in risk_nodes:
+            prob = self.probabilistic_models.bayesian_inference(
+                query=node,
+                evidence=evidence
+            )
+            if prob > 0.65:
+                risk_factors.append({
+                    "type": node,
+                    "description": f"Probabilistic risk detected in {node}",
+                    "severity": int(prob * 8),  # Scale to 1-8
+                    "mitigation": "Review system constraints",
+                    "source": "Bayesian Network",
+                    "confidence": prob
+                })
+        
+        # 3. Rule-based risk detection
+        risk_rules = {}
+        try:
+            risk_rules = self.rule_engine.get_rules_by_category("risk_detection")
+        except AttributeError:
+            logger.error("RuleEngine does not support get_rules_by_category")
+
+        for rule_name, rule_func in risk_rules.items():
+            try:
+                rule_result = rule_func(self.knowledge_base, task, state)
+                if rule_result.get("is_risky", False):
+                    risk_factors.append({
+                        "type": rule_result.get("risk_type", "RuleBasedRisk"),
+                        "description": rule_result.get("description", f"Rule {rule_name} triggered"),
+                        "severity": rule_result.get("severity", 5),
+                        "mitigation": rule_result.get("mitigation", "Apply standard risk protocol"),
+                        "source": f"Rule: {rule_name}",
+                        "confidence": rule_result.get("confidence", 0.75)
+                    })
+            except Exception as e:
+                logger.error(f"Risk rule {rule_name} failed: {str(e)}")
+        
+        # Fallback to default if no risks detected
+        if not risk_factors and "high_uncertainty" in context:
+            risk_factors.append({
+                "type": "UncertaintyRisk",
+                "description": "High uncertainty environment risk",
+                "severity": 7,
+                "mitigation": "Gather additional information",
+                "source": "System Default",
+                "confidence": 0.8
+            })
+        
+        # Remove duplicates and low-confidence entries
+        return self._deduplicate_risks(risk_factors)
+    
+    def detect_opportunity_factors(self, task: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Detect opportunity factors using:
+        - Multi-hop reasoning
+        - Resource availability analysis
+        - Pattern recognition
+        """
+        opportunities = []
+        context = self.get_current_context()
+        
+        # 1. Check for resource-based opportunities
+        resource_availability = state.get("available_resources", {})
+        for resource, amount in resource_availability.items():
+            if amount > state.get("required_resources", {}).get(resource, 0) * 1.5:
+                opportunities.append({
+                    "type": f"Excess{resource.capitalize()}",
+                    "description": f"Excess {resource} available for utilization",
+                    "potential": min(10, int(amount/10)),  # Scale based on amount
+                    "action": f"Reallocate {resource} to high-priority tasks",
+                    "source": "Resource Analysis",
+                    "confidence": min(0.9, amount/100)
+                })
+        
+        # 2. Multi-hop reasoning for indirect opportunities
+        query = (task.id, "has_opportunity", None)
+        opportunity_paths = self.probabilistic_models.multi_hop_reasoning(query)
+        
+        # Handle float returns (confidence scores)
+        if isinstance(opportunity_paths, float):
+            if opportunity_paths > 0.6:
+                opportunities.append({
+                    "type": "InferredOpportunity",
+                    "description": f"Opportunity confidence: {opportunity_paths:.2f}",
+                    "potential": int(opportunity_paths * 8),
+                    "action": "Investigate opportunity connections",
+                    "source": "Multi-hop Reasoning",
+                    "confidence": opportunity_paths
+                })
+        elif isinstance(opportunity_paths, list):
+            for path in opportunity_paths[:5]:  # Limit to top 5
+                if path.get("confidence", 0) > 0.6:  # Use get with default
+                    opportunities.append({
+                        "type": path.get("concept", "InferredOpportunity"),
+                        "description": f"Opportunity path: {' -> '.join(path.get('nodes', ['Unknown']))}",
+                        "potential": int(path.get("confidence", 0) * 8),
+                        "action": f"Explore connections with {path.get('nodes', ['Unknown'])[-1]}",
+                        "source": "Multi-hop Reasoning",
+                        "confidence": path.get("confidence", 0)
+                    })
+        
+        # 3. Temporal opportunity detection
+        if "time_sensitive" in context:
+            time_based = self._detect_temporal_opportunities(task, state)
+            opportunities.extend(time_based)
+        
+        # 4. Rule-based opportunities
+        opportunity_rules = {}
+        try:
+            opportunity_rules = self.rule_engine.get_rules_by_category("opportunity_detection") or {}
+        except AttributeError:
+            logger.error("RuleEngine does not support get_rules_by_category")
+
+        for rule_name, rule_func in opportunity_rules.items():
+            try:
+                rule_result = rule_func(self.knowledge_base, task, state)
+                if rule_result.get("is_opportunity", False):
+                    opportunities.append({
+                        "type": rule_result.get("opportunity_type", "RuleBasedOpportunity"),
+                        "description": rule_result.get("description", f"Rule {rule_name} triggered"),
+                        "potential": rule_result.get("potential", 6),
+                        "action": rule_result.get("action", "Execute opportunity protocol"),
+                        "source": f"Rule: {rule_name}",
+                        "confidence": rule_result.get("confidence", 0.7)
+                    })
+            except Exception as e:
+                logger.error(f"Opportunity rule {rule_name} failed: {str(e)}")
+        
+        # Fallback to default if no opportunities detected
+        if not opportunities:
+            opportunities.append({
+                "type": "DefaultOpportunity",
+                "description": "General improvement potential",
+                "potential": 5,
+                "action": "Analyze task parameters for optimization",
+                "source": "System Default",
+                "confidence": 0.65
+            })
+        
+        return self._prioritize_opportunities(opportunities)
+
+    def _extract_evidence_from_state(self, state: Dict[str, Any]) -> Dict[str, bool]:
+        """Convert state to Bayesian evidence format"""
+        evidence = {}
+        for key, value in state.items():
+            if isinstance(value, bool):
+                evidence[key] = value
+            elif isinstance(value, (int, float)):
+                evidence[key] = value > state.get(f"{key}_threshold", 0.5)
+        return evidence
+    
+    def _get_mitigation_strategy(self, risk_type: str) -> str:
+        """Retrieve mitigation strategy from knowledge base"""
+        strategy = self.knowledge_base.get(
+            (risk_type, "has_mitigation_strategy", None), 
+            "Implement containment protocol"
+        )
+        return strategy
+    
+    def _deduplicate_risks(self, risks: List) -> List:
+        """Remove duplicate risks and filter low-confidence"""
+        seen = set()
+        unique_risks = []
+        for risk in risks:
+            identifier = (risk["type"], risk["source"])
+            if identifier not in seen and risk["confidence"] > 0.55:
+                seen.add(identifier)
+                unique_risks.append(risk)
+        return sorted(unique_risks, key=lambda x: x["severity"], reverse=True)
+    
+    def _prioritize_opportunities(self, opportunities: List) -> List:
+        """Sort opportunities by potential and confidence"""
+        return sorted(
+            opportunities, 
+            key=lambda x: x["potential"] * x["confidence"], 
+            reverse=True
+        )[:5]  # Return top 5 opportunities
+    
+    def _detect_temporal_opportunities(self, task: str, state: Dict) -> List:
+        """Detect time-sensitive opportunities"""
+        opportunities = []
+        if "deadline" in state and "completion_estimate" in state:
+            time_window = state["deadline"] - state["completion_estimate"]
+            if time_window > 0:
+                opportunities.append({
+                    "type": "TimeBuffer",
+                    "description": f"Available time buffer: {time_window} units",
+                    "potential": min(8, int(time_window/5)),
+                    "action": "Allocate time to quality improvement",
+                    "source": "Temporal Analysis",
+                    "confidence": min(0.85, time_window/50)
+                })
+        return opportunities
 
     def forget_fact(self, fact: Union[str, Tuple[str, str, str]]) -> bool:
         """
@@ -875,6 +1122,32 @@ class ReasoningAgent(BaseAgent, nn.Module):
         logger.info(f"[GDPR] Removed {len(to_remove)} facts related to subject: {subject}")
         return len(to_remove)
     
+    def get_key_terms(self, text: str) -> List[str]:
+        """
+        Extract key terms from text using NLU capabilities
+        
+        Args:
+            text: Input text to analyze
+            
+        Returns:
+            List of key terms (nouns and named entities)
+        """
+        try:
+            # Parse text with NLU engine
+            frame = self.nlu_engine.parse(text)
+            
+            # Extract nouns and named entities
+            key_terms = []
+            for token in frame.tokens:
+                if token.ner_tag or token.pos in ["NOUN", "PROPN"]:
+                    key_terms.append(token.lemma)
+            
+            return list(set(key_terms))
+        except Exception as e:
+            logger.error(f"Key term extraction failed: {str(e)}")
+            # Fallback: simple word extraction
+            return [word for word in re.findall(r'\w+', text) if len(word) > 3]
+    
     def forget_memory_keys(self, key_prefix: str):
         """
         Remove all shared memory keys starting with a specific prefix.
@@ -898,6 +1171,112 @@ class ReasoningAgent(BaseAgent, nn.Module):
         return (f"<ReasoningAgent v{__version__} "
                 f"| rules: {len(self.rules)}, "
                 f"facts: {len(self.knowledge_base)}>")
+    
+    def parse_goal(self, goal_description: str) -> Dict[str, Any]:
+        """
+        Parse a natural language goal description into a structured planning task.
+        
+        Args:
+            goal_description (str): Natural language goal, e.g., "Increase market share"
+        
+        Returns:
+            dict: Parsed components such as action, target_state, and optional deadline
+        """
+        try:
+            # Basic verb extraction using simple heuristics
+            tokens = goal_description.lower().split()
+            if len(tokens) < 2:
+                raise ValueError("Insufficient information to parse goal.")
+    
+            # Assume structure: [verb/action] + [target concept]
+            action_verb = tokens[0]
+            target_concept = "_".join(tokens[1:])  # e.g., "market share" → "market_share"
+    
+            # Create structured response
+            return {
+                "action": action_verb + "_" + target_concept,   # e.g., "increase_market_share"
+                "target_state": {
+                    target_concept: "increased"  # Default symbolic goal
+                },
+                "deadline": None
+            }
+        except Exception as e:
+            logger.error(f"[ReasoningAgent] Failed to parse goal '{goal_description}': {e}")
+            raise
+    
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts the confidence level for a given fact or query.
+        
+        Args:
+            state (Any, optional): Can be:
+                - A fact tuple (subject, predicate, object)
+                - A natural language query string
+                - None (returns random fact)
+                
+        Returns:
+            Dict[str, Any]: Structured prediction containing:
+                - fact: The fact being evaluated
+                - confidence: Confidence score (0.0-1.0)
+                - type: Prediction type (random_fact, direct_query, parsed_query)
+        """
+        # Handle None state - return random fact
+        if state is None:
+            if not self.knowledge_base:
+                return {"fact": None, "confidence": 0.0, "type": "empty_knowledge_base"}
+            
+            fact = random.choice(list(self.knowledge_base.keys()))
+            return {
+                "fact": fact,
+                "confidence": self.knowledge_base[fact],
+                "type": "random_fact"
+            }
+        
+        # Handle tuple input - direct fact lookup
+        if isinstance(state, tuple) and len(state) == 3:
+            confidence = self.knowledge_base.get(state, 0.0)
+            return {
+                "fact": state,
+                "confidence": confidence,
+                "type": "direct_query"
+            }
+        
+        # Handle string input - parse and evaluate
+        if isinstance(state, str):
+            try:
+                # Try to parse the string into a fact
+                parsed_fact = self._parse_statement(state)
+                confidence = self.knowledge_base.get(parsed_fact, 0.0)
+                return {
+                    "fact": parsed_fact,
+                    "confidence": confidence,
+                    "type": "parsed_query"
+                }
+            except ValueError:
+                # Fallback to keyword-based confidence
+                matching_facts = [
+                    (fact, conf) 
+                    for fact, conf in self.knowledge_base.items()
+                    if any(term in str(fact) for term in state.split())
+                ]
+                if matching_facts:
+                    best_fact, confidence = max(matching_facts, key=lambda x: x[1])
+                    return {
+                        "fact": best_fact,
+                        "confidence": confidence,
+                        "type": "keyword_match"
+                    }
+                return {
+                    "fact": None,
+                    "confidence": 0.0,
+                    "type": "no_matches"
+                }
+        
+        # Unsupported input type
+        return {
+            "error": "Unsupported input type",
+            "type": "input_error"
+        }
 
 if __name__ == "__main__":
     print("\n=== Running Reasoning Agent ===\n")

@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Dict
 from dataclasses import dataclass, field
 
-from logs.logger import get_logger
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Validation Protocol")
+printer = PrettyPrinter
 
 @dataclass
 class ValidationProtocol:
@@ -116,6 +118,23 @@ class ValidationProtocol:
         }
     })
 
+    def __init__(self):
+        self.config = load_global_config()
+        self.template_path = self.config.get('template_path')
+
+        self.protocol_config = get_config_section('validation_protocol')
+        self.static_analysis = self.protocol_config.get('static_analysis', ValidationProtocol.__dataclass_fields__['static_analysis'].default_factory())
+        self.behavioral_testing = self.protocol_config.get('behavioral_testing', ValidationProtocol.__dataclass_fields__['behavioral_testing'].default_factory())
+        self.safety_constraints = self.protocol_config.get('safety_constraints', ValidationProtocol.__dataclass_fields__['safety_constraints'].default_factory())
+        self.performance_metrics = self.protocol_config.get('performance_metrics', ValidationProtocol.__dataclass_fields__['performance_metrics'].default_factory())
+        self.compliance = self.protocol_config.get('compliance', ValidationProtocol.__dataclass_fields__['compliance'].default_factory())
+        self.operational = self.protocol_config.get('operational', ValidationProtocol.__dataclass_fields__['operational'].default_factory())
+        self.full_evaluation_flow = self.protocol_config.get('full_evaluation_flow', {})
+
+    @property
+    def validation_protocol(self):
+        return self.protocol_config
+
     def validate_configuration(self):
         """
         Formally verify that validation protocol settings are internally consistent,
@@ -180,9 +199,9 @@ class ValidationProtocol:
     
         # 7. Cross-check with Certification Templates
         try:
-            cert_path = Path("evaluators/config/certification_templates.json")
+            cert_path = Path(self.template_path)
             if not cert_path.exists():
-                cert_path = Path("certification_templates.json")
+                cert_path = Path(self.template_path)
             templates = json.loads(cert_path.read_text())
     
             domain = "automotive"  # Default fallback domain

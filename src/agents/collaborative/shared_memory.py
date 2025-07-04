@@ -52,7 +52,7 @@ class SharedMemoryProxy(NamespaceProxy):
 
 class SharedMemory:
     """
-    A thread-safe shared memory implementation for single-process use.
+    A thread-safe shared memory implementation for multy- and single-process use.
 
     Provides versioned storage, expiration, access tracking, priority queuing,
     and basic locking for conflict resolution.
@@ -101,6 +101,7 @@ class SharedMemory:
         self._priority_queue = []
         self._last_cleanup_time = None
         self._last_cleanup_count = 0
+        self.base_state = {}
 
         # Start background cleanup thread
         self._start_expiration_cleaner()

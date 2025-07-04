@@ -6,32 +6,23 @@ with dynamic Bayesian adaptation based on:
 """
 
 import os
+import threading
+import time
 import numpy as np
 import yaml, json
 import jsonschema
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any
 
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+# from src.agents.evaluators.utils.background_scheduler import BackgroundScheduler
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Adaptive Risk")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 SAFETY_CASE_SCHEMA = {
     "type": "object",
@@ -47,15 +38,70 @@ SAFETY_CASE_SCHEMA = {
     "required": ["metadata", "hazard_analysis", "safety_requirements"]
 }
 
+class BackgroundScheduler:
+    """Custom thread-based scheduler for risk adaptation tasks"""
+    
+    def __init__(self):
+        self.jobs = []
+        self.thread = None
+        self.active = False
+
+    def add_job(self, func, trigger, hours=None, next_run_time=None):
+        """Add a periodic job to the scheduler"""
+        if trigger != 'interval':
+            raise ValueError("Only interval trigger is supported")
+        
+        self.jobs.append({
+            'func': func,
+            'interval': timedelta(hours=hours),
+            'next_run': next_run_time or datetime.now()
+        })
+
+    def start(self):
+        """Start the scheduler in a background thread"""
+        if self.active:
+            return
+            
+        self.active = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        """Main scheduler loop"""
+        while self.active:
+            now = datetime.now()
+            for job in self.jobs:
+                if now >= job['next_run']:
+                    try:
+                        job['func']()
+                    except Exception as e:
+                        logger.error(f"Job execution failed: {str(e)}")
+                    job['next_run'] = now + job['interval']
+            time.sleep(60)  # Check every minute
+
+    def stop(self):
+        """Stop the scheduler"""
+        self.active = False
+        if self.thread:
+            self.thread.join(timeout=5)
 
 class RiskAdaptation:
     """Real-time risk assessment engine with Bayesian updating"""
     
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('risk_adaptation', {})
-        memory = EvaluatorsMemory(config)
-        self.memory = memory
+    def __init__(self):
+        self.config = load_global_config()
+        self.max_safety_case_versions = self.config.get('documentation', {}).get('versioning', {}).get('max_versions', 7) 
+
+        self.risk_config = get_config_section('risk_adaptation')
+        self.learning_rate = self.risk_config.get('learning_rate')
+        self.uncertainty_window = self.risk_config.get('uncertainty_window')
+
+        self.hazard_config = get_config_section('initial_hazard_rates')
+        self.system_failure = self.hazard_config.get('system_failure')
+        self.sensor_failure = self.hazard_config.get('sensor_failure')
+        self.unexpected_behavior = self.hazard_config.get('unexpected_behavior')
+
+        self.memory = EvaluatorsMemory()
         self.risk_model = self._initialize_model()
         self.observation_history = []
         self.safety_case_versions = {}
@@ -66,25 +112,26 @@ class RiskAdaptation:
     def _initialize_model(self) -> Dict[str, Tuple[float, float]]:
         """Create prior distributions for each hazard"""
         self.observation_history = [
-            ({h: 0 for h in self.config.get('initial_hazard_rates', {})}, 1.0)
+            ({h: 0 for h in self.hazard_config}, 1.0)
             for _ in range(2)
         ]
         
         return {
             hazard: (float(rate), float(rate) * 0.1)
-            for hazard, rate in self.config.get('initial_hazard_rates', {}).items()
+            for hazard, rate in self.hazard_config.items()
         }
 
     def _init_report_scheduler(self):
-        """Initialize automated report generation"""
+        """Initialize automated report generation with custom scheduler"""
         self.scheduler = BackgroundScheduler()
         self.scheduler.add_job(
-            self.generate_automated_report,
-            'interval',
+            func=self.generate_automated_report,
+            trigger='interval',
             hours=24,
             next_run_time=datetime.now()
         )
         self.scheduler.start()
+        logger.info("Background scheduler started for daily reports")
 
     def update_model(self, observations: Dict[str, int], operational_time: float):
         """
@@ -101,8 +148,8 @@ class RiskAdaptation:
         if not any(count > 0 for count in observations.values()):
             logger.debug("No relevant observations - skipping update")
             return
-        uncertainty_window = self.config.get('uncertainty_window', 1000)
-        learning_rate = self.config.get('learning_rate', 0.01)
+        uncertainty_window = self.uncertainty_window
+        learning_rate = self.learning_rate
         for hazard, count in observations.items():
             if hazard not in self.risk_model:
                 continue
@@ -220,8 +267,8 @@ class RiskAdaptation:
                     ]
                 },
                 "model_parameters": {
-                    "learning_rate": self.config.get('learning_rate'),
-                    "update_window": self.config.get('uncertainty_window'),
+                    "learning_rate": self.learning_rate,
+                    "update_window": self.uncertainty_window,
                     "model_version": "Bayesian-1.3"
                 }
             },
@@ -305,16 +352,64 @@ class RiskAdaptation:
         )
         logger.info(f"Generated automated report: {filename}")
         return filename
+    
+    def reset_model(self,
+                    retain_last_n: int = 0,
+                    override_hazard_rates: Dict[str, float] = None,
+                    reset_reason: str = "manual reset"):
+        """
+        Resets the Bayesian risk model to its initial state with optional configuration overrides.
+        
+        Args:
+            retain_last_n (int): Number of most recent observation entries to retain (default: 0)
+            override_hazard_rates (Dict[str, float]): New initial hazard priors if overriding defaults
+            reset_reason (str): Text label describing the reason for reset (logged for audit trail)
+        """
+        printer.status("RESET", f"Risk model reset triggered: {reset_reason}", "warning")
+
+        # Optionally override initial priors
+        if override_hazard_rates:
+            logger.info(f"Overriding hazard priors with: {override_hazard_rates}")
+            self.initial_hazard_rates = override_hazard_rates
+
+        # Retain last N observation entries (if specified)
+        retained_history = self.observation_history[-retain_last_n:] if retain_last_n > 0 else []
+
+        # Reset observation history
+        self.observation_history = retained_history
+        logger.info(f"Retained last {len(self.observation_history)} observations after reset")
+
+        # Reset risk model using updated (or default) priors
+        self.risk_model = {
+            hazard: (float(rate), float(rate) * 0.1)
+            for hazard, rate in self.initial_hazard_rates.items()
+        }
+
+        # Log reset event in memory
+        self.memory.add(
+            entry={
+                "event": "risk_model_reset",
+                "timestamp": datetime.now().isoformat(),
+                "reason": reset_reason,
+                "retained_observations": len(retained_history),
+                "new_hazard_rates": self.initial_hazard_rates
+            },
+            tags=["risk_reset", "system_event"],
+            priority="medium"
+        )
+
+        logger.info("Risk model successfully reinitialized.")
 
     def get_safety_case_history(self) -> List[Dict]:
-        """Retrieve historical safety cases"""
-        return self.memory.get(tag="safety_case")
+        """Retrieve historical safety cases directly from versions"""
+        # Return most recent cases (up to max_versions)
+        versions = list(self.safety_case_versions.values())
+        return versions[-self.max_safety_case_versions :]
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Adaptive Risk ===\n")
-    config = load_config()
-    risk = RiskAdaptation(config)
+    risk = RiskAdaptation()
 
     print(f"{risk}")
     print(f"\n* * * * * Phase 2 * * * * *\n")

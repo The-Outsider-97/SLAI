@@ -184,6 +184,17 @@ class TaskCoordinator:
         task["progress"] = max(0.0, min(1.0, progress))
         return True
 
+    def pause_task(self, task_name: str) -> bool:
+        task = self._find_task(task_name)
+        if not task:
+            return False
+            
+        if task["state"] == TaskState.IN_PROGRESS.value:
+            task["state"] = TaskState.PAUSED.value
+            logger.info(f"Paused task '{task_name}'")
+            return True
+        return False
+
     def complete_task(self, task_name: str) -> bool:
         """
         Mark a task as successfully completed.

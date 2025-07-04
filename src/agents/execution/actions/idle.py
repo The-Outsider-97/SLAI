@@ -15,7 +15,7 @@ class IdleAction(BaseAction):
     priority = 0
     preconditions = []
     postconditions = ["has_rested"]
-    _required_context_keys = ["max_idle_time"]  # Required context parameter
+    # _required_context_keys = ["max_idle_time"]  # Required context parameter
     energy_recovery_rate = 0.1  # Energy recovered per second
     
     def __init__(self, context: Optional[Dict[str, Any]] = None):
@@ -31,6 +31,8 @@ class IdleAction(BaseAction):
         self.default_duration = self.idle_config.get("default_duration")
         self.min_rest_threshold = self.idle_config.get("min_rest_threshold")
         self.max_rest_threshold = self.idle_config.get("max_rest_threshold")
+
+        context.setdefault("max_idle_time", self.default_duration)
 
         logger.info(f"Idle Action initialized")
 

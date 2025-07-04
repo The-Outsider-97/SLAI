@@ -6,10 +6,10 @@ import numpy as np
 import torch.nn as nn
 
 from pathlib import Path
-from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Tuple, Dict, Any, Optional
+from datetime import datetime, timedelta
 from collections import defaultdict, deque
+from typing import Tuple, Dict, Any, Optional
 
 from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
 from src.agents.reasoning.utils.model_compute import ModelCompute
@@ -110,6 +110,10 @@ class ProbabilisticModels(nn.Module):
             "very_high": [32],
             "extreme": [64]
         }
+
+    def load_from_dict(self, network_data: Dict[str, Any]):
+        self.bayesian_network = network_data
+        self.pgmpy_bn = PgmpyBayesianNetwork(network_data)
         
     def is_bayesian_task(self, task_type: str) -> bool:
         """Determines if the task is better suited for Bayesian or Grid network."""

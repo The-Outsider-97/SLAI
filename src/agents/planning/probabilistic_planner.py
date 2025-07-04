@@ -23,15 +23,35 @@ class ProbabilisticAction:
     Defines an action with probabilistic outcomes, central to PPDDL-style planning.
     """
     name: str
+    probability: float
     preconditions: Callable[[Dict[str, Any]], bool]
-    # Each outcome is a tuple: (probability, effect_function)
     outcomes: List[Tuple[float, Callable[[Dict[str, Any]], None]]]
+    effects: List[Callable] = field(default_factory=list)
+    cost: float = 1.0
+    success_rate: float = 0.0
+    failure_modes: Dict[str, float] = field(default_factory=dict)  # Failure type: probability
 
     def __post_init__(self):
         # Validate that outcome probabilities sum to 1.0
         total_prob = sum(prob for prob, _ in self.outcomes)
         if not abs(total_prob - 1.0) < 1e-6:
             raise ValueError(f"Probabilities for action '{self.name}' do not sum to 1.0 (got {total_prob})")
+
+    def to_policy_format(self) -> Dict:
+        """Convert to policy execution format"""
+        return {
+            'action': self.name,
+            'probability': self.probability,
+            'outcomes': [
+                {'probability': 1 - self.probability, 'effect': self._failure_effect(fail_mode)}
+                for fail_mode in self.failure_modes
+            ]
+        }
+        
+    def _failure_effect(self, fail_mode: str) -> Callable:
+        """Generate failure effect based on failure mode"""
+        # Implementation would vary based on failure mode
+        return lambda state: state.update({'status': f'failed_{fail_mode}'})
 
 class ProbabilisticPlanner():
     """
@@ -56,7 +76,7 @@ class ProbabilisticPlanner():
 
     def register_action(self, action: ProbabilisticAction):
         """Registers a probabilistic action available to the planner."""
-        self.probabilistic_actions[action.name] = action
+        self.probabilistic_actions[action["task_name"]] = action
 
     def perform_task(self, task_data: Dict[str, Any]) -> Optional[Policy]:
         """

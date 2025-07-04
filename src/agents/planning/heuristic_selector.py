@@ -9,6 +9,7 @@ from src.agents.planning.utils.config_loader import load_global_config, get_conf
 from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
 from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
 from src.agents.planning.uncertainty_aware_heuristic import UncertaintyAwareHeuristic
+from src.agents.planning.case_based_reasoning_heuristic import CaseBasedReasoningHeuristic
 from src.agents.planning.reinforcement_learning_heuristic import ReinforcementLearningHeuristic
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
@@ -36,7 +37,8 @@ class HeuristicSelector:
             "DT": DecisionTreeHeuristic(),
             "GB": GradientBoostingHeuristic(),
             "RL": ReinforcementLearningHeuristic(),
-            "UA": UncertaintyAwareHeuristic()
+            "UA": UncertaintyAwareHeuristic(),
+            "CBR": CaseBasedReasoningHeuristic()
         }
         self.heuristic_performance = {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
         self.last_used = {key: 0 for key in self.heuristics}
@@ -142,6 +144,11 @@ class HeuristicSelector:
         if task.get('priority', 0) > 0.8 or task.get('safety_critical', False):
             if self._heuristic_available("UA", time_budget):
                 return "UA", self.heuristics["UA"]
+            
+        # Use CBR for known task types or if sufficient historical data exists
+        if len(self.heuristics["CBR"].case_base) > self.selector_config.get('min_cases_for_cbr', 10):
+            if self._heuristic_available("CBR", time_budget):
+                return "CBR", self.heuristics["CBR"]
         
         # Fallback to performance-based selection
         return self._select_by_performance(time_budget)
@@ -163,7 +170,11 @@ class HeuristicSelector:
         return False
     
     def _calculate_task_depth(self, task: Dict[str, Any]) -> int:
-        """Calculate depth of task hierarchy"""
+        """Calculate depth of task hierarchy with goal_state validation"""
+        if not isinstance(task.get('goal_state'), dict):
+            logger.warning("Task missing valid goal_state, using empty state")
+            task['goal_state'] = {}  # Initialize empty state
+        
         depth = 0
         current = task
         while "parent" in current and current["parent"] is not None:
@@ -221,18 +232,33 @@ class HeuristicSelector:
         heuristic_name, heuristic = self.select_heuristic(
             task, world_state, candidate_methods, time_budget
         )
-        
+
+        # Unified interface call for all heuristics
+        method, prob = heuristic.select_best_method(
+            task, 
+            world_state, 
+            candidate_methods, 
+            method_stats
+        )
+
         # Select best method
-        if heuristic_name == "RL":
-            method, prob = heuristic.select_method(task, world_state, candidate_methods, method_stats)
-        elif heuristic_name == "UA":
-            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
-        elif heuristic_name == "DT":
-            method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
-        else:  # GB
+        #if heuristic_name == "RL":
+        #    method, prob = heuristic.select_method(task, world_state, candidate_methods, method_stats)
+        #    printer.status("SELECT", "Selecting Reinforcement Learning Heuristic for this task", "info")
+        #elif heuristic_name == "UA":
+        #    method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        #    printer.status("SELECT", "Selecting Uncertainty Aware Heuristic for this task", "info")
+        #elif heuristic_name == "DT":
+        #    method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        #    printer.status("SELECT", "Selecting Decision Tree Heuristic for this task", "info")
+        #elif heuristic_name == "CBR":
+        #    method, prob = heuristic.select_best_method(task, world_state, candidate_methods, method_stats)
+        #    printer.status("SELECT", "Selecting Case Based Reasoning Heuristic for this task", "info")
+        #else:  # GB
             # GB doesn't take method_stats in select_best_method in the provided code
             # This is a workaround for the interface inconsistency
-            method, prob = heuristic.select_best_method(task, world_state, candidate_methods)
+        #    method, prob = heuristic.select_best_method(task, world_state, candidate_methods)
+        #    printer.status("SELECT", "Selecting Gradient Boosting Heuristic for this task", "info")
         
         # Update performance metrics
         elapsed = time.time() - start_time
@@ -258,7 +284,7 @@ class HeuristicSelector:
         )
         
         # Make prediction
-        if heuristic_name in ["RL", "UA"]: # == "RL":
+        if heuristic_name in ["RL", "UA"]:
             prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id)
         else:
             # Save current method and set to target method
@@ -266,7 +292,7 @@ class HeuristicSelector:
             task["selected_method"] = method_id
             
             # Get prediction
-            prob = heuristic.predict_success_prob(task, world_state, method_stats)
+            prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id)
             
             # Restore original method
             if original_method:
@@ -274,11 +300,19 @@ class HeuristicSelector:
             else:
                 del task["selected_method"]
         
-        # Update performance metrics
+        # Update performance metrics with actual accuracy if available
         elapsed = time.time() - start_time
-        # Accuracy would require knowing the actual outcome
-        # In real use, this would be updated after task execution
-        self.update_performance(heuristic_name, elapsed, 0.5)
+        actual_outcome = self.memory.get_task_outcome(task.get("id"))
+        
+        # Calculate accuracy based on outcome
+        if actual_outcome is not None:
+            # Accuracy is 1.0 if prediction matched outcome, 0.0 otherwise
+            accuracy = 1.0 if (prob > 0.5) == actual_outcome else 0.0
+        else:
+            # Use prior accuracy when outcome is unknown
+            accuracy = self.heuristic_performance[heuristic_name]["accuracy"]
+        
+        self.update_performance(heuristic_name, elapsed, accuracy)
         
         return prob
     

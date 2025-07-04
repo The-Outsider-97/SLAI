@@ -13,33 +13,24 @@ from typing import Dict, List, Optional
 from jsonschema import ValidationError, validate
 from datetime import datetime
 
-from logs.logger import get_logger
+from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Documentation")
-
-CONFIG_PATH = "src/agents/evaluators/configs/evaluator_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+printer = PrettyPrinter
 
 class Documentation:
-    def __init__(self, config):
-        config = load_config() or {}
-        self.config = config.get('documentation', {})
+    def __init__(self):
+        self.config = load_global_config()
+        self.doc_config = get_config_section('documentation')
+        self.audit_config = self.doc_config.get('audit_trail', {})
+
         self.schema = self._load_validation_schema()
 
         logger.info(f"Documentation succesfully initialized")
  
     def _load_validation_schema(self) -> Optional[Dict]:
-        schema_path = self.config.get('validation', {}).get('schema_path')
+        schema_path = self.doc_config.get('validation', {}).get('schema_path')
         if not schema_path:
             return None
             
@@ -54,8 +45,8 @@ class Documentation:
 class AuditBlock(Documentation):
     """Single unit in the audit chain"""
     
-    def __init__(self, config, data: Dict, previous_hash: str):
-        super().__init__(config)
+    def __init__(self, data: Dict, previous_hash: str):
+        super().__init__()
         self.timestamp = datetime.now()
         self.data = data
         self.previous_hash = previous_hash
@@ -78,20 +69,23 @@ class AuditBlock(Documentation):
 class AuditTrail(Documentation):
     """Immutable validation evidence ledger"""
     
-    def __init__(self, config):
-        super().__init__(config)
-        audit_config = self.config.get('audit_trail', {})
-        self.hash_algorithm_name = audit_config.get('hash_algorithm', 'sha256')
+    def __init__(self):
+        super().__init__()
+        self.hash_algorithm_name = self.audit_config.get('hash_algorithm', 'sha256')
         self.hash_algo = getattr(hashlib, self.hash_algorithm_name)
-        self.difficulty = audit_config.get('difficulty', 4)
+        self.difficulty = self.audit_config.get('difficulty', 4)
         self.chain = [self._create_genesis_block()]
+
+        # Load export configuration
+        self.export_config = self.doc_config.get('export', {})
+        self.supported_formats = self.export_config.get('formats', ['json'])
+        self.default_format = self.export_config.get('default_format', 'json')
 
         logger.info(f"Audit Trail succesfully initialized")
 
     def _create_genesis_block(self) -> AuditBlock:
         """Create initial block with system bootstrap parameters"""
         return AuditBlock(
-            config=self.config,
             data={
                 "system": "SLAI Core",
                 "message": "GENESIS BLOCK",
@@ -122,10 +116,9 @@ class AuditTrail(Documentation):
 
     def export_chain(self, format: str = None) -> str:
         """Export audit trail in specified format"""
-        export_config = self.config.get('export', {})
-        format = format or export_config.get('default_format', 'json')
+        format = format or self.default_format
         
-        if format not in export_config.get('formats', ['json']):
+        if format not in self.supported_formats:
             raise ValueError(f"Unsupported export format: {format}")
 
         chain_data = [block.__dict__ for block in self.chain]
@@ -139,8 +132,8 @@ class AuditTrail(Documentation):
 class DocumentVersioner(Documentation):
     """Manage document versions with retention policy"""
     
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self):
+        super().__init__()
         self.versions = []
         self.max_versions = self.config.get('versioning', {}).get('max_versions', 7)
 
@@ -161,24 +154,33 @@ class DocumentVersioner(Documentation):
 
 # ====================== Usage Example ======================
 if __name__ == "__main__":
-    print("\n=== Running Adaptive Risk ===\n")
-    config = load_config()
-
-    docs = Documentation(config)
+    print("\n=== Running Documentation ===\n")
+    docs = Documentation()
     logger.info(docs)
     print(f"\n* * * * * Phase 2 * * * * *\n")
     data = None
     previous_hash = None
 
-    trail = AuditTrail(config)
-    block = AuditBlock(config, data, previous_hash)
+    trail = AuditTrail()
+    block = AuditBlock(data, previous_hash)
 
     logger.info(f"{block}")
     logger.info(f"{trail}")
     print(f"\n* * * * * Phase 3 * * * * *\n")
-    document = None
+    document = {
+        "report_hash": "4db74ef020d228ea339a60eaeb1e19bbc1f5445c799717cffb1d2cc16fd83821",
+        "metrics_snapshot": {
+            "success_rate": 0.85,
+            "current_risk": 0.02,
+            "operational_time": 152.0
+        },
+        "timestamp": datetime.now().isoformat(),
+        "previous_hash": "0"*64,
+        "nonce": 42,
+        "hash": "7f6a79bca7c94c71ee2d25340a1f2aa71979066a5e4729d68f43e8a59889aabc"
+    }
 
-    version = DocumentVersioner(config)
+    version = DocumentVersioner()
     version.add_version(document)
     block.calculate_hash()
     trail.validate_document(document)
@@ -186,4 +188,4 @@ if __name__ == "__main__":
     logger.info(f"01. {version.add_version(document)}")
     logger.info(f"02. {block.calculate_hash()}")
     logger.info(f"03. {trail.validate_document(document)}")
-    print("\n=== Successfully Ran Adaptive Risk ===\n")
+    print("\n=== Successfully Ran Documentation ===\n")

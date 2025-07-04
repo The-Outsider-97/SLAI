@@ -261,7 +261,7 @@ class GradientBoostingHeuristic(BaseHeuristics):
         joblib.dump((self.model, self.scaler), model_path)
         return val_acc
 
-    def select_best_method(self, task, world_state, candidate_methods):
+    def select_best_method(self, task, world_state, candidate_methods, method_stats=None):
         """Select method with highest predicted success probability"""
         printer.status("INIT", "Method selecter succesfully initialized", "info")
     

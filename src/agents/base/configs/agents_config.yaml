@@ -8,6 +8,12 @@ base_agent:
     error_similarity_threshold: 0.75
     max_task_retries: 0
     task_timeout_seconds: None
+    task_similarity_str_threshold: 0.9
+    jaccard_threshold: 0.5
+    jaccard_min_for_no_shared: 0.7
+    final_key_threshold: 0.7
+    final_value_threshold: 0.7
+    task_similarity_seq_elem_threshold: 0.8
 
 collaborative_agent: {}
 
@@ -42,6 +48,11 @@ browser_agent: {}
 
 evaluation_agent:
     risk_threshold: 0.5
+    memory_warning_threshold: 0.7
+    memory_critical_threshold: 0.9
+    model_dir: "src/agents/evaluators/models/"
+    anomaly_detector: "src/agents/evaluators/models/anomaly_detector.joblib"
+    deep_anomaly: "src/agents/evaluators/models/deep_anomaly.pt"
     initial_hazard_rates:
         system_failure: 0.000001
         sensor_failure: 0.00001
@@ -51,36 +62,68 @@ evaluation_agent:
     risk_thresholds:
         warning: [0.4, 0.7]
         critical: [0.7, 1.0]
-    issue_database:
-        host: 'localhost'
-        port: 5432
-        database: 'ai_issues'
-        user: 'user'
-        password: ''    
+    risk_adaptation: {}
+    autonomous_tasks:
+        - id: "nav_test"
+    type: "navigation"
+    path: [[0,0], [1,1], [2,2]]
+    optimal_path: [[0,0], [2,2]]
+    completion_time: 10.0
+    energy_consumed: 100
+    collisions: 0
+    success: true
+
+issue_database:
+    host: 'localhost'
+    port: 5432
+    database: 'ai_issues'
+    user: 'user'
+    password: ''
+
+operations_notification:
+    email:
+        enabled: true
+        from: "ai-agent@yourdomain.com"
+        to: "ops@yourdomain.com"
+        subject: "URGENT: AI System Hazard"
+        smtp_host: "smtp.yourdomain.com"
+        smtp_port: 587
+        username: "ai-agent"
+        password: "secure-password"
+        use_tls: true
+
+    webhook:
+        enabled: true
+        url: "https://hooks.slack.com/services/..."
+
+    external_logging:
+        enabled: true
+        url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
 
 knowledge_agent:
+    source: "local_files"
+    is_query: True
+    stopwords: "src/agents/language/templates/stopwords.json"
     knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
     use_graph_ontology: True  # False for in-memory
     ontology_threshold: 500   # Switch to graph DB at this size
     in_memory_cache: True  # Whether to keep in-memory cache
     cache_size: 1000
-    bias_threshold: 0.7
+    bias_threshold: 0.75
     bias_detection_enabled: True
-    embedding_model: "all-MiniLM-L6-v2"
-    stopwords: "src/agents/language/templates/stopwords.json"
+    embedding_model: "src/agents/knowledge/models/all-MiniLM-L6-v2"
+    embedding_model_path: "src/agents/knowledge/models/all-MiniLM-L6-v2"
     directory_path: "src/agents/knowledge/templates/"
-    similarity_threshold: 0.2
+    similarity_threshold: 0.35
     use_ontology_expansion: True
     first_pass: True
-    is_query: False
-    decay_factor: 0.8
-    context_window: 3
+    decay_factor: 0.95
+    context_window: 10
     knowledge_tag: "knowledge_snippet"
     ttl: 600
-    source: "broadcast_phase"
-    retrieval_mode: "dense"
+    retrieval_mode: "hybrid"
 
 language_agent: {}
 

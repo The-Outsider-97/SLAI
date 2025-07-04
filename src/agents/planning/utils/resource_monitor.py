@@ -1,12 +1,17 @@
 
 import time
+import psutil
+import GPUtil
 import requests
 import threading
 
+from typing import Any, Dict, List
 from threading import Lock
+from dataclasses import field
 from requests.exceptions import RequestException
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from src.agents.planning.utils.planning_errors import ResourceAcquisitionError
 from src.agents.planning.planning_types import ResourceProfile, ClusterResources
 from logs.logger import get_logger, PrettyPrinter
 
@@ -15,17 +20,31 @@ printer = PrettyPrinter
 
 class ResourceMonitor:
     """Real-time cluster resource tracking with failure resilience"""
-    
+    gpu_utilization: Dict[str, float] = field(default_factory=dict)
+    ram_utilization: Dict[str, float] = field(default_factory=dict)
+    cpu_utilization: Dict[str, float] = field(default_factory=dict)
+    network_utilization: Dict[str, float] = field(default_factory=dict)
+    storage_utilization: Dict[str, float] = field(default_factory=dict)
+    thermal_readings: Dict[str, float] = field(default_factory=dict)
+    power_consumption: Dict[str, float] = field(default_factory=dict)
+    hardware_status: Dict[str, str] = field(default_factory=dict)
+    resource_history: List[Dict] = field(default_factory=list)
+    alert_thresholds: Dict[str, float] = field(default_factory=dict)
+    last_update: float = field(default_factory=time.time)
+    update_interval: float = 5.0  # seconds
+
     def __init__(self):
         self._node_cache = {}  # Cache last known good states
         self.config = load_global_config()
+
         self.resource_config = get_config_section('service_discovery')
-        self.mode = self.resource_config.get('mode')
+        self.skip_localhost_http = self.resource_config.get('skip_localhost_http')
         self.static_nodes = self.resource_config.get('static_nodes')
         self.consul_url = self.resource_config.get('consul_url')
-        self.k8s_api = self.resource_config.get('k8s_api')
         self.k8s_token = self.resource_config.get('k8s_token')
         self.node_port = self.resource_config.get('node_port')
+        self.k8s_api = self.resource_config.get('k8s_api')
+        self.mode = self.resource_config.get('mode')
 
         self.cluster_resources = ClusterResources()
         self.update_interval = 5  # seconds
@@ -34,6 +53,46 @@ class ResourceMonitor:
         self._init_monitoring_thread()
         self.allocations = {}
         self.resource_graph = {}
+
+    def _init_monitoring_thread(self):
+        def monitor_loop():
+            time.sleep(0.1)  # short delay to ensure full object init
+            while True:
+                self._update_resource_map()
+                time.sleep(self.update_interval)
+
+        threading.Thread(
+            target=monitor_loop,
+            daemon=True
+        ).start()
+
+    def acquire_resources(self, requirements: ResourceProfile, task_id: str = None) -> bool:
+        """
+        Attempt to reserve resources. Returns True if successful, else raises ResourceAcquisitionError.
+        """
+        with self._lock:
+            available = self.get_available_resources()
+    
+            # Check if requested resources are available
+            if (
+                requirements.gpu > available.gpu_total or
+                requirements.ram > available.ram_total or
+                not set(requirements.specialized_hardware).issubset(set(available.specialized_hardware_available))
+            ):
+                raise ResourceAcquisitionError(f"Insufficient resources for task {task_id or 'unknown'}")
+    
+            # Perform the allocation
+            self.cluster_resources.gpu_total -= requirements.gpu
+            self.cluster_resources.ram_total -= requirements.ram
+            self.cluster_resources.specialized_hardware_available = [
+                hw for hw in self.cluster_resources.specialized_hardware_available
+                if hw not in requirements.specialized_hardware
+            ]
+    
+            if task_id:
+                self.cluster_resources.current_allocations[task_id] = requirements
+    
+            return True
 
     def get_available_resources(self) -> ClusterResources:
         """Return current available cluster resources after subtracting allocations."""
@@ -65,17 +124,41 @@ class ResourceMonitor:
         finally:
             self._lock.release()
 
-    def _init_monitoring_thread(self):
-        def monitor_loop():
-            time.sleep(0.1)  # short delay to ensure full object init
-            while True:
-                self._update_resource_map()
-                time.sleep(self.update_interval)
+    def update_metrics(self, metrics: Dict[str, Any]):
+        """Update resource metrics from monitoring system"""
+        current_time = time.time()
+        if current_time - self.last_update < self.update_interval:
+            return
+            
+        self.gpu_utilization = metrics.get('gpu', {})
+        self.ram_utilization = metrics.get('ram', {})
+        self.cpu_utilization = metrics.get('cpu', {})
+        self.network_utilization = metrics.get('network', {})
+        self.storage_utilization = metrics.get('storage', {})
+        self.thermal_readings = metrics.get('temperature', {})
+        self.power_consumption = metrics.get('power', {})
+        self.hardware_status = metrics.get('status', {})
+        self.last_update = current_time
+        
+        # Add to history
+        self.resource_history.append({
+            'timestamp': current_time,
+            'metrics': metrics
+        })
+        # Keep only last 1000 entries
+        if len(self.resource_history) > 1000:
+            self.resource_history.pop(0)
+            
+    def check_violations(self) -> List[str]:
+        """Check for resource threshold violations"""
+        violations = []
+        for resource, threshold in self.alert_thresholds.items():
+            current = getattr(self, f"{resource}_utilization", {})
+            for device, usage in current.items():
+                if usage > threshold:
+                    violations.append(f"{resource} violation on {device}: {usage:.1f} > {threshold:.1f}")
+        return violations
 
-        threading.Thread(
-            target=monitor_loop,
-            daemon=True
-        ).start()
 
     def _discover_cluster_nodes(self):
         """Discover nodes through configured service discovery backend"""
@@ -129,7 +212,11 @@ class ResourceMonitor:
                 if time.time() - cached['timestamp'] < self.update_interval * 2:
                     return cached['data']
 
-            # Make HTTP call to node's metrics endpoint
+            # Handle localhost directly without HTTP
+            if node_id == "localhost" and self.skip_localhost_http:
+                return self._get_local_resources()
+
+            # Make HTTP call for other nodes
             response = requests.get(
                 f"http://{node_id}:{self.node_port}/metrics",
                 timeout=self.node_query_timeout
@@ -156,11 +243,48 @@ class ResourceMonitor:
             return resource_data
             
         except RequestException as e:
-            logger.warning(f"Resource query failed for {node_id}: {str(e)}")
-            # Return cached data if available
-            if node_id in self._node_cache:
-                return self._node_cache[node_id]['data']
-            return None
+            if node_id == "localhost":
+                # Always fallback to local monitoring for localhost
+                logger.debug(f"Using local resource fallback for {node_id}")
+                return self._get_local_resources()
+            else:
+                logger.warning(f"Resource query failed for {node_id}: {str(e)}")
+                if node_id in self._node_cache:
+                    return self._node_cache[node_id]['data']
+                return None
+
+    def _get_local_resources(self):
+        """Comprehensive local resource monitoring with GPU support"""
+        try:
+            mem = psutil.virtual_memory()
+            gpu_count = 0
+
+            # Try to detect NVIDIA GPUs
+            try:
+                gpus = GPUtil.getGPUs()
+                gpu_count = len(gpus)
+            except ImportError:
+                pass
+
+            return {
+                'gpu_available': gpu_count,
+                'ram_available': mem.available // (1024 ** 3),
+                'specialized_hw': [],
+                'gpu_allocated': 0,
+                'ram_allocated': mem.used // (1024 ** 3),
+                'specialized_allocated': []
+            }
+        except Exception as e:
+            logger.error(f"Local resource check failed: {str(e)}")
+            # Return safe defaults
+            return {
+                'gpu_available': 1,
+                'ram_available': 16,
+                'specialized_hw': [],
+                'gpu_allocated': 0,
+                'ram_allocated': 0,
+                'specialized_allocated': []
+            }
 
     def _update_resource_map(self):
         """Thread-safe resource map update"""
@@ -195,21 +319,21 @@ class ResourceMonitor:
                 if not node_data:
                     continue
                 
-                # Update totals
-                new_resources.gpu_total += node_data['gpu_available']
-                new_resources.ram_total += node_data['ram_available']
+                # Use get() with defaults for all keys
+                new_resources.gpu_total += node_data.get('gpu_available', 0)
+                new_resources.ram_total += node_data.get('ram_available', 0)
                 
-                # Track specialized hardware
-                for hw in node_data['specialized_hw']:
+                # Handle specialized hardware safely
+                for hw in node_data.get('specialized_hw', []):
                     if hw not in seen_hardware:
                         new_resources.specialized_hardware_available.append(hw)
                         seen_hardware.add(hw)
                 
-                # Store node allocation
+                # Store node allocation with safe access
                 new_resources.current_allocations[node_id] = ResourceProfile(
-                    gpu=node_data['gpu_allocated'],
-                    ram=node_data['ram_allocated'],
-                    specialized_hardware=node_data['specialized_allocated']
+                    gpu=node_data.get('gpu_allocated', 0),
+                    ram=node_data.get('ram_allocated', 0),
+                    specialized_hardware=node_data.get('specialized_allocated', [])
                 )
             
             # Only update if significant changes occur

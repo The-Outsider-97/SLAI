@@ -151,3 +151,13 @@ class Linear(Activation):
     
     def backward(self, z: Tensor) -> Tensor:
         return torch.ones_like(z)
+
+class Softmax(Activation):
+    def __init__(self, dim: int = -1):
+        self.dim = dim
+
+    def forward(self, z: Tensor) -> Tensor:
+        return softmax_tensor(z, dim=self.dim)
+
+    def backward(self, z: Tensor) -> Tensor:
+        raise NotImplementedError("Softmax backward not implemented. Use autograd.")
