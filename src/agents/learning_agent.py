@@ -88,29 +88,29 @@ class LearningAgent(BaseAgent):
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
-        self.learning_agent_config = get_config_section('learning_agent')
+        self.learning_config = get_config_section('learning_agent')
 
-        state_dim = env.state_dim if isinstance(env, SLAIEnv) else self.learning_agent_config.get('state_dim')
+        state_dim = env.state_dim if isinstance(env, SLAIEnv) else self.learning_config.get('state_dim')
         self.rl_algorithm = self.config.get("rl_algorithm", None)
 
-        self.batch_size = self.learning_agent_config.get('batch_size', 32)
-        self.strategy_weights = np.array(self.learning_agent_config.get('strategy_weights', [0.25]*4))
-        self.prediction_weights = self.learning_agent_config.get('prediction_weights', [0.25]*4)
-        self.maml_task_pool_size = self.learning_agent_config.get('maml_task_pool_size', 100)
-        self.rsi_improvement_cycle = self.learning_agent_config.get('rsi_improvement_cycle', 50)
-        self.performance_threshold = self.learning_agent_config.get('performance_threshold', 0.7)
-        self.data_change_threshold = self.learning_agent_config.get('data_change_threshold', 0.15)
-        self.retraining_interval = timedelta(hours=self.learning_agent_config.get('retraining_interval_hours', 24))
-        self.novelty_threshold = self.learning_agent_config.get('novelty_threshold', 0.3)
-        self.uncertainty_threshold = self.learning_agent_config.get('uncertainty_threshold', 0.25)
-        self.maml_adaptation_steps = self.learning_agent_config.get('maml_adaptation_steps', 10)
+        self.batch_size = self.learning_config.get('batch_size', 32)
+        self.strategy_weights = np.array(self.learning_config.get('strategy_weights', [0.25]*4))
+        self.prediction_weights = self.learning_config.get('prediction_weights', [0.25]*4)
+        self.maml_task_pool_size = self.learning_config.get('maml_task_pool_size', 100)
+        self.rsi_improvement_cycle = self.learning_config.get('rsi_improvement_cycle', 50)
+        self.performance_threshold = self.learning_config.get('performance_threshold', 0.7)
+        self.data_change_threshold = self.learning_config.get('data_change_threshold', 0.15)
+        self.retraining_interval = timedelta(hours=self.learning_config.get('retraining_interval_hours', 24))
+        self.novelty_threshold = self.learning_config.get('novelty_threshold', 0.3)
+        self.uncertainty_threshold = self.learning_config.get('uncertainty_threshold', 0.25)
+        self.maml_adaptation_steps = self.learning_config.get('maml_adaptation_steps', 10)
         
         # Initialize buffers with config sizes
-        self.embedding_buffer = deque(maxlen=self.learning_agent_config.get('embedding_buffer_size', 512))
-        self.performance_history = deque(maxlen=self.learning_agent_config.get('performance_history_size', 1000))
-        self.state_recency = deque(maxlen=self.learning_agent_config.get('state_recency_size', 1000))
-        self.architecture_history = deque(maxlen=self.learning_agent_config.get('architecture_history_size', 10))
-        self.task_embedding_dim = self.learning_agent_config.get("task_embedding_dim", 256)
+        self.embedding_buffer = deque(maxlen=self.learning_config.get('embedding_buffer_size', 512))
+        self.performance_history = deque(maxlen=self.learning_config.get('performance_history_size', 1000))
+        self.state_recency = deque(maxlen=self.learning_config.get('state_recency_size', 1000))
+        self.architecture_history = deque(maxlen=self.learning_config.get('architecture_history_size', 10))
+        self.task_embedding_dim = self.learning_config.get("task_embedding_dim", 256)
 
         # Determine state_dim based on the env passed at initialization
         if isinstance(env, SLAIEnv) and hasattr(env, 'state_dim'):
@@ -119,13 +119,13 @@ class LearningAgent(BaseAgent):
              self.state_dim = env.observation_space.shape[0]
         else:
             # Fallback to config if env doesn't provide it directly
-            self.state_dim = self.learning_agent_config.get('state_dim', 10) # Default from config
+            self.state_dim = self.learning_config.get('state_dim', 10) # Default from config
         
         # action_dim determination
         if hasattr(env, 'action_space') and hasattr(env.action_space, 'n'):
             self.action_dim = env.action_space.n
         else:
-            self.action_dim = self.learning_agent_config.get('action_dim', 2) # Default from config
+            self.action_dim = self.learning_config.get('action_dim', 2) # Default from config
 
         # State embedding layer
         self.state_embedder = nn.Sequential(
@@ -135,7 +135,7 @@ class LearningAgent(BaseAgent):
         )
         
         # Deferred initialization config
-        deferred_config = self.learning_agent_config.get('deferred_init', {})
+        deferred_config = self.learning_config.get('deferred_init', {})
         self._config = {
             'max_network_size': deferred_config.get('max_network_size', 256),
             'max_task_pool': deferred_config.get('max_task_pool', 50),
@@ -143,7 +143,7 @@ class LearningAgent(BaseAgent):
         }
 
         # Meta-controller (self.policy_net) configuration
-        meta_controller_config = self.learning_agent_config.get('meta_controller', {})
+        meta_controller_config = self.learning_config.get('meta_controller', {})
         self.task_embedding_dim = meta_controller_config.get('task_embedding_dim', 256) # Dimension of task/state embeddings
         
         self.agent_strategies_map = {
@@ -171,7 +171,7 @@ class LearningAgent(BaseAgent):
         self.performance_metrics = {}
         self.recovery_system = RecoverySystem(learning_agent=self)
         self.strategy_selector = StrategySelector(
-            config=self.learning_agent_config,
+            config=self.learning_config,
             agent_strategies_map=self.agent_strategies_map,
             state_embedder=self.state_embedder,
             policy_net=self.policy_net,
@@ -181,7 +181,7 @@ class LearningAgent(BaseAgent):
         )
         self.learning_calculations = LearningCalculations()
         self.learning_factory = LearningFactory(
-            env=self.env,
+            env=env,
             performance_metrics=self.performance_metrics
         )
         self.state_embedder = self.strategy_selector.state_embedder
@@ -221,7 +221,7 @@ class LearningAgent(BaseAgent):
         }
         self.state_processor = StateProcessor(env)
         self.multi_task_learner = MultiTaskLearner(task_ids=self.task_ids)
-        self.architecture_history = deque(maxlen=self.learning_agent_config.get('architecture_history_size', 10))
+        self.architecture_history = deque(maxlen=self.learning_config.get('architecture_history_size', 10))
 
         self.observation_count = 0
 
@@ -1167,7 +1167,7 @@ class LearningAgent(BaseAgent):
         ).to(self.device)
         
         # Reinitialize policy network
-        hidden_dim = self.learning_agent_config.get('meta_controller', {}).get('hidden_dim', 128)
+        hidden_dim = self.learning_config.get('meta_controller', {}).get('hidden_dim', 128)
         self.policy_net = nn.Sequential(
             nn.Linear(self.task_embedding_dim, hidden_dim),
             nn.ReLU(),
@@ -1177,7 +1177,7 @@ class LearningAgent(BaseAgent):
         # Reinitialize optimizer
         self.optimizer = torch.optim.Adam(
             self.policy_net.parameters(),
-            lr=self.learning_agent_config.get('meta_controller', {}).get('learning_rate', 1e-3)
+            lr=self.learning_config.get('meta_controller', {}).get('learning_rate', 1e-3)
         )
 
     def _compute_task_loss(self, prediction, action, reward, next_state, task_id):
@@ -1866,7 +1866,7 @@ class LearningAgent(BaseAgent):
     def _calculate_learning_load(self):
         """Calculate current learning system load (0-1 scale)"""
         active_processes = sum(1 for _ in self.agents.values() if hasattr(_, 'is_training') and _.is_training)
-        max_concurrent = self.learning_agent_config.get('max_concurrent_training', 3)
+        max_concurrent = self.learning_config.get('max_concurrent_training', 3)
         return min(1.0, active_processes / max_concurrent)
     
     def _get_retraining_efficiency(self):
@@ -2096,6 +2096,65 @@ class LearningAgent(BaseAgent):
             if isinstance(self.strategy_weights, np.ndarray) 
             else self.strategy_weights
         }
+    
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts an action using the meta-controller to select the best strategy,
+        then delegates to the selected agent's prediction mechanism.
+        
+        Returns structured prediction output containing:
+            - selected_strategy: The chosen learning strategy
+            - action: The predicted action
+            - confidence: Confidence score of the prediction
+            - strategy_output: Raw output from the selected strategy agent
+        """
+        # Handle missing state
+        if state is None:
+            if hasattr(self, '_current_state'):
+                state = self._current_state
+            else:
+                logger.warning("No state provided for prediction")
+                return {
+                    "selected_strategy": "unknown",
+                    "action": 0,
+                    "confidence": 0.0,
+                    "strategy_output": None
+                }
+        
+        try:
+            # Generate state embedding
+            state_embedding = self._generate_task_embedding_(state)
+            
+            # Select best strategy using meta-controller
+            strategy = self.select_agent_strategy(state_embedding)
+            agent = self.agents.get(strategy)
+            
+            if not agent:
+                raise ValueError(f"Strategy '{strategy}' not found in agent registry")
+            
+            # Get prediction from selected agent
+            if hasattr(agent, 'predict'):
+                result = agent.predict(state)
+            elif hasattr(agent, 'get_action'):
+                result = agent.get_action(state, explore=False)
+            else:
+                result = agent.act(state) if hasattr(agent, 'act') else 0
+            
+            return {
+                "selected_strategy": strategy,
+                "action": result if isinstance(result, int) else result.get('action', 0),
+                "confidence": 1.0,  # Placeholder for actual confidence
+                "strategy_output": result
+            }
+            
+        except Exception as e:
+            logger.error(f"Prediction failed: {str(e)}")
+            return {
+                "selected_strategy": "error",
+                "action": 0,
+                "confidence": 0.0,
+                "strategy_output": None
+            }
 
 class MetaStrategyEvaluator:
     """Decides strategy weighting using meta-learning insights"""
