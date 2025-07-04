@@ -61,6 +61,9 @@ class PolicyManager:
         if not skills:
             raise ValueError("Cannot initialize PolicyManager with empty skills dictionary")
         
+        if self.state_dim <= 0:
+            raise ValueError("state_dim must be set before initializing skills")
+        
         self.skills = skills
         self.num_skills = len(skills)
         
@@ -104,9 +107,10 @@ class PolicyManager:
                 state = np.zeros(self.state_dim, dtype=np.float32)
     
         # Validate state dimensions
-        if len(state) != self.state_dim:
-            logger.warning(f"State dimension mismatch: expected {self.state_dim}, got {len(state)}")
-            state = state[:self.state_dim]  # Truncate to expected dimensions
+        if len(state) < self.state_dim:
+            state = np.pad(state, (0, self.state_dim - len(state)), 'constant')
+        elif len(state) > self.state_dim:
+            state = state[:self.state_dim]
         
         # Convert state to tensor
         state_tensor = torch.FloatTensor(state).unsqueeze(0)
