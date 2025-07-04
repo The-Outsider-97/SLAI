@@ -36,6 +36,7 @@ class AutonomousEvaluator:
     def __init__(self):
         self.config = load_global_config()
         self.eval_config = get_config_section('autonomous_evaluator')
+        self.store_results = self.eval_config.get('store_results', True)
         
         # Load specialized thresholds
         self.thresholds = self.eval_config.get('thresholds', {
@@ -66,7 +67,7 @@ class AutonomousEvaluator:
         self.task_history = []
         self.plan_graphs = []
 
-        logger.info(f"PlanningRoboticsEvaluator initialized with thresholds: {self.thresholds}")
+        logger.info(f"Autonomous Evaluator initialized with thresholds: {self.thresholds}")
 
     def evaluate_task(self, task: Dict) -> TaskMetrics:
         """
@@ -84,6 +85,22 @@ class AutonomousEvaluator:
                 data=task,
                 expected=f"Task must contain keys: {required_keys}"
             )
+        
+        # Validate task structure with defaults for missing keys
+        defaults = {
+            'completion_time': 0.0,
+            'path': [],
+            'optimal_path': [],
+            'energy_consumed': 0.0,
+            'collisions': 0,
+            'success': False
+        }
+        
+        # Apply defaults for missing keys
+        for key in defaults:
+            if key not in task:
+                task[key] = defaults[key]
+                logger.warning(f"Missing key '{key}' in task, using default value")
             
         # Calculate path metrics
         path_length = self._calculate_path_length(task['path'])
@@ -157,14 +174,17 @@ class AutonomousEvaluator:
             self.metric_weights['energy_efficiency'] * results['energy_efficiency'] +
             self.metric_weights['collision_penalty'] * results['collision_rate']
         )
+
+        min_success = self.thresholds.get('min_success_rate', 0.95)  # Default value
         
-        # Store results
+        # Store results with safe access
         if self.config.get('store_results', False):
             try:
+                priority = "high" if results['success_rate'] < min_success else "medium"
                 self.memory.add(
                     entry=results,
                     tags=["planning_evaluation", "robotics"],
-                    priority="high" if results['success_rate'] < self.thresholds['min_success_rate'] else "medium"
+                    priority=priority
                 )
             except Exception as e:
                 logger.error(f"Memory storage failed: {str(e)}")
