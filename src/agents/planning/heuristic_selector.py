@@ -285,14 +285,14 @@ class HeuristicSelector:
         
         # Make prediction
         if heuristic_name in ["RL", "UA"]:
-            prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id)
+            prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id=method_id)
         else:
             # Save current method and set to target method
             original_method = task.get("selected_method")
             task["selected_method"] = method_id
             
             # Get prediction
-            prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id)
+            prob = heuristic.predict_success_prob(task, world_state, method_stats, method_id=method_id)
             
             # Restore original method
             if original_method:
