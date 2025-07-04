@@ -71,6 +71,7 @@ class AdaptiveAgent(BaseAgent):
         self.num_actions = self.adaptive_config.get('num_actions')
         self.num_handlers = self.adaptive_config.get('num_handlers')
         self.max_episode_steps = self.adaptive_config.get('max_episode_steps')
+        self.base_learning_interval = self.adaptive_config.get("base_learning_interval", 10)
 
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -213,6 +214,7 @@ class AdaptiveAgent(BaseAgent):
     
         # Step 2: Standard episode loop
         state, info = self.env.reset()
+        state = self._validate_state(state)
         self.current_state = state
         state_dim = len(state)
         if state_dim != self.policy_manager.state_dim:
@@ -242,6 +244,7 @@ class AdaptiveAgent(BaseAgent):
 
                 # Execute action
                 next_state, reward, terminated, truncated, info = self.env.step(action)
+                next_state = self._validate_state(next_state)
                 done = terminated or truncated
                 
                 # Store experience
@@ -276,6 +279,28 @@ class AdaptiveAgent(BaseAgent):
         # End-of-episode processing
         self._end_episode()
         return self._generate_performance_report()
+
+    def _validate_state(self, state):
+        """Ensure state is a properly formatted numeric array"""
+        if isinstance(state, str):
+            logger.warning(f"Invalid string state received: '{state}'. Using zero state.")
+            return np.zeros(self.state_dim, dtype=np.float32)
+        elif not isinstance(state, np.ndarray):
+            try:
+                return np.array(state, dtype=np.float32)
+            except:
+                logger.error("Failed to convert state to array. Using zeros.")
+                return np.zeros(self.state_dim, dtype=np.float32)
+        
+        # Ensure correct shape
+        if len(state) != self.state_dim:
+            logger.warning(f"State dimension mismatch: expected {self.state_dim}, got {len(state)}")
+            return state[:self.state_dim] if len(state) > self.state_dim else np.pad(
+                state, 
+                (0, self.state_dim - len(state)), 
+                'constant'
+            )
+        return state
 
     def _end_episode(self):
         """Handle end-of-episode tasks"""
@@ -552,7 +577,7 @@ class AdaptiveAgent(BaseAgent):
         
         # Delegate task
         handler = self.agent_factory.create(
-            "evaluation", 
+            "planning", 
             self.shared_memory,
             config= {} # {'handler_id': handler_id}
         )
@@ -623,6 +648,50 @@ class AdaptiveAgent(BaseAgent):
     
         return max(avg_rewards.items(), key=lambda x: x[1])[0]
 
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts an action using the most appropriate skill and returns structured output.
+    
+        This is used in evaluation and testing, so it avoids exploration and randomness.
+    
+        Args:
+            state (Any, optional): The current environment state. If None, use self.current_state.
+    
+        Returns:
+            Dict[str, Any]: A structured prediction output containing:
+                - selected_skill
+                - action
+                - confidence_score
+                - policy_entropy
+                - log_probability
+        """
+        if state is None:
+            state = self.current_state
+        state = self._validate_state(state)
+
+        try:
+            # Select the most suitable skill using policy manager (no exploration)
+            skill_id = self.policy_manager.select_skill(state, explore=False)
+            skill = self.skills.get(skill_id)
+    
+            if skill is None:
+                raise ValueError(f"Skill {skill_id} not found in initialized skills.")
+    
+            # Select action with deterministic policy (no entropy-driven exploration)
+            action, log_prob, entropy = skill.select_action(state, explore=False)
+    
+            return {
+                "selected_skill": skill_id,
+                "action": action,
+                "confidence_score": float(torch.exp(log_prob).item()) if isinstance(log_prob, torch.Tensor) else float(log_prob),
+                "policy_entropy": float(entropy) if isinstance(entropy, (int, float)) else float(entropy.item()),
+                "log_probability": float(log_prob) if isinstance(log_prob, (int, float)) else float(log_prob.item())
+            }
+    
+        except Exception as e:
+            logger.exception(f"[Prediction Error] AdaptiveAgent failed to predict: {e}")
+            raise RuntimeError(f"AdaptiveAgent prediction failed: {str(e)}")
+
     def alternative_execute(self, task_data, original_error=None):
         """Fallback execution with environment rendering"""
         # Shape error specific handling
@@ -661,6 +730,30 @@ class AdaptiveAgent(BaseAgent):
         
         return task_data
     
+    def analyze_task(self, task):
+        """
+        Analyze an incoming task and return context dictionary.
+        """
+        return {
+            "task_name": getattr(task, "name", "unknown"),
+            "parameters": getattr(task, "parameters", {}),
+            "task_type": getattr(task, "task_type", "abstract")
+        }
+
+    def calculate_learning_interval(self) -> int:
+        """
+        Calculate adaptive learning interval based on episode reward.
+        Avoids zero or negative intervals.
+        """
+        base_interval = max(1, self.base_learning_interval)  # Ensure base is at least 1
+        if self.episode_reward < -10:
+            return max(1, base_interval // 4)
+        elif self.episode_reward < 0:
+            return max(1, base_interval // 2)
+        elif self.episode_reward > 100:
+            return base_interval * 2
+        return base_interval
+
     def supports_fail_operational(self) -> bool:
         """
         Determine whether the agent supports fail-operational capabilities.
