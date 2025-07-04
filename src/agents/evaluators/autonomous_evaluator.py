@@ -125,6 +125,22 @@ class AutonomousEvaluator:
         return metrics
 
     def evaluate_task_set(self, tasks: List[Dict]) -> Dict[str, Any]:
+        """Validate task structure before processing"""
+        validated_tasks = []
+        for task in tasks:
+            # Add missing keys with defaults
+            task.setdefault('optimal_path', [])
+            task.setdefault('path', [])
+            task.setdefault('energy_consumed', 0.0)
+            task.setdefault('collisions', 0)
+            task.setdefault('success', False)
+            validated_tasks.append(task)
+        
+        # Process validated tasks
+        return self._evaluate_valid_tasks(validated_tasks)
+    
+    def _evaluate_valid_tasks(self, tasks: List[Dict]) -> Dict[str, Any]:
+        """Actual evaluation logic"""
         """
         Evaluate a set of planning/robotics tasks
         Args:
