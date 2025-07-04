@@ -125,8 +125,12 @@ class BehavioralValidator:
             logger.error(f"Failed to load default model: {str(e)}")
             raise
 
-    def execute_test_suite(self, sut: callable) -> Dict[str, Any]:
+    def execute_test_suite(self, agent: Any) -> Dict[str, Any]:
         """Execute full test battery with enhanced tracking"""
+        # Create SUT from agent's predict method
+        def sut(scenario):
+            return agent.predict(scenario['input'])
+
         if not sut:
             raise ValidationFailureError(
                 rule_name="sut_validation",
@@ -421,7 +425,7 @@ if __name__ == "__main__":
         return "actual_output"  # Should fail the test
 
     validator = BehavioralValidator(test_cases=test_cases)
-    results = validator.execute_test_suite(sut=sample_sut)
+    results = validator.execute_test_suite(agent=sample_sut)
 
     # Generate report with actual results
     print(validator.generate_report(results))
