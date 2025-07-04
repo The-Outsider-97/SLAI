@@ -176,6 +176,9 @@ class AgentFactory:
             # Cache the newly created agent before returning it.
             self.active_agents[agent_type] = agent_instance
             
+            if not hasattr(agent_instance, 'predict'):
+                raise TypeError(f"Agent {agent_type} must implement predict() method")
+                
             return agent_instance
 
         except TypeError as e:
