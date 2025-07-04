@@ -33,6 +33,7 @@ Real-World Application:
 """
 
 import json
+import uuid
 import torch
 import copy
 import time
@@ -131,9 +132,57 @@ class ExecutionAgent(BaseAgent):
 
         self.shared_memory.set(f"agent_state:{self.name}", state)
         return state
+    
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts the next action the agent would take given the current state.
+        
+        Args:
+            state (Any, optional): The current state of the agent. If None, use the agent's current state.
+            
+        Returns:
+            Dict[str, Any]: A structured prediction containing:
+                - selected_action: The name of the action that would be taken
+                - confidence: Confidence score for the prediction
+                - context: Context used for decision-making
+                - task_progress: Current progress of the active task
+        """
+        # If state is provided, use it; otherwise gather current context
+        context = state if state is not None else self._gather_context()
+        
+        # Generate potential actions
+        potential_actions = [
+            {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
+            for name, cls in self.action_class_registry.items()
+        ]
+        
+        try:
+            # Select the best action
+            selected_action_dict = self.action_selector.select(potential_actions, context)
+            action_name = selected_action_dict.get("name")
+            
+            return {
+                "selected_action": action_name,
+                "confidence": 1.0,  # Action selector always returns highest confidence
+                "context": context,
+                "task_progress": self._calculate_task_progress(context) if self.current_task else 0.0
+            }
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return {
+                "selected_action": "idle",
+                "confidence": 0.0,
+                "context": context,
+                "task_progress": 0.0
+            }
 
     def perform_task(self, task_data: Dict) -> Dict:
         printer.status("EXECUTION", "Task Performer", "info")
+
+        # Ensure task has all required fields for scheduler
+        task_data.setdefault('id', f"{task_data.get('name', 'task')}_{str(uuid.uuid4())[:8]}")
+        task_data.setdefault('requirements', [])
+        task_data.setdefault('deadline', time.time() + 300)  # Default 5 min deadline
 
         if isinstance(task_data, str):
             try:
