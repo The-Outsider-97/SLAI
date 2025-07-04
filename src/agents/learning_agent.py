@@ -74,7 +74,7 @@ class LearningAgent(BaseAgent):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config, 
+            config=config
         )
         """
         Initialize learning subsystems with environment context
@@ -93,6 +93,7 @@ class LearningAgent(BaseAgent):
         state_dim = env.state_dim if isinstance(env, SLAIEnv) else self.learning_agent_config.get('state_dim')
         self.rl_algorithm = self.config.get("rl_algorithm", None)
 
+        self.batch_size = self.learning_agent_config.get('batch_size', 32)
         self.strategy_weights = np.array(self.learning_agent_config.get('strategy_weights', [0.25]*4))
         self.prediction_weights = self.learning_agent_config.get('prediction_weights', [0.25]*4)
         self.maml_task_pool_size = self.learning_agent_config.get('maml_task_pool_size', 100)
