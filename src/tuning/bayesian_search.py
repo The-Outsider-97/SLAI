@@ -59,8 +59,10 @@ class BayesianSearch:
         self.random_state = self.bayesian_config.get('random_state')
         self.n_initial_points = self.bayesian_config.get('n_initial_points')
         self.model_type = model_type if model_type is not None else self.bayesian_config.get('model_type', 'GradientBoosting')
-        if not self.model_type:
-            self.model_type = 'GradientBoosting'
+        if not model_type:
+            self.model_type = self.bayesian_config.get('model_type', 'GradientBoosting')
+        else:
+            self.model_type = model_type
 
         output_dir_name: str = "bayesian_search"
 
@@ -72,7 +74,7 @@ class BayesianSearch:
         self.best_score_so_far: float = np.inf # Assuming minimization; use -np.inf for maximization
         self.best_params_so_far: Optional[Dict[str, Any]] = None
 
-        self.output_dir = Path() / output_dir_name # Standardize reports location
+        self.output_dir = Path(self.bayesian_config.get('output_dir'))
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"BayesianSearch initialized. Results will be saved to: {self.output_dir.resolve()}")
 
@@ -96,8 +98,14 @@ class BayesianSearch:
                 model_params = config_data['hyperparameters'][key]
                 break
         
+        # Default handling moved HERE after model_params is defined
         if model_params is None:
-            raise ValueError(f"No hyperparameters defined for model type: {self.model_type}")
+            logger.warning(f"No hyperparameters defined for model type: {self.model_type}. Using default parameters.")
+            model_params = [
+                {"name": "p", "type": "integer", "values": [0, 1, 2, 3]},
+                {"name": "d", "type": "integer", "values": [0, 1, 2]},
+                {"name": "q", "type": "integer", "values": [0, 1, 2, 3]}
+            ]
         
         space_definitions = []
         skopt_dimensions = []

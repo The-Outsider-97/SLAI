@@ -338,6 +338,22 @@ class PgmpyBayesianNetwork:
             # Fallback or re-raise
             return 0.5 # Default to uncertain on error
 
+    def get_risk_nodes(self) -> List[str]:
+        """
+        Return a list of nodes considered as 'risk' variables based on heuristics or metadata.
+    
+        Returns:
+            List[str]: Names of nodes that are considered risk-related.
+        """
+        risk_keywords = ['risk', 'failure', 'loss', 'error', 'hazard', 'threat']
+        risk_nodes = []
+    
+        for node in self.model.nodes():
+            if any(kw in node.lower() for kw in risk_keywords):
+                risk_nodes.append(node)
+    
+        return risk_nodes
+
 if __name__ == "__main__":
     print("\n=== Running Pgmpy Bayesian Network ===\n")
     printer.status("TEST", "Starting Pgmpy Bayesian Network tests", "info")

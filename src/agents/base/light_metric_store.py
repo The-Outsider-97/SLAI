@@ -25,7 +25,7 @@ class LightMetricStore:
         self.enable_memory_tracking = self.lm_config.get('enable_memory_tracking', True)
         self.default_category = self.lm_config.get('default_category', 'default')
 
-        logger.info(f"Light Metric Store succesfully initialized with:\n{self.metrics}")
+        logger.info(f"Light Metric Store succesfully initialized")
 
     def start_tracking(self, metric_name: str, category: str = "default"):
         """Start tracking a specific operation under a category."""

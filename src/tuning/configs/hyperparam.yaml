@@ -19,76 +19,40 @@ training:
 # Hyperparameters Definition
 # ==========================
 
-#hyperparameters:
-#  - name: learning_rate
-#    type: real
-#    values: [0.0001, 0.001, 0.01, 0.05, 0.1]
-#    prior: "log-uniform"
-
-#  - name: num_layers
-#    type: integer
-#    values: [1, 3, 5, 7, 10]
-
-#  - name: batch_size
-#    type: int
-#    values: [16, 64, 128, 256, 512, 1024]
-
-#  - name: optimizer
-#    type: categorical
-#    values: ["adam", "sgd", "rmsprop"]
-
-#  - name: activation
-#    type: categorical
-#    values: ["relu", "tanh", "sigmoid"]
-
-#  - name: dropout_rate
-#    type: float
-#    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
-
-#  - name: gamma
-#    type: float
-#    values: [0.8, 0.85, 0.9, 0.95, 0.999]
-
-#  - name: "n_estimators"
-#    type: "int"
-#    values: [50, 100, 150, 200, 250, 300]
-
-#  - name: "max_depth"
-#    type: "int"
-#    values: [3, 5, 7, 10, 15] 
-
-#  - name: "regularization_strength"
-#    type: "float"
-#    values: [0.0, 0.01, 0.1, 1.0]
-
-#  - name: "use_feature_scaling" # Example of a boolean-like categorical
-#    type: "categorical"
-#    values: [True, False]
-
-#  - name: TaskA
-#    type: int
-#    values: [0, 1, 2]
-
-#  - name: TaskB
-#    type: int
-#    values: [0, 1, 2, 3]
-
 hyperparameters:
   GradientBoosting:
     - name: learning_rate
       type: real
-      values: [0.0001, 0.001, 0.01, 0.05, 0.1]
+      min: 0.0001
+      max: 0.1
       prior: "log-uniform"
+      
     - name: n_estimators
-      type: int
-      values: [50, 100, 150, 200, 250, 300]
+      type: integer
+      min: 50
+      max: 300
+      
   RandomForest:
     - name: n_estimators
-      type: int
-      values: [50, 100, 150, 200, 250, 300]
+      type: integer
+      min: 50
+      max: 300
+      
     - name: max_depth
-      type: int
-      values: [3, 5, 7, 10, 15]
+      type: integer
+      min: 3
+      max: 15
+
+  ARIMA:
+    - name: p
+      type: integer
+      values: [0, 1, 2, 3]
+    - name: d
+      type: integer
+      values: [0, 1, 2]
+    - name: q
+      type: integer
+      values: [0, 1, 2, 3]
 
 # ==========================
 # Tuning Strategy Settings
@@ -96,12 +60,12 @@ hyperparameters:
 
 tuning:
   strategy: bayesian         # options: bayesian, grid
-  n_calls: 20                # used for Bayesian
+  n_calls: 50                # used for Bayesian
   n_random_starts: 5         # used for Bayesian
   allow_generate: True
 
 bayesian_search:
-  n_calls: 20
+  n_calls: 50
   random_state: 42
   n_initial_points: 5
   model_type: "GradientBoosting"
