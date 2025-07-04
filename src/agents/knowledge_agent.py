@@ -21,6 +21,7 @@ import uuid
 import numpy as np
 import pandas as pd
 
+from transformers import AutoTokenizer
 from heapq import nlargest
 from typing import Any, Dict, List, Optional
 from collections import defaultdict, deque
@@ -39,6 +40,8 @@ from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Knowledge Agent")
 printer = PrettyPrinter
+
+_tokenizer_instance = None
 
 def cosine_sim(v1, v2):
     v1, v2 = np.array(v1), np.array(v2)
@@ -60,16 +63,19 @@ class KnowledgeAgent(BaseAgent):
             config=config
         )
         self.knowledge_agent = []
+        self.learning_agent = None
+        self.reasoning_agent = None
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
         self.knowledge_config = get_config_section('knowledge_agent')
         self.source = self.knowledge_config.get('source')
+        self.tokenize = self.knowledge_config.get('tokenize')
         self.is_query = self.knowledge_config.get('is_query')
         self.stopwords = self.knowledge_config.get('stopwords')
         self.cache_size = self.knowledge_config.get('cache_size')
         self.first_pass = self.knowledge_config.get('first_pass')
-        self.decay_factor = self.knowledge_config.get('decay_factor')
+        self._decay_factor = self.knowledge_config.get('decay_factor')
         self.knowledge_tag = self.knowledge_config.get('knowledge_tag')
         self.retrieval_mode = self.knowledge_config.get('retrieval_mode')
         self.context_window = self.knowledge_config.get('context_window')
@@ -82,6 +88,9 @@ class KnowledgeAgent(BaseAgent):
         self.bias_detection_enabled = self.knowledge_config.get('bias_detection_enabled')
         self.use_ontology_expansion = self.knowledge_config.get('use_ontology_expansion')
 
+        if not self.embedding_model:
+            logger.error("KnowledgeAgent misconfigured: 'embedding_model' is not set in config.")
+
         self.cache = KnowledgeCache()
         self.perform_action = PerformAction()
         self.ontology_manager = OntologyManager()
@@ -89,7 +98,7 @@ class KnowledgeAgent(BaseAgent):
         self.sbert_model: Optional[SentenceTransformer] = None
         self.doc_embeddings: Dict[str, np.ndarray] = {}
         self.persist_file = persist_file
-        self._initialize_sbert_model()    # Initialize the SBERT model
+        self._initialize_sbert_model()
         self.ontology = defaultdict(lambda: {'type': None, 'relations': set()})
         self.embedding_fallback = None
         self.vocabulary = set()
@@ -120,35 +129,28 @@ class KnowledgeAgent(BaseAgent):
 
         logger.info(f"Knowledge Agent Initialized with SBERT model: {self.embedding_model if self.sbert_model else 'Failed to load'}")
 
+    @property
+    def decay_factor(self):
+        return self._decay_factor
+    
+    @decay_factor.setter
+    def decay_factor(self, value):
+        self._decay_factor = value
+
     def _initialize_sbert_model(self):
-        try:
-            if isinstance(self.embedding_model, str):
-                # Check if path exists and is directory
-                if os.path.exists(self.embedding_model) and os.path.isdir(self.embedding_model):
-                    # Download model if directory is empty
-                    if not os.listdir(self.embedding_model):
-                        model_name = os.path.basename(self.embedding_model)
-                        logger.info(f"Downloading model '{model_name}' into empty directory: {self.embedding_model}")
-                        model = SentenceTransformer(model_name)
-                        model.save(self.embedding_model)
-                        self.sbert_model = model
-                    else:
-                        self.sbert_model = SentenceTransformer(self.embedding_model)
-                else:
-                    # Create directory if it doesn't exist
-                    os.makedirs(self.embedding_model, exist_ok=True)
-                    # Download model to new directory
-                    model_name = os.path.basename(self.embedding_model)
-                    logger.info(f"Downloading model '{model_name}' to new directory: {self.embedding_model}")
-                    model = SentenceTransformer(model_name)
-                    model.save(self.embedding_model)
-                    self.sbert_model = model
-            else:
-                self.sbert_model = SentenceTransformer(self.embedding_model)
-            logger.info(f"SentenceTransformer model loaded from: {self.embedding_model}")
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            self.sbert_model = None
+            """Initializes the SentenceTransformer model."""
+            try:
+                model_name_or_path = self.embedding_model
+                if not model_name_or_path:
+                    raise ValueError("Config 'embedding_model' is not set.")
+                
+                # The SentenceTransformer library handles caching and loading from a path or Hugging Face Hub automatically.
+                self.sbert_model = SentenceTransformer(model_name_or_path)
+                logger.info(f"SentenceTransformer model '{model_name_or_path}' loaded successfully.")
+    
+            except Exception as e:
+                logger.error(f"Failed to load SentenceTransformer model '{self.embedding_model}': {e}", exc_info=True)
+                self.sbert_model = None
 
     def _initialize_governance(self):
         """Conditionally create governor based on config"""
@@ -204,6 +206,57 @@ class KnowledgeAgent(BaseAgent):
     
         return len(self.knowledge_agent) - initial_count
     
+    def predict(self, state: Any = None) -> Dict[str, Any]:
+        """
+        Predicts the top knowledge result for a given query (state).
+        
+        Args:
+            state (Any, optional): The query string. Defaults to None.
+            
+        Returns:
+            Dict[str, Any]: Prediction results with keys:
+                - top_result: Text of top document
+                - confidence_score: Similarity score
+                - document_id: ID of the document
+        """
+        if state is None:
+            state = ""
+    
+        # Retrieve top result
+        results = self.retrieve(state, k=1)
+        
+        if not results:
+            return {
+                "top_result": "No results found",
+                "confidence_score": 0.0,
+                "document_id": None
+            }
+            
+        score, doc = results[0]
+        return {
+            "top_result": doc['text'],
+            "confidence_score": float(score),
+            "document_id": doc['doc_id']
+        }
+    
+    def _tokenizer(self):
+        global _tokenizer_instance
+        if _tokenizer_instance is not None:
+            return _tokenizer_instance
+    
+        try:
+            model_path = self.embedding_model_path or self.embedding_model
+    
+            if not model_path or not os.path.exists(model_path):
+                raise FileNotFoundError(f"Tokenizer path not found: {model_path}")
+    
+            _tokenizer_instance = AutoTokenizer.from_pretrained(model_path)
+            return _tokenizer_instance
+    
+        except Exception as e:
+            logger.error(f"Failed to load tokenizer: {e}")
+            return None
+    
     def retrieve_documents_by_type(self, doc_type: str) -> List[Dict]:
         return [
             json.loads(doc["text"]) for doc in self.knowledge_agent
@@ -212,46 +265,21 @@ class KnowledgeAgent(BaseAgent):
 
     def add_document(self, text, doc_id=None, metadata=None):
         """Store documents, generate TF-IDF, and dense embeddings."""
-        if self.sbert_model is not None:  # Check if model is actually loaded
-            try:
-                embedding = self.sbert_model.encode(text, show_progress_bar=False)
-                self.doc_embeddings[doc_id] = embedding
-            except Exception as e:
-                logger.error(f"Error generating embedding: {e}")
-        else:
-            logger.warning("SBERT model unavailable - skipping embedding")
+        doc_id = doc_id or str(uuid.uuid4())
 
         if isinstance(text, tuple) and len(text) == 3:
             self.ontology_manager.add_triple(*text)
-            self.add_to_ontology(*text) # Local ontology cache update
+            self.add_to_ontology(*text)
             return
         if not isinstance(text, str) or len(text.strip()) < 3:
             logger.warning(f"Document text too short or not a string: '{text}'")
-            # raise ValueError("Document text must be non-empty string of at least 3 chars") # Or just return
             return
 
-        # Use a UUID for doc_id if not provided, ensuring uniqueness better than hash(text)
-        doc_id = doc_id or str(uuid.uuid4())
-
-        if doc_id in self.doc_embeddings: # Check against dense embeddings store
+        # Check for existence AFTER initial processing and ID generation.
+        # This prevents duplicate processing.
+        if doc_id in self.doc_tf_idf_vectors:
             logger.warning(f"Document ID {doc_id} already exists. Skipping.")
-            # raise KeyError(f"Document ID {doc_id} already exists") # Or just return
             return
-
-        # Bias detection
-        if self.bias_detection_enabled and self.governor:
-            bias_metadata = self._detect_bias_metadata(text)
-            if metadata is None:
-                metadata = {}
-            metadata['bias'] = bias_metadata
-
-        tokens = self._preprocess(text)
-        self.knowledge_agent.append({ # Store in the list of document details
-            'doc_id': doc_id,
-            'text': text,
-            'tokens': tokens,
-            'metadata': metadata or {}
-        })
 
         # --- Dense Embedding Generation ---
         if self.sbert_model:
@@ -263,20 +291,37 @@ class KnowledgeAgent(BaseAgent):
         else:
             logger.warning(f"SBERT model not available. Cannot generate dense embedding for doc_id {doc_id}.")
 
-        # --- TF-IDF Vector Generation (can be optional or for hybrid) ---
-        # Step 1: Update vocabulary and DF BEFORE TF-IDF vectorization
+        # Bias detection
+        if self.bias_detection_enabled and self.governor:
+            bias_metadata = self._detect_bias_metadata(text)
+            if metadata is None:
+                metadata = {}
+            metadata['bias'] = bias_metadata
+
+        tokens = self._preprocess(text)
+        self.knowledge_agent.append({
+            'doc_id': doc_id,
+            'text': text,
+            'tokens': tokens,
+            'metadata': metadata or {}
+        })
+
+        # --- TF-IDF Vector Generation ---
         unique_tokens = set(tokens)
         for token in unique_tokens:
             self.document_frequency[token] += 1
-        self.vocabulary.update(unique_tokens) # Global vocabulary for TF-IDF
+        self.vocabulary.update(unique_tokens)
         self.total_documents += 1
 
-        # Step 2: Now compute TF-IDF vector with the updated global vocabulary
         tf_idf_vector_dict = self._calculate_tfidf(tokens)
         self.doc_tf_idf_vectors[doc_id] = tf_idf_vector_dict
-        # No need to convert to numpy array here for TF-IDF if using dicts for sparse representation
-
+        
         logger.debug(f"Added document {doc_id}. Total docs: {self.total_documents}. Vocab size: {len(self.vocabulary)}")
+        
+    def attach_reasoning(self, reasoning_agent):
+        """Connect ReasoningAgent to KnowledgeAgent"""
+        self.reasoning_agent = reasoning_agent
+        logger.info("Reasoning agent attached to KnowledgeAgent")
 
     def add_to_ontology(self, subject: str, predicate: str, obj: str):
         self.ontology[subject]['relations'].add((predicate, obj))
@@ -294,6 +339,17 @@ class KnowledgeAgent(BaseAgent):
             "confidence": self.governor._detect_unethical_content(text),
             "categories": self.governor._detect_bias(text)
         }
+    
+    def fetch_web_content(self, url: str) -> str:
+        """Fetch web content from URL"""
+        try:
+            import requests
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            logger.error(f"Web retrieval failed: {str(e)}")
+            return ""
 
     def retrieve(self, query, k=5):
         cache_key = hashlib.sha256(query.encode()).hexdigest()
@@ -778,52 +834,53 @@ class KnowledgeAgent(BaseAgent):
         return broadcast_keys
 
     def discover_rules(self) -> list:
-        """
-        Discover and retrieve governance-approved rules inferred from the agent's knowledge and memory.
-    
-        Returns:
-            list: A list of enriched and governance-filtered rule dictionaries.
-        """
-        if not hasattr(self, 'governor') or not self.governor:
-            logger.warning("Governor not initialized; cannot discover rules.")
-            return []
-    
-        logger.info("Discovering rules using governance subsystem...")
-    
+        """Discover and retrieve governance-approved rules"""
+        # Try to get rules from Governor first
+        if self.governor:
+            try:
+                raw_rules = self.governor.get_approved_rules()
+                logger.info(f"Discovered {len(raw_rules)} rules via Governor")
+                return self._process_rules(raw_rules)
+            except Exception as e:
+                logger.error(f"Governor rule discovery failed: {e}")
+        
+        # Fallback to direct rule engine access
         try:
-            raw_rules = self.governor.get_approved_rules()
+            rules = self.governor.rule_engine.get_rules_by_category("governance_approved")
+            logger.info(f"Discovered {len(rules)} rules directly from RuleEngine")
+            return self._process_rules(rules)
         except Exception as e:
-            logger.error(f"Error retrieving approved rules: {e}", exc_info=True)
+            logger.error(f"Direct rule discovery failed: {e}")
             return []
     
-        # Internally use static thresholds/configs (you can refactor later to load from file or memory)
+    def _process_rules(self, raw_rules: list) -> list:
+        """Process and filter raw rules"""
         min_confidence = 0.7
-        include_confidence = True
-        annotate = True
-    
         processed_rules = []
+        
         for rule in raw_rules:
             if not isinstance(rule, dict):
-                logger.warning(f"Invalid rule format: {rule}")
                 continue
-    
+                
             confidence = rule.get("confidence", 1.0)
-            if include_confidence and confidence < min_confidence:
+            if confidence < min_confidence:
                 continue
-    
-            enriched_rule = dict(rule)  # safe copy
-            if annotate:
+                
+            # Add metadata if available
+            rule_id = rule.get("id")
+            if rule_id:
                 try:
-                    memory_matches = self.recall_memory(filters={"type": "system_rule", "id": rule.get("id")})
+                    memory_matches = self.recall_memory(
+                        filters={"type": "system_rule", "id": rule_id}
+                    )
                     if memory_matches:
                         _, metadata = memory_matches[0]
-                        enriched_rule["metadata"] = metadata
+                        rule["metadata"] = metadata
                 except Exception as e:
-                    logger.warning(f"Failed to annotate rule {rule.get('id')}: {e}")
-    
-            processed_rules.append(enriched_rule)
-    
-        logger.info(f"Discovered {len(processed_rules)} governance-compliant rules.")
+                    logger.warning(f"Failed to annotate rule {rule_id}: {e}")
+            
+            processed_rules.append(rule)
+        
         return processed_rules
     
     def respond_to_query(self, query):
@@ -988,6 +1045,11 @@ class KnowledgeAgent(BaseAgent):
         np_vec2 = np.array([vec2_dict.get(term, 0.0) for term in all_terms])
         
         return cosine_sim(np_vec1, np_vec2)
+    
+    def attach_learning(self, learning_agent):
+        """Connect LearningAgent to KnowledgeAgent"""
+        self.learning_agent = learning_agent
+        logger.info("Learning agent attached to KnowledgeAgent")
 
 if __name__ == "__main__":
     print("\n=== Running Knopwledge Agent ===\n")
