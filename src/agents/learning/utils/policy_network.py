@@ -167,10 +167,15 @@ class PolicyNetwork(torch.nn.Module):
         if not self.pn_config:
             logger.warning("PolicyNetwork configuration not found. Using defaults.")
 
-        if action_size <= 0:
-            raise ValueError(f"action_size must be positive, got {action_size}")    
+        hidden_layer_sizes = self.pn_config.get('hidden_layer_sizes', [128, 64])
 
-        hidden_layer_sizes = self.pn_config.get('hidden_layer_sizes', [128, 64]) # Default architecture
+        if action_size <= 0:
+            raise ValueError(f"action_size must be positive, got {action_size}")
+        if state_size <= 0:
+            raise ValueError(f"state_size must be positive, got {state_size}")
+        if any(dim <= 0 for dim in hidden_layer_sizes):
+            raise ValueError("All hidden_layer_sizes must be positive")
+
         self.layer_dims = [state_size] + hidden_layer_sizes + [action_size]
         self.num_layers = len(self.layer_dims) - 1
 
