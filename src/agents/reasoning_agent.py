@@ -1122,6 +1122,32 @@ class ReasoningAgent(BaseAgent, nn.Module):
         logger.info(f"[GDPR] Removed {len(to_remove)} facts related to subject: {subject}")
         return len(to_remove)
     
+    def get_key_terms(self, text: str) -> List[str]:
+        """
+        Extract key terms from text using NLU capabilities
+        
+        Args:
+            text: Input text to analyze
+            
+        Returns:
+            List of key terms (nouns and named entities)
+        """
+        try:
+            # Parse text with NLU engine
+            frame = self.nlu_engine.parse(text)
+            
+            # Extract nouns and named entities
+            key_terms = []
+            for token in frame.tokens:
+                if token.ner_tag or token.pos in ["NOUN", "PROPN"]:
+                    key_terms.append(token.lemma)
+            
+            return list(set(key_terms))
+        except Exception as e:
+            logger.error(f"Key term extraction failed: {str(e)}")
+            # Fallback: simple word extraction
+            return [word for word in re.findall(r'\w+', text) if len(word) > 3]
+    
     def forget_memory_keys(self, key_prefix: str):
         """
         Remove all shared memory keys starting with a specific prefix.
