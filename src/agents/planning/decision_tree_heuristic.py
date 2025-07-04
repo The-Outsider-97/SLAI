@@ -93,7 +93,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
             base_features.append('priority_weight')
         return base_features
 
-    def predict_success_prob(self, task, world_state, method_stats):
+    def predict_success_prob(self, task, world_state, method_stats, **kwargs):
         """Predict with confidence and resource checks"""
         printer.status("INIT", "Success prob predictor succesfully initialized", "info")
 
