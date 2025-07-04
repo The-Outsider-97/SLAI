@@ -1004,6 +1004,10 @@ class BaseAgent(abc.ABC):
             self.logger.error(f"[{self.name}] Error in 'update_projection': {e}")
             self.logger.debug(traceback.format_exc())
 
+    def broadcast(self, key: str, value: Any):
+        """Broadcast to shared memory"""
+        self.shared_memory.set(key, value)
+
 class RetrainingManager:
     """
     Manages the retraining process for an agent based on flags in shared memory
