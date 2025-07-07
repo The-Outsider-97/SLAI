@@ -382,7 +382,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         """Run Bayesian learning with agent-specific context"""
         self.probabilistic_models.run_bayesian_learning_cycle(
             observations,
-            context=self.get_current_context()
+            # context=self.get_current_context()
         )
 
     def get_current_context(self) -> List[str]:
