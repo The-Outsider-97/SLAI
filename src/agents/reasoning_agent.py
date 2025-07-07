@@ -15,7 +15,6 @@ Real-World Usage:
 3. Content Moderation: Identify contradictory claims in user-generated content.
 4. Financial Fraud Detection: Flag transactional contradictions (e.g., "purchases" in two countries simultaneously).
 5. AI Tutoring Systems: Check student answers against domain knowledge (e.g., physics/math rules).
-
 """
 
 import json
