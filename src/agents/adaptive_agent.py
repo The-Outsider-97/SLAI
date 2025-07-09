@@ -33,7 +33,7 @@ import torch.nn.functional as F
 import statsmodels.formula.api as smf
 
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 from collections import defaultdict, deque
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
@@ -98,6 +98,7 @@ class AdaptiveAgent(BaseAgent):
             state_dim=self.state_dim,
             policy_network=self.rl_engine.actor_critic.actor
         )
+        
         self._connect_imitation_learning()
         self._connect_meta_learning()
 
@@ -122,7 +123,15 @@ class AdaptiveAgent(BaseAgent):
         skills_config = self.adaptive_config.get('skills', {})
         skills = {}
         for skill_id, skill_meta in skills_config.items():
-            skills[skill_id] = SkillWorker.create_worker(skill_id, skill_meta)
+            # Ensure all skills use the agent's state_dim
+            skills[skill_id] = SkillWorker.create_worker(
+                skill_id, 
+                {
+                    **skill_meta,
+                    'state_dim': self.state_dim
+                }
+            )
+            logger.debug(f"Initialized skill {skill_id} with state_dim={self.state_dim}")
         return skills
 
     def _create_fallback_skill(self) -> Dict[int, SkillWorker]:
@@ -579,6 +588,7 @@ class AdaptiveAgent(BaseAgent):
         handler = self.agent_factory.create(
             "planning", 
             self.shared_memory,
+            env=self.env,
             config= {} # {'handler_id': handler_id}
         )
         result = handler.execute(task_description)
@@ -754,6 +764,41 @@ class AdaptiveAgent(BaseAgent):
             return base_interval * 2
         return base_interval
 
+    def register_utility(self, name: str, utility: Any) -> None:
+        """
+        Register a utility object (e.g., map, database) by name.
+        These utilities can be accessed later during agent operations.
+
+        Args:
+            name: Unique identifier for the utility
+            utility: The utility object to store
+        """
+        if not hasattr(self, '_utilities'):
+            self._utilities = {}
+        self._utilities[name] = utility
+        logger.debug(f"Registered utility '{name}'")
+
+    def register_callback(self, event_name: str, callback: Callable) -> None:
+        """
+        Register a callback function for a specific event.
+        The callback will be triggered when the event occurs.
+
+        Args:
+            event_name: Name of the event to handle
+            callback: Function to call when event occurs
+        """
+        if not hasattr(self, '_callbacks'):
+            self._callbacks = defaultdict(list)
+        self._callbacks[event_name].append(callback)
+        logger.debug(f"Registered callback for event '{event_name}'")
+
+    def connect_planner(self, planner: Any) -> None:
+        """
+        Connect to a planning agent for coordination
+        """
+        self.planner = planner
+        logger.info(f"Connected to planning agent: {type(planner).__name__}")
+
     def supports_fail_operational(self) -> bool:
         """
         Determine whether the agent supports fail-operational capabilities.
@@ -829,7 +874,7 @@ class AdaptiveAgent(BaseAgent):
     
     def log_evaluation_result(self, metrics):
         return metrics
-    
+
 if __name__ == "__main__":
     print("\n=== Running Adaptive Agent ===\n")
     printer.status("TEST", "Starting Adaptive Agent tests", "info")
