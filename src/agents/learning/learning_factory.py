@@ -26,12 +26,12 @@ class LearningFactory:
             raise ValueError("LearningFactory requires valid environment with observation_space and action_space")
         self.env = env
         self.performance_metrics = {}
+        self.state_dim = env.observation_space.shape[0]
         self.config = load_global_config()
         self.factory_config = get_config_section('evolutionary')
-        
-        # Load parameters from config
         self.mutation_rate = self.factory_config.get('mutation_rate')
         self.top_k = self.factory_config.get('top_k')
+        self.action_dim = self.factory_config.get('action_dim', 101)
 
         self.learning_memory = LearningMemory()
         self.model_id = "Learning_Factory"
