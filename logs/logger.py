@@ -22,15 +22,86 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.utils.system_optimizer import SystemOptimizer
 
+sys.stdout.isatty = lambda: True
+
 if os.name == 'nt':
     os.system("")
 
-sys.stdout.isatty = lambda: True
 
 log_dir = "logs"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir, exist_ok=True)
     os.chmod(log_dir, 0o755)  # Read/write for owner, read for others
+
+# ========== Status Tags ==========
+INIT       = "[INIT]"
+START      = "[START]"
+STOP       = "[STOP]"
+RESTART    = "[RESTART]"
+RUNNING    = "[RUNNING]"
+IDLE       = "[IDLE]"
+SLEEP      = "[SLEEP]"
+PAUSE      = "[PAUSE]"
+RESUME     = "[RESUME]"
+DONE       = "[DONE]"
+COMPLETE   = "[COMPLETE]"
+
+# ========== Information Tags ==========
+INFO       = "[INFO]"
+STATUS     = "[STATUS]"
+REFRESH    = "[REFRESH]"
+UPDATE     = "[UPDATE]"
+SYNC       = "[SYNC]"
+LOAD       = "[LOAD]"
+SAVE       = "[SAVE]"
+CONFIG     = "[CONFIG]"
+CACHE      = "[CACHE]"
+DATA       = "[DATA]"
+ENV        = "[ENV]"
+
+# ========== Web/Network Tags ==========
+WEB        = "[WEB]"
+FETCH      = "[FETCH]"
+API        = "[API]"
+REQUEST    = "[REQ]"
+RESPONSE   = "[RESP]"
+CONNECT    = "[CONNECT]"
+DISCONNECT = "[DISCONNECT]"
+
+# ========== Learning & Agents ==========
+LEARN      = "[LEARN]"
+TRAIN      = "[TRAIN]"
+INFER      = "[INFER]"
+AGENT      = "[AGENT]"
+MEMORY     = "[MEM]"
+TASK       = "[TASK]"
+TRIGGER    = "[TRIGGER]"
+CYCLE      = "[CYCLE]"
+EVAL       = "[EVAL]"
+
+# ========== Debugging & Performance ==========
+DEBUG      = "[DEBUG]"
+TRACE      = "[TRACE]"
+PERF       = "[PERF]"
+SPEED      = "[SPEED]"
+METRIC     = "[METRIC]"
+SCORE      = "[SCORE]"
+
+# ========== Result Tags ==========
+SUCCESS    = "[OK]"
+FAILURE    = "[FAIL]"
+ERROR      = "[ERROR]"
+WARN       = "[WARN]"
+EXCEPTION  = "[EXCEPTION]"
+TIMEOUT    = "[TIMEOUT]"
+
+# ========== Misc ==========
+USER       = "[USER]"
+AUTH       = "[AUTH]"
+SECURE     = "[SECURE]"
+RETRY      = "[RETRY]"
+SKIP       = "[SKIP]"
+EVENT      = "[EVENT]"
 
 COLOR_CODES = {
     'RESET': "\033[0m",
