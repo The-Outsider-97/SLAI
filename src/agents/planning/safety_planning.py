@@ -980,6 +980,8 @@ class SafetyPlanning:
                         continue  # Skip the failed method
                     
                     subtasks = failed_task.get_subtasks(method_idx)
+                    for subtask in subtasks:
+                        self._reset_temporal_attributes(subtask)
                     repair_plan = self._create_repair_plan(failed_task, subtasks)
                     
                     candidates.append(RepairCandidate(
