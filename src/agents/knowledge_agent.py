@@ -62,6 +62,7 @@ class KnowledgeAgent(BaseAgent):
             agent_factory=agent_factory,
             config=config
         )
+        self.cache = None
         self.knowledge_agent = []
         self.learning_agent = None
         self.reasoning_agent = None
@@ -83,7 +84,6 @@ class KnowledgeAgent(BaseAgent):
         self.directory_path = self.knowledge_config.get('directory_path')
         self.embedding_model = self.knowledge_config.get('embedding_model')
         self.use_graph_ontology = self.knowledge_config.get('use_graph_ontology')
-        self.embedding_model_path = self.knowledge_config.get('embedding_model_path')
         self.similarity_threshold = self.knowledge_config.get('similarity_threshold')
         self.bias_detection_enabled = self.knowledge_config.get('bias_detection_enabled')
         self.use_ontology_expansion = self.knowledge_config.get('use_ontology_expansion')
@@ -91,7 +91,7 @@ class KnowledgeAgent(BaseAgent):
         if not self.embedding_model:
             logger.error("KnowledgeAgent misconfigured: 'embedding_model' is not set in config.")
 
-        self.cache = KnowledgeCache()
+        self.knowledge_cache = KnowledgeCache()
         self.perform_action = PerformAction()
         self.ontology_manager = OntologyManager()
 
@@ -103,6 +103,7 @@ class KnowledgeAgent(BaseAgent):
         self.embedding_fallback = None
         self.vocabulary = set()
         self.document_frequency = defaultdict(int)
+        self.safety_check_callback = None
         self.total_documents = 0
         self.doc_vectors = {}
         self.doc_tf_idf_vectors = {}
@@ -138,18 +139,44 @@ class KnowledgeAgent(BaseAgent):
         self._decay_factor = value
 
     def _initialize_sbert_model(self):
-            """Initializes the SentenceTransformer model."""
-            try:
-                model_name_or_path = self.embedding_model
-                if not model_name_or_path:
-                    raise ValueError("Config 'embedding_model' is not set.")
-                
-                # The SentenceTransformer library handles caching and loading from a path or Hugging Face Hub automatically.
-                self.sbert_model = SentenceTransformer(model_name_or_path)
-                logger.info(f"SentenceTransformer model '{model_name_or_path}' loaded successfully.")
+        """Initializes the SentenceTransformer model with robust error handling."""
+        try:
+            # Get model path from config with fallback
+            model_path = self.embedding_model or "sentence-transformers/all-MiniLM-L6-v2"
+            
+            if not model_path:
+                logger.error("SBERT initialization failed: No embedding_model configured")
+                self.sbert_model = None
+                return
     
-            except Exception as e:
-                logger.error(f"Failed to load SentenceTransformer model '{self.embedding_model}': {e}", exc_info=True)
+            # Check if path is valid
+            is_local_path = os.path.exists(model_path)
+            
+            # Log model source
+            source_type = "local" if is_local_path else "Hugging Face Hub"
+            logger.info(f"Loading SBERT model from {source_type}: {model_path}")
+            
+            # Load model with timeout
+            self.sbert_model = SentenceTransformer(
+                model_path, 
+                device='cpu',  # Ensures compatibility
+                cache_folder="src/agents/knowledge/models/cache"
+            )
+            logger.info(f"SBERT model loaded successfully. Embedding dimension: {self.sbert_model.get_sentence_embedding_dimension()}")
+            
+        except Exception as e:
+            logger.error(f"SBERT initialization failed: {str(e)}")
+            logger.info("Attempting fallback to default model")
+            
+            try:
+                # Fallback to lightweight model
+                self.sbert_model = SentenceTransformer(
+                    "sentence-transformers/all-MiniLM-L6-v2",
+                    device='cpu'
+                )
+                logger.warning("Using fallback SBERT model: sentence-transformers/all-MiniLM-L6-v2")
+            except Exception as fallback_error:
+                logger.critical(f"Fallback model failed: {str(fallback_error)}")
                 self.sbert_model = None
 
     def _initialize_governance(self):
@@ -245,7 +272,7 @@ class KnowledgeAgent(BaseAgent):
             return _tokenizer_instance
     
         try:
-            model_path = self.embedding_model_path or self.embedding_model
+            model_path = self.embedding_model
     
             if not model_path or not os.path.exists(model_path):
                 raise FileNotFoundError(f"Tokenizer path not found: {model_path}")
@@ -315,6 +342,16 @@ class KnowledgeAgent(BaseAgent):
 
         tf_idf_vector_dict = self._calculate_tfidf(tokens)
         self.doc_tf_idf_vectors[doc_id] = tf_idf_vector_dict
+
+        # Safety validation before adding document
+        if self.safety_check_callback:
+            validation = self._validate_with_safety(
+                {"operation": "add_document", "content": text[:500]},
+                {"source": "knowledge_agent"}
+            )
+            if not validation:
+                logger.warning("Document addition blocked by safety check")
+                return  # Skip adding document
         
         logger.debug(f"Added document {doc_id}. Total docs: {self.total_documents}. Vocab size: {len(self.vocabulary)}")
         
@@ -354,9 +391,9 @@ class KnowledgeAgent(BaseAgent):
     def retrieve(self, query, k=5):
         cache_key = hashlib.sha256(query.encode()).hexdigest()
         start_time = time.time()
-        cache_hit = self.cache.get(cache_key) is not None
+        cache_hit = self.knowledge_cache.get(cache_key) is not None
 
-        cached_result = self.cache.get(cache_key)
+        cached_result = self.knowledge_cache.get(cache_key)
         if cached_result is not None:
             self.performance_metrics['cache_hits'].append(1)
             self.performance_metrics['retrieval_times'].append(time.time() - start_time)
@@ -390,9 +427,9 @@ class KnowledgeAgent(BaseAgent):
                 similarities.append((similarity, doc))
 
         results = nlargest(k, similarities, key=lambda x: x[0])
-        if len(self.cache) > self.cache_size:
-            self.cache.popitem()
-        self.cache.set(cache_key, results)
+        if len(self.knowledge_cache) > self.cache_size:
+            self.knowledge_cache.popitem()
+        self.knowledge_cache.set(cache_key, results)
 
         self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in results])
     
@@ -496,7 +533,7 @@ class KnowledgeAgent(BaseAgent):
             final_k_results = self._apply_bias_analysis(final_k_results)
 
         serializable_results = [(float(score), doc) for score, doc in final_k_results]
-        self.cache.set(cache_key, serializable_results)
+        self.knowledge_cache.set(cache_key, serializable_results)
         self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in final_k_results])
         self.performance_metrics['retrieval_times'].append(time.time() - start_time)
         
@@ -1045,6 +1082,52 @@ class KnowledgeAgent(BaseAgent):
         np_vec2 = np.array([vec2_dict.get(term, 0.0) for term in all_terms])
         
         return cosine_sim(np_vec1, np_vec2)
+    
+    def _validate_with_safety(self, action_params: Dict, context: Optional[Dict] = None) -> bool:
+        """
+        Executes registered safety validation if available
+        
+        Returns:
+            True if approved, False if rejected or no callback registered
+        """
+        if not self.safety_check_callback:
+            return True  # Default approve if no callback
+        
+        try:
+            result = self.safety_check_callback(action_params, context or {})
+            return result.get('approved', False)
+        except Exception as e:
+            logger.error(f"Safety validation failed: {str(e)}")
+            return False  # Reject on failure
+    
+    def register_safety_check(self, safety_check_callback: callable):
+        """
+        Registers a safety validation callback that can be used to validate 
+        knowledge operations. This provides a flexible hook for security validation.
+        
+        Args:
+            safety_check_callback: Function with signature:
+                (action_params: Dict, action_context: Optional[Dict]) -> Dict
+                Must return a dict with at least 'approved' (bool) key
+        """
+        if not callable(safety_check_callback):
+            logger.error("Safety check callback must be callable")
+            raise TypeError("Safety callback must be callable")
+        
+        # Validate callback signature
+        try:
+            test_result = safety_check_callback(
+                {"action": "test_validation"},
+                {"context": "signature_verification"}
+            )
+            if not isinstance(test_result, dict) or 'approved' not in test_result:
+                raise ValueError("Callback must return dict with 'approved' key")
+        except Exception as e:
+            logger.error(f"Safety callback validation failed: {str(e)}")
+            raise
+        
+        self.safety_check_callback = safety_check_callback
+        logger.info("Safety validation callback registered successfully")
     
     def attach_learning(self, learning_agent):
         """Connect LearningAgent to KnowledgeAgent"""
