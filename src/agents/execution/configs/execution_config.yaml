@@ -1,4 +1,5 @@
 
+max_retries: 3
 
 base_action: {}
 
@@ -35,6 +36,18 @@ task_coordinator:
 
 execution_manager:
   energy_level: 100.0
+
+execution_recovery:
+  max_failure_history: 100
+  recovery_idle_time: 5.0
+  sensitive_keys: ["password", "token"]
+
+execution_validator:
+  default_mode: "preflight"
+  default_level: "strict"
+  max_object_distance: 5.0
+  min_energy_threshold: 2.0
+  position_tolerance: 0.5
 
 execution_memory:
   cache_dir: "src/agents/execution/cache/"
