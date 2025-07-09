@@ -8,9 +8,6 @@ from typing import Dict, List, Any, Callable, Optional
 
 from src.agents.execution.utils.config_loader import load_global_config, get_config_section
 from src.agents.execution.execution_memory import ExecutionMemory
-from src.agents.execution.actions.move_to import MoveToAction
-from src.agents.execution.actions.pick_object import PickObjectAction
-from src.agents.execution.actions.idle import IdleAction
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Action Selector")
@@ -27,18 +24,23 @@ class ActionSelector:
         # Load action-specific configurations
         self.move_config = get_config_section("move_to_action")
         self.pick_config = get_config_section("pick_object_action")
+        self.place_config = get_config_section("place_object_action")
         self.idle_config = get_config_section("idle_action")
 
         # Register available action types
         self.action_registry = {
             "move_to": {
                 "preconditions": ["has_destination"],
-                "postconditions": ["at_destination"]
+                "postconditions": ["at_destination"],
             },
             "pick_object": {
                 "preconditions": ["object_detected", "hand_empty"],
-                "postconditions": ["holding_object"]
+                "postconditions": ["holding_object"],
             },
+            "place_object": {
+                "preconditions": ["holding_object"],
+                "postconditions": ["hand_empty", "object_placed"],
+             },
             "idle": {
                 "preconditions": [],
                 "postconditions": ["has_rested"]
@@ -62,6 +64,10 @@ class ActionSelector:
         Select the best action from a list with context awareness.
         Each action should contain: 'name', 'priority', 'preconditions', etc.
         """
+        if not context:
+            context = {"energy": 10.0, "max_energy": 10.0}  # Default context
+            logger.warning("Using fallback context for action selection")
+
         if not actions:
             logger.warning("No actions available for selection")
             return self._create_fallback_action(context)
@@ -95,17 +101,14 @@ class ActionSelector:
         valid_actions = []
         for action in actions:
             action_name = action.get("name")
-            preconditions = action.get("preconditions", [])
+            preconditions = self.action_registry.get(action_name, {}).get("preconditions", [])
             
-            if action_name in self.action_registry:
-                # Use registered preconditions if available
-                preconditions = self.action_registry[action_name].get("preconditions", [])
+            # If no registered preconditions, use action's own
+            if not preconditions:
+                preconditions = action.get("preconditions", [])
             
             if self._check_preconditions(preconditions, context):
                 valid_actions.append(action)
-            else:
-                logger.debug(f"Action {action_name} filtered due to unmet preconditions")
-        
         return valid_actions
 
     def _check_preconditions(self, preconditions: List[str], context: Dict) -> bool:
@@ -134,12 +137,18 @@ class ActionSelector:
         dest_distance = context.get("destination_distance", float('inf'))
         object_near = context.get("object_nearby", False)
         carrying_items = context.get("carrying_items", 0)
+        holding_object = context.get("holding_object", False)
         
         # Decision logic
         if energy_ratio < 0.3:
             logger.debug("Low energy - prioritizing conservation")
             return self._find_action_by_name(actions, "idle") or actions[0]
-        
+
+        # If holding an object and at the destination, placing it is high priority
+        if holding_object and dest_distance < 2.0 and self._find_action_by_name(actions, "place_object"):
+            logger.debug("At destination while holding object - prioritizing place")
+            return self._find_action_by_name(actions, "place_object")
+
         if dest_distance < 2.0 and self._find_action_by_name(actions, "move_to"):
             logger.debug("Close to destination - prioritizing movement")
             return self._find_action_by_name(actions, "move_to")
@@ -306,9 +315,42 @@ class ActionSelector:
         else:
             # Simple goal-action mapping
             goal_actions = {
+                # Navigation goals
                 "navigate": "move_to",
+                "move": "move_to",
+                "travel_to": "move_to",
+                "approach": "move_to",
+            
+                # Object collection goals
                 "collect": "pick_object",
-                "rest": "idle"
+                "pickup": "pick_object",
+                "gather": "pick_object",
+                "retrieve": "pick_object",
+                "grab": "pick_object",
+            
+                # Object placement goals
+                "deposit": "place_object",
+                "place": "place_object",
+                "drop": "place_object",
+                "deliver": "place_object",
+                "store": "place_object",
+            
+                # Rest and idle-related
+                "rest": "idle",
+                "wait": "idle",
+                "recover": "idle",
+                "pause": "idle",
+                "recharge": "idle",
+            
+                # Composite or abstract intent
+                "deliver_package": ["move_to", "pick_object", "move_to", "place_object"],
+                "relocate_object": ["pick_object", "move_to", "place_object"],
+                "reposition": ["pick_object", "move_to", "place_object"],
+                "reset": "idle",
+            
+                # Optional: diagnostic/testing/neutral actions
+                "do_nothing": "idle",
+                "standby": "idle"
             }
             relevance = 1.0 if action_name == goal_actions.get(goal_type, "") else 0.3
         
@@ -325,6 +367,7 @@ class ActionSelector:
         base_costs = {
             "move_to": self.move_config.get("energy_cost", 0.05),
             "pick_object": self.pick_config.get("energy_cost", 0.2),
+            "place_object": self.place_config.get("energy_cost", 0.1),
             "idle": -self.idle_config.get("energy_recovery_rate", 0.1)  # Negative cost = gain
         }
         
@@ -345,7 +388,14 @@ class ActionSelector:
             size_factor = obj_props.get("size", 0.0) / self.pick_config.get("max_size", 1.0)
             difficulty_factor = obj_props.get("grasp_difficulty", 0.0)
             cost_adjustment = 1.0 + weight_factor + size_factor + difficulty_factor
-            
+
+        elif action_name == "place_object":
+            # Cost could be adjusted by weight of held object
+            obj_id = context.get("held_object")
+            if obj_id and "inventory" in context and obj_id in context["inventory"]:
+                weight = context["inventory"][obj_id].get("weight", 0.1)
+                cost_adjustment = 1.0 + (weight / 2.0)  # Minor adjustment for weight
+
         elif action_name == "idle":
             # Scale with actual idle duration
             idle_duration = context.get("idle_duration", self.idle_config.get("default_duration", 5.0))
@@ -364,6 +414,7 @@ class ActionSelector:
         base_durations = {
             "move_to": 0.0,  # Calculated dynamically
             "pick_object": self.pick_config.get("grasp_time", 1.0),
+            "place_object": self.place_config.get("place_time", 1.5),
             "idle": context.get("idle_duration", self.idle_config.get("default_duration", 5.0))
         }
         
@@ -461,12 +512,14 @@ if __name__ == "__main__":
     test_actions = [
         {"name": "move_to", "priority": 3, "preconditions": ["has_destination"]},
         {"name": "pick_object", "priority": 5, "preconditions": ["object_detected", "hand_empty"]},
+        {"name": "place_object", "priority": 4, "preconditions": ["holding_object"]},
         {"name": "idle", "priority": 0, "preconditions": []}
     ]
     
     # Test contexts
     test_contexts = [
         {"has_destination": True, "object_detected": False, "hand_empty": True},
+        {"has_destination": True, "holding_object": True, "destination_distance": 1.0},
         {"has_destination": False, "object_detected": True, "hand_empty": True, "energy": 3.0},
         {"has_destination": True, "object_detected": True, "hand_empty": True, "destination_distance": 1.5},
         {"has_destination": True, "object_detected": True, "hand_empty": True, "current_goal": "collect_object"}
