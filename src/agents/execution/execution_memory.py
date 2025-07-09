@@ -29,6 +29,7 @@ class ExecutionMemory:
         - Efficient compression
         - Thread-safe operations
         """
+        self.lock = threading.RLock()
         self.config = load_global_config()
         self.memory_config = get_config_section('execution_memory')
         self.cache_dir = self._ensure_dir(self.memory_config.get('cache_dir'))
@@ -39,6 +40,7 @@ class ExecutionMemory:
         self.memory_cache: Dict[str, Any] = {}
         self.disk_cache = self._init_shelve(os.path.join(self.cache_dir, 'agent_cache.db'))
         self.checkpoint_store = self._init_shelve(os.path.join(self.checkpoint_dir, 'checkpoints.db'))
+        self._validate_checkpoint_store()
         self.cookies = self._load_cookies()
 
         # Configuration parameters
@@ -53,7 +55,6 @@ class ExecutionMemory:
         self.cache_misses = 0
         self.last_validation = time.time()
         self.last_cleanup = time.time()
-        self.lock = threading.RLock()
 
         logger.info(f"Execution Memory initialized with {self.compression_algorithm} compression")
 
@@ -64,8 +65,15 @@ class ExecutionMemory:
         return full_path
 
     def _init_shelve(self, path: str) -> shelve.DbfilenameShelf:
-        """Initialize a thread-safe shelve database"""
-        return shelve.open(path, writeback=True, protocol=pickle.HIGHEST_PROTOCOL)
+        """Initialize a thread-safe shelve database with file locking"""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return shelve.open(path, writeback=True, protocol=pickle.HIGHEST_PROTOCOL, flag='c')
+
+    def _validate_checkpoint_store(self):
+        """Ensure critical structures exist in checkpoint store"""
+        with self.lock:
+            if '__tag_index' not in self.checkpoint_store:
+                self.checkpoint_store['__tag_index'] = {}
 
     def _load_cookies(self) -> Dict[str, Any]:
         """Load cookies with integrity checking"""
@@ -241,11 +249,20 @@ class ExecutionMemory:
                 'compression': self.compression_algorithm
             }
             
-            # Update tag index
-            tag_index = self.checkpoint_store.get('__tag_index', {})
+            # Update tag index with error handling
+            try:
+                tag_index = self.checkpoint_store.get('__tag_index', {})
+            except Exception:
+                # Handle corrupted tag index
+                tag_index = {}
+            
             for tag in tags or []:
                 tag_index.setdefault(tag, []).append(full_id)
-            self.checkpoint_store['__tag_index'] = tag_index
+            
+            try:
+                self.checkpoint_store['__tag_index'] = tag_index
+            except Exception as e:
+                logger.error(f"Failed to update tag index: {str(e)}")
             
             return full_id
 
@@ -315,7 +332,7 @@ class ExecutionMemory:
             self.checkpoint_store['__tag_index'] = tag_index
             del self.checkpoint_store[checkpoint_id]
             return True
-
+        
     def get_cache_stats(self) -> Dict:
         """Get cache statistics"""
         with self.lock:
