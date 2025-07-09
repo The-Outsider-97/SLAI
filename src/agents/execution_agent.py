@@ -38,7 +38,9 @@ import torch
 import copy
 import time
 import math
+import numpy as np
 
+from datetime import datetime, timedelta
 from collections import deque, defaultdict
 from typing import Dict, Union, Tuple, Optional, Any, Type
 
@@ -50,8 +52,12 @@ from src.agents.execution.action_selector import ActionSelector
 from src.agents.execution.actions.base_action import BaseAction
 from src.agents.execution.actions.move_to import MoveToAction
 from src.agents.execution.actions.pick_object import PickObjectAction
+from src.agents.execution.actions.place_object import PlaceObjectAction
 from src.agents.execution.actions.idle import IdleAction
+from src.agents.execution.execution_recovery import ExecutionRecovery
+from src.agents.execution.execution_validator import ExecutionValidator
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
+from src.agents.planning.planning_types import Task
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
@@ -87,6 +93,8 @@ class ExecutionAgent(BaseAgent):
         # Core components for decision making and task management
         self.task_coordinator = TaskCoordinator()
         self.action_selector = ActionSelector()
+        self.validator = ExecutionValidator()
+        self.recovery = ExecutionRecovery()
 
         # Agent's internal state
         self.state: Dict[str, Any] = self._initialize_state()
@@ -96,15 +104,19 @@ class ExecutionAgent(BaseAgent):
         self.action_class_registry: Dict[str, Type[BaseAction]] = {
             "move_to": MoveToAction,
             "pick_object": PickObjectAction,
+            "place_object": PlaceObjectAction,
             "idle": IdleAction
         }
+        self.active_tasks = {}
 
         # Register actions with the selector for precondition awareness
         for name, cls in self.action_class_registry.items():
             self.action_selector.register_action(name, cls.preconditions, cls.postconditions)
 
-        logger.info("Execution Agent initialized with core components and state.")
+        self.validator.action_registry = self.action_class_registry
+        self.recovery.task_coordinator = self.task_coordinator
 
+        logger.info("Execution Agent initialized with core components and state.")
 
     def _initialize_state(self) -> Dict[str, Any]:
         """Initializes the agent's internal state."""
@@ -176,8 +188,30 @@ class ExecutionAgent(BaseAgent):
                 "task_progress": 0.0
             }
 
+    def _generate_default_plan(self, task_data):
+        """Generate a default empty plan"""
+        return []
+
     def perform_task(self, task_data: Dict) -> Dict:
         printer.status("EXECUTION", "Task Performer", "info")
+        if 'action_sequence' not in task_data:
+            task_data['action_sequence'] = self._generate_default_plan(task_data)
+
+        # Validate plan only if it exists and is non-empty
+        if 'action_sequence' in task_data and task_data['action_sequence']:
+            plan = task_data['action_sequence']
+            context = self._gather_context()
+            
+            # Validate plan before execution
+            is_valid, report = self.validator.validate_plan(plan, context)
+            if not is_valid:
+                logger.error(f"Plan validation failed: {self.validator.generate_validation_summary(report)}")
+                return {
+                    "status": "failed",
+                    "reason": "Plan validation failed",
+                    "validation_report": report
+                }
+            self.current_plan = plan
 
         # Ensure task has all required fields for scheduler
         task_data.setdefault('id', f"{task_data.get('name', 'task')}_{str(uuid.uuid4())[:8]}")
@@ -217,7 +251,7 @@ class ExecutionAgent(BaseAgent):
             "task_events",
             {"event": "task_started", "task": task_data, "agent": self.name}
         )
-    
+
         try:
             self.scheduler = DeadlineAwareScheduler()
             schedule = self.scheduler.schedule(
@@ -225,9 +259,23 @@ class ExecutionAgent(BaseAgent):
                 agents={self.name: self._get_agent_capabilities()},
                 state=self.state
             )
-            if not schedule:
+            
+            # Validate schedule using task ID instead of name
+            if not schedule or task_data['id'] not in schedule:
                 logger.error("Scheduler failed to create valid schedule")
-                return {"status": "failed", "reason": "Scheduling failed"}
+                return {
+                    "status": "failed", 
+                    "reason": "Scheduling failed - task not scheduled"
+                }
+                
+            # Get scheduled assignment using task ID
+            assignment = schedule.get(task_data['id'])
+            if not assignment:
+                logger.error("Scheduler returned invalid assignment")
+                return {
+                    "status": "failed", 
+                    "reason": "Scheduling failed - no valid assignment"
+                }
 
             if not self.task_coordinator.assign_task(task_data):
                 logger.error(f"Failed to assign task: {task_data.get('name')}. It may be a duplicate or invalid.")
@@ -242,6 +290,9 @@ class ExecutionAgent(BaseAgent):
 
             start_time = time.time()
             timeout = self.current_task.get('timeout', 300)
+
+            recovery_id = self.recovery.create_recovery_checkpoint("pre_task", self.state)
+            logger.info(f"Created pre-task recovery checkpoint: {recovery_id}")
 
             while self.current_task and self.current_task['state'] == TaskState.IN_PROGRESS.value:
                 if time.time() - start_time > timeout:
@@ -304,12 +355,38 @@ class ExecutionAgent(BaseAgent):
             self.task_coordinator.complete_task(self.current_task['name'])
             return
 
+        # Validate current task exists
+        if not self.current_task:
+            logger.error("Execution step aborted: No active task")
+            return
+            
+        # Create checkpoint before action execution
+        checkpoint_id = self.recovery.create_recovery_checkpoint(
+            f"pre_{self.current_task['name']}",
+            self.state
+        )
+        logger.debug(f"Created pre-action checkpoint: {checkpoint_id}")
+
         try:
+            action_name = selected_action_dict.get("name", "unknown")
             # Generate potential actions for the selector
             potential_actions = [
                 {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
                 for name, cls in self.action_class_registry.items()
             ]
+
+            # Validate action before execution
+            is_valid, report = self.validator.validate_plan(
+                [Task(name=action_name)],
+                context,
+                mode="continuous",
+                level="strict"
+            )
+            if not is_valid:
+                raise ActionFailureError(
+                    action_name,
+                    f"Action validation failed: {report[0]['errors']}"
+                )
 
             selected_action_dict = self.action_selector.select(potential_actions, context)
             action_name = selected_action_dict.get("name")
@@ -328,14 +405,52 @@ class ExecutionAgent(BaseAgent):
 
             # Update agent's master state from the action's resulting context
             self._update_state_from_action(action_instance)
-            
+
             # Update task progress (example: based on distance or sub-goals)
             progress = self._calculate_task_progress(context)
             self.task_coordinator.update_task_progress(self.current_task['name'], progress)
+    
         except ActionInterruptionError as e:
             logger.warning(f"Action interrupted: {e}")
-            # Add pause task functionality to TaskCoordinator
             self.task_coordinator.pause_task(self.current_task['name'])
+            
+        except (ActionFailureError, InvalidContextError) as e:
+            logger.error(f"Action failed: {str(e)}")
+            
+            # Enhanced recovery with task validation
+            if self.current_task:  # Ensure task still exists
+                recovery_success, new_context = self.recovery.handle_failure(
+                    action_name, e, context
+                )
+                
+                if recovery_success:
+                    self.state = {**self.state, **new_context}
+                    self.shared_memory.set(f"agent_state:{self.name}", self.state)
+                    logger.info("Retrying action after recovery")
+                    return self._execution_step()
+                else:
+                    self.task_coordinator.fail_task(
+                        self.current_task['name'],
+                        f"Unrecoverable failure: {str(e)}"
+                    )
+                    
+        except Exception as e:
+            # Handle unexpected errors with task validation
+            if self.current_task:
+                error = ActionFailureError("unknown", f"Unexpected error: {str(e)}")
+                recovery_success, new_context = self.recovery.handle_failure(
+                    "unknown", error, context
+                )
+                
+                if recovery_success:
+                    self.state = {**self.state, **new_context}
+                    self.shared_memory.set(f"agent_state:{self.name}", self.state)
+                    return self._execution_step()
+                else:
+                    self.task_coordinator.fail_task(
+                        self.current_task['name'],
+                        f"Critical failure: {str(e)}"
+                    )
 
     def _gather_context(self) -> Dict[str, Any]:
         """Merges agent state and task details into a comprehensive context object."""
@@ -351,6 +466,7 @@ class ExecutionAgent(BaseAgent):
             context['deadline'] = self.current_task.get('deadline')
             context['destination'] = self.current_task.get('destination')
             context['target_object'] = self.current_task.get('target_object')
+            context['target_position'] = context['destination']
             
             # Context flags for action preconditions
             if context.get('destination'):
@@ -384,6 +500,8 @@ class ExecutionAgent(BaseAgent):
             return True
         if goal == "collect" and context.get("holding_object") and context.get("held_object") == self.current_task.get("target_object"):
             return True
+        if goal == "deposit" and context.get("object_placed"):
+            return True
         if goal == "rest" and context.get("has_rested"):
             return True
 
@@ -413,6 +531,28 @@ class ExecutionAgent(BaseAgent):
                 return 1.0 - (context['destination_distance'] / start_dist)
             return self.current_task.get('progress', 0.0) if self.current_task else 0.0
         return 1.0
+    
+    def dispatch_task(self, task_type: str, task_data: dict):
+        task_id = f"{task_type}_{task_data.get('order_id')}"
+        task = {
+            "task_id": task_id,
+            "type": task_type,
+            "state": {
+                "current_position": task_data.get("pickup_location"),
+                "status": "DISPATCHED"
+            },
+            "estimated_completion": datetime.utcnow() + timedelta(minutes=30),
+            "progress_milestones": ["task_dispatched"]
+        }
+        self.active_tasks[task_id] = task
+        return task
+
+    def get_active_task(self, task_id: str):
+        """
+        Retrieve active task by ID (e.g. delivery_1234)
+        Can be used across apps without assuming food delivery logic
+        """
+        return self.active_tasks.get(task_id, None)
 
     def alternative_execute(self, task_data, original_error=None):
         """Fallback logic: try to execute an 'idle' action to recover or wait."""
@@ -439,14 +579,31 @@ class ExecutionAgent(BaseAgent):
     def _get_agent_capabilities(self) -> Dict:
         return {
             "capabilities": ["navigation", "object_manipulation"],
-            "current_load": len(self.task_coordinator.tasks),
+            "current_load": 0.0,  # Initialize to 0
             "efficiency": self.config.get("efficiency", 1.0)
         }
+    
+    def sync_state(self, env_state: np.ndarray):
+        """Sync agent state with environment state"""
+        self.state.update({
+            'current_position': (env_state[0], env_state[1]),
+            'energy': env_state[8],
+            'holding_object': bool(env_state[6]),
+            'carrying_items': int(env_state[6])
+        })
     
     def attach_adaptive(self, adaptive_agent):
         """Connect AdaptiveAgent to ExecutionAgent"""
         self.adaptive_agent = adaptive_agent
         logger.info("Adaptive agent attached to Execution agent")
+
+    def get_validation_report(self):
+        """Get recent validation statistics"""
+        return self.validator.get_validation_stats()
+
+    def get_recovery_report(self):
+        """Get recovery system status"""
+        return self.recovery.get_recovery_report()
 
 if __name__ == "__main__":
     print("\n=== Running Execution Task Coordinator ===\n")
@@ -467,14 +624,17 @@ if __name__ == "__main__":
     print(agent)
     print("\n* * * * * Phase 2 * * * * *\n")
     data = {
-        "id": "test_task",
-        "name": "test_task",
-        "requirements": ["navigation"],
-        "deadline": time.time() + 5,
-        "goal_type": "navigate",
-        "destination": (5.0, 50.0)
+        "name": "deliver_test_package",
+        "goal_type": "navigate",  # could also be "collect", "deposit", or "rest"
+        "destination": (5, 5),
+        "timeout": 30,
+        "requirements": [],
+        "priority": 1
     }
 
-    printer.pretty("Perform", agent.perform_task(task_data=data), "success" if agent.perform_task else "error")
-    printer.pretty("Execute", agent._execution_step(), "success" if agent._execution_step else "error")
+    p_task = agent.perform_task(task_data=data)
+    e_step = agent._execution_step()
+
+    printer.pretty("Perform", p_task, "success" if p_task else "error")
+    printer.pretty("Execute", e_step, "success" if e_step else "error")
     print("\n=== All tests completed successfully! ===\n")
