@@ -1,19 +1,4 @@
 
-"""
-SAFE_AI_FACTORY.PY - Constitutional Safety Framework
-
-Implements:
-1. RLHF-based reward modeling (Christiano et al., 2017)
-2. Constitutional AI principles (Bai et al., 2022)
-3. Mechanistic interpretability (Bereska & Gavves, 2024)
-4. STPA safety analysis (Leveson, 2011)
-
-Academic Foundations:
-- Constitutional Rules: Anthropic's Constitutional AI (arXiv:2212.08073)
-- Safety Layers: DeepMind's SAFE Framework (arXiv:2310.00064)
-- Interpretability: Causal Scrubbing (arXiv:2304.00683)
-"""
-
 from datetime import datetime
 import random
 import hashlib
