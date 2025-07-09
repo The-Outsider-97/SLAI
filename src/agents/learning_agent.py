@@ -16,6 +16,7 @@ Academic Foundations:
 - Evolutionary Strategies: Salimans et al. (2017)
 """
 
+import os
 import torch
 import copy
 import time
@@ -2155,6 +2156,19 @@ class LearningAgent(BaseAgent):
                 "confidence": 0.0,
                 "strategy_output": None
             }
+
+    # Save model
+    def save_all_strategies(self, dir_path):
+        os.makedirs(dir_path, exist_ok=True)
+        for name, agent_wrapper in self.agents.items():
+            # Unwrap LazyAgent to get the actual agent
+            if hasattr(agent_wrapper, 'agent') and agent_wrapper.agent is not None:
+                real_agent = agent_wrapper.agent
+            else:
+                real_agent = agent_wrapper
+                
+            if hasattr(real_agent, 'save_model'):
+                real_agent.save_model(os.path.join(dir_path, f"{name}_strategy.pt"))
 
 class MetaStrategyEvaluator:
     """Decides strategy weighting using meta-learning insights"""
