@@ -41,8 +41,8 @@ class SafetyGuard:
         self.boundary_phrases_path =  self.complience_config.get('boundary_phrases_path')
         self.pii_patterns_path =  self.complience_config.get('pii_patterns_path')
         self.toxicity_patterns_path =  self.complience_config.get('toxicity_patterns_path')
+        self.identity_markers = self.complience_config.get('identity_markers_for_harassment', [])
 
-        self.logger = logger
         self.memory = SecureMemory()
         self.privacy_params = {
             'epsilon': self.epsilon,
@@ -64,7 +64,7 @@ class SafetyGuard:
         """Load PII patterns from JSON file"""
         path = self.pii_patterns_path
         if not path:
-            self.logger.warning("PII patterns path not configured, using defaults")
+            logger.warning("PII patterns path not configured, using defaults")
             return self._default_redaction_patterns()
             
         try:
@@ -72,7 +72,7 @@ class SafetyGuard:
                 patterns = json.load(f)
             return [(item['pattern'], item['replacement']) for item in patterns]
         except Exception as e:
-            self.logger.error(f"Failed to load PII patterns: {str(e)}")
+            logger.error(f"Failed to load PII patterns: {str(e)}")
             return self._default_redaction_patterns()
 
     def _load_authority_phrases(self) -> List[str]:
@@ -84,14 +84,14 @@ class SafetyGuard:
             r"real person"
         ]
         if not path:
-            self.logger.warning("Authority phrases path not configured, using defaults")
+            logger.warning("Authority phrases path not configured, using defaults")
             return default_patterns
             
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load authority phrases: {str(e)}")
+            logger.error(f"Failed to load authority phrases: {str(e)}")
             return default_patterns
 
     def _load_manipulation_patterns(self) -> List[str]:
@@ -104,14 +104,14 @@ class SafetyGuard:
             r"as a friend"
         ]
         if not path:
-            self.logger.warning("Manipulation patterns path not configured, using defaults")
+            logger.warning("Manipulation patterns path not configured, using defaults")
             return default_patterns
             
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load manipulation patterns: {str(e)}")
+            logger.error(f"Failed to load manipulation patterns: {str(e)}")
             return default_patterns
 
     def _load_group_targeting_patterns(self) -> List[str]:
@@ -123,28 +123,28 @@ class SafetyGuard:
             r"your community"
         ]
         if not path:
-            self.logger.warning("Group targeting patterns path not configured, using defaults")
+            logger.warning("Group targeting patterns path not configured, using defaults")
             return default_patterns
             
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load group targeting patterns: {str(e)}")
+            logger.error(f"Failed to load group targeting patterns: {str(e)}")
             return default_patterns
 
     def _load_toxicity_patterns(self) -> List[str]:
         """Load toxicity patterns from JSON file"""
         path = self.toxicity_patterns_path
         if not path:
-            self.logger.warning("Toxicity patterns path not configured, using defaults")
+            logger.warning("Toxicity patterns path not configured, using defaults")
             return self._default_toxicity_patterns()
             
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load toxicity patterns: {str(e)}")
+            logger.error(f"Failed to load toxicity patterns: {str(e)}")
             return self._default_toxicity_patterns()
 
     def _load_boundary_phrases(self) -> List[str]:
@@ -156,14 +156,14 @@ class SafetyGuard:
             r"suppose I wanted"
         ]
         if not path:
-            self.logger.warning("Boundary phrases path not configured, using defaults")
+            logger.warning("Boundary phrases path not configured, using defaults")
             return default_patterns
             
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            self.logger.error(f"Failed to load boundary phrases: {str(e)}")
+            logger.error(f"Failed to load boundary phrases: {str(e)}")
             return default_patterns
 
     def _default_redaction_patterns(self):
@@ -231,7 +231,7 @@ class SafetyGuard:
 
         # Post-sanitization validation
         if original != text:
-            self.logger.info(f"Sanitized content. Changes: {protection_stack}")
+            logger.info(f"Sanitized content. Changes: {protection_stack}")
             self._post_sanitization_checks(text)
 
         return text
@@ -285,7 +285,7 @@ class SafetyGuard:
         return max(0.0, value + noise)
 
     def _handle_toxicity_event(self, risk_assessment: dict, text: str):
-        self.logger.warning(
+        logger.warning(
             f"Blocked toxic content - Risk: {risk_assessment['risk_level']} "
             f"Triggers: {risk_assessment['triggers']}"
         )
@@ -465,19 +465,16 @@ class SafetyGuard:
     def _is_targeted_harassment(self, text: str, context: str) -> bool:
         """Detect targeted harassment patterns"""
         if any(re.search(pattern, text, re.IGNORECASE) for pattern in self.group_targeting_patterns):
-            identity_markers = self.config.get('identity_markers_for_harassment', 
-                                               ['gender', 'race', 'religion', 'orientation', 
-                                                'nationality', 'ethnicity', 'disability', 
-                                                'political affiliation', 'social class']) # Example expanded list
+            identity_markers = self.identity_markers
 
             if any(marker.lower() in context.lower() for marker in identity_markers):
-                self.logger.debug(f"Potential targeted harassment: Matched pattern in text and identity marker in context.")
+                logger.debug(f"Potential targeted harassment: Matched pattern in text and identity marker in context.")
                 return True
             
             # A simpler check: if a targeting pattern is found, and the context is generally about social issues or identity
             if re.search(r"\b(social|identity|group|community|rights|discrimination|equality|diversity|inclusion)\b", context, re.IGNORECASE):
-                 self.logger.debug(f"Potential targeted harassment: Matched pattern in text and general identity discussion in context.")
-                 return True
+                logger.debug(f"Potential targeted harassment: Matched pattern in text and general identity discussion in context.")
+                return True
                 
         return False
 
@@ -533,11 +530,29 @@ if __name__ == "__main__":
 
     logger.info(f"{guard}")
     print(guard._validate_privacy_params())
+
     print(f"\n* * * * * Phase 2 * * * * *\n")
     text="The user is called Joe Doe email is john.doe@example.com and SSN is 123-45-6789 and phone number is +31 06 38478912."
     depth = 'full'
+    text2 = "You people from that community are always causing trouble."
+    context = "Earlier, we discussed racial profiling and minority rights."
 
     pipeline = guard.sanitize(text=text, depth=depth)
+    report = guard.get_protection_report(text=text)
+    harassment = guard._is_targeted_harassment(text=text2, context=context)
 
-    logger.info(f"{pipeline}")
+    printer.pretty("PIPELINE", pipeline, "success" if pipeline else "error")
+    printer.pretty("REPORT", report, "success" if report else "error")
+    printer.pretty("HARASSMENT", harassment, "success" if harassment else "error")
+
+    print(f"\n* * * * * Phase 3 * * * * *\n")
+    size = 1
+    value = 42.5
+    privacy = guard.apply_differential_privacy(value=value, dataset_size=size)
+    printer.pretty("PRIVACY", privacy, "success" if privacy else "error")
+
+    print(f"\n* * * * * Phase 4 * * * * *\n")
+    viable = guard.is_minimal_viable()
+
+    printer.pretty("viable", viable, "success" if viable else "error")
     print("\n=== Successfully Ran Security Reward Model ===\n")
