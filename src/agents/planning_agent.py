@@ -178,10 +178,10 @@ class PlanningAgent(BaseAgent):
                 gpu=0.1,
                 ram=0.5,
                 specialized_hardware=[]
-            )
-            #start_time=time.time() + 10,  # Start in 10 seconds
-            #deadline=time.time() + 3600,  # 1 hour deadline
-            #duration=300  # 5 minute duration
+            ),
+            start_time=10,
+            deadline=3600,
+            duration=300
         )
         task.methods = [[fallback]]  # Single method with fallback task
 
@@ -280,11 +280,14 @@ class PlanningAgent(BaseAgent):
         simulated_world_state = current_state.copy()
 
         for subtask_template in subtasks_template:
-            # Create a runtime instance of the subtask
             subtask_instance = subtask_template.copy()
-            subtask_instance.start_time = getattr(subtask_template, 'start_time', time.time() + 60)
-            subtask_instance.deadline = getattr(subtask_template, 'deadline', time.time() + 3600)
-            subtask_instance.duration = getattr(subtask_template, 'duration', 300)
+            current_time = time.time()
+            if not hasattr(subtask_instance, 'start_time'):
+                subtask_instance.start_time = current_time + 60  # Default: start in 60 seconds
+            if not hasattr(subtask_instance, 'deadline'):
+                subtask_instance.deadline = subtask_instance.start_time + 3600  # Default: 1hr deadline
+            if not hasattr(subtask_instance, 'duration'):
+                subtask_instance.duration = 300  # Default: 5min duration
             subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
 
             # Check subtask preconditions in the *current* (simulated) world state
@@ -462,12 +465,18 @@ class PlanningAgent(BaseAgent):
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
         self._planning_start_time = time.time()
-        self.current_goal = goal_task
+        current_time = self._planning_start_time
 
-        # Validate goal task temporal attributes
-        current_time = time.time()
-        if not hasattr(goal_task, 'start_time') or not goal_task.start_time or goal_task.start_time < current_time:
-            goal_task.start_time = current_time + 10  # Start in 10s buffer
+        # Refresh all task timestamps
+        def refresh_timestamps(task):
+            if hasattr(task, 'start_time') and task.start_time < current_time:
+                task.start_time = current_time + 10
+            if hasattr(task, 'deadline') and task.deadline < current_time:
+                task.deadline = current_time + 3600
+            for subtask in task.get_subtasks():
+                refresh_timestamps(subtask)
+                
+        refresh_timestamps(goal_task)
 
         if not hasattr(goal_task, 'deadline') or not goal_task.deadline or goal_task.deadline < goal_task.start_time:
             goal_task.deadline = goal_task.start_time + 3600 # Default 1hr deadline
