@@ -116,6 +116,7 @@ class RLAgent:
         # Additional tracking for exploration strategies
         self.state_action_counts = defaultdict(int)
         self.episode_count = 0
+        self.policy_net = None
 
         self.learning_memory = LearningMemory()
         self.model_id = "RL_Agent"
@@ -422,6 +423,15 @@ class RLAgent:
                     key=lambda x: x[1]
                 )[0]
         return policy
+
+def save(self, path):
+    """Save policy network weights"""
+    torch.save({
+        'policy_net': self.policy_net.state_dict(),
+        'target_net': self.target_net.state_dict(),
+        'optimizer': self.optimizer.state_dict()
+    }, path)
+    logger.info(f"Saved DQN model to {path}")
 
 class AdvancedQLearning(RLAgent):
     """
@@ -756,6 +766,10 @@ class RLVisualizer:
             '-c:v', 'libx264', '-preset', 'slow', '-crf', '18',
             '-pix_fmt', 'yuv420p', f'enhanced_{filename}'
         ])
+
+    def save(self, path):
+        """Save model weights to path"""
+        torch.save(self.policy_net.state_dict(), path)
 
 class RLEncoder(RLAgent):
     def __init__(self, agent_id: str,
