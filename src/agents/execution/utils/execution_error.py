@@ -225,8 +225,85 @@ class StaleCheckpointError(ExecutionError):
             remediation_guidance="Ensure proper checkpoint tagging and expiry. Avoid reuse of outdated execution state."
         )
 
-
 class ActionInterruptionError(ExecutionError):
     """Raised when an action is intentionally interrupted"""
     level = "MEDIUM"
     code = "ACTION_INTERRUPTION"
+
+class InvalidGridReferenceError(ExecutionError):
+    def __init__(self, location: tuple, grid_bounds: tuple):
+        super().__init__(
+            ExecutionErrorType.ACTION_FAILURE,
+            f"Location {location} is outside valid grid bounds {grid_bounds}.",
+            severity="high",
+            context={
+                "location": location,
+                "grid_bounds": grid_bounds
+            },
+            remediation_guidance="Ensure coordinate validation and boundary checks before action execution."
+        )
+
+class CorruptedContextStateError(ExecutionError):
+    def __init__(self, corrupted_keys: list, context_snapshot: dict):
+        super().__init__(
+            ExecutionErrorType.INVALID_CONTEXT,
+            "Execution context appears corrupted or inconsistent.",
+            severity="critical",
+            context={
+                "corrupted_keys": corrupted_keys,
+                "context_snapshot": context_snapshot
+            },
+            remediation_guidance="Validate context lifecycle and access pattern. Consider deep copying before mutation."
+        )
+
+class ExecutionLoopLockError(ExecutionError):
+    def __init__(self, repeated_action: str, repeat_count: int):
+        super().__init__(
+            ExecutionErrorType.DEADLOCK,
+            f"Detected execution loop: '{repeated_action}' repeated {repeat_count} times with no progression.",
+            severity="critical",
+            context={
+                "repeated_action": repeated_action,
+                "repeat_count": repeat_count
+            },
+            remediation_guidance="Introduce exit criteria or timeout guards in strategy execution."
+        )
+
+class MissingActionHandlerError(ExecutionError):
+    def __init__(self, task_name: str):
+        super().__init__(
+            ExecutionErrorType.TASK_REJECTION,
+            f"No action handler registered for task '{task_name}'.",
+            severity="high",
+            context={
+                "task_name": task_name
+            },
+            remediation_guidance="Register a handler for this task or review task-to-action mappings."
+        )
+
+class InvalidTaskTransitionError(ExecutionError):
+    def __init__(self, current_state: str, attempted_action: str):
+        super().__init__(
+            ExecutionErrorType.ILLEGAL_STATE_TRANSITION,
+            f"Cannot perform '{attempted_action}' from state '{current_state}'.",
+            severity="medium",
+            context={
+                "current_state": current_state,
+                "attempted_action": attempted_action
+            },
+            remediation_guidance="Verify task prerequisites and update task coordinator logic."
+        )
+
+class UnreachableTargetError(ExecutionError):
+    def __init__(self, action_name: str, target: tuple, agent_pos: tuple):
+        super().__init__(
+            ExecutionErrorType.ACTION_FAILURE,
+            f"Target {target} unreachable from current position {agent_pos}.",
+            severity="high",
+            context={
+                "action": action_name,
+                "target": target,
+                "agent_position": agent_pos
+            },
+            remediation_guidance="Re-evaluate pathfinding or replanning strategy. Consider alternate goal or movement strategy."
+        )
