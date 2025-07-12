@@ -379,7 +379,7 @@ if __name__ == "__main__":
         InputToken(text="this", lemma="this", pos="DET", index=9, head=10, dep="det", start_char_abs=37, end_char_abs=40),
         InputToken(text="to", lemma="to", pos="PART", index=10, head=11, dep="aux", start_char_abs=42, end_char_abs=43),
         InputToken(text="stop", lemma="stop", pos="VERB", index=12, head=11, dep="xcomp", start_char_abs=48, end_char_abs=51),
-        InputToken(text="?", lemma="?", pos="PUNCT", index=13, head=8, dep="punct", start_char_abs=52, end_char_abs=52),
+        InputToken(text="!", lemma="!", pos="PUNCT", index=13, head=8, dep="punct", start_char_abs=52, end_char_abs=52),
     ]]
     full_text_snippet= None
     sentence_tokens=[]
