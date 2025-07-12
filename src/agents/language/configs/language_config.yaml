@@ -1,6 +1,7 @@
 
 wordlist_path: "src/agents/language/library/wordlist_en.json"
 main_wordlist_path: "src/agents/language/library/structured_wordlist_en.json"
+modality_markers_path: "src/agents/language/templates/modality_markers.json"
 cache_size: 1000
 bpe_model_path: "data/bpe_200d_50k_model.json"
 bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
@@ -91,7 +92,6 @@ nlg:
 
 nlu:
   sentiment_lexicon_path: "src/agents/language/templates/sentiment_lexicon.json"
-  modality_markers_path: "src/agents/language/templates/modality_markers.json"
   custom_intent_patterns_path: "src/agents/language/templates/intent_patterns.json"
   custom_entity_patterns_path: "src/agents/language/templates/entity_patterns.json"
   morphology_rules_path: "src/agents/language/templates/morphology_rules.json"
@@ -106,8 +106,11 @@ style:
 
 dialogue_context:
   memory_limit: 20  # Max history items before summarization
+  threshold: 0.7
   required_slots: []
-  enable_summarization: true
+  include_summary: True
+  include_history: True
+  enable_summarization: True
   default_initial_history:
     - "System: Hello! How can I assist you today?"
   default_initial_summary: "The conversation has just begun."
