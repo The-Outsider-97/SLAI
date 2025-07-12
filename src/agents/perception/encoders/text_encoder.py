@@ -31,6 +31,8 @@ class TextEncoder(nn.Module):
     def _init_configs(self):
         """Load and validate configurations from global and section-specific settings"""
         self.config = load_global_config()
+        self.training = self.config.get('training')
+
         self.text_config = get_config_section('text_encoder')
         self.max_gen_length = self.text_config.get('max_gen_length')
         
@@ -150,9 +152,12 @@ class TextEncoder(nn.Module):
         if self.training and self.dropout_rate > 0:
             embeddings = TensorOps.dropout(embeddings)
 
+        # Handle style embeddings
         if style_id is not None:
-            style_emb = self.style_embeddings(style_id).unsqueeze(1)  # [B, 1, D]
-            style_emb = style_emb.expand(-1, seq_len, -1)             # [B, seq_len, D]
+            if not isinstance(style_id, torch.Tensor):
+                style_id = torch.tensor(style_id, device=input_ids.device)
+            style_emb = self.style_embeddings(style_id).unsqueeze(1)
+            style_emb = style_emb.expand(-1, seq_len, -1)
             embeddings = embeddings + style_emb
 
         if attention_mask is not None:
