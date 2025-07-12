@@ -184,8 +184,6 @@ class Wordlist:
         for char, neighbors in reverse_mapping.items():
              self.keyboard_layout[char] = {**self.keyboard_layout.get(char, {}), **neighbors}
 
-        self.glove_vectors = self.glove_path
-
     def add_word(self, word: str, metadata: dict = None):
         word_lower = word.lower()
         if word_lower not in self.data:
