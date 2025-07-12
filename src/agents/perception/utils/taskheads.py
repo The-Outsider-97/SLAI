@@ -33,7 +33,7 @@ class TaskHead(torch.nn.Module):
         super().__init__()
         self.config = load_global_config()
         self.device = self.config.get('device')
-        self.training = self.config.get('training')
+        #self.training = self.config.get('training')
         self.dropout_rate = self.config.get('dropout_rate')
         self.dropout = torch.nn.Dropout(p=self.dropout_rate)
 
@@ -61,13 +61,13 @@ class TaskHead(torch.nn.Module):
         super().to(device)  # This handles module movement
         self.device = device
 
-    def train(self) -> None:
-        """Set to training mode"""
-        self.training = True
+    #def train(self) -> None:
+    #    """Set to training mode"""
+    #    self.training = True
 
-    def eval(self) -> None:
-        """Set to evaluation mode"""
-        self.training = False
+    #def eval(self) -> None:
+    #    """Set to evaluation mode"""
+    #    self.training = False
 
     def freeze_parameters(self) -> None:
         """Disable gradient calculation for all parameters"""
