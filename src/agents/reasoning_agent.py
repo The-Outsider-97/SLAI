@@ -15,6 +15,7 @@ Real-World Usage:
 3. Content Moderation: Identify contradictory claims in user-generated content.
 4. Financial Fraud Detection: Flag transactional contradictions (e.g., "purchases" in two countries simultaneously).
 5. AI Tutoring Systems: Check student answers against domain knowledge (e.g., physics/math rules).
+
 """
 
 import json
@@ -32,8 +33,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.reasoning.types.base_reasoning import BaseReasoning
 from src.agents.reasoning.rule_engine import RuleEngine
 from src.agents.reasoning.probabilistic_models import ProbabilisticModels
+from src.agents.reasoning.reasoning_types import ReasoningTypes
 from src.agents.reasoning.validation import ValidationEngine
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
@@ -87,9 +90,11 @@ class ReasoningAgent(BaseAgent, nn.Module):
         self.exploration_rate = self.reasoning_config.get('exploration_rate')
         self.decay = self.reasoning_config.get('decay')
         self.knowledge_db = self.reasoning_config.get('knowledge_db')
+        self.max_iterations = self.reasoning_config.get('max_iterations')
 
         self.rule_engine = RuleEngine()
         self.validation_engine = ValidationEngine()
+        self.reasoning_strategies = ReasoningTypes()
         self.probabilistic_models = ProbabilisticModels()
         self.probabilistic_models.link_agent(self)  # Create bidirectional connection
 
@@ -395,14 +400,18 @@ class ReasoningAgent(BaseAgent, nn.Module):
 
     def react_loop(self, problem: str, max_steps: int = 5) -> dict:
         """
-        ReAct-style problem solving with interleaved thoughts and actions.
+        ReAct-style problem solving with integrated reasoning strategies
         """
         solution = {}
+        # Determine the best reasoning strategy based on the problem
+        reasoning_type = self.reasoning_strategies._determine_reasoning_strategy(problem)
+        reasoning_engine = self.reasoning_strategies.create(reasoning_type)
+        
         self.current_thoughts = []  # Initialize thought storage
-        for _ in range(max_steps):
-            # Thought Phase
-            thoughts = self.generate_chain_of_thought(problem)
-            self.current_thoughts = thoughts  # Store for action execution
+        for step in range(max_steps):
+            # Thought Phase - use reasoning engine to enhance thought generation
+            thoughts = self._generate_enhanced_chain(problem, solution, reasoning_engine)
+            self.current_thoughts = thoughts
             print(f"Thought: {thoughts[-1]}")
             
             # Action Phase
@@ -413,15 +422,51 @@ class ReasoningAgent(BaseAgent, nn.Module):
             solution.update(result)
             if self._is_goal_reached(solution):
                 break
-
+    
         # Probabilistic guidance to action selection
-        last_thought = thoughts[-1].lower()
+        last_thought = self.current_thoughts[-1].lower()
         if "uncertain" in last_thought:
             prob_score = self.probabilistic_models.probabilistic_query(problem)
             if prob_score < 0.5:
-                action = "request_human_input"
-
+                self.shared_memory.append(
+                    key="human_intervention_requests",
+                    value={
+                        "timestamp": time.time(),
+                        "thoughts": self.current_thoughts,
+                        "problem": problem,
+                        "reason": "Low confidence in solution"
+                    }
+                )
         return solution
+
+    def _generate_enhanced_chain(self, problem: str, context: dict, 
+                                reasoning_engine: BaseReasoning) -> List[str]:
+        """
+        Generate enhanced chain of thought using reasoning engine
+        """
+        # First generate the base chain of thought
+        base_chain = self.generate_chain_of_thought(problem)
+        
+        # Enhance with reasoning engine
+        reasoning_result = reasoning_engine.perform_reasoning(
+            input_data=problem,
+            context=context
+        )
+        
+        # Extract insights from reasoning result
+        if 'final_output' in reasoning_result:
+            insight = reasoning_result['final_output']
+        elif 'conclusion' in reasoning_result:
+            insight = reasoning_result['conclusion']
+        else:
+            insight = str(reasoning_result)
+        
+        # Add reasoning insights to the chain
+        enhanced_chain = base_chain + [
+            f"Reasoning Insight: {insight}",
+            f"Reasoning Strategy: {reasoning_engine.name}"
+        ]
+        return enhanced_chain
 
     def generate_chain_of_thought(self, query: Union[str, Tuple], depth: int = 3) -> List[str]:
         """
@@ -517,37 +562,57 @@ class ReasoningAgent(BaseAgent, nn.Module):
 
     def execute_action(self, action: str) -> Dict[str, Any]:
         """
-        Executes the selected action and returns results.
-        Integrates with knowledge base, validation engine, and probabilistic models.
-        
-        Args:
-            action: Action string from _select_action
-            
-        Returns:
-            Dictionary with action results and metadata
+        Executes selected actions with enhanced reasoning and inter-agent communication.
+        Integrates reasoning types and shares results via shared memory.
         """
         result = {"action": action, "success": False, "details": None}
         
         try:
+            # Get current reasoning engine from ReAct loop
+            reasoning_engine = getattr(self, 'current_reasoning_engine', None)
+            
             if action == "query_knowledge_base":
-                # Get relevant facts from last 5 thoughts
-                query_terms = " ".join(self.current_thoughts[-5:])
+                # Enhanced query using reasoning engine
+                if reasoning_engine:
+                    structured_query = reasoning_engine.structure_query(self.current_thoughts)
+                else:
+                    query_terms = " ".join(self.current_thoughts[-5:])
+                    structured_query = {"terms": query_terms.split(), "context": self.get_current_context()}
+                
+                # Publish query to shared memory
+                self.shared_memory.publish(
+                    "knowledge_queries", 
+                    {
+                        "query": structured_query,
+                        "source": self.name,
+                        "timestamp": time.time()
+                    }
+                )
+                
+                # Get responses from other agents
+                responses = self.shared_memory.get("knowledge_responses", [])
                 relevant_facts = {}
                 
+                # Combine local and external knowledge
                 for fact, conf in self.knowledge_base.items():
-                    if any(term in str(fact) for term in query_terms.split()):
+                    if any(term in str(fact) for term in structured_query.get("terms", [])):
                         relevant_facts[fact] = conf
+                
+                for response in responses:
+                    if response["query"] == structured_query:
+                        relevant_facts.update(response["facts"])
                 
                 result.update({
                     "success": True,
                     "details": {
                         "found_facts": len(relevant_facts),
-                        "sample_facts": list(relevant_facts.items())[:3]
+                        "sample_facts": list(relevant_facts.items())[:3],
+                        "reasoning_type": reasoning_engine.name if reasoning_engine else "default"
                     }
                 })
                 
             elif action == "run_consistency_check":
-                # Validate most recent fact in thought chain
+                # Validate with reasoning-enhanced consistency check
                 recent_fact = None
                 for thought in reversed(self.current_thoughts):
                     try:
@@ -557,53 +622,113 @@ class ReasoningAgent(BaseAgent, nn.Module):
                         continue
                 
                 if recent_fact:
-                    validation = self.validate_fact(recent_fact)
+                    # Use reasoning engine for enhanced validation
+                    if reasoning_engine:
+                        validation = reasoning_engine.validate_fact(recent_fact, self.validation_engine)
+                    else:
+                        validation = self.validate_fact(recent_fact)
+                    
+                    # Publish validation request
+                    self.shared_memory.publish(
+                        "consistency_checks", 
+                        {
+                            "fact": recent_fact,
+                            "source": self.name,
+                            "timestamp": time.time()
+                        }
+                    )
+                    
                     result.update({
                         "success": True,
-                        "details": validation
+                        "details": validation,
+                        "reasoning_type": reasoning_engine.name if reasoning_engine else "default"
                     })
-                else:
-                    result["details"] = "No parsable fact found in thoughts"
             
             elif action == "forward_chaining":
-                new_facts = self.forward_chaining(max_iterations=10)
+                # Reasoning-guided forward chaining
+                if reasoning_engine:
+                    new_facts = reasoning_engine.forward_chaining(
+                        self.knowledge_base, 
+                        self.rules,
+                        max_iterations=10
+                    )
+                else:
+                    new_facts = self.forward_chaining(max_iterations=10)
+                
+                # Publish new facts to shared memory
+                if new_facts:
+                    self.shared_memory.publish(
+                        "new_inferred_facts", 
+                        (list(new_facts.keys()), "forward_chaining")
+                    )
+                
                 result.update({
                     "success": bool(new_facts),
                     "details": {
                         "new_facts_count": len(new_facts),
-                        "sample_facts": list(new_facts.items())[:3]
+                        "sample_facts": list(new_facts.items())[:3],
+                        "reasoning_type": reasoning_engine.name if reasoning_engine else "default"
                     }
                 })
             
             elif action == "backward_chaining":
-                # Implement basic backward chaining
+                # Enhanced backward chaining with reasoning
                 target_fact = self._parse_statement(self.current_thoughts[-1].split(":")[-1])
                 supporting_facts = []
                 
-                for fact in self.knowledge_base:
-                    if fact[2] == target_fact[0]:  # Object matches subject
-                        supporting_facts.append(fact)
+                if reasoning_engine:
+                    # Decompose goal using reasoning engine
+                    subgoals = reasoning_engine.decompose_goal(target_fact)
+                    for subgoal in subgoals:
+                        # Publish subgoals to shared memory
+                        self.shared_memory.publish(
+                            "subgoal_requests",
+                            {
+                                "subgoal": subgoal,
+                                "parent_goal": target_fact,
+                                "source": self.name
+                            }
+                        )
+                        # Collect supporting facts
+                        supporting_facts.extend(self._find_supporting_facts(subgoal))
+                else:
+                    supporting_facts = self._find_supporting_facts(target_fact)
                 
                 result.update({
                     "success": bool(supporting_facts),
                     "details": {
-                        "supporting_facts": supporting_facts[:5]
+                        "supporting_facts": supporting_facts[:5],
+                        "reasoning_type": reasoning_engine.name if reasoning_engine else "default"
                     }
                 })
             
             elif action == "request_human_input":
-                # Log to shared memory for human intervention
-                self.shared_memory.append(
-                    key="human_intervention_requests",
-                    value={
-                        "timestamp": time.time(),
-                        "thoughts": self.current_thoughts,
-                        "problem_context": self.get_current_context()
-                    }
-                )
+                # Generate focused question using reasoning engine
+                if reasoning_engine:
+                    question = reasoning_engine.generate_question(
+                        self.current_thoughts,
+                        self.get_current_context()
+                    )
+                else:
+                    question = " ".join(self.current_thoughts[-3:])
+                
+                # Enhanced request with reasoning context
+                request_data = {
+                    "timestamp": time.time(),
+                    "thoughts": self.current_thoughts,
+                    "problem_context": self.get_current_context(),
+                    "reasoning_type": reasoning_engine.name if reasoning_engine else "default",
+                    "specific_question": question
+                }
+                
+                self.shared_memory.append("human_intervention_requests", request_data)
+                
                 result.update({
                     "success": True,
-                    "details": "Intervention request logged"
+                    "details": {
+                        "question": question,
+                        "reasoning_type": reasoning_engine.name if reasoning_engine else "default"
+                    }
                 })
             
             # Update rule weights based on action success
@@ -615,6 +740,15 @@ class ReasoningAgent(BaseAgent, nn.Module):
             self._update_rule_weights(action, False)
         
         return result
+    
+    # Helper method for backward chaining
+    def _find_supporting_facts(self, target_fact):
+        """Find facts supporting a target fact"""
+        supporting_facts = []
+        for fact in self.knowledge_base:
+            if fact[2] == target_fact[0]:  # Object matches subject
+                supporting_facts.append(fact)
+        return supporting_facts
 
     def _is_goal_reached(self, context: Dict[str, Any]) -> bool:
         """
@@ -636,7 +770,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
     
         return confidence >= 0.9 and not contradiction
 
-    def forward_chaining(self, max_iterations: int = 100) -> Dict[Tuple, float]:
+    def forward_chaining(self) -> Dict[Tuple, float]:
         """
         Probabilistic forward chaining inference.
 
@@ -648,7 +782,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         """
         new_facts = {}
         applied_rules = defaultdict(int)  # Track rule applications
-        for _ in range(max_iterations):
+        for _ in range(self.max_iterations):
             current_new = {}
 
             # Explore new rules occasionally
@@ -707,16 +841,15 @@ class ReasoningAgent(BaseAgent, nn.Module):
         return new_facts # {k: v for k, v in new_facts.items() if k not in redundant}
 
     def _incremental_forward_chain(self, seed_facts: Dict[Tuple, float], max_iterations: int = 10):
-        """
-        Run a light inference pass starting from seed_facts.
-        """
+        """Run a light inference pass starting from seed_facts."""
         new_facts = {}
 
         for _ in range(max_iterations):
             current_new = {}
+            # Prioritize rules using agent's rule weights instead of probabilistic_models
             prioritized_rules = sorted(
                 self.rules,
-                key=lambda r: self.probabilistic_models.rule_priority(r[0]),
+                key=lambda r: self.rule_weights.get(r[0], 1.0),  # Use agent's rule weights
                 reverse=True
             )
             for name, rule_func, weight in prioritized_rules:
@@ -810,7 +943,10 @@ class ReasoningAgent(BaseAgent, nn.Module):
             visited.add(node)
             
             for fact in self.knowledge_base:
-                similarity = self.nlu_engine.wordlist.semantic_similarity(str(node),str(fact))
+                similarity = self.nlu_engine.wordlist.semantic_similarity(
+                    node[2],  # Use the object part of the fact tuple
+                    fact[2]   # Compare object-to-object
+                )
                 if similarity > 0.65:
                     edge_conf = current_confidence * decay * similarity
                     
@@ -831,6 +967,55 @@ class ReasoningAgent(BaseAgent, nn.Module):
         if max_conf > 0:
             for edge in self.hypothesis_graph[root_key]['edges']:
                 self.hypothesis_graph[root_key]['edges'][edge] /= max_conf
+
+    def _generate_embedding(self, root_node: Tuple) -> List[float]:
+        """Generate embedding for a fact tuple using transformer or GloVe fallback"""
+        # Convert fact tuple to natural language string
+        fact_str = f"{root_node[0]} {root_node[1]} {root_node[2]}"
+        
+        # First try: Use transformer embedding from NLU engine
+        try:
+            if hasattr(self.nlu_engine.wordlist, '_get_transformer_embedding'):
+                embedding = self.nlu_engine.wordlist._get_transformer_embedding(fact_str)
+                if embedding:
+                    return embedding
+        except Exception as e:
+            logger.warning(f"Transformer embedding failed: {str(e)}")
+        
+        # Fallback: Use GloVe vectors
+        glove_vectors = getattr(self.nlu_engine.wordlist, 'glove_vectors', {})
+        if not glove_vectors:
+            logger.warning("GloVe vectors not available - using random embedding")
+            return [random.gauss(0, 0.1) for _ in range(300)]  # Random fallback
+        
+        # Get embedding dimension from first vector
+        sample_vec = next(iter(glove_vectors.values()), None)
+        dim = len(sample_vec) if sample_vec else 300
+        
+        # Process each part of the fact tuple
+        vectors = []
+        for element in root_node:
+            element_str = str(element)
+            words = element_str.split()
+            word_vecs = []
+            
+            for word in words:
+                vec = glove_vectors.get(word.lower())
+                if vec:
+                    word_vecs.append(vec)
+            
+            if word_vecs:
+                # Average word vectors in this element
+                avg_vec = [sum(x) / len(word_vecs) for x in zip(*word_vecs)]
+                vectors.append(avg_vec)
+        
+        if vectors:
+            # Average vectors across all elements
+            final_embedding = [sum(x) / len(vectors) for x in zip(*vectors)]
+            return final_embedding
+        
+        # Ultimate fallback: zero vector
+        return [0.0] * dim
 
     def stream_update(self, new_facts: List[Tuple[str, str, str]], confidence: float = 1.0):
         """
@@ -959,7 +1144,8 @@ class ReasoningAgent(BaseAgent, nn.Module):
                 })
         
         # 2. Multi-hop reasoning for indirect opportunities
-        query = (task.id, "has_opportunity", None)
+        #query = (task.id, "has_opportunity", None) 
+        query = (task[0], "has_opportunity", None)
         opportunity_paths = self.probabilistic_models.multi_hop_reasoning(query)
         
         # Handle float returns (confidence scores)
@@ -1167,7 +1353,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
 
     def __repr__(self):
         """Safe representation to avoid recursion errors"""
-        return (f"<ReasoningAgent v{__version__} "
+        return (f"<Reasoning Agent v{__version__} "
                 f"| rules: {len(self.rules)}, "
                 f"facts: {len(self.knowledge_base)}>")
     
@@ -1200,7 +1386,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
                 "deadline": None
             }
         except Exception as e:
-            logger.error(f"[ReasoningAgent] Failed to parse goal '{goal_description}': {e}")
+            logger.error(f"[Reasoning Agent] Failed to parse goal '{goal_description}': {e}")
             raise
     
     def predict(self, state: Any = None) -> Dict[str, Any]:
@@ -1276,6 +1462,32 @@ class ReasoningAgent(BaseAgent, nn.Module):
             "error": "Unsupported input type",
             "type": "input_error"
         }
+    
+    def get_probability_grid(self, agent_pos=None, target_pos=None):
+        """
+        Get probability grid from probabilistic models
+        :param agent_pos: Current agent position
+        :param target_pos: Target position
+        :return: Probability grid as numpy array
+        """
+        return self.probabilistic_models.get_grid_state(agent_pos, target_pos)
+    
+    def reason(self, problem: Any, reasoning_type: str, context: dict = None) -> Any:
+        """
+        Perform reasoning using specified reasoning type or combination
+        Args:
+            problem: Input data for reasoning
+            reasoning_type: Type of reasoning (e.g., 'abduction', 'deduction+induction')
+            context: Additional context information
+        Returns:
+            Result of the reasoning process
+        """
+        try:
+            reasoning_engine = self.reasoning_strategies.create(reasoning_type)
+            return reasoning_engine.perform_reasoning(problem, context or {})
+        except Exception as e:
+            self.log_step(f"Reasoning failed: {str(e)}", "error")
+            return None
 
 if __name__ == "__main__":
     print("\n=== Running Reasoning Agent ===\n")
@@ -1286,19 +1498,19 @@ if __name__ == "__main__":
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()
 
-    r_agent = ReasoningAgent(
+    agent = ReasoningAgent(
         agent_factory=agent_factory,
         shared_memory=shared_memory,
         config=None
     )
-    print(r_agent)
-    printer.status("MODELS", r_agent._initialize_probabilistic_models(), "success")
+    print(agent)
+    printer.status("MODELS", agent._initialize_probabilistic_models(), "success")
 
     print("\n* * * * * Phase 2 - Rules * * * * *\n")
     rule = identity_rule
     rule_name = "IdentityRule"
     weight = 1.0
-    rules = r_agent.add_rule(rule=rule, rule_name=rule_name, weight=weight)
+    rules = agent.add_rule(rule=rule, rule_name=rule_name, weight=weight)
     printer.status("RULES1", rules, "success")# if rules else "error")
 
     print("\n* * * * * Phase 3 - Rules * * * * *\n")
@@ -1308,16 +1520,42 @@ if __name__ == "__main__":
         ("wheel", "is", "square"): False
     }
     confidence = 1.0
-    intersection = r_agent.learn_from_interaction(fact_tuple=fact_tuple, feedback=feedback, confidence=confidence)
-    weights = r_agent._update_rule_weights(rule_name=rule_name, success=None)
+    intersection = agent.learn_from_interaction(fact_tuple=fact_tuple, feedback=feedback, confidence=confidence)
+    weights = agent._update_rule_weights(rule_name=rule_name, success=None)
 
     printer.status("RULES1", intersection, "success")# if intersection else "error")
     printer.status("WEIGHTS", weights, "success")# if weights else "error")
-    printer.pretty("CHECK", r_agent.check_consistency(fact=fact_tuple), "success")# if weights else "error")
+    printer.pretty("CHECK", agent.check_consistency(fact=fact_tuple), "success")# if weights else "error")
 
     print("\n* * * * * Phase 4 - Validation * * * * *\n")
     threshold = 0.75
-    valid = r_agent.validate_fact(fact=fact_tuple, threshold=threshold)
+    valid = agent.validate_fact(fact=fact_tuple, threshold=threshold)
+
+    thoughts = agent.generate_chain_of_thought(fact_tuple)
+    action = agent._select_action(thoughts)
+    execute = agent.execute_action(action=action)
 
     printer.pretty("VALID", valid, "success" if valid else "error")
+    printer.pretty("ACTION", execute, "success" if execute else "error")
+
+    print("\n* * * * * Phase 5 - Embeddings * * * * *\n")
+    new_facts = ("car", "has", "wheels")
+    state = {
+        "context": agent.knowledge_base,
+        "history": [],
+        "confidence": 0.5
+    }
+    #agent.react_loop(task, state, max_steps=5)
+
+    hypothesis = agent._build_hypothesis_graph(root_node=fact_tuple)
+    stream = agent.stream_update(new_facts=new_facts, confidence=confidence)
+    factor1 = agent.detect_risk_factors(task=fact_tuple, state=state)
+    factor2 = agent.detect_opportunity_factors(task=fact_tuple, state=state)
+    evidence = agent._extract_evidence_from_state(state=state)
+
+    printer.pretty("GRAPH", hypothesis, "success" if hypothesis else "error")
+    printer.pretty("UPDATE", stream, "success" if stream else "error")
+    printer.pretty("RISK", factor1, "success" if factor1 else "error")
+    printer.pretty("OPPORTUNITY", factor2, "success" if factor2 else "error")
+    printer.pretty("EVIDENCE", evidence, "success" if evidence else "error")
     print("\n=== Successfully Ran Reasoning Agent ===\n")
