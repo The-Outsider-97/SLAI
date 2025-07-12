@@ -111,10 +111,9 @@ knowledge_agent:
     ontology_threshold: 500   # Switch to graph DB at this size
     in_memory_cache: True  # Whether to keep in-memory cache
     cache_size: 1000
-    bias_threshold: 0.75
+    bias_threshold: 0.87
     bias_detection_enabled: True
     embedding_model: "src/agents/knowledge/models/all-MiniLM-L6-v2"
-    embedding_model_path: "src/agents/knowledge/models/all-MiniLM-L6-v2"
     directory_path: "src/agents/knowledge/templates/"
     similarity_threshold: 0.35
     use_ontology_expansion: True
@@ -124,6 +123,7 @@ knowledge_agent:
     knowledge_tag: "knowledge_snippet"
     ttl: 600
     retrieval_mode: "hybrid"
+    safety_check_callback: foodie_security.validate_action
 
 language_agent: {}
 
@@ -182,12 +182,13 @@ reasoning_agent:
     ner_tag: None
     embedding: None
     decay: 0.8
+    max_iterations: 100
 
 safety_agent:
     constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
     audit_level: 2
     collect_feedback: true
-    enable_learnable_aggregation: false
+    enable_learnable_aggregation: true
     system_models: {}
     known_hazards: []
     global_losses: []
@@ -196,8 +197,8 @@ safety_agent:
     formal_specs: {}
     fault_tree_config: {}
     risk_thresholds:
-        overall_safety: 0.75
-        cyber_risk: 0.5
+        overall_safety: 0.85
+        cyber_risk: 0.7
         compliance_failure_is_blocker: true
     secure_memory:
         default_ttl_seconds: 3600
