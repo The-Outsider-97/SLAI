@@ -93,3 +93,54 @@ networks:
   gn20x20: "src/agents/reasoning/networks/grid_network_20x20.json"
   gn32x32: "src/agents/reasoning/networks/grid_network_32x32.json"
   gn64x64: "src/agents/reasoning/networks/grid_network_64x64.json"
+
+base_reasoning:
+  confidence: 0.75 # default confidence
+  is_supported: True
+  validation_threshold: 0.8
+  similarity_threshold: 0.7
+
+reasoning_abduction:
+  min_confidence: 0.7
+  max_hypotheses: 5
+  explanatory_threshold: 0.8
+
+reasoning_analogical:
+  min_similarity: 0.5
+  max_analogies: 3
+  structural_weight: 0.6
+  functional_weight: 0.4
+  adaptation_threshold: 0.7
+
+reasoning_cause_effect:
+  min_confidence: 0.7        # Minimum confidence to accept relationship
+  max_chain_length: 3        # Maximum causal chain length to consider
+  enable_counterfactual: true # Enable counterfactual analysis
+  temporal_weight: 0.6       # Weight for temporal validation
+  correlation_weight: 0.4    # Weight for correlation validation
+  network_mode: 'bayesian'   # 'bayesian' or 'simple' modeling
+
+reasoning_decompositional:
+  max_depth: 3                   # Maximum decomposition depth
+  min_component_size: 1          # Minimum size for decomposition
+  structural_weight: 0.5         # Weight for structural analysis
+  functional_weight: 0.5         # Weight for functional analysis
+  enable_interaction_analysis: true  # Enable interaction analysis
+
+reasoning_deductive:
+  max_steps: 10
+  certainty_threshold: 0.95
+  enable_fallacy_check: True
+  rule_priority:                  # Rule application order
+    - modus_ponens
+    - modus_tollens
+    - syllogism
+    - disjunctive_syllogism
+    - hypothetical_syllogism
+
+reasoning_inductive:
+  min_observations: 5
+  confidence_threshold: 0.7
+  extrapolation_limit: 1.5
+  trend_analysis_weight: 0.6
+  pattern_analysis_weight: 0.4
