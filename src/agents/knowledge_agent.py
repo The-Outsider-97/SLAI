@@ -199,6 +199,7 @@ class KnowledgeAgent(BaseAgent):
 
     def load_from_directory(self):
         """Loads all .txt and .json files in the directory as knowledge documents."""
+        logger.debug(f"Loading documents from: {self.directory_path}")
         if not os.path.isdir(self.directory_path):
             logger.error(f"Invalid directory: {self.directory_path}")
             return 0  # Explicitly return 0 when directory is invalid
