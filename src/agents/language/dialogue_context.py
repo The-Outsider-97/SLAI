@@ -39,9 +39,12 @@ class DialogueContext:
         self.wordlist_path = self.config.get('main_wordlist_path')
 
         self.dialogue_config = get_config_section('dialogue_context')
+        self.threshold = self.dialogue_config.get('threshold')
         self.memory_limit = self.dialogue_config.get('memory_limit')
         self.required_slots = self.dialogue_config.get('required_slots')
         self.enable_summarization = self.dialogue_config.get('enable_summarization')
+        self.include_history = self.dialogue_config.get('include_history')
+        self.include_summary = self.dialogue_config.get('include_summary')
         self.initial_history = self.dialogue_config.get('initial_history')
         self.initial_summary = self.dialogue_config.get('initial_summary')
         self.default_initial_history = self.dialogue_config.get('default_initial_history')
@@ -69,7 +72,7 @@ class DialogueContext:
         self.cache = LanguageCache()
 
         self.history: List[Dict[str, str]] = []
-        self.summarizer_fn: Optional[Callable[[List[Dict[str, str]], Optional[str]], str]] = {}
+        self.summarizer_fn: Optional[Callable[[List[Dict[str, str]], Optional[str]], str]] = None
 
         # Slot/Entity Tracking System
         self.slot_values: Dict[str, Any] = {}
@@ -120,25 +123,27 @@ class DialogueContext:
         if self.enable_summarization and self.summarizer_fn and user_messages_count > self.memory_limit:
             self._summarize()
 
+    def register_summarizer(self, summarizer_fn: Callable[[List[Dict[str, str]], Optional[str]], str]):
+        """Register a summarization function"""
+        self.summarizer_fn = summarizer_fn
+        logger.info("Summarizer function registered")
+
     def _summarize(self):
         """Summarize current history and reset memory if a summarizer function is provided."""
-        retain_last = 2  # Keep immediate context
-        self.history = self.history[-retain_last:]
         if not self.summarizer_fn:
-            logger.warning("Summarization enabled, but no summarizer_fn provided. Skipping summarization.")
+            logger.warning("Summarization enabled but no summarizer_fn registered")
             return
-
-        logger.info(f"Attempting to summarize. Current history length: {len(self.history)}")
+    
+        retain_last = self.summarization.get('retain_last_messages', 2)
+        messages_to_keep = self.history[-retain_last:]
+        
         try:
             new_summary = self.summarizer_fn(self.history, self.summary)
             self.summary = new_summary
-            # Retain only the last few messages post-summarization to avoid losing immediate context
-            # Or clear completely if summarizer handles this. For now, we clear.
-            self.history = [] 
-            logger.info(f"Summarization complete. New summary: '{self.summary[:100]}...' History cleared.")
+            self.history = messages_to_keep  # Keep recent context
+            logger.info(f"Summarization complete. New summary: '{self.summary[:100]}...'")
         except Exception as e:
             logger.error(f"Error during summarization: {e}", exc_info=True)
-
 
     def get_history_messages(self, window: Optional[int] = None) -> List[Dict[str, str]]:
         """
@@ -173,7 +178,7 @@ class DialogueContext:
         """Returns the current summary."""
         return self.summary
 
-    def get_context_for_prompt(self, include_summary: bool = True, include_history: bool = True, history_messages_window: Optional[int] = None) -> str:
+    def get_context_for_prompt(self, history_messages_window: Optional[int] = None) -> str:
         """
         Constructs a string representation of the context for prompting an LLM.
         Args:
@@ -182,10 +187,10 @@ class DialogueContext:
             history_messages_window (Optional[int]): Number of recent messages to include from history.
         """
         parts = []
-        if include_summary and self.summary:
+        if self.include_summary and self.summary:
             parts.append(f"[Summary]\n{self.summary}")
         
-        if include_history and self.history:
+        if self.include_history and self.history:
             history_to_show = self.get_history_messages(window=history_messages_window)
             
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history_to_show])
@@ -237,12 +242,19 @@ class DialogueContext:
         })
         self.environment_state['last_intent'] = intent
 
-    def detect_topic_shift(self, current_topic: str, threshold: float = 0.7) -> bool:
-        from src.agents.perception.encoders.text_encoder import TextEncoder, load_config as load_perception_config
-    
-        config = load_perception_config()
-        tokenizer = LanguageTokenizer()
-        encoder = TextEncoder(config=config, tokenizer=tokenizer)
+    def detect_topic_shift(self, current_topic: str) -> bool:
+        try:
+            from src.agents.perception.encoders.text_encoder import TextEncoder
+        except ImportError as e:
+            logger.error(f"Failed to import TextEncoder: {e}")
+            return False
+
+        # Check encoder availability
+        if not hasattr(self, '_text_encoder'):
+            logger.info("Initializing TextEncoder for topic shift detection")
+            self._text_encoder = TextEncoder().eval()  # Initialize once
+
+        encoder = TextEncoder()
         encoder.eval()
     
         if not self.history:
@@ -259,30 +271,31 @@ class DialogueContext:
             sim = F.cosine_similarity(current_vec, past_vec, dim=0).item()
             similarities.append(sim)
     
-        return max(similarities) < threshold
+        return max(similarities) < self.threshold
 
     def _encode_text(self, text: str, encoder) -> torch.Tensor:
         """Helper to convert string to embedding using encoder"""
+        tokenizer = LanguageTokenizer()
         cached = self.cache.get_embedding(text)
         if cached is not None:
             return cached
-        if not encoder.tokenizer:
-            raise ValueError("TextEncoder requires a tokenizer to embed text.")
-        
-        tokens = encoder.tokenizer.encode(text)["input_ids"]
+            
+        tokens = tokenizer.encode(text)["input_ids"]
         token_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0)
         
+        # Create style_id tensor
+        style_id_tensor = torch.zeros(1, dtype=torch.long)  # Batch size 1
+        
         with torch.no_grad():
-            output = encoder(token_tensor, style_id=0)
+            output = encoder(token_tensor, style_id=style_id_tensor)  # Pass tensor, not int
             if isinstance(output, tuple):
-                # output is (hidden_states, hidden_states) — take the actual tensor
-                encoded = output[0]  # shape: [batch_size, seq_len, embed_dim]
+                encoded = output[0]
             else:
                 encoded = output
-            if isinstance(encoded, tuple):  # just in case encoded is again a tuple
+            if isinstance(encoded, tuple):
                 encoded = encoded[0]
-            pooled = torch.mean(encoded, dim=1).squeeze(0)  # shape: [embed_dim]
-    
+            pooled = torch.mean(encoded, dim=1).squeeze(0)
+        
         self.cache.add_embedding(text, pooled)
         return pooled
 
@@ -381,7 +394,19 @@ if __name__ == "__main__":
     print("\n* * * * * Phase 2 * * * * *\n")
     input="What is life about?"
     output="The meaning of life differse from person to person."
-    printer.status("Init", context.add_turn(user_input=input, agent_response=output), "success")
-    printer.status("Init", context._summarize(), "success")
+    window = None
+    context.add_turn(user_input=input, agent_response=output)
+    context._summarize()
+    history = context.get_history_messages(window=window)
+    prompt = context.get_context_for_prompt(history_messages_window=window)
 
+    printer.pretty("history", history, "success" if history else "error")
+    printer.pretty("summary", context.get_summary(), "success" if context.get_summary() else "error")
+    printer.pretty("context prompt", prompt, "success" if prompt else "error")
+
+    print("\n* * * * * Phase 3 * * * * *\n")
+    topic="Bring me the bottle of water on that counter!"
+    shift = context.detect_topic_shift(current_topic=topic)
+
+    printer.pretty("TOPIC", shift, "success" if shift else "error")
     print("\n=== Finished Running Dialogue Context ===\n")
