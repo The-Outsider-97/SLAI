@@ -810,7 +810,7 @@ class SafetyAgent(BaseAgent):
             if parsed_email_data:
                 self.adaptive_security.train_phishing_model('email', parsed_email_data)
 
-        url_training_data = self.secure_memory.recall(tag="feedback_url_phishing", top_k=1000)
+        url_training_data = self.reward_model.memory.recall(tag="feedback_url_phishing", top_k=1000)
         parsed_url_data = []
         if url_training_data:
             for item in url_training_data:
@@ -820,7 +820,7 @@ class SafetyAgent(BaseAgent):
                 self.adaptive_security.train_phishing_model('url', parsed_url_data)
 
         # Example: Retrain RewardModel (if it has a retrain method)
-        reward_model_training_data = self.secure_memory.recall(tag="feedback_reward_model", top_k=500)
+        reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
         if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
            parsed_reward_data = [item['data'] for item in reward_model_training_data] # Adjust parsing as needed
            self.reward_model.retrain_model(parsed_reward_data)
@@ -1028,21 +1028,24 @@ class SafetyAgent(BaseAgent):
 
         self.shared_memory.put(
             f"feedback:{int(time.time())}", 
-            {"data": feedback_record},  # Wrap in 'data' key
+            feedback_record,
             tags=["reward_feedback", "human_feedback"]
         )
         logger.info(f"Collected human feedback for reward model training")
 
     def update_reward_model(self, min_samples=100):
         """Trigger reward model retraining"""
+        reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
+        if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
+            parsed_reward_data = [item['value'] for item in reward_model_training_data]
+            self.reward_model.retrain_model(parsed_reward_data)
+    
         feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples*2)
-        training_data = [item['value'] for item in feedback_items]
-
         if len(feedback_items) < min_samples:
             logger.info(f"Not enough feedback ({len(feedback_items)}/{min_samples})")
             return False
 
-        training_data = [entry["data"] for entry in feedback_items]
+        training_data = [item['value'] for item in feedback_items]
         self.reward_model.retrain_model(training_data)
         return True
 
