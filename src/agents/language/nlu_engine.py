@@ -43,16 +43,16 @@ class Wordlist:
         self.config = load_global_config()
         self.main_wordlist_path = self.config.get('main_wordlist_path')
         self.wordlist_path = self.config.get('wordlist_path')
+        self.modality_markers_path = self.config.get('modality_markers_path')
 
-        self.wordlist_config = get_config_section('nlu')
-        self.sentiment_lexicon_path = self.wordlist_config.get('sentiment_lexicon_path')
-        self.modality_markers_path = self.wordlist_config.get('modality_markers_path')
-        self.custom_intent_patterns_path = self.wordlist_config.get('custom_intent_patterns_path')
-        self.custom_entity_patterns_path = self.wordlist_config.get('custom_entity_patterns_path')
-        self.morphology_rules_path = self.wordlist_config.get('morphology_rules_path')
-        self.glove_synonym_threshold = self.wordlist_config.get('glove_synonym_threshold')
-        self.glove_top_synonyms = self.wordlist_config.get('glove_top_synonyms')
-        self.glove_path = self.wordlist_config.get('glove_path')
+        self.nlu_config = get_config_section('nlu')
+        self.sentiment_lexicon_path = self.nlu_config.get('sentiment_lexicon_path')
+        self.custom_intent_patterns_path = self.nlu_config.get('custom_intent_patterns_path')
+        self.custom_entity_patterns_path = self.nlu_config.get('custom_entity_patterns_path')
+        self.morphology_rules_path = self.nlu_config.get('morphology_rules_path')
+        self.glove_synonym_threshold = self.nlu_config.get('glove_synonym_threshold')
+        self.glove_top_synonyms = self.nlu_config.get('glove_top_synonyms')
+        self.glove_path = self.nlu_config.get('glove_path')
 
         self.cache_config = get_config_section('language_cache')
         self.max_cache_size = self.cache_config.get('max_size')
@@ -1174,10 +1174,10 @@ class NLUEngine:
     def __init__(self, wordlist_instance: Wordlist):
         self.config = load_global_config()
         self.main_wordlist_path = self.config.get('main_wordlist_path')
+        self.modality_markers_path = self.config.get('modality_markers_path')
 
         self.nlu_config = get_config_section('nlu')
         self.sentiment_lexicon_path = self.nlu_config.get('sentiment_lexicon_path')
-        self.modality_markers_path = self.nlu_config.get('modality_markers_path')
         self.custom_intent_patterns_path = self.nlu_config.get('custom_intent_patterns_path')
         self.custom_entity_patterns_path = self.nlu_config.get('custom_entity_patterns_path')
         self.morphology_rules_path = self.nlu_config.get('morphology_rules_path')
@@ -1196,6 +1196,38 @@ class NLUEngine:
 
         logger.info("NLU Engine initialized...")
 
+    def _load_intent_patterns(self, path: str) -> Dict[str, Any]:
+        """Load intent patterns from JSON file with better error handling"""
+        if not path:
+            logger.warning("Intent patterns path not provided in config")
+            return {}
+        
+        try:
+            file_path = Path(path)
+            if not file_path.exists():
+                logger.error(f"Intent patterns file not found at: {file_path}")
+                return {}
+                
+            with open(file_path, 'r', encoding='utf-8') as f:
+                patterns = json.load(f)
+                
+            # Convert old format to new format
+            processed_patterns = {}
+            for intent, pattern_data in patterns.items():
+                if isinstance(pattern_data, dict) and "patterns" in pattern_data:
+                    processed_patterns[intent] = pattern_data["patterns"]
+                elif isinstance(pattern_data, list):
+                    processed_patterns[intent] = pattern_data
+                else:
+                    logger.warning(f"Unexpected pattern format for intent '{intent}'")
+                    
+            logger.info(f"Loaded {len(processed_patterns)} intents from patterns file")
+            return processed_patterns
+            
+        except Exception as e:
+            logger.error(f"Error loading intent patterns: {e}")
+            return {}
+
     def get_intents(self):
         return self.custom_intent_patterns_path
 
@@ -1210,6 +1242,32 @@ class NLUEngine:
 
     def get_morphologies(self):
         return self.morphology_rules_path
+    
+    def _match_intent_by_pattern(self, text: str) -> List[Tuple[str, str, float]]:
+        """Match text against intent patterns using word boundaries"""
+        text_clean = re.sub(r'[^\w\s]', '', text).lower().strip()
+        intents = []
+        
+        for intent_name, patterns in self.intent_patterns.items():
+            for pattern in patterns:
+                # Clean and escape pattern
+                pattern_clean = re.sub(r'[^\w\s]', '', pattern).lower().strip()
+                
+                # Skip empty patterns
+                if not pattern_clean:
+                    continue
+                    
+                # Create regex pattern that matches the entire phrase
+                pattern_re = r'\b' + re.escape(pattern_clean) + r'\b'
+                
+                if re.search(pattern_re, text_clean):
+                    # Calculate match score based on length ratio
+                    score = len(pattern_clean) / max(1, len(text_clean))
+                    intents.append((intent_name, pattern, score))
+                    logger.debug(f"Pattern match: '{pattern}' -> '{intent_name}' (score: {score:.2f})")
+        
+        # Sort by match score descending
+        return sorted(intents, key=lambda x: x[2], reverse=True)
 
     def _validate_temporal(self, entity: str) -> bool:
         """Temporal validation using date logic"""
@@ -1294,6 +1352,12 @@ class NLUEngine:
     
         detected_intent = 'unknown'
         max_confidence_for_intent = 0.0  # Initialize properly as float
+
+        # Match against intent patterns
+        matched_intents = self._match_intent_by_pattern(text)
+        if matched_intents:
+            intent, pattern, score = matched_intents[0]
+            logger.debug(f"Top intent match: '{intent}' with pattern '{pattern}' (score: {score:.2f})")
     
         # Intent detection
         for intent, patterns in self.intent_patterns.items():
@@ -1441,6 +1505,20 @@ class NLUEngine:
             normalized_score = sentiment_score / weight_sum
             return max(-1.0, min(1.0, normalized_score))
         return 0.0
+    
+    def _calculate_confidence(self, matches: List[Tuple[str, str, float]]) -> float:
+        """Calculate intent confidence based on match quality"""
+        if not matches:
+            return 0.0
+        
+        # Get the best match score
+        best_score = matches[0][2]
+        
+        # Normalize score to 0.0-1.0 range
+        normalized_score = min(1.0, best_score * 1.5)  # Boost longer matches
+        
+        # Apply minimum confidence for any match
+        return max(0.5, normalized_score)  # Minimum 50% confidence for any match
 
     def _detect_modality(self, text: str) -> str:
         """Hierarchical modality detection"""
