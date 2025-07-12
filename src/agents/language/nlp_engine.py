@@ -388,16 +388,6 @@ class NLPEngine:
         except Exception as e:
             logger.error(f"Failed to load sentiment lexicon: {e}")
             return 0.0
-        #if not self.sentiment_lexicon_path:
-        #    logger.error("Sentiment lexicon path not configured!")
-        #    return 0.0
-            
-        #try:
-        #    with open(Path(self.sentiment_lexicon_path), 'r', encoding='utf-8') as f:
-        #        lexicon = json.load(f)
-        #except Exception as e:
-        #    logger.error(f"Failed to load sentiment lexicon: {e}")
-        #    return 0.0
 
         text = ' '.join([t.text.lower() for t in tokens])
         score = 0.0
