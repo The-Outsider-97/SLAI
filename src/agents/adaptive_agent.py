@@ -623,12 +623,7 @@ class AdaptiveAgent(BaseAgent):
     def _get_task_embedding(self, task_description: str) -> torch.Tensor:
         """
         Generate a consistent task embedding in torch format using the environment's novelty detector.
-    
-        Args:
-            task_description (str): High-level natural language task input.
-    
-        Returns:
-            torch.Tensor: Embedding of shape (1, embedding_dim)
+
         """
         with torch.no_grad():  # Prevent gradient tracking
             embedding = self.env.get_state_embedding(task_description)
@@ -663,17 +658,7 @@ class AdaptiveAgent(BaseAgent):
         Predicts an action using the most appropriate skill and returns structured output.
     
         This is used in evaluation and testing, so it avoids exploration and randomness.
-    
-        Args:
-            state (Any, optional): The current environment state. If None, use self.current_state.
-    
-        Returns:
-            Dict[str, Any]: A structured prediction output containing:
-                - selected_skill
-                - action
-                - confidence_score
-                - policy_entropy
-                - log_probability
+
         """
         if state is None:
             state = self.current_state
@@ -769,9 +754,6 @@ class AdaptiveAgent(BaseAgent):
         Register a utility object (e.g., map, database) by name.
         These utilities can be accessed later during agent operations.
 
-        Args:
-            name: Unique identifier for the utility
-            utility: The utility object to store
         """
         if not hasattr(self, '_utilities'):
             self._utilities = {}
@@ -783,9 +765,6 @@ class AdaptiveAgent(BaseAgent):
         Register a callback function for a specific event.
         The callback will be triggered when the event occurs.
 
-        Args:
-            event_name: Name of the event to handle
-            callback: Function to call when event occurs
         """
         if not hasattr(self, '_callbacks'):
             self._callbacks = defaultdict(list)
@@ -802,18 +781,7 @@ class AdaptiveAgent(BaseAgent):
     def supports_fail_operational(self) -> bool:
         """
         Determine whether the agent supports fail-operational capabilities.
-        
-        Fail-operational capability means the agent can continue operating 
-        safely and effectively even when partial failures occur in its components.
-        
-        This implementation checks:
-        - Presence of recovery strategies
-        - Integrity of local memory
-        - Policy redundancy or reset mechanisms
-        - Minimum episode reward thresholds
-        
-        Returns:
-            bool: True if agent has sufficient fail-operational strategies in place.
+
         """
         try:
             # Check for valid recovery strategies
@@ -848,9 +816,7 @@ class AdaptiveAgent(BaseAgent):
     def has_redundant_safety_channels(self) -> bool:
         """
         Determines if the agent has multiple independent channels for safety-critical decisions.
-    
-        Returns:
-            bool: True if redundant safety mechanisms are active.
+
         """
         try:
             # Example: check if multiple independent monitors or handlers are active
