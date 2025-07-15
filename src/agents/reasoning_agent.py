@@ -19,6 +19,7 @@ Real-World Usage:
 """
 
 import json
+import queue
 import re, os
 import yaml
 import time
@@ -112,10 +113,10 @@ class ReasoningAgent(BaseAgent, nn.Module):
             "reasoning_agent:knowledge_base", 
             default={}
         )
-        self.shared_memory.subscribe(
-            "new_facts", 
-            self._handle_new_fact
-        )
+        #self.shared_memory.subscribe(
+        #    "new_facts", 
+        #    self._handle_new_fact
+        #)
         self.storage_path = None
         self._init_lang_engines()
 
@@ -150,6 +151,38 @@ class ReasoningAgent(BaseAgent, nn.Module):
         from src.agents.language.nlu_engine import Wordlist, NLUEngine
         self.wordlist = Wordlist()  # Initialize first
         self.nlu_engine = NLUEngine(self.wordlist)
+
+    def process_notifications(self, input_queue, output_queue, termination_queue):
+        """Process notifications from shared memory using queues"""
+        while True:
+            try:
+                # Check termination signal first
+                try:
+                    if termination_queue.get(block=False) == "STOP":
+                        logger.info("Received termination signal, exiting notification loop")
+                        return
+                except queue.Empty:
+                    pass
+                
+                # Get queues from shared memory once
+                if not hasattr(self, '_input_queue'):
+                    self._input_queue = self.shared_memory.get('reasoning_input')
+                    self._output_queue = self.shared_memory.get('reasoning_output')
+                
+                # Process messages with timeout
+                try:
+                    message = self._input_queue.get(block=True, timeout=0.5)
+                    if message.get('channel') == 'new_facts':
+                        self._handle_new_fact(message['data'])
+                except queue.Empty:
+                    continue
+                except (ConnectionResetError, OSError) as e:
+                    if "10054" in str(e) or "232" in str(e):  # Handle pipe errors
+                        logger.info("Connection closed remotely, exiting notification loop")
+                        return
+            except Exception as e:
+                logger.error(f"Notification processing failed: {str(e)}")
+                time.sleep(1)  # Prevent tight error loop
 
     def _save_knowledge(self):
         path = self.knowledge_db
@@ -1488,74 +1521,3 @@ class ReasoningAgent(BaseAgent, nn.Module):
         except Exception as e:
             self.log_step(f"Reasoning failed: {str(e)}", "error")
             return None
-
-if __name__ == "__main__":
-    print("\n=== Running Reasoning Agent ===\n")
-    printer.status("TEST", "Starting Reasoning Agent tests", "info")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
-
-    shared_memory = SharedMemory()
-    agent_factory = AgentFactory()
-
-    agent = ReasoningAgent(
-        agent_factory=agent_factory,
-        shared_memory=shared_memory,
-        config=None
-    )
-    print(agent)
-    printer.status("MODELS", agent._initialize_probabilistic_models(), "success")
-
-    print("\n* * * * * Phase 2 - Rules * * * * *\n")
-    rule = identity_rule
-    rule_name = "IdentityRule"
-    weight = 1.0
-    rules = agent.add_rule(rule=rule, rule_name=rule_name, weight=weight)
-    printer.status("RULES1", rules, "success")# if rules else "error")
-
-    print("\n* * * * * Phase 3 - Rules * * * * *\n")
-    fact_tuple= ("wheel", "is", "round")
-    feedback = {
-        ("wheel", "is", "round"): True,
-        ("wheel", "is", "square"): False
-    }
-    confidence = 1.0
-    intersection = agent.learn_from_interaction(fact_tuple=fact_tuple, feedback=feedback, confidence=confidence)
-    weights = agent._update_rule_weights(rule_name=rule_name, success=None)
-
-    printer.status("RULES1", intersection, "success")# if intersection else "error")
-    printer.status("WEIGHTS", weights, "success")# if weights else "error")
-    printer.pretty("CHECK", agent.check_consistency(fact=fact_tuple), "success")# if weights else "error")
-
-    print("\n* * * * * Phase 4 - Validation * * * * *\n")
-    threshold = 0.75
-    valid = agent.validate_fact(fact=fact_tuple, threshold=threshold)
-
-    thoughts = agent.generate_chain_of_thought(fact_tuple)
-    action = agent._select_action(thoughts)
-    execute = agent.execute_action(action=action)
-
-    printer.pretty("VALID", valid, "success" if valid else "error")
-    printer.pretty("ACTION", execute, "success" if execute else "error")
-
-    print("\n* * * * * Phase 5 - Embeddings * * * * *\n")
-    new_facts = ("car", "has", "wheels")
-    state = {
-        "context": agent.knowledge_base,
-        "history": [],
-        "confidence": 0.5
-    }
-    #agent.react_loop(task, state, max_steps=5)
-
-    hypothesis = agent._build_hypothesis_graph(root_node=fact_tuple)
-    stream = agent.stream_update(new_facts=new_facts, confidence=confidence)
-    factor1 = agent.detect_risk_factors(task=fact_tuple, state=state)
-    factor2 = agent.detect_opportunity_factors(task=fact_tuple, state=state)
-    evidence = agent._extract_evidence_from_state(state=state)
-
-    printer.pretty("GRAPH", hypothesis, "success" if hypothesis else "error")
-    printer.pretty("UPDATE", stream, "success" if stream else "error")
-    printer.pretty("RISK", factor1, "success" if factor1 else "error")
-    printer.pretty("OPPORTUNITY", factor2, "success" if factor2 else "error")
-    printer.pretty("EVIDENCE", evidence, "success" if evidence else "error")
-    print("\n=== Successfully Ran Reasoning Agent ===\n")
