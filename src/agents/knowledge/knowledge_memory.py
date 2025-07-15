@@ -1,3 +1,4 @@
+import os
 import time
 import math
 import yaml, json
@@ -89,9 +90,30 @@ class KnowledgeMemory:
             json.dump(self._store, f, default=str)
     
     def load(self, path: str):
-        with open(path, 'r') as f:
-            raw = json.load(f)
-            self._store = {k: v for k, v in raw.items()}
+        if not os.path.exists(path):
+            return
+        
+        try:
+            with open(path, 'r') as f:
+                raw = json.load(f)
+            
+            # Handle dictionary format
+            if isinstance(raw, dict):
+                self._store = raw
+            # Handle list format
+            elif isinstance(raw, list):
+                self._store = {}
+                for entry in raw:
+                    if isinstance(entry, dict) and 'key' in entry:
+                        key = entry['key']
+                        self._store[key] = {
+                            'value': entry.get('value'),
+                            'metadata': entry.get('metadata', {})
+                        }
+            else:
+                logger.error(f"Unexpected data type in {path}: {type(raw)}")
+        except Exception as e:
+            logger.error(f"Error loading memory from {path}: {e}")
 
     def add_all(self, entries: List[dict]):
         """
