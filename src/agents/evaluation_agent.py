@@ -961,7 +961,11 @@ class EvaluationAgent(BaseAgent):
         """
         logger.critical("Triggering mitigation actions due to certification failure or critical hazard.")
         
-        self.shared_memory.set("system_status", "degraded")
+        # Check if shared memory is still available
+        if self.shared_memory is not None:
+            self.shared_memory.set("system_status", "degraded")
+        else:
+            logger.warning("Shared memory unavailable during mitigation")
     
         last_metrics = self.shared_memory.get("latest_metrics", {})
         self.issue_db.log_issue({
@@ -982,7 +986,11 @@ class EvaluationAgent(BaseAgent):
             agent_factory=self.agent_factory,
             config=self.config
         )
-        self.shared_memory.set("active_agent", fallback)
+        # Only try to set fallback agent if shared memory exists
+        if self.shared_memory is not None:
+            self.shared_memory.set("active_agent", fallback)
+        else:
+            logger.error("Cannot set fallback agent - shared memory unavailable")
     
         if "notify" in self.config:
             self._notify_operations_team("System degraded: mitigation actions triggered.")
