@@ -124,6 +124,7 @@ knowledge_agent:
     ttl: 600
     retrieval_mode: "hybrid"
     safety_check_callback: foodie_security.validate_action
+    max_workers: 8
 
 language_agent: {}
 
