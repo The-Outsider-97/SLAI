@@ -53,6 +53,10 @@ class LanguageAgent(BaseAgent):
         self.dialogue_context = DialogueContext()
         self.nlp_engine = NLPEngine()
         self.nlu_engine = NLUEngine(wordlist_instance=self.wordlist)
+        if not self.nlu_engine.intent_patterns:
+            logger.error("NLU Engine failed to load intent patterns!")
+        else:
+            logger.info(f"NLU Engine loaded {len(self.nlu_engine.intent_patterns)} intent patterns")
         self.nlg_engine = NLGEngine()
         self.safety_guard = SafetyGuard()
         self.response()
@@ -437,6 +441,34 @@ class LanguageAgent(BaseAgent):
             merged_policy['error_responses'] = {**default_policy['error_responses'], **policy_config['error_responses']}
         
         return merged_policy
+
+    def predict(self, user_input: str = None) -> Dict[str, Any]:
+        """
+        Processes user input through the language pipeline and returns a structured response.
+        
+        Args:
+            user_input (str): Text input from the user
+            
+        Returns:
+            Dict[str, Any]: Contains:
+                - response: Generated agent response text
+                - confidence: Confidence score of the response
+        """
+        if not user_input:
+            return {"response": "No input provided", "confidence": 0.0}
+        
+        try:
+            response = self.pipeline(user_input)
+            return {
+                "response": response,
+                "confidence": 1.0  # Simplified confidence
+            }
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return {
+                "response": "I encountered an error processing your request",
+                "confidence": 0.0
+            }
 
 if __name__ == "__main__":
     print("\n=== Running Language Agent ===\n")
