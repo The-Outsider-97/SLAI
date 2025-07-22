@@ -1,0 +1,23 @@
+{
+  "seller_id": "52768e9d-8195-4d98-8b75-49359a49b48d",
+  "profile_type": "indie_seller",
+  "is_active": true,
+  "created_at": "2025-07-04T22:54:45.268277",
+  "updated_at": "2025-07-04T22:54:45.268277",
+  "version": 1,
+  "menu": [],
+  "service_areas": [],
+  "business_hours": [],
+  "ratings": {
+    "average": 0.0,
+    "count": 0,
+    "reviews": []
+  },
+  "metadata": {
+    "profile_source": "self_registration",
+    "verification_status": "pending"
+  },
+  "name": "John Doe",
+  "cuisine_type": "Local",
+  "contact_email": "john.doe@email.com"
+}

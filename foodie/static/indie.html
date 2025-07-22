@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Indie Sellers - Foodie Aruba</title>
+    <link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="index.html" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+            <ul class="nav-links" id="nav-links">
+                <li><a href="business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="restaurants.html"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="indie.html" class="active"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="page-container">
+        <div class="container">
+            <div class="page-header">
+                <h1>Taste the Talent: Foodie Indies</h1>
+                <p>Support local entrepreneurs and discover unique, home-cooked meals.</p>
+            </div>
+
+            <div class="filter-bar">
+                <input type="text" placeholder="Search by restaurant or dish..." class="filter-search">
+                <select class="filter-select" aria-label="Filter by cuisine">
+                    <option value="">All Cuisines</option>
+                    <option value="italian">Italian</option>
+                    <option value="caribbean">Caribbean</option>
+                    <option value="asian">Asian</option>
+                    <option value="american">American</option>
+                </select>
+                <button class="filter-btn">Apply</button>
+            </div>
+
+            <div class="featured-grid" id="cards-container">
+                <!-- Example Indie Seller Cards
+                <div class="card">
+                    <img src="img/maria.png" alt="Maria's Kitchen">
+                    <div class="card-content">
+                        <h3>Maria's Kitchen</h3>
+                        <p>Authentic Aruban pastechi and stews.</p>
+                        <span class="rating"><i class="fa-solid fa-star"></i> 5.0 (45+)</span>
+                        <a href="#" class="card-link">View Offerings</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <img src="img/cake.png" alt="The Cake Box">
+                    <div class="card-content">
+                        <h3>The Cake Box</h3>
+                        <p>Custom cakes, cupcakes, and desserts.</p>
+                        <span class="rating"><i class="fa-solid fa-star"></i> 4.9 (80+)</span>
+                        <a href="#" class="card-link">View Offerings</a>
+                    </div>
+                </div>
+                 <div class="card">
+                    <img src="img/vegan.png" alt="Vegan Vibes Aruba">
+                    <div class="card-content">
+                        <h3>Vegan Vibes Aruba</h3>
+                        <p>Delicious plant-based meals and snacks.</p>
+                        <span class="rating"><i class="fa-solid fa-star"></i> 4.8 (60+)</span>
+                        <a href="#" class="card-link">View Offerings</a>
+                    </div>
+                </div> -->
+                <!-- Cards will be injected here -->
+            </div>
+
+            <!-- Registration Section -->
+            <section class="registration-section">
+                <div class="form-container">
+                    <h2>Become a Foodie Indie Seller</h2>
+                    <p>Turn your passion for cooking into a business. Reach thousands of customers across Aruba with our platform and delivery service.</p>
+                    <form class="contact-form">
+                        <input type="hidden" id="is_indie" value="true">
+                        <div class="form-group">
+                            <label for="sellerName">Your Name or Business Name</label>
+                            <input type="text" id="sellerName" name="sellerName" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="sellerEmail">Email Address</label>
+                            <input type="email" id="sellerEmail" name="sellerEmail" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyWebsite">Website URL (Optional)</label>
+                            <input type="url" id="companyWebsite" name="companyWebsite" placeholder="https://www.yourrestaurant.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="companyPhoto">Restaurant Profile Photo</label>
+                            <input type="file" id="companyPhoto" name="companyPhoto" accept="image/png, image/jpeg" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyMotto">Company Motto</label>
+                            <input type="text" id="companyMotto" name="companyMotto" 
+                                   placeholder="e.g., Serving with love all day long." required>
+                        </div>
+                        <div class="form-group">
+                            <label for="cuisineType">Type of Food You Offer</label>
+                            <input type="text" id="cuisineType" name="cuisineType" placeholder="e.g., Local, Baked Goods, Italian" required>
+                        </div>
+                        <button type="submit" class="submit-btn">Submit Registration</button>
+                    </form>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <footer class="main-footer">
+        <div class="container">
+            <p>© 2025 Foodie Aruba. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="js/script.js"></script>
+    <script src="js/registrator.js"></script>
+    <script src="js/searchbar.js"></script>
+    <script src="js/clock.js"></script>
+</body>
+</html>

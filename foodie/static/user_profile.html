@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Profile - Foodie Aruba</title>
+	<link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/auth.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+      /* Center the welcome header but left-align the content */
+      .page-header {
+        text-align: left;
+        padding: 0 20px;
+      }
+      
+      /* Remove center alignment from tab content */
+      .tab-content {
+        text-align: left;
+        padding: 0;
+      }
+      
+      /* Fix tab button alignment */
+      .tabs {
+        justify-content: flex-start;
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+      
+      /* Adjust form padding */
+      .profile-form {
+        padding: 0 20px;
+      }
+      
+      /* Make address/payment containers full width */
+      .addresses-container, 
+      .payments-container {
+        width: 100%;
+      }
+    </style>
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="index.html" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+            <ul class="nav-links" id="nav-links">
+                <li><a href="business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="restaurants.html"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="indie.html"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="page-container">
+        <div class="container">
+
+            <div id="user-content-wrapper">
+                <div id="auth-container" style="display: block;">
+                    <div class="auth-form-container">
+                        <!-- Login Form -->
+                        <form id="login-form" class="auth-form">
+                            <h2>Login</h2>
+                            <p>Welcome back! Please login to your account.</p>
+                            <div class="form-group">
+                                <label for="login-identifier">Email, Phone, or Full Name</label>
+                                <input type="text" id="login-identifier" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="login-password">Password</label>
+                                <input type="password" id="login-password" required>
+                            </div>
+                            <button type="submit" class="submit-btn">Login</button>
+                            <p class="auth-toggle">Don't have an account? <a href="#" id="show-register">Sign Up</a></p>
+                            <div class="error-message" id="login-error"></div>
+                        </form>
+
+                        <!-- Registration Form -->
+                        <form id="register-form" class="auth-form" style="display:none;">
+                            <h2>Sign Up</h2>
+                            <p>Create an account to get <strong>300 bonus points!</strong></p>
+                            
+                            <!-- Required Info -->
+                            <fieldset>
+                                <legend>Required Information</legend>
+                                <div class="form-group">
+                                    <label for="register-fullname">Full Name *</label>
+                                    <input type="text" id="register-fullname" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="register-email">Email Address *</label>
+                                    <input type="email" id="register-email" required>
+                                </div>
+                                <div class="form-group form-row">
+                                    <div class="form-group">
+                                        <label for="register-age">Age *</label>
+                                        <input type="number" id="register-age" required min="13">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="register-gender">Gender *</label>
+                                        <select id="register-gender" required>
+                                            <option value="">Select...</option>
+                                            <option value="male">Male</option>
+                                            <option value="female">Female</option>
+                                            <option value="prefer-not-to-say">Prefer not to say</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="register-password">Password *</label>
+                                    <input type="password" id="register-password" required minlength="10" autocomplete="new-password">
+                                    <small>Min 10 chars, 1 uppercase, 1 number, 1 special symbol.</small>
+                                </div>
+                            </fieldset>
+                        
+                            <!-- Optional Info -->
+                            <fieldset>
+                                <legend>Optional Information</legend>
+                                <div class="form-group">
+                                    <label for="register-phone">Phone Number</label>
+                                    <input type="tel" id="register-phone" placeholder="+297 123 4567">
+                                </div>
+                                <div class="form-group">
+                                    <label for="register-address">Address</label>
+                                    <input type="text" id="register-address" placeholder="e.g., 123 Palm Beach, Noord">
+                                </div>
+                                 <div class="form-group">
+                                    <label for="register-photo">Profile Photo</label>
+                                    <input type="file" id="register-photo" accept="image/png, image/jpeg">
+                                </div>
+                                <div class="form-group">
+                                    <label for="register-card">Card Number</label>
+                                    <input type="text" id="register-card" placeholder="•••• •••• •••• ••••">
+                                </div>
+                            </fieldset>
+                        
+                            <button type="submit" class="submit-btn">Create Account</button>
+                            <p class="auth-toggle">Already have an account? <a href="#" id="show-login">Login</a></p>
+                            <div class="error-message" id="register-error"></div>
+                        </form>
+                    </div>
+                </div>
+
+                <div id="profile-layout" class="profile-layout" style="display: none;">
+                    <div class="page-header">
+                        <h1 id="welcome-header">Welcome Back!</h1>
+                    </div>
+                    <div class="tabs">
+                        <button class="tab-link active" data-tab="personal-info"><i class="fa-solid fa-id-card"></i> Personal Info</button>
+                        <button class="tab-link" data-tab="order-history"><i class="fa-solid fa-receipt"></i> Order History</button>
+                        <button class="tab-link" data-tab="loyalty"><i class="fa-solid fa-award"></i> Loyalty Points</button>
+                        <button class="tab-link" data-tab="settings"><i class="fa-solid fa-gear"></i> Settings</button>
+                        <!-- Add an ID to the logout button for easy selection -->
+                        <button class="tab-link" id="logout-btn"><i class="fa-solid fa-right-from-bracket"></i> Logout</button>
+                    </div>
+
+                    <!-- Tab Content -->
+                    <div id="personal-info" class="tab-content active">
+                        <h2>Personal Information</h2>
+                        <form class="profile-form">
+                            <p><strong>Name:</strong> John Doe</p>
+                            <p><strong>Email:</strong> john.doe@email.com</p>
+                            <h3>Saved Addresses</h3>
+                            <div class="addresses-container">
+                                <!-- Addresses will be inserted here -->
+                            </div>
+                            <h3>Payment Methods</h3>
+                            <div class="payments-container">
+                                <!-- Payments will be inserted here -->
+                            </div>
+                            <button type="button" class="submit-btn-secondary">Add New Address</button>
+                        </form>
+                    </div>
+
+                    <div id="order-history" class="tab-content">
+                        <h2>Your Past Orders</h2>
+                        <div class="orders-container">
+                            <!-- Orders will be inserted here -->
+                        </div>
+                    </div>
+
+                    <div id="loyalty" class="tab-content">
+                        <h2>Your Loyalty Points</h2>
+                        <div class="points-display">
+                            <p>You have</p>
+                            <span class="points-total">450</span>
+                            <p>Points</p>
+                            <small>Redeemable for discounts on future orders!</small>
+                        </div>
+                    </div>
+
+                    <div id="settings" class="tab-content">
+                        <h2>Settings</h2>
+                        <form class="profile-form">
+                            <p>Manage your notification preferences and account settings.</p>
+                            <button type="button" class="submit-btn-danger">Delete Account</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <footer class="main-footer">
+        <div class="container">
+            <p>© 2025 Foodie Aruba. All rights reserved.</p>
+            <p><a href="#">About Us</a> | <a href="#">Contact</a> | <a href="#">Privacy Policy</a></p>
+        </div>
+    </footer>
+
+    <script src="js/script.js"></script>
+    <script src="js/clock.js"></script>
+    <script src="js/users.js"></script>
+</body>
+</html>

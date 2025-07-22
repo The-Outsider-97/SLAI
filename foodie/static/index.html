@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Foodie - Food Delivery in Aruba</title>
+	<link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="css/style.css">
+    <!-- Google Fonts for a modern look -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="#" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+
+            <ul class="nav-links" id="nav-links">
+                <li><a href="business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="restaurants.html"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="indie.html"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu">
+                    <i class="fa-solid fa-bars"></i>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero-section">
+            <div class="hero-bg"></div>
+            <div class="hero-content">
+                <h1 class="main-logo">
+                    <i class="fa-solid fa-burger"></i>
+                    Foodie
+                </h1>
+                <form class="search-form" id="search-form">
+                    <input type="text" placeholder="Type address, restaurant, main..." class="search-input">
+                    <button type="submit" class="search-btn">Search</button>
+                </form>
+            </div>
+        </section>
+
+        <section class="featured-section">
+            <div class="container">
+                <h2>Featured Today</h2>
+                <div class="featured-grid">
+                    <!-- Card 1: Plate w/ Rice -->
+                    <div class="card">
+                        <img src="img/rice.png" alt="Plate with rice">
+                        <div class="card-content">
+                            <h3>Plate w/ Rice, Banana & Beans</h3>
+                            <p>A local favorite from an Indie kitchen.</p>
+                            <a href="#" class="card-link">Order Now</a>
+                        </div>
+                    </div>
+                    
+                    <!-- Card 2: Soup -->
+                    <div class="card">
+                        <img src="img/soup.png" alt="Bowl of soup">
+                        <div class="card-content">
+                            <h3>Hearty Small Bowl of Soup</h3>
+                            <p>Perfect for a light business lunch.</p>
+                            <a href="#" class="card-link">See Options</a>
+                        </div>
+                    </div>
+                    
+                    <!-- Card 3: Fruit -->
+                    <div class="card">
+                        <img src="img/fruit.png" alt="Fresh Fruit">
+                        <div class="card-content">
+                            <h3>Fresh Fruit & Smoothies</h3>
+                            <p>Healthy options delivered to you.</p>
+                            <a href="#" class="card-link">Explore</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="main-footer">
+        <div class="container">
+            <p>© 2025 Foodie Aruba. All rights reserved.</p>
+            <p><a href="#">About Us</a> | <a href="#">Contact</a> | <a href="#">Privacy Policy</a></p>
+        </div>
+    </footer>
+
+    <script src="js/script.js"></script>
+    <script src="js/registrator.js"></script>
+    <script src="js/users.js"></script>
+    <script src="js/searchbar.js"></script>
+    <script src="js/clock.js"></script>
+</body>
+</html>

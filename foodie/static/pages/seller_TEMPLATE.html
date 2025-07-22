@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seller Dashboard - Foodie</title>
+	<link rel="icon" type="image/x-icon" href="../img/logo.ico" />
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="../index.html" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+            <ul class="nav-links" id="nav-links">
+                <li><a href="../business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="../restaurants.html"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="../indie.html" class="active"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="../user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="seller-page-layout container">
+        <!-- Left Column -->
+        <aside class="left-column">
+            <div class="seller-score-container">
+                <span class="seller-score">00</span>
+            </div>
+            <div class="reviews-feed" id="reviews-list">
+                <!-- Reviews will be populated by JS -->
+            </div>
+            <div class="my-review-form">
+                <h4>My Rating</h4>
+                <div class="my-rating-stars">
+                    <i class="fa-regular fa-star"></i>
+                    <i class="fa-regular fa-star"></i>
+                    <i class="fa-regular fa-star"></i>
+                    <i class="fa-regular fa-star"></i>
+                    <i class="fa-regular fa-star"></i>
+                </div>
+                <h4>My Review</h4>
+                <textarea placeholder="Share your experience..."></textarea>
+                <div class="review-actions">
+                    <button class="cancel-btn">Cancel</button>
+                    <button class="submit-review-btn">Submit</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Center Column -->
+        <section class="center-column">
+            <div class="seller-main-profile">
+                <img id="seller-banner-img" src="" alt="Seller Banner">
+                <div class="seller-details">
+                    <h1 id="seller-name"></h1>
+                    <p id="seller-motto"></p>
+                    <div class="rating" id="seller-rating"></div>
+                </div>
+            </div>
+
+            <div class="announcement-section">
+                <h2>Latest Announcement</h2>
+                <div class="announcement-post">
+                    <div class="announcement-header">
+                        <span class="date">DD/MM/YYYY - HH:MM</span>
+                    </div>
+                    <p>Here, the latest announcement of the seller would be showcased.</p>
+                </div>
+                 <div class="announcement-post">
+                     <p>Another announcement could be here, this section is scrollable.</p>
+                 </div>
+            </div>
+
+            <div class="menu-section" id="menu-container">
+                <!-- Menu items will be populated by JS, grouped by category -->
+            </div>
+        </section>
+
+        <!-- Right Column -->
+        <aside class="right-column">
+            <div class="seller-info-card">
+                <img class="seller-avatar" src="../img/user-laura.png" alt="Seller Avatar">
+                <h3 id="seller-personal-name">Laura la Cruz</h3>
+                <p id="seller-personal-email">laura_lc95@gmail.com</p>
+                <hr>
+                <p class="location-info"><i class="fa-solid fa-location-dot"></i> Savaneta</p>
+                <p class="join-date">since March 2025</p>
+
+                <div class="seller-socials">
+                    <a href="#"><i class="fa-brands fa-tumblr"></i></a>
+                    <a href="#"><i class="fa-solid fa-phone"></i></a>
+                    <a href="#"><i class="fa-brands fa-instagram"></i></a>
+                    <a href="#"><i class="fa-solid fa-envelope"></i></a>
+                </div>
+
+                <div class="seller-stats">
+                    <div class="stat-item">
+                        <i class="fa-solid fa-heart"></i>
+                        <span>54500</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fa-solid fa-user-plus"></i>
+                        <span>14200</span>
+                    </div>
+                </div>
+                <hr>
+                <p class="seller-about">
+                    The seller can write something about themselves here. This text area allows them to share their story, passion for food, or any other information they'd like customers to know.
+                </p>
+            </div>
+        </aside>
+    </main>
+
+    <div id="error-message" style="display:none; color:red; text-align:center; padding:20px;"></div>
+
+    <footer class="main-footer">
+        <div class="container">
+            <p>© 2025 Foodie Aruba. All rights reserved.</p>
+            <p><a href="#">About Us</a> | <a href="#">Contact</a> | <a href="#">Privacy Policy</a></p>
+        </div>
+    </footer>
+
+    <script src="../js/seller_page.js"></script>
+    <script src="../js/script.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const sellerId = localStorage.getItem('sellerId');
+        if (!sellerId) {
+            document.getElementById('error-message').textContent = 
+                'Seller information missing. Redirecting to homepage...';
+            document.getElementById('error-message').style.display = 'block';
+            setTimeout(() => window.location.href = '../index.html', 3000);
+        }
+    });
+    </script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add Menu Items - Foodie</title>
+	<link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/menu_setup.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="#" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+
+            <ul class="nav-links" id="nav-links">
+                <li><a href="business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="restaurants.html"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="indie.html"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu">
+                    <i class="fa-solid fa-bars"></i>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="menu-setup-container">
+        <div class="setup-header">
+            <h1>Add Your Menu Items</h1>
+            <p>Complete your profile by adding at least 5 menu items. Categorize them properly to help customers find your offerings.</p>
+        </div>
+        
+        <div class="form-grid">
+            <section class="item-form">
+                <h2><i class="fa-solid fa-plus"></i> Add New Item</h2>
+                
+                <div class="form-group">
+                    <label for="item-name">Item Name *</label>
+                    <input type="text" id="item-name" placeholder="e.g., Chicken Pastechi" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="item-description">Description</label>
+                    <textarea id="item-description" rows="3" placeholder="Describe your dish..."></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="item-image">Item Image (Optional)</label>
+                    <input type="file" id="item-image" accept="image/png, image/jpeg, image/webp">
+                    <img id="image-preview" src="" alt="Image Preview" class="image-preview"/>
+                </div>
+                
+                <div class="form-group">
+                    <label for="item-category">Category *</label>
+                    <select id="item-category" required>
+                        <option value="">Select category</option>
+                        <option value="breakfast">Breakfast</option>
+                        <option value="lunch">Lunch</option>
+                        <option value="brunch">Brunch</option>
+                        <option value="dinner">Dinner</option>
+                        <option value="late-night">Late Night</option>
+                        <option value="snacks">Snacks & Sides</option>
+                        <option value="desserts">Desserts</option>
+                        <option value="beverages">Beverages</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="item-size">Serving Size</label>
+                    <select id="item-size">
+                        <option value="">Select size</option>
+                        <option value="None">None</option>
+                        <option value="baby">Baby</option>
+                        <option value="kids">Kids</option>
+                        <option value="mini">Mini</option>
+                        <option value="medium">Medium</option>
+                        <option value="adult">Adult</option>
+                        <option value="large">Large</option>
+                        <option value="extra-large">Extra Large</option>
+                        <option value="family">Family Size</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="item-temperature">Temperature</label>
+                    <select id="item-temperature">
+                        <option value="">Select temperature</option>
+                        <option value="hot">Hot</option>
+                        <option value="cold">Cold</option>
+                        <option value="dry">Dry</option>
+                        <option value="wet">Wet/Saucy</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="item-price">Price (AFL) *</label>
+                    <input type="number" id="item-price" min="0" step="0.01" placeholder="e.g., 2.50" required>
+                </div>
+                
+                <div class="form-group">
+                    <label>Ingredients * (At least 2)</label>
+                    <input type="text" id="ingredient-input" placeholder="e.g., pepper, cheese, onion">
+                    <button type="button" id="add-ingredient" class="small-btn">
+                        <i class="fa-solid fa-plus"></i> Add Ingredients
+                    </button>
+                    <div class="ingredient-input" id="ingredients-container"></div>
+                </div>
+
+                <div class="form-group">
+                    <label>Tags * (At least 2)</label>
+                    <input type="text" id="tag-input" placeholder="e.g., spicy, vegetarian, gluten-free">
+                    <button type="button" id="add-tag" class="small-btn">
+                        <i class="fa-solid fa-plus"></i> Add Tag
+                    </button>
+                    <div class="tag-input" id="tags-container"></div>
+                </div>
+
+                <div class="form-group">
+                    <button type="button" id="toggle-nutrition" class="small-btn">
+                        <i class="fa-solid fa-apple-alt"></i> Add Nutritional Information
+                    </button>
+                    <div id="nutrition-fields" style="display: none; margin-top: 15px;">
+                        <div class="nutrition-grid">
+                            <div>
+                                <label for="item-weight">Weight (kg)</label>
+                                <input type="number" id="item-weight" min="0" step="0.01" placeholder="e.g., 0.5">
+                            </div>
+                            <div>
+                                <label for="item-calories">Calories</label>
+                                <input type="number" id="item-calories" min="0" placeholder="e.g., 350">
+                            </div>
+                            <div>
+                                <label for="item-sugar">Sugar (g)</label>
+                                <input type="number" id="item-sugar" min="0" placeholder="e.g., 15">
+                            </div>
+                            <div>
+                                <label for="item-protein">Protein (g)</label>
+                                <input type="number" id="item-protein" min="0" placeholder="e.g., 25">
+                            </div>
+                            <div>
+                                <label for="item-alcohol">Alcohol (%)</label>
+                                <input type="number" id="item-alcohol" min="0" max="100" step="0.1" placeholder="e.g., 5.5">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="price-comparison" id="price-comparison" style="display: none;">
+                    <h3><i class="fa-solid fa-scale-balanced"></i> Price Comparison</h3>
+                    <div id="comparison-results"></div>
+                </div>
+                
+                <button type="button" id="add-item" class="submit-btn">
+                    <i class="fa-solid fa-plus"></i> Add Item
+                </button>
+            </section>
+            
+            <section class="preview-section">
+                <h2><i class="fa-solid fa-eye"></i> Menu Preview</h2>
+                <p>You've added <span id="item-count">0</span> items</p>
+                
+                <div class="preview-grid" id="menu-preview">
+                    <!-- Items will be added here dynamically -->
+                    <div class="empty-state">
+                        <i class="fa-solid fa-utensils"></i>
+                        <p>No items added yet</p>
+                    </div>
+                </div>
+                
+                <div class="actions">
+                    <button type="button" id="save-draft" class="outline-btn">
+                        <i class="fa-solid fa-floppy-disk"></i> Save Draft
+                    </button>
+                    <button type="button" id="finish-setup" class="submit-btn" disabled>
+                        <i class="fa-solid fa-check"></i> Finish Setup
+                    </button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="js/script.js"></script>
+    <script src="js/menu_setup.js"></script>
+    <script src="js/registrator.js"></script>
+    <script src="js/clock.js"></script>
+</body>
+</html>
