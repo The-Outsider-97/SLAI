@@ -104,6 +104,10 @@ def serve_business_order():
 def serve_user_profile():
     return send_from_directory(app.static_folder, 'user_profile.html')
 
+@app.route('/world_map.html')
+def serve_world_map():
+    return send_from_directory(app.static_folder, 'world_map.html')
+
 # --- API Endpoints ---
 # These endpoints are what your JavaScript will call using fetch().
 @app.route('/api/search', methods=['POST'])
