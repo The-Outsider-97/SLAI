@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive World Map | Foodie</title>
+    <link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="css/world_map.css">
+</head>
+<body>
+    <header class="map-header">
+        <a href="/" class="back-link">← Back to Foodie</a>
+        <div>
+            <h1>Detailed Interactive World Map</h1>
+            <p>Explore countries, borders, and key national details with real map data.</p>
+        </div>
+    </header>
+
+    <main>
+        <aside class="panel" aria-label="Map Controls">
+            <h2>Map Layers</h2>
+            <p>Switch between street and terrain maps, then click a country to inspect details.</p>
+            <ul>
+                <li><strong>Pan:</strong> click and drag</li>
+                <li><strong>Zoom:</strong> mouse wheel or + / - buttons</li>
+                <li><strong>Country detail:</strong> click any country polygon</li>
+            </ul>
+            <section id="country-info" class="country-info" aria-live="polite">
+                <h3>Selected Country</h3>
+                <p>Click a country on the map to view details.</p>
+            </section>
+        </aside>
+        <section id="world-map" class="world-map" aria-label="Interactive World Map"></section>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="js/world_map.js"></script>
+</body>
+</html>
