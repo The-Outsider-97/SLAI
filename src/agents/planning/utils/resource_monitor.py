@@ -53,6 +53,7 @@ class ResourceMonitor:
         self._init_monitoring_thread()
         self.allocations = {}
         self.resource_graph = {}
+        self._last_logged_cluster_signature = None
 
     def _init_monitoring_thread(self):
         def monitor_loop():
@@ -368,4 +369,5 @@ class ResourceMonitor:
                 hw for hw in self.cluster_resources.specialized_hardware_available 
                 if hw not in requirements.specialized_hardware
             ]
+
 
