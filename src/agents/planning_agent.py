@@ -451,6 +451,8 @@ class PlanningAgent(BaseAgent):
 
     def _convert_to_schedule_format(self, plan):
         """Map plan tasks to scheduler format"""
+        now = time.time()
+
         def _requirements_from_task(task: Task):
             reqs = []
             profile = getattr(task, 'resource_requirements', None)
@@ -474,13 +476,34 @@ class PlanningAgent(BaseAgent):
                     dep_ids.append(dep)
             return dep_ids
 
+        def _normalized_deadline(task: Task):
+            deadline = getattr(task, 'deadline', 0) or 0
+            if not isinstance(deadline, (int, float)) or deadline <= now:
+                return now + max(getattr(task, 'duration', 300.0), 300.0)
+            return deadline
+
         return [{
             'id': task.name,
             'requirements': _requirements_from_task(task),
-            'deadline': task.deadline,
+            'deadline': _normalized_deadline(task),
             'risk_score': task.risk_score,
             'dependencies': _dependency_ids(task)
         } for task in plan]
+
+    def _create_task_from_assignment(self, assignment: Dict[str, Any]) -> Task:
+        """Rehydrate a scheduler assignment into a primitive executable task."""
+        return Task(
+            name=assignment.get('task_id', 'scheduled_task'),
+            task_type=TaskType.PRIMITIVE,
+            start_time=assignment.get('start_time', 0),
+            end_time=assignment.get('end_time', 0),
+            deadline=assignment.get('end_time', 0),
+            risk_score=assignment.get('risk_score', 0.0),
+            context={
+                'assigned_agent': assignment.get('agent_id'),
+                'assignment': assignment,
+            },
+        )
 
     def _convert_to_plan(self, schedule):
         """Convert scheduler output to executable plan"""
