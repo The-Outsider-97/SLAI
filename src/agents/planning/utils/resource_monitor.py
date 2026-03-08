@@ -343,6 +343,22 @@ class ResourceMonitor:
         finally:
             self._lock.release()
 
+            # Only update if significant changes occur
+            if new_resources != self.cluster_resources:
+                self.cluster_resources = new_resources
+
+                # Avoid log spam from volatile per-node allocation jitter.
+                cluster_signature = (
+                    new_resources.gpu_total,
+                    new_resources.ram_total,
+                    tuple(sorted(new_resources.specialized_hardware_available)),
+                )
+                if cluster_signature != self._last_logged_cluster_signature:
+                    logger.info("Cluster resource map updated")
+                    self._last_logged_cluster_signature = cluster_signature
+        finally:
+            self._lock.release()
+
     def allocate_resources(self, requirements: ResourceProfile):
         """Track resource consumption"""
         with self._lock:
@@ -352,3 +368,4 @@ class ResourceMonitor:
                 hw for hw in self.cluster_resources.specialized_hardware_available 
                 if hw not in requirements.specialized_hardware
             ]
+
