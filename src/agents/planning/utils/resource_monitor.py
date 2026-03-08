@@ -340,13 +340,6 @@ class ResourceMonitor:
             # Only update if significant changes occur
             if new_resources != self.cluster_resources:
                 self.cluster_resources = new_resources
-                logger.info("Cluster resource map updated")
-        finally:
-            self._lock.release()
-
-            # Only update if significant changes occur
-            if new_resources != self.cluster_resources:
-                self.cluster_resources = new_resources
 
                 # Avoid log spam from volatile per-node allocation jitter.
                 cluster_signature = (
@@ -369,5 +362,6 @@ class ResourceMonitor:
                 hw for hw in self.cluster_resources.specialized_hardware_available 
                 if hw not in requirements.specialized_hardware
             ]
+
 
 
