@@ -515,18 +515,24 @@ class SafetyPlanning:
                 )
                 self.current_violations.append(violation)
                 return False
-    
-            # Validate temporal constraints for this task
-            if task.start_time < current_time:
+
+          # Validate temporal constraints for this task
+            # Accept both absolute epoch timestamps and legacy relative offsets.
+            if isinstance(task.start_time, (int, float)) and task.start_time <= 0:
+                task.start_time = current_time + 10
+            elif isinstance(task.start_time, (int, float)) and task.start_time < current_time:
                 task.start_time = current_time + 10
                 raise TemporalViolation(f"Task {task.name} starts in past")
-            if task.deadline and task.deadline < task.start_time:
-                task.deadline = task.start_time + 300  # Default 5min duration
-                raise TemporalViolation(f"Task {task.name} has invalid deadline")
+
+            if isinstance(task.deadline, (int, float)) and task.deadline:
+                if task.deadline <= current_time:
+                    # Legacy planners can still provide relative seconds instead of epoch time.
+                    task.deadline = task.start_time + max(float(task.deadline), 300.0)
+                if task.deadline < task.start_time:
+                    task.deadline = task.start_time + 300  # Default 5min duration
+                    raise TemporalViolation(f"Task {task.name} has invalid deadline")
         
         return True
-    
-
 
     def log_adjustment(self, adjustment: Dict) -> None:
         """Comprehensive adjustment logging with contextual metadata"""
@@ -980,6 +986,8 @@ class SafetyPlanning:
                         continue  # Skip the failed method
                     
                     subtasks = failed_task.get_subtasks(method_idx)
+                    for subtask in subtasks:
+                        self._reset_temporal_attributes(subtask)
                     repair_plan = self._create_repair_plan(failed_task, subtasks)
                     
                     candidates.append(RepairCandidate(
@@ -1438,17 +1446,13 @@ class DistributedOrchestrator:
             logger.warning(f"Using default decomposition for {task.name}")
             return [task]
     
-        for method in task.methods:
+        for method_idx, method in enumerate(task.methods):
             try:
-                method_idx = 0
-                #subtasks = method.get_subtasks(method_idx)
-                #logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks")
-
-                subtasks = method_list
+                subtasks = method if isinstance(method, list) else []
                 if not subtasks:
                     continue
 
-                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks using one of its methods.")
+                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks using method index {method_idx}.")
     
                 # Distribute subtasks across compute nodes (this is pseudo-coded for orchestration)
                 distributed = []
