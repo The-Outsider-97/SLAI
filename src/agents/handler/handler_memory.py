@@ -59,3 +59,19 @@ class HandlerMemory:
 
     def recent_telemetry(self, limit: int = 100) -> List[Dict[str, Any]]:
         return list(self._telemetry)[-limit:]
+
+if __name__ == "__main__":
+    memory = HandlerMemory(config={"max_checkpoints": 2, "max_telemetry_events": 3})
+    checkpoint_id = memory.save_checkpoint(
+        label="smoke",
+        state={"step": 1, "status": "ok"},
+        metadata={"source": "__main__"},
+    )
+    restored = memory.restore_checkpoint(checkpoint_id)
+    memory.append_telemetry({"event": "smoke_test", "ok": bool(restored)})
+
+    print("HandlerMemory smoke test")
+    print(f"checkpoint_id={checkpoint_id}")
+    print(f"found_checkpoints={len(memory.find_checkpoints(label='smoke'))}")
+    print(f"restored={restored}")
+    print(f"recent_telemetry={memory.recent_telemetry(limit=1)}")
