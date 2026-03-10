@@ -298,7 +298,9 @@ class StatisticalEvaluator:
                 return (0.0, 0.0)
             mean = np.mean(samples)
             std_err = np.std(samples, ddof=1) / math.sqrt(n)
-            z = 1.96 if confidence == 0.95 else 2.58
+            confidence = confidence or self.confidence_level or 0.95
+            z_map = {0.90: 1.645, 0.95: 1.96, 0.99: 2.58}
+            z = z_map.get(round(float(confidence), 2), 1.96)
             margin = z * std_err
             return mean - margin, mean + margin
         except Exception as e:
@@ -317,6 +319,8 @@ class StatisticalEvaluator:
             diffs = np.array(sample_a) - np.array(sample_b)
             mean_diff = np.mean(diffs)
             std_diff = np.std(diffs, ddof=1)
+            if std_diff == 0:
+                return {"p_value": 1.0, "significant": False}
             t_stat = mean_diff / (std_diff / np.sqrt(len(diffs)))
             df = len(diffs) - 1
             p_value = 2 * (1 - student_t.cdf(abs(t_stat), df))
@@ -426,4 +430,5 @@ if __name__ == "__main__":
     except Exception as e:
         printer.pretty("Fatal error during evaluation", str(e), "error")
     
+
     print("\n=== Statistical Evaluation Complete ===\n")
