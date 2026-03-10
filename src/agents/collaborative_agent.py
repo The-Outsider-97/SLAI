@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 __version__ = "2.0.0"
 
 """
@@ -11,8 +13,6 @@ Features:
 5. Serialization/deserialization support
 6. Performance tracking and metrics
 """
-
-from __future__ import annotations
 
 import json
 import threading
@@ -108,6 +108,8 @@ class CollaborativeAgent(BaseAgent):
 
         self.global_config = load_global_config()
         self.collaborative_config = get_config_section("collaborative_agent") or {}
+        if not self.collaborative_config:
+            self.collaborative_config = get_config_section("task_routing") or {}
 
         self.risk_threshold = float(self.collaborative_config.get("risk_threshold", 0.7))
         self.max_concurrent_tasks = int(self.collaborative_config.get("max_concurrent_tasks", 100))
@@ -131,7 +133,7 @@ class CollaborativeAgent(BaseAgent):
             self.use_collaboration_manager = bool(config.get("use_collaboration_manager", self.use_collaboration_manager))
 
         self._risk_model = BayesianRiskModel(alpha=self.bayes_prior_alpha, beta=self.bayes_prior_beta)
-        self.collaboration_manager = CollaborationManager()
+        self.collaboration_manager = CollaborationManager(shared_memory=self.shared_memory) if self.use_collaboration_manager else None
 
         self._metrics = {
             "assessments_completed": 0,
@@ -179,7 +181,7 @@ class CollaborativeAgent(BaseAgent):
         dynamic_threshold = min(
             self._risk_model.threshold(task_key),
             self._risk_model.threshold(agent_key),
-            float(self.collab_config.get("risk_threshold", 0.7)),
+            float(self.collaborative_config.get("risk_threshold", self.risk_threshold)),
         )
 
         if risk_score >= dynamic_threshold * 1.4:
@@ -235,7 +237,7 @@ class CollaborativeAgent(BaseAgent):
             return {"status": "error", "error": "tasks and available_agents are required"}
 
         assignments: Dict[str, Dict[str, Any]] = {}
-        max_tasks_per_agent = int(constraints.get("max_tasks_per_agent", self.collab_config.get("max_concurrent_tasks", 100)))
+        max_tasks_per_agent = int(constraints.get("max_tasks_per_agent", self.collaborative_config.get("max_concurrent_tasks", self.max_concurrent_tasks)))
         agent_loads = {name: int(meta.get("current_load", 0)) for name, meta in available_agents.items()}
 
         for task in sorted(tasks, key=lambda t: (t.get("deadline", float("inf")), -float(t.get("priority", 0)))):
@@ -320,9 +322,9 @@ class CollaborativeAgent(BaseAgent):
             risk_score = self._risk_model.threshold(f"agent:{agent_name}")
 
             score = (
-                self.collab_config.get("optimization_weight_capability", 0.5) * capability_score
-                + self.collab_config.get("optimization_weight_load", 0.3) * load_score
-                + self.collab_config.get("optimization_weight_risk", 0.2) * risk_score
+                self.collaborative_config.get("optimization_weight_capability", self.optimization_weight_capability) * capability_score
+                + self.collaborative_config.get("optimization_weight_load", self.optimization_weight_load) * load_score
+                + self.collaborative_config.get("optimization_weight_risk", self.optimization_weight_risk) * risk_score
             )
             if score > best_score:
                 best_score = score
@@ -352,7 +354,7 @@ class CollaborativeAgent(BaseAgent):
         return json.dumps(
             {
                 "name": self.name,
-                "config": self.collab_config,
+                "config": self.collaborative_config,
                 "metrics": self._metrics,
                 "risk_model": self._risk_model.snapshot(),
                 "timestamp": time.time(),
@@ -396,4 +398,46 @@ class CollaborativeAgent(BaseAgent):
 if __name__ == "__main__":
     print("\n=== Running Collaborative Agent ===\n")
     printer.status("TEST", "Starting Collaborative Agent tests", "info")
-    print("\nAll tests completed successfully!\n")
+
+    class _MockMemory:
+        def __init__(self):
+            self._store = {}
+
+        def get(self, key, default=None):
+            return self._store.get(key, default)
+
+        def set(self, key, value, ttl=None):
+            self._store[key] = value
+
+    memory = _MockMemory()
+    agent = CollaborativeAgent(shared_memory=memory, config={"use_collaboration_manager": False, "risk_threshold": 0.6})
+
+    assessment = agent.assess_risk(0.9, task_type="analysis", source_agent="AgentA", context={"request_id": "r1"})
+    assert assessment.risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL}
+    assert memory.get("collaborative:last_assessment") is not None
+
+    available_agents = {
+        "AgentA": {"capabilities": ["analysis", "nlp"], "current_load": 0},
+        "AgentB": {"capabilities": ["vision"], "current_load": 0},
+    }
+    tasks = [
+        {"id": "t1", "type": "analysis", "requirements": ["analysis"], "priority": 2, "estimated_risk": 0.2},
+        {"id": "t2", "type": "analysis", "requirements": ["analysis"], "priority": 1, "estimated_risk": 0.95},
+    ]
+    result = agent.coordinate_tasks(tasks, available_agents)
+    assert result["status"] == "success"
+    assert "t1" in result["assignments"] and "t2" in result["assignments"]
+
+    state = agent.serialize_state()
+    restored = CollaborativeAgent.deserialize_state(state, shared_memory=memory)
+    assert restored.get_metrics()["assessments_completed"] >= 1
+
+    task_result = agent.perform_task({
+        "mode": "assess",
+        "risk_score": 0.1,
+        "task_type": "general",
+        "source_agent": "AgentA",
+    })
+    assert task_result["status"] == "success"
+
+    print("All collaborative_agent.py tests passed.\n")
