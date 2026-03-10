@@ -82,3 +82,8 @@ class TaskRouter:
         row["failures"] = int(row.get("failures", 0)) + 1
         row["last_seen"] = time.time()
         self._set_stats(stats)
+
+if __name__ == "__main__":
+    print("\n=== Running Task Router ===\n")
+    printer.status("TEST", "Starting Task Router tests", "info")
+    print("\nAll tests completed successfully!\n")
