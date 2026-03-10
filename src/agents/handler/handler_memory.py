@@ -13,12 +13,12 @@ printer = PrettyPrinter
 class HandlerMemory:
     """Checkpoint + telemetry memory for HandlerAgent decisions."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = load_global_config()
 
         self.memory_config = get_config_section('memory')
-        self.max_checkpoints = self.memory.get("max_checkpoints", 100)
-        self.max_telemetry_events = self.memory.get("max_telemetry_events", 1000)
+        self.max_checkpoints = self.memory_config.get("max_checkpoints", 100)
+        self.max_telemetry_events = self.memory_config.get("max_telemetry_events", 1000)
         self._checkpoints = deque(maxlen=self.max_checkpoints)
         self._telemetry = deque(maxlen=self.max_telemetry_events)
 
