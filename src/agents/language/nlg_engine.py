@@ -211,8 +211,9 @@ class NLGEngine:
         if not response_text:
             logger.warning(f"All templates failed for intent '{intent}'")
             plain_templates = [t for t in template_list if '{' not in t]
+            default_templates = self.templates.get("default", {}).get("responses", ["I'm not sure how to respond to that right now."])
             response_text = random.choice(plain_templates) if plain_templates else \
-                random.choice(self.templates["default"])
+                random.choice(default_templates)
     
         # Adapt style before returning
         return self._adapt_style(response_text)
