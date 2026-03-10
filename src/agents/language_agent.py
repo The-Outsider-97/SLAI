@@ -1,11 +1,9 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
-import torch
 import math
 import time
 import re
 import yaml, json
-import torch.nn as nn
 
 from dataclasses import dataclass
 from pathlib import Path
