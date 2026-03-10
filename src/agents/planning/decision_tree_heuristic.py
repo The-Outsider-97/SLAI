@@ -66,6 +66,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
         self.scaler = StandardScaler(with_mean=False, with_std=False)
         self.feature_names = self._get_feature_names()
         self.feature_importances_ = None
+        self._autotrain_attempted = False
 
         logger.info(f"Decision Tree Heuristic succesfully initialized")
 
@@ -93,27 +94,47 @@ class DecisionTreeHeuristic(BaseHeuristics):
             base_features.append('priority_weight')
         return base_features
 
-    def predict_success_prob(self, task, world_state, method_stats):
+    def predict_success_prob(self, task, world_state, method_stats, **kwargs):
         """Predict with confidence and resource checks"""
         printer.status("INIT", "Success prob predictor succesfully initialized", "info")
 
-        if not self.trained:
-            if os.path.exists(self.model_path):  # Use configured path
-                self.model, self.scaler = joblib.load(self.model_path)
-                self.trained = True
-                logger.info("Loaded pre-trained decision tree model")
-            else:
-                logger.warning("Using fallback heuristic predictions")
-                return self._fallback_heuristic(task, world_state, method_stats)
+        if not self._ensure_model_ready():
+            logger.warning("Using fallback heuristic predictions")
+            return self._fallback_heuristic(task, world_state, method_stats)
 
         try:
             features = self.extract_features(task, world_state, method_stats)
-            features = features.reshape(1, -1)  # ← Ensure 2D array shape
+            features = self.scaler.transform(features.reshape(1, -1))
             return self.model.predict_proba(features)[0][1]
 
         except Exception as e:
             logger.error(f"Prediction failed: {str(e)}")
             return self._fallback_heuristic(task, world_state, method_stats)
+
+    def _ensure_model_ready(self) -> bool:
+        if self.trained:
+            return True
+
+        if os.path.exists(self.model_path):
+            self.model, self.scaler = joblib.load(self.model_path)
+            self.trained = True
+            logger.info("Loaded pre-trained decision tree model")
+            return True
+
+        if self._autotrain_attempted:
+            return False
+
+        self._autotrain_attempted = True
+        try:
+            X, y = self.load_training_data()
+            if len(X) == 0 or len(np.unique(y)) < 2:
+                logger.warning("Insufficient planning data for auto-training")
+                return False
+            self.train(X, y)
+            return self.trained
+        except Exception as e:
+            logger.error(f"Auto-training failed: {str(e)}")
+            return False
 
     def extract_features(self, task, world_state, method_stats) -> np.ndarray:
         printer.status("INIT", "Freature extractor succesfully initialized", "info")
@@ -182,6 +203,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
             logger.error("Cannot train with only one class in dataset")
             return 0.0
 
+        _, counts = np.unique(y, return_counts=True)
         if any(c < 2 for c in counts):
             logger.warning("Insufficient class distribution for stratified split. Proceeding without stratification.")
             stratify = None
