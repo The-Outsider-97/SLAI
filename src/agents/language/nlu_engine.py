@@ -1186,13 +1186,20 @@ class NLUEngine:
         self.wordlist = wordlist_instance
         self.coherence_checker = None
 
-        # Load intent patterns from JSON file
-        with open(self.custom_intent_patterns_path, 'r') as f:
-            self.intent_patterns = json.load(f)
-
-        # Load entity patterns from JSON file
-        with open(self.custom_entity_patterns_path, 'r') as f:
-            self.entity_patterns = json.load(f)
+        # Load intent and entity patterns from JSON files
+        self.intent_patterns = self._load_intent_patterns(self.custom_intent_patterns_path)
+        self.entity_patterns = {}
+        try:
+            entity_path = Path(self.custom_entity_patterns_path) if self.custom_entity_patterns_path else None
+            if entity_path and entity_path.exists():
+                with open(entity_path, 'r', encoding='utf-8') as f:
+                    loaded_entities = json.load(f)
+                self.entity_patterns = loaded_entities if isinstance(loaded_entities, dict) else {}
+            else:
+                logger.error(f"Entity patterns file not found at: {self.custom_entity_patterns_path}")
+        except Exception as e:
+            logger.error(f"Error loading entity patterns: {e}")
+            self.entity_patterns = {}
 
         logger.info("NLU Engine initialized...")
 
