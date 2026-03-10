@@ -16,11 +16,11 @@ class HandlerPolicy:
         self.config = load_global_config()
 
         self.policy_config = get_config_section('policy')
-        self.max_retries = self.policy.get("max_retries", 2)
-        self.circuit_breaker_threshold = self.policy.get("circuit_breaker_threshold", 5)
-        self.cooldown_seconds = self.policy.get("cooldown_seconds", 30)
-        self.failure_budget_window_seconds = self.policy.get("failure_budget_window_seconds", 300)
-        self.evaluator_hooks_enabled = self.policy.get("evaluator_hooks_enabled", True)
+        self.max_retries = self.policy_config.get("max_retries", 2)
+        self.circuit_breaker_threshold = self.policy_config.get("circuit_breaker_threshold", 5)
+        self.cooldown_seconds = self.policy_config.get("cooldown_seconds", 30)
+        self.failure_budget_window_seconds = self.policy_config.get("failure_budget_window_seconds", 300)
+        self.evaluator_hooks_enabled = self.policy_config.get("evaluator_hooks_enabled", True)
 
         self._failure_counters = defaultdict(int)
         self._last_failures = defaultdict(list)
@@ -59,3 +59,25 @@ class HandlerPolicy:
             "open_until": open_until,
             "seconds_remaining": max(0.0, open_until - now),
         }
+
+if __name__ == "__main__":
+    policy = HandlerPolicy(config={"max_retries": 2, "cooldown_seconds": 1, "circuit_breaker_threshold": 2})
+    agent_name = "demo_agent"
+
+    print("HandlerPolicy smoke test")
+    print(f"initial_can_attempt={policy.can_attempt(agent_name)}")
+
+    policy.record_failure(agent_name)
+    print(f"status_after_first_failure={policy.breaker_status(agent_name)}")
+
+    policy.record_failure(agent_name)
+    status = policy.breaker_status(agent_name)
+    print(f"status_after_threshold={status}")
+    print(f"retries_allowed_0={policy.retries_allowed(0)}")
+    print(f"retries_allowed_2={policy.retries_allowed(2)}")
+
+    time.sleep(1.1)
+    print(f"can_attempt_after_cooldown={policy.can_attempt(agent_name)}")
+
+    policy.record_success(agent_name)
+    print(f"status_after_success={policy.breaker_status(agent_name)}")
