@@ -13,7 +13,7 @@ printer = PrettyPrinter
 class HandlerMemory:
     """Checkpoint + telemetry memory for HandlerAgent decisions."""
 
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(self):
         self.config = load_global_config()
 
         self.memory_config = get_config_section('memory')
