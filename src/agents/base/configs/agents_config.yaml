@@ -102,6 +102,15 @@ operations_notification:
 
 execution_agent: {}
 
+handler_agent:
+    max_retries: 2
+    circuit_breaker_threshold: 5
+    cooldown_seconds: 30
+    failure_budget_window_seconds: 300
+    checkpoint_max_age_seconds: 600
+    telemetry_buffer_size: 1000
+    evaluator_hooks_enabled: true
+
 knowledge_agent:
     source: "local_files"
     is_query: True
