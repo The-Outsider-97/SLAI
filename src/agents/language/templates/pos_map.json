@@ -1,0 +1,20 @@
+{
+    "pos": {
+        "noun": "NOUN",
+        "propn": "PROPN",
+        "verb": "VERB",
+        "aux": "AUX",
+        "adjective": "ADJ",
+        "adverb": "ADV",
+        "numeral": "NUM",
+        "determiner": "DET",
+        "pronoun": "PRON",
+        "preposition": "ADP",
+        "conjunction": "CCONJ",
+        "subord": "SCONJ",
+        "particle": "PART",
+        "interjection": "INTJ",
+        "symbol": "SYM",
+        "punct": "PUNCT"
+    }
+}

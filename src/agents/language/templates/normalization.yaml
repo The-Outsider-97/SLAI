@@ -1,0 +1,337 @@
+normalization_rules:
+  # UK -> US spellings (and some vice-versa if a US standard is preferred)
+  "colour": "color"
+  "flavour": "flavor"
+  "humour": "humor"
+  "behaviour": "behavior"
+  "neighbour": "neighbor"
+  "centre": "center"
+  "metre": "meter"
+  "theatre": "theater"
+  "fibre": "fiber"
+  "litre": "liter"
+  "analyse": "analyze"
+  "catalyse": "catalyze"
+  "paralyse": "paralyze"
+  "organise": "organize"
+  "recognise": "recognize"
+  "criticise": "criticize"
+  "emphasise": "emphasize"
+  "apologise": "apologize"
+  "specialise": "specialize"
+  "realise": "realize" # common
+  "travelled": "traveled"
+  "travelling": "traveling"
+  "cancelled": "canceled"
+  "cancelling": "canceling"
+  "fuelled": "fueled"
+  "fuelling": "fueling"
+  "jewellery": "jewelry"
+  "grey": "gray"
+  "dialogue": "dialog" # Or "dialogue" if preferred, pick one
+  "analogue": "analog"
+  "catalogue": "catalog"
+  "paediatric": "pediatric"
+  "foetus": "fetus"
+  "manoeuvre": "maneuver"
+  "oesophagus": "esophagus"
+  "oestrogen": "estrogen"
+  "anaemia": "anemia"
+  "leukaemia": "leukemia"
+  "encyclopaedia": "encyclopedia"
+  "defence": "defense"
+  "licence": "license" # Noun, verb is "license" in both
+  "offence": "offense"
+  "pretence": "pretense"
+  "practice": "practise" # UK noun is "practice", verb "practise". US both "practice". Normalize to US verb form if desired or noun "practice".
+  # "practise": "practice" # If targeting US noun/verb consistency
+  "pyjamas": "pajamas"
+  "plough": "plow"
+  "sceptical": "skeptical"
+  "mould": "mold"
+  "smoulder": "smolder"
+  "gaol": "jail"
+  "programme": "program" # Except for TV programme
+  "aeroplane": "airplane"
+  "tyre": "tire"
+  "cheque": "check" # For money
+  "draught": "draft"
+  "ageing": "aging"
+  "judgement": "judgment" # Judgment is preferred in US
+  "acknowledgement": "acknowledgment" # Acknowledgment is preferred in US
+
+  # Common inconsistencies, slang, or informal versions
+  "though": "tho"
+  "through": "thru"
+  "night": "nite"
+  "light": "lite"
+  "queue": "cue" # Be careful, 'cue' has other meanings. 'line' might be better if that's the intent.
+  # "queue": "line" # Alternative for waiting line
+  "whisky": "whiskey" # Scotch vs Irish/American
+  "advisor": "adviser" # Adviser is more common, but advisor is also accepted
+  "amongst": "among"
+  "whilst": "while"
+  "amidst": "amid"
+  "yoghurt": "yogurt"
+  "donut": "doughnut" # Or vice-versa, pick a standard
+  "okay": "ok" # Or "OK"
+  "alright": "all right" # Or keep "alright" if it's your preferred informal
+  "gonna": "going to"
+  "wanna": "want to"
+  "gotta": "got to"
+  "kinda": "kind of"
+  "sorta": "sort of"
+  "lemme": "let me"
+  "gimme": "give me"
+  "cuz": "because"
+  "cos": "because"
+  "coz": "because"
+  "btw": "by the way"
+  "fyi": "for your information"
+  "aka": "also known as"
+  "asap": "as soon as possible"
+  "lol": "laugh out loud" # Or keep "lol" if you want to capture the sentiment differently
+  "brb": "be right back"
+  "omg": "oh my god" # Or "oh my gosh"
+  "idk": "i don't know"
+  "ily": "i love you"
+  "pls": "please"
+  "plz": "please"
+  "thx": "thanks"
+  "tnx": "thanks"
+  "u": "you"
+  "r": "are"
+  "ur": "your" # or "you are" depending on context, tricky for simple map
+  "y": "why"
+  "2": "to" # Be careful with numbers, might be better handled by entity extraction
+  # "4": "for" # Similar caution as above
+  "nite": "night" # Reversing one from above if 'night' is standard
+  "lite": "light" # Reversing one from above if 'light' is standard
+  "tho": "though" # Reversing
+  "thru": "through" # Reversing
+
+  # Technical terms (more -ise/-ize)
+  "normalise": "normalize"
+  "optimise": "optimize"
+  "visualise": "visualize"
+  "customise": "customize"
+  "standardise": "standardize"
+  "initialise": "initialize"
+  "capitalisation": "capitalization"
+  "serialisation": "serialization"
+  "virtualisation": "virtualization"
+  "authorise": "authorize"
+  "summarise": "summarize"
+  "utilise": "utilize" # Often "use" is preferred over "utilize" for simplicity
+  # "utilise": "use"
+  "disc": "disk" # Context dependent (optical disc vs. hard disk) - pick one or handle contextually
+
+  # Compound words (choose a consistent style: open, hyphenated, or closed)
+  "e-mail": "email" # To closed form
+  "web site": "website" # To closed form
+  "on-line": "online" # To closed form
+  "user name": "username" # To closed form
+  "cell phone": "cellphone"
+  "good bye": "goodbye"
+  "any way": "anyway" # Different from "any way" (e.g., "is there any way to do this?")
+  "every day": "everyday" # Adjective form. Noun "every day" is two words. Tricky.
+  # "everyday": "every day" # If you want to force the two-word form for adverbial use
+  "some time": "sometime" # Adverb. "Some time" (noun phrase) is different.
+  "log in": "login" # Noun form. Verb is "log in".
+  # "login": "log in" # If you need the verb form and 'login' is seen
+  "set up": "setup" # Noun form. Verb is "set up".
+  # "setup": "set up"
+  "check out": "checkout" # Noun form. Verb is "check out".
+  # "checkout": "check out"
+  "make up": "makeup" # Noun form. Verb is "make up".
+  # "makeup": "make up"
+  "work out": "workout" # Noun form. Verb is "work out".
+  # "workout": "work out"
+  "sign up": "signup" # Noun form. Verb is "sign up".
+  # "signup": "sign up"
+  "can not": "cannot" # 'cannot' is generally preferred
+
+  # Archaic forms
+  "whom": "who"
+  "thou": "you"
+  "thy": "your"
+  "thee": "you"
+  "hath": "has"
+  "doth": "does"
+  "art": "are" # As in "thou art"
+  "oft": "often"
+  "ere": "before"
+  "aught": "anything" # Or "nothing" depending on context (archaic negative)
+  "naught": "nothing"
+
+  # Common misspellings
+  "accomodate": "accommodate"
+  "acheive": "achieve"
+  "adress": "address"
+  "agressive": "aggressive"
+  "apparant": "apparent"
+  "arguement": "argument"
+  "beleive": "believe"
+  "benifit": "benefit"
+  "buisness": "business"
+  "calender": "calendar"
+  "cemetary": "cemetery"
+  "commitee": "committee"
+  "commited": "committed"
+  "completly": "completely"
+  "concious": "conscious"
+  "curiousity": "curiosity"
+  "definately": "definitely"
+  "dilema": "dilemma"
+  "dissapoint": "disappoint"
+  "embarass": "embarrass"
+  "enviroment": "environment"
+  "existance": "existence"
+  "experiance": "experience"
+  "familar": "familiar"
+  "Febuary": "February"
+  "finaly": "finally"
+  "florescent": "fluorescent"
+  "foriegn": "foreign"
+  "fourty": "forty"
+  "freind": "friend"
+  "goverment": "government"
+  "grammer": "grammar"
+  "gratefull": "grateful"
+  "gaurd": "guard"
+  "happend": "happened"
+  "harrass": "harass"
+  "hieght": "height"
+  "wierd": "weird"
+  "independant": "independent"
+  "intrest": "interest"
+  "irresistable": "irresistible"
+  "knowlege": "knowledge"
+  "libary": "library"
+  "maintainance": "maintenance"
+  "millenium": "millennium"
+  "miniscule": "minuscule"
+  "mischeivous": "mischievous"
+  "misspell": "mispell" # Oh, the irony! Correcting the key here:
+  "mispell": "misspell"
+  "neccessary": "necessary"
+  "nieghbor": "neighbor" # Already have UK spelling, this is a common misspelling
+  "noticable": "noticeable"
+  "occured": "occurred"
+  "occurrence": "occurrence" # Noun form
+  "occurence": "occurrence"
+  "ommitted": "omitted"
+  "pavillion": "pavilion"
+  "peice": "piece"
+  "percieve": "perceive"
+  "persistant": "persistent"
+  "possesssion": "possession"
+  "prefered": "preferred"
+  "priviledge": "privilege"
+  "proffesor": "professor"
+  "pronounciation": "pronunciation"
+  "publically": "publicly"
+  "questionaire": "questionnaire"
+  "recieve": "receive"
+  "recomend": "recommend"
+  "refered": "referred"
+  "relevent": "relevant"
+  "restaraunt": "restaurant"
+  "rythm": "rhythm"
+  "sence": "sense"
+  "seperate": "separate"
+  "succesful": "successful"
+  "suprise": "surprise"
+  "temperture": "temperature"
+  "tommorow": "tomorrow"
+  "truely": "truly"
+  "untill": "until"
+  "vacum": "vacuum"
+  "vehical": "vehicle"
+  "visable": "visible"
+  "Wenesday": "Wednesday"
+  "wierd": "weird" # Duplicate, but common
+  "writting": "writing"
+  "yeild": "yield"
+
+  # Symbol to word (use with caution, context is important)
+  "&": "and"
+  # "@": "at" # Very context-dependent, might be part of email/username
+  "%": "percent"
+  # "$": "dollar" # Or other currency symbols like "€": "euro", "£": "pound"
+  "+": "plus"
+
+  # Abbreviations to full words (selective)
+  "approx.": "approximately"
+  "dept.": "department"
+  "e.g.": "for example" # Or "eg"
+  "eg": "for example"
+  "etc.": "et cetera" # Or "and so on"
+  "et cetera": "and so on" # If you prefer this
+  "i.e.": "that is" # Or "ie"
+  "ie": "that is"
+  "no.": "number" # If context implies number (e.g., No. 5)
+  "vs.": "versus"
+  "vs": "versus"
+  "dr.": "doctor" # For titles
+  "mr.": "mister"
+  "mrs.": "missus" # or "missis"
+  "ms.": "miss" # Can be ambiguous, often kept as Ms.
+
+  # Contractions (some NLU handle this, but explicit can be good)
+  # Some already covered in slang, but more formally:
+  "aren't": "are not"
+  "can't": "cannot" # Or "can not"
+  "couldn't": "could not"
+  "didn't": "did not"
+  "doesn't": "does not"
+  "don't": "do not"
+  "hadn't": "had not"
+  "hasn't": "has not"
+  "haven't": "have not"
+  "he'd": "he would" # Or "he had" - ambiguous, NLU usually needs context
+  "he'll": "he will"
+  "he's": "he is" # Or "he has" - ambiguous
+  "i'd": "i would" # Or "i had"
+  "i'll": "i will"
+  "i'm": "i am"
+  "i've": "i have"
+  "isn't": "is not"
+  "it's": "it is" # Common confusion with "its" (possessive)
+  # "its": "it is" # Careful: this would be wrong if 'its' is possessive
+  "let's": "let us"
+  "mightn't": "might not"
+  "mustn't": "must not"
+  "shan't": "shall not"
+  "she'd": "she would" # Or "she had"
+  "she'll": "she will"
+  "she's": "she is" # Or "she has"
+  "shouldn't": "should not"
+  "that's": "that is" # Or "that has"
+  "there's": "there is" # Or "there has"
+  "they'd": "they would" # Or "they had"
+  "they'll": "they will"
+  "they're": "they are"
+  "they've": "they have"
+  "wasn't": "was not"
+  "we'd": "we would" # Or "we had"
+  "we'll": "we will"
+  "we're": "we are"
+  "we've": "we have"
+  "weren't": "were not"
+  "what'll": "what will"
+  "what're": "what are"
+  "what's": "what is" # Or "what has"
+  "what've": "what have"
+  "where's": "where is" # Or "where has"
+  "who'd": "who would" # Or "who had"
+  "who'll": "who will"
+  "who're": "who are"
+  "who's": "who is" # Or "who has"
+  "who've": "who have"
+  "won't": "will not"
+  "wouldn't": "would not"
+  "you'd": "you would" # Or "you had"
+  "you'll": "you will"
+  "you're": "you are"
+  "you've": "you have"

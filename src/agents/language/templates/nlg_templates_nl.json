@@ -1,0 +1,90 @@
+{
+  "greeting": [
+    "Hallo! Hoe kan ik je vandaag helpen?",
+    "Hoi! Waar zou je over willen praten?",
+    "Hey! Ik ben hier om je te assisteren.",
+    "Goedemorgen! Klaar om je vragen te beantwoorden!",
+    "Goedemiddag! Hoe kan ik je ondersteunen?",
+    "Gegroet! Vraag me alles—ik luister!",
+    "Hoe gaat het? Laat maar horen wat je bezighoudt!",
+    "Leuk je te zien! Waarmee kan ik je helpen vandaag?"
+  ],
+  "farewell": [
+    "Tot ziens! Laat het weten als je nog iets nodig hebt.",
+    "Pas goed op jezelf! Tot de volgende keer.",
+    "Doei! Ik ben er wanneer je me nodig hebt.",
+    "Vaarwel! Twijfel niet om terug te komen als je hulp nodig hebt!",
+    "Een fantastische dag gewenst!",
+    "Tot de volgende keer! Blijf stralen!",
+    "Ik log uit—bereik me gerust wanneer je wilt!",
+    "Tot later! Blijf awesome!"
+  ],
+  "default": [
+    "Ik weet hier nog niet zeker hoe op te reageren.",
+    "Kun je dat anders formuleren?",
+    "Interessant... Vertel me er meer over.",
+    "Ik ben nog aan het leren! Kun je het anders vragen?",
+    "Hmm, laten we het vanuit een andere hoek bekijken. Wat bedoel je precies?",
+    "Ik help graag! Kun je je verzoek verduidelijken?",
+    "Misschien vragen over nieuws, trivia of tech? Ik kan van alles!",
+    "Dit onderwerp is nieuw voor me. Wil je iets anders proberen?"
+  ],
+  "acknowledgement": [
+    "Begrepen.",
+    "Oké, duidelijk.",
+    "Bedankt voor de update.",
+    "Genoteerd met een virtuele high-five!",
+    "Ontvangen! Wat is de volgende stap?",
+    "Kristalhelder—gaan we mee aan de slag!",
+    "Roger that! Klaar voor je volgende actie.",
+    "Opgeslagen en vergrendeld!"
+  ],
+  "error": [
+    "Oeps, er is iets misgegaan aan mijn kant.",
+    "Ik liep tegen een fout aan. Kun je het opnieuw proberen?",
+    "Er was een probleem. Probeer je verzoek nog eens.",
+    "Mijn circuits zijn wat warrig vandaag. Laten we dat opnieuw proberen?",
+    "Fout 404: Geestige reactie niet gevonden. Probeer opnieuw!",
+    "Technische storing gedetecteerd! Herhaal het verzoek.",
+    "Jemig! Laten we doen alsof dat niet gebeurde. Kun je herhalen?",
+    "De server neemt een koffiepauze. Probeer het zo nog eens!"
+  ],
+  "thanks": [
+    "Graag gedaan!",
+    "Geen probleem!",
+    "Blij dat ik kon helpen!",
+    "Altijd! Jouw dankbaarheid voedt mijn code!",
+    "Met plezier! Laten we dit snel weer doen.",
+    "Help graag—gewoon mijn robotplicht!",
+    "Geen dank! Jij maakt helpen leuk!",
+    "Missie volbracht! Nog iets anders nodig?"
+  ],
+  "positive_feedback": [
+    "Bedankt voor de lieve woorden!",
+    "Ik bloos! Hoe kan ik verder helpen?",
+    "Jij hebt mijn dag net beter gemaakt! ",
+    "Een compliment van jou betekent veel!",
+    "Ach, toe maar! Laten we deze flow vasthouden!"
+  ],
+  "negative_feedback": [
+    "Het spijt me dat te horen. Hoe kan ik beter worden?",
+    "Jouw feedback is belangrijk. Ik zal eraan werken.",
+    "Excuses voor het ongemak. Laat me het proberen te fixen.",
+    "Au—ik zal mijn antwoorden bijstellen. Bedankt voor je geduld!",
+    "Constructieve kritiek ontvangen! Hier ga ik van leren."
+  ],
+  "help": [
+    "Natuurlijk! Vraag me over het weer, nieuws of feiten. Waar heb je hulp bij nodig?",
+    "Ik kan concepten uitleggen, rekenen of gewoon kletsen. Wat wil je?",
+    "Hulp nodig? Probeer: 'Wat is de hoofdstad van Peru?' of 'Definieer kwantumfysica.'",
+    "Ik ben een Zwitsers zakmes van kennis—wat is je vraag?",
+    "Vastgelopen? Typ ‘tips’ voor ideeën, of vraag maar raak!"
+  ],
+  "apology": [
+    "Mijn excuses—laten we dat opnieuw proberen.",
+    "Oeps! Ik wilde je niet in verwarring brengen.",
+    "Vergeef mijn digitale onhandigheid. Laten we opnieuw beginnen!",
+    "Mea culpa! Zullen we het anders formuleren?",
+    "Ik ben je een koffie verschuldigd voor die fout. Opnieuw proberen?"
+  ]
+}

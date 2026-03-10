@@ -1,0 +1,36 @@
+{
+  "epistemic": [
+    "certainly", "probably", "possibly", "apparently", "seemingly", 
+    "evidently", "maybe", "perhaps", "definitely", "undoubtedly", 
+    "likely", "unlikely", "supposedly", "clearly", "obviously", 
+    "conceivably", "surely" 
+  ],
+  "deontic": [
+    "must", "should", "ought", "permitted", "allowed", "forbidden",
+    "required", "prohibited", "may", "need", "shall", "have to", 
+    "supposed to", "obligated", "bound", "cannot", "may not"
+  ],
+  "dynamic": [
+    "can", "could", "able", "capable", "enable", "capacity", 
+    "potential", "possibility", "unable", "incapable", "cannot", 
+    "could not"
+  ],
+  "alethic": [
+    "necessarily", "possibly", "contingently", "impossibly", "true", 
+    "false", "actual", "potential", "essential" 
+  ],
+  "interrogative": [
+    "who", "what", "when", "where", "why", "how", "which", "whom", 
+    "whose", "whether", "if" 
+  ],
+  "imperative": [
+    "please", "kindly", "urgently", "immediately", "require", "demand",
+    "do", "go", "stop", "request", "instruct", "command", "order", 
+    "ensure", "make sure", "let's"
+  ],
+  "conditional": [
+    "if", "unless", "provided", "assuming", "contingent", "conditional",
+    "whenever", "while", "given", "suppose", "supposing", "in case",
+    "as long as", "on condition that"
+  ]
+}

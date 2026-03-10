@@ -1,0 +1,17 @@
+[
+  {
+    "gender": "Woman",
+    "pronouns": "she/her",
+    "description": "A female gender identity."
+  },
+  {
+    "gender": "Man",
+    "pronouns": "he/him",
+    "description": "A male gender identity."
+  },
+  {
+    "gender": "Non-binary",
+    "pronouns": "they/them",
+    "description": "A gender identity that is not exclusively man or woman."
+  }
+]
