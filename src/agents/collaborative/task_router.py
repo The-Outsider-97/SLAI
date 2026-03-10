@@ -86,4 +86,52 @@ class TaskRouter:
 if __name__ == "__main__":
     print("\n=== Running Task Router ===\n")
     printer.status("TEST", "Starting Task Router tests", "info")
-    print("\nAll tests completed successfully!\n")
+
+    class _Memory:
+        def __init__(self):
+            self._store = {}
+
+        def get(self, key, default=None):
+            return self._store.get(key, default)
+
+        def set(self, key, value):
+            self._store[key] = value
+
+    class _Agent:
+        def __init__(self, name, fail=False):
+            self.name = name
+            self.fail = fail
+
+        def execute(self, task_data):
+            if self.fail:
+                raise RuntimeError(f"{self.name} failed")
+            return {"agent": self.name, "task": task_data}
+
+    class _Registry:
+        def __init__(self):
+            self._agents = {
+                "A": {"instance": _Agent("A", fail=True), "capabilities": ["translate"]},
+                "B": {"instance": _Agent("B"), "capabilities": ["translate"]},
+            }
+
+        def get_agents_by_task(self, task_type):
+            return {k: v for k, v in self._agents.items() if task_type in v["capabilities"]}
+
+    memory = _Memory()
+    router = TaskRouter(registry=_Registry(), shared_memory=memory)
+
+    result = router.route("translate", {"text": "hello"})
+    assert result["agent"] == "B"
+
+    stats = memory.get("agent_stats")
+    assert stats["A"]["failures"] >= 1
+    assert stats["B"]["successes"] >= 1
+    assert stats["A"]["active_tasks"] == 0 and stats["B"]["active_tasks"] == 0
+
+    try:
+        router.route("missing", {"text": "x"})
+        raise AssertionError("Expected missing-task failure")
+    except RuntimeError as exc:
+        assert "No agents found" in str(exc)
+
+    print("All task_router.py tests passed.\n")
