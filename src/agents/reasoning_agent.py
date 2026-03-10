@@ -79,7 +79,6 @@ class ReasoningAgent(BaseAgent, nn.Module):
         self.config = load_global_config()
         self.reasoning_config = get_config_section('reasoning_agent')
 
-        # Extract specific parameters from config
         self.language_config_path = self.reasoning_config.get('language_config_path')
         self.glove_path = self.reasoning_config.get('glove_path')
         self.ner_tag = self.reasoning_config.get('ner_tag')
@@ -88,6 +87,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         self.exploration_rate = self.reasoning_config.get('exploration_rate')
         self.decay = self.reasoning_config.get('decay')
         self.knowledge_db = self.reasoning_config.get('knowledge_db')
+        self.contradiction_threshold = self.reasoning_config.get('contradiction_threshold', 0.25)
 
         self.rule_engine = RuleEngine()
         self.validation_engine = ValidationEngine()
@@ -150,8 +150,9 @@ class ReasoningAgent(BaseAgent, nn.Module):
     def _save_knowledge(self):
         path = self.knowledge_db
 
-        # Get knowledge base and rule set
-        kb = self.shared_memory.get("reasoning_agent:knowledge_base", default=[])
+        # Keep shared memory and local state in sync
+        self.shared_memory.set("reasoning_agent:knowledge_base", self.knowledge_base)
+        kb = self.knowledge_base
         rules = []
         rule_weights = {}
 
@@ -170,7 +171,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         with open(path, "w") as f:
             json.dump(data, f, indent=4)
 
-    def add_fact(self, fact_tuple, fact: Union[Tuple, str], confidence: float = 1.0, publish=True) -> bool:
+    def add_fact(self, fact: Union[Tuple, str], confidence: float = 1.0, publish=True) -> bool:
         """
         Add a fact with confidence score.
         
@@ -185,11 +186,6 @@ class ReasoningAgent(BaseAgent, nn.Module):
         if fact is None:
             logger.error("Attempted to add None fact")
             return False
-        contradiction_score = self.agent_factory.validate_with_azr(fact_tuple)
-        if contradiction_score > 0.3:
-            logger.warning(f"Fact rejected due to contradiction: {fact_tuple} (score={contradiction_score})")
-        else:
-            self.knowledge_base[fact_tuple] = confidence
 
         try:
             if isinstance(fact, str):
@@ -197,7 +193,12 @@ class ReasoningAgent(BaseAgent, nn.Module):
             
             if len(fact) != 3:
                 raise ValueError("Fact must be a 3-tuple")
-                
+
+            contradiction_score = self.agent_factory.validate_with_azr(fact)
+            if contradiction_score > self.contradiction_threshold:
+                logger.warning(f"Fact rejected due to contradiction: {fact} (score={contradiction_score})")
+                return False
+
             # Update confidence using noisy-OR combination
             current_conf = self.knowledge_base.get(fact, 0.0)
             self.knowledge_base[fact] = 1 - (1 - current_conf) * (1 - confidence)
@@ -359,20 +360,12 @@ class ReasoningAgent(BaseAgent, nn.Module):
     
     def probabilistic_query(self, fact: Tuple, evidence: Dict[Tuple, bool] = None) -> float:
         """Enhanced probabilistic query with agent context"""
-        return self.probabilistic_models.probabilistic_query(
-            fact, 
-            evidence,
-            context=self.get_current_context()
-        )
+        return self.probabilistic_models.probabilistic_query(fact, evidence)
 
     def multi_hop_reasoning(self, query: Tuple, max_depth: int = 3) -> Union[float, list]:
         """Context-aware multi-hop reasoning with fallback"""
         try:
-            return self.probabilistic_models.multi_hop_reasoning(
-                query,
-                context=self.get_current_context(),
-                max_depth=max_depth
-            )
+            return self.probabilistic_models.multi_hop_reasoning(query, max_depth=max_depth)
         except Exception as e:
             logger.error(f"Multi-hop reasoning failed: {str(e)}")
             # Return confidence score as fallback
@@ -380,10 +373,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
 
     def run_bayesian_learning(self, observations: list):
         """Run Bayesian learning with agent-specific context"""
-        self.probabilistic_models.run_bayesian_learning_cycle(
-            observations,
-            context=self.get_current_context()
-        )
+        self.probabilistic_models.run_bayesian_learning_cycle(observations)
 
     def get_current_context(self) -> List[str]:
         """Get current reasoning context for probabilistic models"""
@@ -679,12 +669,12 @@ class ReasoningAgent(BaseAgent, nn.Module):
             self.knowledge_base.update(current_new)
 
         # Probabilistic validation to inferred facts
-        for fact, conf in current_new.items():
+        for fact, conf in new_fact.items():
             self.add_fact(fact, conf)
             prob_conf = self.probabilistic_models.probabilistic_query(fact)
             # Combine rule confidence with probabilistic confidence
             weighted_conf = (conf * 0.6) + (prob_conf * 0.4)
-            current_new[fact] = weighted_conf
+            new_fact[fact] = weighted_conf
 
         # --- Validation Phase ---
         rule_engine = self.rule_engine
@@ -936,7 +926,7 @@ class ReasoningAgent(BaseAgent, nn.Module):
         # Remove duplicates and low-confidence entries
         return self._deduplicate_risks(risk_factors)
     
-    def detect_opportunity_factors(self, task: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def detect_opportunity_factors(self, task: Any, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Detect opportunity factors using:
         - Multi-hop reasoning
@@ -960,7 +950,8 @@ class ReasoningAgent(BaseAgent, nn.Module):
                 })
         
         # 2. Multi-hop reasoning for indirect opportunities
-        query = (task.id, "has_opportunity", None)
+        task_id = getattr(task, "id", str(task))
+        query = (task_id, "has_opportunity", None)
         opportunity_paths = self.probabilistic_models.multi_hop_reasoning(query)
         
         # Handle float returns (confidence scores)
