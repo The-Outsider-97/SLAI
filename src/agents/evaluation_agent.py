@@ -106,12 +106,12 @@ class EvaluationAgent(BaseAgent):
         self.config = load_global_config()
         self.db_config = self.config.get("issue_database", {})
 
-        self.evaluation_config = get_config_section('evaluation_agent')
+        self.evaluation_config = get_config_section('evaluation_agent') or self.config
         self.memory_warning_threshold = self.evaluation_config.get('memory_warning_threshold', 0.7)
         self.memory_critical_threshold = self.evaluation_config.get('memory_critical_threshold', 0.9)
-        self.model_dir = self.evaluation_config.get("model_dir")
-        if not os.path.exists(self.model_dir):
-            os.makedirs(self.model_dir)
+        self.model_dir = self.evaluation_config.get("model_dir", "src/agents/evaluators/models")
+        if self.model_dir and not os.path.exists(self.model_dir):
+            os.makedirs(self.model_dir, exist_ok=True)
         self.deep_anomaly = self.evaluation_config.get('deep_anomaly')
         self.anomaly_detector = self.evaluation_config.get('anomaly_detector')
         self.update_interval = self.evaluation_config.get('update_interval', 60.0)
@@ -136,7 +136,7 @@ class EvaluationAgent(BaseAgent):
         self.protocol = self._init_validation_protocol()
         self.interpreter = InterpretabilityHelper()
         self.calculations = EvaluatorsCalculations()
-        self.validation_suite = AIValidationSuite(protocol=protocol)
+        self.validation_suite = AIValidationSuite(protocol=self.protocol)
         self.risk_model = self._init_risk_model()
         self.tuner = self._init_hyperparam_tuner()
 
@@ -151,7 +151,7 @@ class EvaluationAgent(BaseAgent):
                     'requirement_id': "REQ-001",
                     'detection_method': 'automated'
                 },
-                'oracle': lambda x: x == "expected_output"
+                'oracle': lambda x: isinstance(x, dict) and x.get('value') == "expected_output"
             }
         ]
 
@@ -552,34 +552,30 @@ class EvaluationAgent(BaseAgent):
             results = {}
             
             # Static Analysis
-            if self.protocol.static_analysis['enable']:
+            if self.protocol.static_analysis.get('enable', False):
                 analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
                 static_results = analyzer.full_analysis()
                 results.update({
                     'static_analysis': static_results,
                     'static_analysis_explanation': self._explain_static_results(static_results)
                 })
-        
-            # Create agent properly
+
+            # Create agent and run behavioral tests
             agent = self.create_agent()
-            
-            # Behavioral Testing
-            if self.protocol.behavioral_testing['test_types']:
+            test_suite = {
+                'predictions': [],
+                'expected_outputs': []
+            }
+            if self.protocol.behavioral_testing.get('test_types'):
                 test_suite = self.evaluators['behavioral'].execute_test_suite(agent)
-                
-            # Autonomous Task Evaluation - use validated tasks
-            if self.autonomous_tasks:
-                results['autonomous'] = self.evaluators['autonomous'].evaluate_task_set(
-                    self._get_validated_tasks()
-                )
                 results['behavioral'] = test_suite
                 results['test_explanation'] = self._explain_test_results(test_suite)
-        
-                # Subsequent evaluators using behavioral test results
-                outputs = test_suite.get('predictions', [])
-                truths = test_suite.get('expected_outputs', [])
-                
-                # Performance Evaluation
+
+            outputs = test_suite.get('predictions', [])
+            truths = test_suite.get('expected_outputs', [])
+
+            # Performance Evaluation
+            if outputs and truths:
                 results['performance'] = self.evaluators['performance'].evaluate(
                     outputs=outputs,
                     ground_truths=truths
@@ -591,19 +587,6 @@ class EvaluationAgent(BaseAgent):
                     ground_truths=truths
                 )
         
-            # Resource Utilization (always runs)
-            results['resource'] = self.evaluators['resource'].evaluate()
-        
-        
-            statistical_data = self._prepare_statistical_dataset()
-            if len(statistical_data['current_run']) > 0 and len(statistical_data['current_run']) >= self.evaluators['statistical'].min_sample_size:
-                results['statistical'] = self.evaluators['statistical'].evaluate(
-                    datasets=statistical_data
-                )
-            else:
-                logger.info("Skipping statistical evaluation - insufficient data")
-                results['statistical'] = {'status': 'skipped', 'reason': 'Insufficient data'}
-
             # Autonomous Task Evaluation
             if self.autonomous_tasks:
                 try:
@@ -614,12 +597,25 @@ class EvaluationAgent(BaseAgent):
                     logger.error(f"Autonomous evaluation failed: {str(e)}")
                     results['autonomous'] = {'error': str(e)}
             
-            # Safety Incident Evaluation
-            if SafetyEvaluator().safety_incidents:
+            # Resource Utilization (always runs)
+            results['resource'] = self.evaluators['resource'].evaluate()
+
+            statistical_data = self._prepare_statistical_dataset()
+            current_run = statistical_data.get('current_run', [])
+            if len(current_run) >= self.evaluators['statistical'].min_sample_size:
+                results['statistical'] = self.evaluators['statistical'].evaluate(
+                    datasets=statistical_data
+                )
+            else:
+                logger.info("Skipping statistical evaluation - insufficient data")
+                results['statistical'] = {'status': 'skipped', 'reason': 'Insufficient data'}
+
+            # Safety Incident Evaluation (use persistent safety evaluator instance)
+            safety_incidents = self.evaluators['safety'].raw_incidents
+            if safety_incidents:
                 try:
-                    results['safety'] = self.evaluators['safety'].evaluate_operation(
-                        SafetyEvaluator().safety_incidents
-                    )
+                    results['safety'] = self.evaluators['safety'].evaluate_operation(safety_incidents)
+
                 except Exception as e:
                     logger.error(f"Safety evaluation failed: {str(e)}")
                     results['safety'] = {'error': str(e)}
@@ -649,21 +645,23 @@ class EvaluationAgent(BaseAgent):
         """Prepare historical data for statistical analysis"""
         metrics = self.shared_memory.get("latest_metrics") or {}
         perf_metrics = metrics.get('performance', {})
-        
-        # SAFETY CHECK
+
         current_data = perf_metrics.get('accuracy_history', [])
         if not isinstance(current_data, list):
             current_data = []
-    
-        dataset = {
-            'current_run': (self.shared_memory.get("latest_metrics") or {}).get('performance', {}).get('accuracy_history', []),
-            'previous_runs': [
-                entry['performance']['accuracy'] 
-                for entry in self.shared_memory.get("metric_history") or []
-                if 'performance' in entry
-            ]
+        current_data = [x for x in current_data if isinstance(x, (int, float))]
+
+        previous_runs = []
+        for entry in self.shared_memory.get("metric_history") or []:
+            perf = entry.get('performance', {}) if isinstance(entry, dict) else {}
+            val = perf.get('accuracy')
+            if isinstance(val, (int, float)):
+                previous_runs.append(val)
+
+        return {
+            'current_run': current_data,
+            'previous_runs': previous_runs
         }
-        return dataset
     
     def _evaluate_financial_health(self, portfolio: Dict, dashboard: Dict) -> Dict:
         """Financial-specific risk assessment"""
@@ -693,7 +691,7 @@ class EvaluationAgent(BaseAgent):
         
         if results.get('safety', {}).get('compliance_rate', 0) < min_success:
             return 'critical'
-        if results.get('financial_metrics', {}).get('critical_issues'):
+        if results.get('critical_issues'):
             return 'critical'
         if results.get('performance', {}).get('accuracy', 0) < 0.7:
             return 'warning'
