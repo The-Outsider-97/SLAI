@@ -398,18 +398,9 @@ class CollaborativeAgent(BaseAgent):
 if __name__ == "__main__":
     print("\n=== Running Collaborative Agent ===\n")
     printer.status("TEST", "Starting Collaborative Agent tests", "info")
+    from src.agents.collaborative.shared_memory import SharedMemory
 
-    class _MockMemory:
-        def __init__(self):
-            self._store = {}
-
-        def get(self, key, default=None):
-            return self._store.get(key, default)
-
-        def set(self, key, value, ttl=None):
-            self._store[key] = value
-
-    memory = _MockMemory()
+    memory = SharedMemory()
     agent = CollaborativeAgent(shared_memory=memory, config={"use_collaboration_manager": False, "risk_threshold": 0.6})
 
     assessment = agent.assess_risk(0.9, task_type="analysis", source_agent="AgentA", context={"request_id": "r1"})
