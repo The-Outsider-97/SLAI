@@ -10,11 +10,6 @@ from pathlib import Path
 from collections import OrderedDict, deque
 from typing import Dict, List, Any, Union, Optional, Callable
 
-if __package__ in (None, ""):
-    _project_root = Path(__file__).resolve().parents[2]
-    if str(_project_root) not in sys.path:
-        sys.path.insert(0, str(_project_root))
-
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.language.orthography_processor import OrthographyProcessor
