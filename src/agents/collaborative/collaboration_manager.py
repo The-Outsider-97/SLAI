@@ -82,4 +82,39 @@ class CollaborationManager:
 if __name__ == "__main__":
     print("\n=== Running Collaboration Manager ===\n")
     printer.status("TEST", "Starting Collaboration Manager tests", "info")
-    print("\nAll tests completed successfully!\n")
+
+    class _Memory:
+        def __init__(self):
+            self._store = {}
+
+        def get(self, key, default=None):
+            return self._store.get(key, default)
+
+        def set(self, key, value):
+            self._store[key] = value
+
+    class _EchoAgent:
+        capabilities = ["translate"]
+
+        def execute(self, data):
+            return {"ok": True, "payload": data}
+
+    memory = _Memory()
+    manager = CollaborationManager(shared_memory=memory)
+    manager.register_agent("Echo", _EchoAgent(), ["translate"])
+
+    out = manager.run_task("translate", {"text": "hola"}, retries=1)
+    assert out["ok"] is True
+
+    # Force overload path
+    memory.set("agent_stats", {"Echo": {"active_tasks": manager.max_load}})
+    try:
+        manager.run_task("translate", {"text": "boom"})
+        raise AssertionError("Expected overload")
+    except OverloadError:
+        pass
+
+    stats = manager.get_agent_stats()
+    assert "Echo" in stats
+
+    print("All collaboration_manager.py tests passed.\n")
