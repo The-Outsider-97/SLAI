@@ -1,4 +1,3 @@
-
 import numpy as np
 import yaml, json
 import matplotlib.pyplot as plt
@@ -8,11 +7,11 @@ from typing import Dict, List, Tuple, Any
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QBuffer, QSize
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
 from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
-from src.agents.evaluators.utils.evaluation_errors import (ReportGenerationError, ValidationFailureError, 
+from src.agents.evaluators.utils.evaluation_errors import (ReportGenerationError, ValidationFailureError,
                                                           MetricCalculationError, VisualizationError)
 from src.agents.evaluators.utils.report import get_visualizer
 from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
@@ -29,13 +28,14 @@ class SafetyMetrics:
     safety_margin: float
     collision_avoidance: bool
     standards_compliance: float
+    risk_assessment: Dict[str, float] = field(default_factory=dict)
 
 class SafetyEvaluator:
     """Evaluator for safety-critical aspects of robotics and automation systems"""
     def __init__(self):
         self.config = load_global_config()
         self.eval_config = get_config_section('safety_evaluator')
-        
+
         # Load safety thresholds
         self.thresholds = self.eval_config.get('thresholds', {
             'max_risk_level': 0.3,
@@ -44,12 +44,12 @@ class SafetyEvaluator:
             'min_safety_margin': 0.5,
             'min_standards_compliance': 0.95
         })
-        
+
         # Safety standards configuration
         self.safety_standards = self.eval_config.get('safety_standards', [
             'ISO 13849', 'IEC 61508', 'ANSI/RIA R15.06'
         ])
-        
+
         # Metrics configuration
         self.metric_weights = self.eval_config.get('weights', {
             'risk_level': 0.3,
@@ -57,13 +57,13 @@ class SafetyEvaluator:
             'emergency_response': 0.25,
             'standards_compliance': 0.2
         })
-        
+
         # Risk categories
         self.risk_categories = self.eval_config.get('risk_categories', [
             'collision', 'pinch_point', 'crush_hazard',
             'electrical', 'environmental', 'control_failure'
         ])
-        
+
         self.memory = EvaluatorsMemory()
         self.calculations = EvaluatorsCalculations()
 
@@ -84,7 +84,7 @@ class SafetyEvaluator:
             SafetyMetrics object with evaluation results
         """
         # Validate incident structure
-        required_keys = ['risk_assessment', 'hazard_detection_time', 
+        required_keys = ['risk_assessment', 'hazard_detection_time',
                          'emergency_stop_time', 'safety_margin', 'collision_avoided']
         if not all(key in incident for key in required_keys):
             raise ValidationFailureError(
@@ -92,17 +92,17 @@ class SafetyEvaluator:
                 data=incident,
                 expected=f"Incident must contain keys: {required_keys}"
             )
-            
+
         # Calculate risk level (weighted average of risk categories)
-        risk_vector = np.array([incident['risk_assessment'].get(cat, 0) 
+        risk_vector = np.array([incident['risk_assessment'].get(cat, 0)
                               for cat in self.risk_categories])
         risk_level = np.mean(risk_vector)
-        
+
         # Calculate standards compliance
-        standards_vector = np.array([incident.get(std, False) 
+        standards_vector = np.array([incident.get(std, False)
                                    for std in self.safety_standards])
         standards_compliance = np.mean(standards_vector)
-        
+
         # Create metrics object
         metrics = SafetyMetrics(
             risk_level=risk_level,
@@ -110,13 +110,14 @@ class SafetyEvaluator:
             emergency_stop_time=incident['emergency_stop_time'],
             safety_margin=incident['safety_margin'],
             collision_avoidance=incident['collision_avoided'],
-            standards_compliance=standards_compliance
+            standards_compliance=standards_compliance,
+            risk_assessment=incident.get('risk_assessment', {})
         )
-        
+
         # Store detailed hazard data if available
         if 'hazard_details' in incident:
             self.hazard_data.append(incident['hazard_details'])
-        
+
         self.safety_incidents.append(metrics)
         self.raw_incidents.append(incident)
         self.compliance_history.append(standards_compliance)
@@ -140,12 +141,12 @@ class SafetyEvaluator:
             'total_safety_margin': 0,
             'incident_metrics': []
         }
-        
+
         for incident in incidents:
             try:
                 metrics = self.evaluate_incident(incident)
                 results['incident_metrics'].append(metrics)
-                
+
                 # Aggregate metrics
                 results['critical_incidents'] += int(metrics.risk_level > self.thresholds['max_risk_level'])
                 results['collisions_prevented'] += int(metrics.collision_avoidance)
@@ -153,10 +154,10 @@ class SafetyEvaluator:
                 results['total_detection_time'] += metrics.hazard_detection_time
                 results['total_stop_time'] += metrics.emergency_stop_time
                 results['total_safety_margin'] += metrics.safety_margin
-                
+
             except Exception as e:
                 logger.error(f"Incident evaluation failed: {str(e)}")
-        
+
         # Calculate aggregate metrics
         if incidents:
             results['avg_risk_level'] = results['total_risk'] / len(incidents)
@@ -172,12 +173,12 @@ class SafetyEvaluator:
                 'avg_safety_margin': 0,
                 'compliance_rate': 0
             })
-        
+
         # Safety effectiveness scores
         results['detection_score'] = max(0, 1 - (results['avg_detection_time'] / self.thresholds['max_hazard_detection_time']))
         results['response_score'] = max(0, 1 - (results['avg_stop_time'] / self.thresholds['max_emergency_stop_time']))
         results['safety_score'] = results['avg_safety_margin'] / self.thresholds['min_safety_margin']
-        
+
         # Composite safety score
         results['composite_score'] = (
             self.metric_weights['risk_level'] * (1 - results['avg_risk_level']) +
@@ -185,11 +186,12 @@ class SafetyEvaluator:
             self.metric_weights['emergency_response'] * results['response_score'] +
             self.metric_weights['standards_compliance'] * results['compliance_rate']
         )
-        
+
         # Risk categorization
         if self.hazard_data:
+            self.calculations.hazard_data = list(self.hazard_data)
             results['risk_distribution'] = self.calculations._calculate_risk_distribution()
-        
+
         # Store results
         if self.config.get('store_results', False):
             try:
@@ -200,7 +202,7 @@ class SafetyEvaluator:
                 )
             except Exception as e:
                 logger.error(f"Memory storage failed: {str(e)}")
-                
+
         return results
 
     def generate_report(self, results: Dict[str, Any]) -> str:
@@ -208,11 +210,11 @@ class SafetyEvaluator:
         try:
             report = []
             visualizer = get_visualizer()
-            
+
             # Header Section
             report.append(f"\n# Safety Evaluation Report\n")
             report.append(f"**Generated**: {datetime.now().isoformat()}\n")
-            
+
             # Summary Metrics
             report.append("## Executive Summary\n")
             report.append(f"- **Incidents Evaluated**: {results['total_incidents']}")
@@ -221,7 +223,7 @@ class SafetyEvaluator:
             report.append(f"- **Average Risk Level**: {results['avg_risk_level']:.2f}")
             report.append(f"- **Compliance Rate**: {results['compliance_rate']:.2%}")
             report.append(f"- **Safety Score**: {results['composite_score']:.2f}/1.0\n")
-            
+
             # Risk Visualization
             if 'risk_distribution' in results:
                 report.append("\n## Risk Distribution\n")
@@ -231,14 +233,14 @@ class SafetyEvaluator:
                 except Exception as e:
                     logger.error(f"Risk visualization failed: {str(e)}")
                     report.append("*Risk visualization unavailable*")
-            
+
             # Standards Compliance
             report.append("\n## Standards Compliance\n")
             for standard in self.safety_standards:
                 compliant_count = sum(incident.get(standard, False) for incident in self.raw_incidents)
                 report.append(f"- **{standard}**: {compliant_count}/{results['total_incidents']} "
                               f"({compliant_count/results['total_incidents']:.1%})")
-            
+
             # Timeline Analysis
             if self.compliance_history:
                 report.append("\n## Compliance Trend\n")
@@ -247,23 +249,23 @@ class SafetyEvaluator:
                     report.append(f"![Compliance Trend](data:image/png;base64,{timeline_chart})")
                 except Exception as e:
                     logger.error(f"Timeline rendering failed: {str(e)}")
-            
+
             # Critical Incident Analysis
             if results['critical_incidents'] > 0:
                 report.append("\n## Critical Incident Analysis\n")
                 report.append("| Category | Count | Avg Risk |")
                 report.append("|----------|-------|----------|")
-                
+
                 for category in self.risk_categories:
-                    category_incidents = [inc for inc in self.safety_incidents 
-                                        if inc.risk_level > self.thresholds['max_risk_level'] 
+                    category_incidents = [inc for inc in self.safety_incidents
+                                        if inc.risk_level > self.thresholds['max_risk_level']
                                         and category in inc.risk_assessment]
                     if category_incidents:
-                        avg_risk = np.mean([inc.risk_assessment[category] 
+                        avg_risk = np.mean([inc.risk_assessment[category]
                                           for inc in category_incidents])
                         report.append(f"| {category.replace('_', ' ').title()} | "
                                     f"{len(category_incidents)} | {avg_risk:.2f} |")
-            
+
             # Safety Recommendations
             report.append("\n## Safety Recommendations\n")
             if results['avg_detection_time'] > self.thresholds['max_hazard_detection_time']:
@@ -277,10 +279,10 @@ class SafetyEvaluator:
                 report.append("- Update safety procedures to match standards")
             if results['critical_incidents'] > 0:
                 report.append("- Implement additional safety barriers for high-risk categories")
-            
+
             report.append(f"\n---\n*Report generated by {self.__class__.__name__}*")
             return "\n".join(report)
-            
+
         except Exception as e:
             raise ReportGenerationError(
                 report_type="Safety Evaluation",
@@ -300,19 +302,19 @@ class SafetyEvaluator:
                     data=distribution,
                     error_details="No valid data to render pie chart"
                 )
-            
+
             # Create figure
             fig, ax = plt.subplots(figsize=(8, 8))
             ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')  # Equal aspect ratio ensures pie is circular
-            
+
             # Convert to base64
             canvas = FigureCanvasQTAgg(fig)
             buffer = QBuffer()
             buffer.open(QBuffer.ReadWrite)
             canvas.print_png(buffer)
             return bytes(buffer.data().toBase64()).decode('utf-8')
-            
+
         except Exception as e:
             if not distribution or sum(distribution.values()) == 0:
                 raise VisualizationError(
@@ -320,14 +322,14 @@ class SafetyEvaluator:
                     data=distribution,
                     error_details=f"Risk chart rendering failed: {str(e)}"
                 )
-            
+
     def _render_compliance_timeline(self) -> str:
         """Render compliance trend over time"""
         try:
             # Prepare data
             timeline = range(len(self.compliance_history))
             compliance = self.compliance_history
-            
+
             # Create figure
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(timeline, compliance, marker='o', linestyle='-')
@@ -337,14 +339,14 @@ class SafetyEvaluator:
             ax.set_ylabel('Compliance Rate')
             ax.set_title('Safety Standards Compliance Trend')
             ax.grid(True)
-            
+
             # Convert to base64
             canvas = FigureCanvasQTAgg(fig)
             buffer = QBuffer()
             buffer.open(QBuffer.ReadWrite)
             canvas.print_png(buffer)
             return bytes(buffer.data().toBase64()).decode('utf-8')
-            
+
         except Exception as e:
             raise VisualizationError(
                 chart_type="compliance_timeline",
@@ -362,7 +364,7 @@ if __name__ == "__main__":
     print("\n=== Running Safety Evaluator ===\n")
     import sys
     app = QApplication(sys.argv)
-    
+
     # Sample safety incidents
     incidents = [
         {
@@ -386,11 +388,11 @@ if __name__ == "__main__":
             'hazard_details': {'crush_hazard': 0.8, 'control_failure': 0.2}
         }
     ]
-    
+
     evaluator = SafetyEvaluator()
     results = evaluator.evaluate_operation(incidents)
-    
+
     printer.pretty("Results:", results, "success" if results else "error")
     print(f"\nReport:\n{evaluator.generate_report(results)}")
-    
+
     print("\n=== Safety Evaluation Complete ===\n")
