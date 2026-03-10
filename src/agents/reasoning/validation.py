@@ -300,7 +300,9 @@ class ValidationEngine:
 
         # Compare against KB facts
         for new_fact, new_emb in fact_embeddings.items():
-            for kb_fact, kb_emb in self.knowledge_base.items():
+            for kb_fact in self.knowledge_base:
+                kb_text = ' '.join(map(str, kb_fact))
+                kb_emb = self.semantic_model.encode(kb_text)
                 similarity = util.pytorch_cos_sim(new_emb, kb_emb).item()
                 if similarity > 0.8 and abs(new_facts[new_fact] - self.knowledge_base[kb_fact]) > 0.3:
                     conflicts.append((new_fact, kb_fact))
@@ -364,7 +366,7 @@ class ValidationEngine:
         for (s, p, o), conf in kb.items():
             try:
                 conf_val = float(conf)
-                if o.startswith("not_"):
+                if isinstance(o, str) and o.startswith("not_"):
                     positive_form = (s, p, o.replace("not_", ""))
                     if positive_form in kb:
                         pos_conf = float(kb[positive_form])
