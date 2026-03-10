@@ -1259,8 +1259,13 @@ class HTNPlanner(PlanningAgent):
 
 class PartialOrderPlanner(PlanningAgent):
     """Implements Wilkins' temporal constraint management"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config,
+            **kwargs,
+        )
         self.temporal_constraints: Set[Tuple[Task, Task, str]] = set()  # (A,B,relation)
         self.causal_links: Set[Tuple[Task, Task, Callable]] = set()  # (producer, consumer, condition)
 
