@@ -114,7 +114,7 @@ class DialogueContext:
             logger.error(f"Invalid message format: role and content must be strings. Got role={type(role)}, content={type(content)}")
             return
             
-        self.history.append({"role": role.lower(), "content": content})
+        self.history.append({"role": role.lower(), "content": content, "timestamp": datetime.now().isoformat()})
         logger.debug(f"Added message: Role='{role.lower()}', Content='{content[:50]}...'")
         
         # Summarization is typically based on turns (user-agent pairs)
@@ -349,9 +349,20 @@ class DialogueContext:
         return (datetime.now() - last_msg_time).total_seconds() / 60
 
     def is_follow_up(self, current_utterance: str) -> bool:
-        patterns = self.follow_up_patterns_path 
-        return any(re.search(pattern, current_utterance, re.IGNORECASE) 
-               for pattern in patterns)
+        patterns = []
+        try:
+            follow_up_path = Path(self.follow_up_patterns_path) if self.follow_up_patterns_path else None
+            if follow_up_path and follow_up_path.exists():
+                with open(follow_up_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                patterns = data.get('follow_up_patterns', []) if isinstance(data, dict) else []
+            elif isinstance(self.follow_up_patterns_path, list):
+                patterns = self.follow_up_patterns_path
+        except Exception as e:
+            logger.warning(f"Failed loading follow-up patterns: {e}")
+            patterns = []
+
+        return any(re.search(pattern, current_utterance, re.IGNORECASE) for pattern in patterns)
 
     def clear(self):
         """Clear the history, summary, and reset environment state and other tracking"""
@@ -371,17 +382,21 @@ class DialogueContext:
  
     def serialize(self):
         return {
-            "messages": self.messages,
-            "slots": self.slots,
+            "history": self.history,
+            "slot_values": self.slot_values,
             "intent_history": self.intent_history,
-            "environment_state": self.environment_state
+            "environment_state": self.environment_state,
+            "summary": self.summary,
+            "unresolved_issues": self.unresolved_issues,
         }
     
     def deserialize(self, data):
-        self.messages = data.get("messages", [])
-        self.slots = data.get("slots", {})
+        self.history = data.get("history", [])
+        self.slot_values = data.get("slot_values", {})
         self.intent_history = data.get("intent_history", [])
         self.environment_state = data.get("environment_state", {})
+        self.summary = data.get("summary", self.summary)
+        self.unresolved_issues = data.get("unresolved_issues", [])
 
 if __name__ == "__main__":
     print("\n=== Running Dialogue Context ===\n")
