@@ -1,4 +1,3 @@
-
 import time
 import psutil
 import GPUtil
@@ -20,6 +19,8 @@ printer = PrettyPrinter
 
 class ResourceMonitor:
     """Real-time cluster resource tracking with failure resilience"""
+    _global_last_logged_cluster_signature = None
+    _global_last_log_ts = 0.0
     gpu_utilization: Dict[str, float] = field(default_factory=dict)
     ram_utilization: Dict[str, float] = field(default_factory=dict)
     cpu_utilization: Dict[str, float] = field(default_factory=dict)
@@ -53,7 +54,6 @@ class ResourceMonitor:
         self._init_monitoring_thread()
         self.allocations = {}
         self.resource_graph = {}
-        self._last_logged_cluster_signature = None
 
     def _init_monitoring_thread(self):
         def monitor_loop():
@@ -347,9 +347,15 @@ class ResourceMonitor:
                     new_resources.ram_total,
                     tuple(sorted(new_resources.specialized_hardware_available)),
                 )
-                if cluster_signature != self._last_logged_cluster_signature:
+                now = time.time()
+                should_log = (
+                    cluster_signature != ResourceMonitor._global_last_logged_cluster_signature
+                    or (now - ResourceMonitor._global_last_log_ts) >= 60
+                )
+                if should_log:
                     logger.info("Cluster resource map updated")
-                    self._last_logged_cluster_signature = cluster_signature
+                    ResourceMonitor._global_last_logged_cluster_signature = cluster_signature
+                    ResourceMonitor._global_last_log_ts = now
         finally:
             self._lock.release()
 
@@ -362,6 +368,3 @@ class ResourceMonitor:
                 hw for hw in self.cluster_resources.specialized_hardware_available 
                 if hw not in requirements.specialized_hardware
             ]
-
-
-
