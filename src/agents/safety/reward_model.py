@@ -10,6 +10,7 @@ from typing import Dict, List, Callable, Union
 
 from src.agents.evaluators.utils.report import get_visualizer
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
+from src.agents.safety.utils.score_model import ScoreModel
 from src.agents.safety.secure_memory import SecureMemory
 from logs.logger import get_logger, PrettyPrinter
 
@@ -20,9 +21,14 @@ class RewardModel:
     def __init__(self):
         self.config = load_global_config()
         self.reward_config = get_config_section('reward_model')
-        self.guard_config = get_config_section('safety_guard')
-        self.pii_patterns_path =  self.guard_config.get('pii_patterns_path')
+        self.context_weights = {
+            "user_creation": {
+                "helpfulness": 1.0,  # Lower weight for user creation
+                "privacy": 1.0
+            }
+        }
         self.memory = SecureMemory()
+        self.score_model = ScoreModel()
 
         self.rules = {
             "alignment": lambda x: 1 - x.count("harm") / max(1, len(x)),
@@ -44,11 +50,11 @@ class RewardModel:
     def _init_rule_based_system(self) -> Dict[str, Callable]:
         """Initialize predefined security rules with secure storage"""
         rules = {
-            "alignment": self._alignment_score,
-            "helpfulness": self._helpfulness_score,
-            "privacy": self._privacy_score,
-            "safety": self._safety_score,
-            "truthfulness": self._truthfulness_score
+            "alignment": self.score_model._alignment_score,
+            "helpfulness": self.score_model._helpfulness_score,
+            "privacy": self.score_model._privacy_score,
+            "safety": self.score_model._safety_score,
+            "truthfulness": self.score_model._truthfulness_score
         }
 
         # Store rule definitions in secure memory
@@ -149,12 +155,6 @@ class RewardModel:
         # Calculate learned score
         scores["learned"] = self.learned_model(scores)
 
-        # Calculate composite score
-        composite = sum(scores[name] * self.rule_weights.get(name, 0) 
-                     for name in self.rule_based)
-        composite += scores["learned"] * self.rule_weights.get("learned", 0)
-        scores["composite"] = composite
-
         # Store evaluation in secure memory
         if self.config.get("store_evaluations", True):
             evaluation_record = {
@@ -179,6 +179,20 @@ class RewardModel:
             attention_factor = 0.1  # 10% weight to attention quality
             composite += scores["attention_quality"] * attention_factor
 
+        # Apply context-aware weighting
+        ctx_type = context.get("operation") if context else "default"
+        ctx_weights = self.context_weights.get(ctx_type, {})
+        
+        for name in scores:
+            if name in ctx_weights:
+                scores[name] *= ctx_weights[name]
+                
+        # Recalculate composite with adjusted weights
+        composite = sum(scores[name] * self.rule_weights.get(name, 0) 
+                     for name in self.rule_based)
+        composite += scores["learned"] * self.rule_weights.get("learned", 0)
+        scores["composite"] = composite
+
         return scores
 
     def update_rule_weights(self, new_weights: Dict[str, float]):
@@ -201,37 +215,6 @@ class RewardModel:
             sensitivity=0.7
         )
         logger.info(f"Updated rule weights: {normalized}")
-
-    # Rule-based scoring functions =============================================
-    
-    def _alignment_score(self, text: str) -> float:
-        """Measure alignment with ethical guidelines (0-1 scale)"""
-        harmful_terms = ["harm", "hate", "discriminate", "illegal"]
-        harmful_count = sum(text.lower().count(term) for term in harmful_terms)
-        return 1.0 - min(harmful_count / max(1, len(text.split()) * 5), 1.0)
-
-    def _helpfulness_score(self, text: str) -> float:
-        """Measure helpfulness and constructive content (0-1 scale)"""
-        helpful_terms = ["help", "assist", "support", "guide", "answer"]
-        helpful_count = sum(text.lower().count(term) for term in helpful_terms)
-        return min(helpful_count / max(1, len(text.split()) * 3), 1.0)
-
-    def _privacy_score(self, text: str) -> float:
-        """Detect privacy risks and PII exposure (0-1 scale)"""
-        pii_patterns = self.pii_patterns_path
-        pii_count = sum(len(re.findall(pattern, text)) for pattern in pii_patterns)
-        return 1.0 - min(pii_count * 0.5, 1.0)  # 0.5 penalty per PII
-
-    def _safety_score(self, text: str) -> float:
-        """Detect safety risks and dangerous content (0-1 scale)"""
-        risk_terms = ["dangerous", "unsafe", "risk", "hazard", "toxic"]
-        risk_count = sum(text.lower().count(term) for term in risk_terms)
-        return 1.0 - min(risk_count / max(1, len(text.split())) * 2, 1.0)
-
-    def _truthfulness_score(self, text: str) -> float:
-        """Measure factual accuracy and truthfulness (0-1 scale)"""
-        # Placeholder - would integrate with fact-checking modules
-        return 0.8  # Default neutral score
 
     # Analytics and reporting ==================================================
     
