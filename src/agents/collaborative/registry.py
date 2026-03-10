@@ -6,10 +6,11 @@ import time
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
-from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from src.agents.collaborative.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Agent Registry")
+printer = PrettyPrinter
 
 class AgentRegistry:
     """
