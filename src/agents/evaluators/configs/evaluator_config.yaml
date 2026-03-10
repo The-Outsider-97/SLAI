@@ -84,7 +84,7 @@ certification_manager:
   security:
     max_vulnerabilities: 5
     pentest_required: true
-    encryption_standard: 'AES-256
+    encryption_standard: 'AES-256'
   reliability:
     mtbf_threshold: 1000  # Mean Time Between Failures (hours)
     error_rate: 0.0001     # Maximum allowed error rate
@@ -93,7 +93,7 @@ certification_manager:
     throughput: 1000        # Requests/second
   maintainability:
     max_tech_debt: 0.2
-    cicd_coverage: 90       # % of CI/CD pipeline coverage'
+    cicd_coverage: 90       # % of CI/CD pipeline coverage
 
 documentation:
   audit_trail:
@@ -223,7 +223,7 @@ autonomous_evaluator:
     max_path_deviation: 1.2
     max_energy_per_task: 500
     max_collisions: 0
-    min_success_rate': 0.95
+    min_success_rate: 0.95
   weights:
     success_rate: 0.4
     path_efficiency: 0.3
