@@ -7,3 +7,14 @@ handler_agent:
   checkpoint_max_age_seconds: 600
   telemetry_buffer_size: 1000
   evaluator_hooks_enabled: true
+
+memory:
+  max_checkpoints: 100
+  max_telemetry_events: 1000
+
+policy:
+  max_retries: 2
+  circuit_breaker_threshold: 5
+  cooldown_seconds: 30
+  failure_budget_window_seconds: 300
+  evaluator_hooks_enabled: true
