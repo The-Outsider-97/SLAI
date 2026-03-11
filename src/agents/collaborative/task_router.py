@@ -68,6 +68,7 @@ class TaskRouter:
         row["active_tasks"] = max(0, int(row.get("active_tasks", 0)) + delta)
         row["last_seen"] = time.time()
         self._set_stats(stats)
+        self._touch_agent_heartbeat(agent_name, row["last_seen"])
 
     def _record_success(self, agent_name: str) -> None:
         stats = self._get_stats()
@@ -75,6 +76,7 @@ class TaskRouter:
         row["successes"] = int(row.get("successes", 0)) + 1
         row["last_seen"] = time.time()
         self._set_stats(stats)
+        self._touch_agent_heartbeat(agent_name, row["last_seen"])
 
     def _record_failure(self, agent_name: str) -> None:
         stats = self._get_stats()
@@ -82,6 +84,19 @@ class TaskRouter:
         row["failures"] = int(row.get("failures", 0)) + 1
         row["last_seen"] = time.time()
         self._set_stats(stats)
+        self._touch_agent_heartbeat(agent_name, row["last_seen"])
+
+    def _touch_agent_heartbeat(self, agent_name: str, timestamp: float) -> None:
+        if self.shared_memory is None:
+            return
+
+        agent_key = f"agent:{agent_name}"
+        heartbeat = self.shared_memory.get(agent_key, {}) or {}
+        if not isinstance(heartbeat, dict):
+            heartbeat = {"status": "active"}
+        heartbeat["last_seen"] = float(timestamp)
+        heartbeat.setdefault("status", "active")
+        self.shared_memory.set(agent_key, heartbeat)
 
 if __name__ == "__main__":
     print("\n=== Running Task Router ===\n")
