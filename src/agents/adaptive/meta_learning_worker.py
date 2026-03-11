@@ -1,4 +1,3 @@
-
 import torch
 import random
 import numpy as np
@@ -51,6 +50,7 @@ class MetaLearningWorker:
         # Memory for hyperparameter-performance pairs
         self.memory = MultiModalMemory()
         self.performance_history = []
+        self.optimization_step_count = 0
 
         self.exploration_factor = self.meta_config.get('exploration_factor', 0.1)
         self.update_frequency = self.meta_config.get('update_frequency', 100)
@@ -174,7 +174,20 @@ class MetaLearningWorker:
         """Perform one optimization cycle"""
         # Collect current performance
         metrics = self.collect_performance_metrics()
-        avg_performance = np.mean([m['recent_reward'] for m in metrics.values()])
+        if not metrics:
+            logger.warning("No metrics available for optimization step")
+            return
+
+        valid_rewards = [m.get('recent_reward') for m in metrics.values() if 'recent_reward' in m]
+        if not valid_rewards:
+            logger.warning("Metrics missing 'recent_reward'; skipping optimization step")
+            return
+
+        avg_performance = float(np.mean(valid_rewards))
+
+        if not self.skill_worker_registry:
+            logger.warning("No registered skill workers found; skipping optimization step")
+            return
         
         # Collect current hyperparameters (using first worker as representative)
         worker = next(iter(self.skill_worker_registry.values()))
@@ -192,6 +205,7 @@ class MetaLearningWorker:
         new_hyperparams = self.suggest_hyperparameters()
         self.update_skill_hyperparameters(new_hyperparams)
         
+        self.optimization_step_count += 1
         logger.info(f"Meta-optimization step completed | "
                     f"Performance: {avg_performance:.4f}")
 
