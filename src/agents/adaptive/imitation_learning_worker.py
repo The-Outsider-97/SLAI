@@ -1,4 +1,3 @@
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -129,7 +128,6 @@ class ImitationLearningWorker:
             logger.warning("Insufficient demonstrations for BC training")
             return
         
-        samples = self.memory.sample(min(len(self.memory), self.batch_size))
             
         dataset = list(self.demo_memory)
         logger.info(f"Starting Behavior Cloning with {len(dataset)} samples")
@@ -277,7 +275,7 @@ class ImitationLearningWorker:
         # Implementation depends on storage format
         pass
     
-    def load_demonstrations(self, filepath: str):
-        """Load demonstrations from file"""
+    def load_demonstrations_from_file(self, filepath: str):
+        """Load demonstrations from file."""
         # Implementation depends on storage format
         pass
