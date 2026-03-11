@@ -8,6 +8,7 @@ def exponential_backoff(retries):
     return delay
 
 class SecurityFeatures:
+    @staticmethod
     def detect_captcha(driver):
         """Check for CAPTCHA challenges in page content"""
         captcha_indicators = [
