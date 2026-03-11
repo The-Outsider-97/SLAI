@@ -4,6 +4,8 @@ import inspect
 import time
 
 from typing import Dict, Any, List, Optional
+
+from src.agents.base_agent import BaseAgent
 from abc import ABC, abstractmethod
 
 from src.agents.collaborative.utils.config_loader import load_global_config, get_config_section
@@ -65,21 +67,46 @@ class AgentRegistry:
         """Internal method to load and validate agent modules"""
         try:
             module = importlib.import_module(module_name)
-            for name, obj in inspect.getmembers(module):
-                if (inspect.isclass(obj) and
-                    not inspect.isabstract(obj)):
-                    try:
-                        instance = obj()
-                        caps = getattr(instance, "capabilities", [])
-                        meta = {
-                            "class": obj,
-                            "instance": instance,
-                            "capabilities": caps,
-                            "version": self._version
-                        }
-                        self._register_agent(obj.__name__, meta)
-                    except Exception as e:
-                        logger.error(f"Failed to instantiate {name}: {e}")
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                if obj.__module__ != module.__name__:
+                    continue
+                if inspect.isabstract(obj) or not issubclass(obj, BaseAgent):
+                    continue
+
+                init_signature = inspect.signature(obj.__init__)
+                required_args = [
+                    param
+                    for param_name, param in init_signature.parameters.items()
+                    if param_name != "self"
+                    and param.default is inspect.Parameter.empty
+                    and param.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                ]
+
+                if required_args:
+                    logger.debug(
+                        "Skipping %s.%s discovery due to required constructor args: %s",
+                        module.__name__,
+                        name,
+                        ", ".join(param.name for param in required_args),
+                    )
+                    continue
+
+                try:
+                    instance = obj()
+                    caps = getattr(instance, "capabilities", [])
+                    meta = {
+                        "class": obj,
+                        "instance": instance,
+                        "capabilities": caps,
+                        "version": self._version
+                    }
+                    self._register_agent(obj.__name__, meta)
+                except Exception as e:
+                    logger.error(f"Failed to instantiate {name}: {e}")
         except Exception as e:
             logger.error(f"Failed to load module {module_name}: {e}")
 
@@ -140,7 +167,9 @@ class AgentRegistry:
             record = self.shared_memory.get(f"agent:{name}") or {}
             if time.time() - record.get("last_seen", 0) > self._health_check_interval:
                 logger.warning(f"Agent {name} appears unresponsive")
-                return False
+                # Keep stale agents routable; router-level retries/failure accounting
+                # provide a safer degradation path than hard de-registration.
+                return True
         return True
 
     def reload_agent(self, name: str) -> bool:
