@@ -8,7 +8,6 @@ import json
 import torch
 import difflib
 import traceback
-import numpy as np
 import torch.nn as nn
 
 from typing import Any
@@ -365,7 +364,7 @@ class BaseAgent(abc.ABC):
             # Fallback to JSON stringification
             try:
                 return json.dumps({k: v for k, v in task_data.items() if isinstance(v, (str, int, float))})[:500]
-            except:
+            except (TypeError, ValueError):
                 return str(task_data)[:500]
         
         return str(task_data)[:500]
@@ -389,7 +388,7 @@ class BaseAgent(abc.ABC):
         # Try grammar processor if available
         if hasattr(self, 'grammar') and callable(getattr(self.grammar, "compose_sentence", None)):
             try:
-                facts = {"input": sanitized_input[:100], "error": str(original_error)[:100]}
+                facts = {"input": sanitized_input[:100], "error": "unknown"}
                 return f"[Grammar Response] {self.grammar.compose_sentence(facts)}"
             except Exception as e:
                 logger.warning(f"Grammar processing failed: {str(e)}")
@@ -494,25 +493,10 @@ class BaseAgent(abc.ABC):
             self.logger.debug(f"[{self.name}] No standard performance metrics extracted from result of type {type(result)}.")
         return metrics
 
-#    @abc.abstractmethod
+    @abc.abstractmethod
     def perform_task(self, task_data: Any) -> Any:
-        """Overrides BaseAgent.perform_task to handle planning-specific commands."""
-        self.logger.info(f"Executing planning task with data: {task_data}")
-
-        if not isinstance(task_data, dict):
-            raise ValueError("Unsupported input format for PlanningAgent, expected a dictionary.")
-
-        command = task_data.get("command")
-
-        if command == "execute_plan":
-            # This allows the training loop's call to work without crashing,
-            # executing whatever plan is currently loaded in the agent.
-            if not self.current_plan:
-                self.logger.warning("Command 'execute_plan' received, but no current plan exists.")
-                return {"status": "AWAITING_PLAN", "message": "No plan to execute."}
-            return self.execute_plan(self.current_plan, self.current_goal)
-        else:
-            raise ValueError(f"Unsupported command for PlanningAgent: '{command}'")
+        """Execute a task and return a result payload."""
+        raise NotImplementedError("Subclasses must implement perform_task.")
 
     def execute_plan(self, plan: Any, goal: Any = None) -> Any:
         """
@@ -533,17 +517,24 @@ class BaseAgent(abc.ABC):
         if not hasattr(plan, '__iter__'):
             return {"status": "error", "reason": "Invalid plan format"}
         
+        if isinstance(plan, (str, bytes)):
+            return {"status": "error", "reason": "Plan must be a sequence of steps"}
+
+        plan_steps = list(plan)
+        if not plan_steps:
+            return {"status": "error", "reason": "Plan is empty"}
+        
         results = []
         step_context = {}
         resource_monitor = ResourceMonitor()
         
         try:
             # Pre-execution validation
-            if not self.validate_plan(plan):
+            if not self.validate_plan(plan_steps):
                 return {"status": "error", "reason": "Plan validation failed"}
             
-            for i, step in enumerate(plan):
-                step_name = step.get('name', f"step_{i+1}")
+            for i, step in enumerate(plan_steps):
+                step_name = step.get('name', f"step_{i+1}") if isinstance(step, dict) else f"step_{i+1}"
                 logger.info(f"[{self.name}] Executing {step_name}...")
                 
                 # Monitor resources before execution
@@ -585,6 +576,9 @@ class BaseAgent(abc.ABC):
 
     def validate_plan(self, plan):
         """Basic plan validation logic"""
+        if not plan:
+            return False
+
         required_attrs = ['name', 'handler'] if isinstance(plan[0], dict) else None
         for step in plan:
             if required_attrs:
@@ -644,10 +638,12 @@ class BaseAgent(abc.ABC):
 
     def compile_results(self, results, success):
         """Standardized result compilation"""
+        total_steps = len(results)
+        successful_steps = sum(1 for r in results if isinstance(r, dict) and r.get('status') == 'success')
         return {
             "status": "success" if success else "partial_success",
-            "steps_executed": len(results),
-            "success_rate": sum(1 for r in results if r.get('status') == 'success') / len(results),
+            "steps_executed": total_steps,
+            "success_rate": (successful_steps / total_steps) if total_steps else 0.0,
             "results": results,
             "timestamp": time.time()
         }
@@ -657,7 +653,7 @@ class BaseAgent(abc.ABC):
         Attempts to recover from a failed step execution.
         Returns True if recovery was successful, False otherwise.
         """
-        step_name = step.get('name', "unknown_step")
+        step_name = step.get('name', "unknown_step") if isinstance(step, dict) else "unknown_step"
         logger.warning(f"[{self.name}] Attempting recovery for failed step: {step_name}")
         
         # Strategy 1: Check if step has a recovery handler
@@ -721,7 +717,7 @@ class BaseAgent(abc.ABC):
         
         try:
             # Get module agent from factory
-            module_agent = self.agent_factory.create(module)
+            module_agent = self.agent_factory.create(module, self.shared_memory)
             
             # Get the action method
             if not hasattr(module_agent, action):
@@ -1079,58 +1075,4 @@ class ResourceMonitor:
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running SLAI Base Agent ===\n")
-    config = get_config_section('base_agent')
-    shared_memory={}
-    agent_factory=None
-
-    class TempAgent(BaseAgent):
-        def __init__(self, shared_memory, agent_factory, config=None):
-            # Initialize logger FIRST
-            self.logger = get_logger(self.__class__.__name__)
-            self.name = self.__class__.__name__
-            # Now call parent constructor
-            super().__init__(shared_memory, agent_factory, config)
-
-        def perform_task(self, task_data: Any) -> Any:
-            return {"status": "success"}
-
-    base1 = type('TempAgent', (BaseAgent,), {
-        'perform_task': lambda self, task_data: {"status": "success"}
-    })(shared_memory, agent_factory, config)
-
-    agent = TempAgent(shared_memory, agent_factory, config)
-
-    print(f"\n{base1}")
-    print(f"\n{agent}")
-
-    print("\n* * * * * Phase 2 * * * * *\n")
-    reward_scores=None
-    lr=0.01
-
-    base2 = BaseAgent(shared_memory, agent_factory, config=None)
-
-    update = base2.update_projection(reward_scores, lr)
-
-    print(f"\n{base2}")
-    print(f"\n{update}")
-
-    print("\n* * * * * Phase 3 * * * * *\n")
-    init_fn=callable
-    agent=None
-    class DummySharedMemory(dict):
-        def get(self, key, default=None):
-            return super().get(key, default)
-        def set(self, key, value):
-            self[key] = value
-
-    shared_memory = DummySharedMemory()
-
-    store = LightMetricStore()
-    lazy = LazyAgent(init_fn)
-    agent = TempAgent(shared_memory, agent_factory, config)
-    manager = RetrainingManager(agent=agent, shared_memory=shared_memory)
-
-    print(f"\n{store}\n{lazy}\n{agent}\n{manager}")
-    print("\n* * * * * Phase 4 * * * * *\n")
-
     print("\n=== Successfully Ran SLAI Base Agent ===\n")
