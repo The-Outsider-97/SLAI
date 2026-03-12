@@ -19,6 +19,7 @@ from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("BayesianSearch")
 printer = PrettyPrinter
+
 Dimension = Union[Integer, Real, Categorical]
 
 
