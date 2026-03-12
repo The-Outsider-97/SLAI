@@ -1,35 +1,28 @@
-
 import importlib
-import sys
 import inspect
-
-from pathlib import Path
 from typing import Any, Dict, Optional, Type
-
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
 
 from . import __version__ 
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.factory.agent_meta_data import AgentMetaData, AgentRegistry
-from src.agents.factory.metrics_adapter import MetricsAdapter
-from src.agents.factory.reasoner import BasicZeroReasoner
-from src.agents.base_agent import BaseAgent
+from .base.utils.main_config_loader import load_global_config
+from .factory.agent_meta_data import AgentMetaData, AgentRegistry
+from .factory.metrics_adapter import MetricsAdapter
+from .factory.reasoner import BasicZeroReasoner
+from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
-from src.agents.evaluation_agent import EvaluationAgent
-from src.agents.execution_agent import ExecutionAgent
-from src.agents.alignment_agent import AlignmentAgent
-from src.agents.knowledge_agent import KnowledgeAgent
-from src.agents.language_agent import LanguageAgent
-from src.agents.perception_agent import PerceptionAgent
-from src.agents.learning_agent import LearningAgent
-from src.agents.planning_agent import PlanningAgent
-from src.agents.safety_agent import SafetyAgent
-from src.agents.adaptive_agent import AdaptiveAgent
-from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.handler_agent import HandlerAgent
+from .evaluation_agent import EvaluationAgent
+from .execution_agent import ExecutionAgent
+from .alignment_agent import AlignmentAgent
+from .knowledge_agent import KnowledgeAgent
+from .language_agent import LanguageAgent
+from .perception_agent import PerceptionAgent
+from .learning_agent import LearningAgent
+from .planning_agent import PlanningAgent
+from .safety_agent import SafetyAgent
+from .adaptive_agent import AdaptiveAgent
+from .reasoning_agent import ReasoningAgent
+from .handler_agent import HandlerAgent
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
@@ -80,8 +73,6 @@ class AgentFactory:
                 dependencies=self._get_agent_dependencies(cls)
             ))
 
-        self.agent_factory = {}
-
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
 
     def _get_agent_dependencies(self, cls) -> list[str]:
@@ -89,9 +80,10 @@ class AgentFactory:
         return getattr(cls, "REQUIRES", [])
     
     def discover_agents(self):
-        import src.agents  # root module
-        for name, obj in inspect.getmembers(src.agents):
-            if inspect.isclass(obj) and issubclass(obj, BaseAgent):
+        agents_module = importlib.import_module(__package__)
+
+        for _, obj in inspect.getmembers(agents_module):
+            if inspect.isclass(obj) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
                 self._agent_classes[obj.__name__.lower()] = obj
 
     def register_agent(self, metadata: AgentMetaData):
@@ -101,10 +93,10 @@ class AgentFactory:
         if not isinstance(metadata, AgentMetaData):
             raise TypeError("Can only register objects of type AgentMetaData.")
 
-        if metadata.name in self.agent_registry:
+        if metadata.name in self.registry.agents:
             logger.warning(f"Agent '{metadata.name}' is already registered. Overwriting metadata.")
 
-        self.agent_registry[metadata.name] = metadata
+        self.registry.register(metadata)
         logger.info(f"Registered agent: '{metadata.name}' (version {metadata.version})")
 
     def create(self, agent_type: str, shared_memory: Any, **kwargs: Any) -> BaseAgent:
@@ -159,7 +151,7 @@ class AgentFactory:
 
         # 3: Get the agent-specific configuration and merge with any runtime kwargs
         agent_config_key = f"{agent_type}_agent"
-        agent_config = get_config_section(agent_config_key)
+        agent_config = dict(self.global_config.get(agent_config_key, {}))
         agent_config.update(kwargs)
 
         try:
@@ -287,23 +279,3 @@ class AgentFactory:
     def validate_with_azr(self, fact_tuple):
         self.bzr = BasicZeroReasoner()
         return 0.0
-
-if __name__ == "__main__":
-    print("\n=== Running Agent Factory Test ===\n")
-    printer.status("Init", "Agent Factory initialized", "success")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    shared_memory=SharedMemory()
-    agent_type="adaptive"
-
-    factory = AgentFactory()
-    print(factory)
-    printer.status("Init", factory.create(agent_type=agent_type, shared_memory=shared_memory), "success")
-
-    print("\n* * * * * Phase 2 - Inspection * * * * *\n")
-    diagnostics = factory.inspect_registered_agents()
-    for agent, result in diagnostics.items():
-        print(f"{agent}: {result['status']}")
-        if result['issues']:
-            for issue in result['issues']:
-                print(f"  - {issue}")
-    print("\n=== Successfully Ran Agent Factory ===\n")

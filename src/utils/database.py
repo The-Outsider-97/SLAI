@@ -5,9 +5,10 @@ import json
 from datetime import datetime
 from typing import Dict, Any
 
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Database")
+printer = PrettyPrinter
 
 class IssueDBConnector:
     """PostgreSQL connector for safety issue tracking"""

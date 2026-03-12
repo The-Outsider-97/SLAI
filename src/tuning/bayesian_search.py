@@ -1,17 +1,18 @@
-"""
-Bayesian Hyperparameter Optimization with Integrated Reasoning Agent
-Combines features from both implementations with improved integration
-"""
-from datetime import datetime
-import yaml, json
-import numpy as np
+"""Production-ready Bayesian hyperparameter search."""
+
+from __future__ import annotations
+
 import matplotlib.pyplot as plt
+import numpy as np
+import json
 
 from pathlib import Path
 from skopt import gp_minimize
-from skopt.space import Real, Integer, Categorical
-from skopt.utils import use_named_args, OptimizeResult
-from typing import Dict, List, Tuple, Callable, Any, Union, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from skopt.space import Categorical, Integer, Real
+from skopt.utils import OptimizeResult, use_named_args
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.tuning.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
@@ -19,375 +20,307 @@ from logs.logger import get_logger, PrettyPrinter
 logger = get_logger("BayesianSearch")
 printer = PrettyPrinter
 
+Dimension = Union[Integer, Real, Categorical]
+
+
+@dataclass(frozen=True)
+class BayesianSearchSettings:
+    """Validated runtime settings for Bayesian search."""
+
+    n_calls: int
+    n_initial_points: int
+    random_state: Optional[int]
+    output_dir: Path
+    model_type: str
+    objective: str
+
+
 class BayesianSearch:
-    """
-    Advanced Bayesian hyperparameter optimization with full ReasoningAgent integration
-    
-    Features:
-    - Full integration of ReasoningAgent's knowledge base
-    - Adaptive parameter adjustment based on semantic reasoning
-    - Continuous learning from optimization outcomes
-    - Enhanced visualization and result tracking
-    """
-    
-    def __init__(self, evaluation_function: Callable[[Dict[str, Any]], float], model_type=None):
-        """
-        Initialize the BayesianSearch instance.
+    """Bayesian optimization wrapper with validation, logging, and persistence."""
 
-        Args:
-            config (Union[str, Path]): Path to the YAML or JSON configuration file 
-                                            defining the hyperparameter search space.
-            evaluation_function (Callable[[Dict[str, Any]], float]): 
-                The function to be minimized. It takes a dictionary of 
-                hyperparameters as input and returns a single float score.
-                Note: Bayesian optimization typically minimizes the objective, 
-                so if your function returns a score where higher is better, 
-                you should return its negative.
-            n_calls (int): Total number of evaluations (calls to the evaluation_function).
-                           This includes `n_initial_points`.
-            n_initial_points (int): Number of evaluations of `evaluation_function` with
-                                   randomly D-chosen points before Gaussian Process fitting.
-            random_state (Optional[int]): Seed for reproducible results.
-            output_dir_name (str): Name of the directory to save reports and plots.
-                                   Will be created under a 'reports' parent directory.
-        """
-        self.config = load_global_config()
-        self.bayesian_config = get_config_section('bayesian_search')
-        self.n_calls = self.bayesian_config.get('n_calls')
-        self.output_dir = self.bayesian_config.get('output_dir')
-        self.summary_dir = self.bayesian_config.get('summary_dir')
-        self.random_state = self.bayesian_config.get('random_state')
-        self.n_initial_points = self.bayesian_config.get('n_initial_points')
-        self.model_type = model_type if model_type is not None else self.bayesian_config.get('model_type', 'GradientBoosting')
-        if not model_type:
-            self.model_type = self.bayesian_config.get('model_type', 'GradientBoosting')
-        else:
-            self.model_type = model_type
-
-        output_dir_name: str = "bayesian_search"
+    def __init__(
+        self,
+        evaluation_function: Callable[[Dict[str, Any]], float],
+        model_type: Optional[str] = None,
+        objective: str = "minimize",
+    ) -> None:
+        if evaluation_function is None:
+            raise ValueError("evaluation_function is required.")
 
         self.evaluation_function = evaluation_function
-        self.search_space_config, self.dimensions = self._load_search_space()
-        self.param_names: List[str] = [dim.name for dim in self.dimensions]
+        self.config: Dict[str, Any] = load_global_config() or {}
+        self.settings = self._load_settings(model_type=model_type, objective=objective)
+        self.search_space_config, self.dimensions = self._load_search_space(self.settings.model_type)
 
+        if not self.dimensions:
+            raise ValueError("Bayesian search requires at least one hyperparameter dimension.")
+
+        self.param_names = [dim.name for dim in self.dimensions]
         self.optimization_history: List[Dict[str, Any]] = []
-        self.best_score_so_far: float = np.inf # Assuming minimization; use -np.inf for maximization
+        self.best_score_so_far = np.inf if self.settings.objective == "minimize" else -np.inf
         self.best_params_so_far: Optional[Dict[str, Any]] = None
 
-        self.output_dir = Path(self.bayesian_config.get('output_dir'))
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"BayesianSearch initialized. Results will be saved to: {self.output_dir.resolve()}")
+        self.settings.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "BayesianSearch initialized with model=%s, objective=%s, n_calls=%s",
+            self.settings.model_type,
+            self.settings.objective,
+            self.settings.n_calls,
+        )
 
-    def _load_search_space(self) -> Tuple[List[Dict[str, Any]], List[Union[Real, Integer, Categorical]]]:
-        logger.info("Loading search space from config")
-        
-        if 'hyperparameters' not in self.config:
-            raise ValueError("Config missing 'hyperparameters' section")
-        
-        config_data = self.config
-        
-        # Use the instance model_type
-        model_type = self.model_type
-        if not model_type:
-            model_type = 'GradientBoosting'
+    def _load_settings(self, model_type: Optional[str], objective: str) -> BayesianSearchSettings:
+        section = get_config_section("bayesian_search") or {}
+        configured_model = model_type or section.get("model_type") or "GradientBoosting"
 
-        # Case-insensitive lookup
-        model_params = None
-        for key in config_data['hyperparameters']:
-            if key.lower() == model_type.lower():
-                model_params = config_data['hyperparameters'][key]
-                break
-        
-        # Default handling moved HERE after model_params is defined
-        if model_params is None:
-            logger.warning(f"No hyperparameters defined for model type: {self.model_type}. Using default parameters.")
-            model_params = [
-                {"name": "p", "type": "integer", "values": [0, 1, 2, 3]},
-                {"name": "d", "type": "integer", "values": [0, 1, 2]},
-                {"name": "q", "type": "integer", "values": [0, 1, 2, 3]}
-            ]
-        
-        space_definitions = []
-        skopt_dimensions = []
-        
-        for param_spec in model_params:
-            if not isinstance(param_spec, dict) or 'name' not in param_spec or 'type' not in param_spec:
-                raise ValueError("Invalid parameter specification")
-                
-            name = param_spec['name']
-            param_type = param_spec['type'].lower()
-            
-            # Map grid-style types to Bayesian-compatible types
-            if param_type == 'float': param_type = 'real'
-            if param_type == 'int': param_type = 'integer'
-            
-            try:
-                if param_type == 'integer':
-                    # Get values from list if no explicit min/max
-                    if 'values' in param_spec:
-                        vals = [v for v in param_spec['values'] if v is not None]  # Filter out None
-                        if not vals:
-                            raise ValueError(f"Parameter {name} has no valid integer values after removing None.")
-                        param_min, param_max = min(vals), max(vals)
-                    else:
-                        param_min = param_spec['min']
-                        param_max = param_spec['max']
-                    skopt_dimensions.append(Integer(param_min, param_max, name=name))
-                    
-                elif param_type == 'real':
-                    # Handle log-uniform prior for learning rates
-                    prior = param_spec.get('prior', 'uniform').lower()
-                    if 'values' in param_spec:
-                        vals = param_spec['values']
-                        param_min, param_max = min(vals), max(vals)
-                    else:
-                        param_min = param_spec['min']
-                        param_max = param_spec['max']
-                    skopt_dimensions.append(Real(param_min, param_max, prior=prior, name=name))
-                    
-                elif param_type == 'categorical':
-                    # Directly use values list as categories
-                    choices = param_spec['values']
-                    skopt_dimensions.append(Categorical(choices, name=name))
-                    
-                else:
-                    raise ValueError(f"Unsupported type: {param_type}")
-                    
-                space_definitions.append(param_spec)
-                
-            except Exception as e:
-                raise ValueError(f"Error processing {name}: {str(e)}")
-        
-        return space_definitions, skopt_dimensions
+        n_calls = int(section.get("n_calls", 20))
+        n_initial_points = int(section.get("n_initial_points", 5))
+        random_state = section.get("random_state")
+        output_dir = Path(section.get("output_dir", "src/tuning/reports/bayesian_search"))
 
-    def _log_iteration_progress(self, params: Dict[str, Any], score: float, iteration: int) -> None:
-        """
-        Record the parameters and score for the current optimization iteration.
-        Updates the best score and parameters if the current score is an improvement.
-        (Assumes minimization, so a lower score is better).
-        """
-        self.optimization_history.append({
-            'iteration': iteration,
-            'parameters': params,
-            'score': score  # This is the value returned by evaluation_function (to be minimized)
-        })
-        
-        # gp_minimize minimizes the function, so lower score is better.
-        if score < self.best_score_so_far:
-            self.best_score_so_far = score
-            self.best_params_so_far = params
-            logger.info(f"Iteration {iteration}: New best score: {score:.6f} with params: {params}")
+        if n_calls < 2:
+            raise ValueError("n_calls must be >= 2.")
+        if n_initial_points < 1:
+            raise ValueError("n_initial_points must be >= 1.")
+        if n_initial_points >= n_calls:
+            raise ValueError("n_initial_points must be less than n_calls.")
+
+        normalized_objective = objective.strip().lower()
+        if normalized_objective not in {"minimize", "maximize"}:
+            raise ValueError("objective must be either 'minimize' or 'maximize'.")
+
+        return BayesianSearchSettings(
+            n_calls=n_calls,
+            n_initial_points=n_initial_points,
+            random_state=random_state,
+            output_dir=output_dir,
+            model_type=configured_model,
+            objective=normalized_objective,
+        )
+
+    def _load_search_space(self, model_type: str) -> Tuple[List[Dict[str, Any]], List[Dimension]]:
+        hp_root = self.config.get("hyperparameters")
+        if not isinstance(hp_root, dict):
+            raise ValueError("Expected 'hyperparameters' to be a model-keyed dictionary.")
+
+        model_specs = next((v for k, v in hp_root.items() if k.lower() == model_type.lower()), None)
+        if not isinstance(model_specs, list):
+            raise ValueError(f"No hyperparameter list found for model_type='{model_type}'.")
+
+        dimensions: List[Dimension] = []
+        seen_names: set[str] = set()
+
+        for spec in model_specs:
+            if not isinstance(spec, dict):
+                raise ValueError(f"Invalid hyperparameter specification: {spec!r}")
+
+            name = str(spec.get("name", "")).strip()
+            if not name:
+                raise ValueError(f"Missing hyperparameter name in spec: {spec!r}")
+            if name in seen_names:
+                raise ValueError(f"Duplicate hyperparameter name detected: {name}")
+            seen_names.add(name)
+
+            raw_type = str(spec.get("type", "")).strip().lower()
+            param_type = {"int": "integer", "float": "real"}.get(raw_type, raw_type)
+            dimensions.append(self._build_dimension(name=name, param_type=param_type, spec=spec))
+
+        return model_specs, dimensions
+
+    def _build_dimension(self, name: str, param_type: str, spec: Dict[str, Any]) -> Dimension:
+        if param_type == "integer":
+            low, high = self._resolve_bounds(spec, cast_type=int)
+            return Integer(low=low, high=high, name=name)
+
+        if param_type == "real":
+            low, high = self._resolve_bounds(spec, cast_type=float)
+            prior = str(spec.get("prior", "uniform")).lower()
+            if prior not in {"uniform", "log-uniform"}:
+                raise ValueError(f"Unsupported prior '{prior}' for real parameter '{name}'.")
+            if prior == "log-uniform" and (low <= 0 or high <= 0):
+                raise ValueError(f"log-uniform prior requires positive bounds for '{name}'.")
+            return Real(low=low, high=high, prior=prior, name=name)
+
+        if param_type == "categorical":
+            values = spec.get("values")
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"Categorical parameter '{name}' requires a non-empty list of values.")
+            return Categorical(categories=values, name=name)
+
+        raise ValueError(f"Unsupported parameter type '{param_type}' for '{name}'.")
+
+    @staticmethod
+    def _resolve_bounds(spec: Dict[str, Any], cast_type: Callable[[Any], Any]) -> Tuple[Any, Any]:
+        if "min" in spec and "max" in spec:
+            low, high = cast_type(spec["min"]), cast_type(spec["max"])
+        elif "values" in spec:
+            values = [v for v in spec["values"] if v is not None]
+            if not values:
+                raise ValueError("Parameter 'values' cannot be empty.")
+            casted = [cast_type(v) for v in values]
+            low, high = min(casted), max(casted)
         else:
-            logger.info(f"Iteration {iteration}: Score: {score:.6f} with params: {params}")
+            raise ValueError("Numeric parameter requires either min/max or values.")
 
-    def run_search(self) -> Tuple[Optional[Dict[str, Any]], float, OptimizeResult]:
-        """
-        Execute the Bayesian optimization process.
+        if low > high:
+            raise ValueError(f"Invalid bounds: min ({low}) > max ({high}).")
+        return low, high
 
-        Returns:
-            Tuple[Optional[Dict[str, Any]], float, OptimizeResult]:
-                - best_parameters (Dict): The best set of hyperparameters found.
-                - best_score (float): The score achieved by the best parameters.
-                                      (This is the minimized value from the objective function).
-                - result (OptimizeResult): The full result object from `skopt.gp_minimize`.
-        """
-        logger.info(f"Starting Bayesian optimization: {self.n_calls} total calls, "
-                    f"{self.n_initial_points} initial random points.")
-        
-        iteration_count = 0
-        logger_callback = BayesianLoggerCallback(self)
+    def run_search(self) -> Tuple[Optional[Dict[str, Any]], float, Optional[OptimizeResult]]:
+        logger.info("Starting Bayesian search with %s dimensions.", len(self.dimensions))
 
-        # The objective function without logging
+        def score_to_minimize(raw_score: float) -> float:
+            if self.settings.objective == "minimize":
+                return raw_score
+            return -raw_score
+
         @use_named_args(self.dimensions)
         def objective_function(**params: Any) -> float:
-            processed_params = {name: params[name] for name in self.param_names}
             try:
-                return self.evaluation_function(processed_params)
-            except Exception as e:
-                logger.error(f"Evaluation failed: {e}")
-                return float('inf')
+                raw_score = float(self.evaluation_function(params))
+                if not np.isfinite(raw_score):
+                    raise ValueError("non-finite score returned")
+                transformed = score_to_minimize(raw_score)
+                self._record_iteration(params=params, raw_score=raw_score)
+                return transformed
+            except Exception as exc:
+                logger.error("Evaluation failed for params=%s: %s", params, exc, exc_info=True)
+                self._record_iteration(params=params, raw_score=np.nan, failed=True)
+                return float("inf")
 
-        # Execute optimization with callback
+        result: Optional[OptimizeResult] = None
         try:
-            result: OptimizeResult = gp_minimize(
+            result = gp_minimize(
                 func=objective_function,
                 dimensions=self.dimensions,
-                n_calls=self.n_calls,
-                n_initial_points=self.n_initial_points,
-                random_state=self.random_state,
-                callback=[logger_callback],  # Add our logging callback
-                verbose=False
+                n_calls=self.settings.n_calls,
+                n_initial_points=self.settings.n_initial_points,
+                random_state=self.settings.random_state,
+                verbose=False,
             )
-            
-            # Process final results
-            final_best_params = dict(zip(self.param_names, result.x))
-            final_best_score = float(result.fun)
-            logger.info(f"Bayesian optimization completed.")
-            logger.info(f"Best parameters found: {final_best_params}")
-            logger.info(f"Best score (minimized objective): {final_best_score:.6f}")
-            
-            self._save_results_to_file(final_best_params, final_best_score, result)
-            self._plot_optimization_progress()            
+        except Exception as exc:
+            logger.error("Bayesian optimization run failed: %s", exc, exc_info=True)
 
-        except Exception as e:
-            logger.error(f"Bayesian optimization failed: {e}", exc_info=True)
-            self._save_results_to_file(self.best_params_so_far, self.best_score_so_far, None)
-            self._plot_optimization_progress()
-            return self.best_params_so_far, self.best_score_so_far, None
+        if result is not None:
+            best_params = dict(zip(self.param_names, result.x))
+            best_score = float(result.fun if self.settings.objective == "minimize" else -result.fun)
+        else:
+            best_params = self.best_params_so_far
+            best_score = float(self.best_score_so_far) if self.best_params_so_far is not None else float("nan")
 
-        # The best parameters are in result.x, and the best score (minimized value) is result.fun
-        final_best_params = dict(zip(self.param_names, result.x))
-        final_best_score = float(result.fun) # This is the minimized value.
-        
-        logger.info(f"Bayesian optimization completed.")
-        logger.info(f"Best parameters found: {final_best_params}")
-        logger.info(f"Best score (minimized objective): {final_best_score:.6f}")
-        
-        self._save_results_to_file(final_best_params, final_best_score, result)
+        self._persist_results(best_params=best_params, best_score=best_score, result=result)
         self._plot_optimization_progress()
-        
-        return final_best_params, final_best_score, result
+        return best_params, best_score, result
 
-    def _save_results_to_file(self, best_params, best_score, skopt_result):
-        """Save comprehensive optimization results to JSON files."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_summary = {
-            'search_configuration': {
-                'model_type': self.model_type,
-                'n_calls': self.n_calls,
-                'n_initial_points': self.n_initial_points,
-                'random_state': self.random_state,
-                'search_space_definition': self.search_space_config
-            },
-            'best_result_found': {
-                'parameters': best_params,
-                'minimized_score': best_score # Explicitly state it's the minimized score
-            },
-            'optimization_history': self.optimization_history
+    def _record_iteration(self, params: Dict[str, Any], raw_score: float, failed: bool = False) -> None:
+        iteration = len(self.optimization_history) + 1
+        entry = {
+            "iteration": iteration,
+            "parameters": params,
+            "score": raw_score,
+            "failed": failed,
         }
-        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.model_type}_{timestamp}.json"
-        
-        # If skopt_result is available, add more details if serializable
-        if skopt_result:
-            # Storing the entire OptimizeResult can be large and complex.
-            # Extract key, serializable information.
-            output_summary['skopt_summary'] = {
-                'x_iters': skopt_result.x_iters, # List of parameter points evaluated
-                'func_vals': skopt_result.func_vals.tolist(), # List of objective values
-                'space_details': str(skopt_result.space) # String representation of the space
-            }
+        self.optimization_history.append(entry)
 
-        # Ensure all parts of the output are JSON serializable
-        serializable_output = self._make_dict_json_serializable(output_summary)
-        summary_file_path = self.output_dir / f"bayesian_search_summary_{self.model_type}.json"
-        try:
-            with open(summary_file_path, 'w') as f:
-                json.dump(serializable_output, f, indent=2)
-            logger.info(f"Optimization summary saved to: {summary_file_path.resolve()}")
-        except Exception as e:
-            logger.error(f"Failed to save summary to {summary_file_path.resolve()}: {e}", exc_info=True)
-
-    def _plot_optimization_progress(self) -> None:
-        """Visualize the scores obtained at each iteration of the optimization."""
-        if not self.optimization_history:
-            logger.info("No optimization history to plot.")
+        if failed or not np.isfinite(raw_score):
             return
 
-        iterations = [item['iteration'] for item in self.optimization_history]
-        scores = [item['score'] for item in self.optimization_history] # These are the raw scores (to be minimized)
+        is_better = (
+            raw_score < self.best_score_so_far
+            if self.settings.objective == "minimize"
+            else raw_score > self.best_score_so_far
+        )
+        if is_better:
+            self.best_score_so_far = raw_score
+            self.best_params_so_far = params
+
+    def _persist_results(
+        self,
+        best_params: Optional[Dict[str, Any]],
+        best_score: float,
+        result: Optional[OptimizeResult],
+    ) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        summary = {
+            "created_at_utc": timestamp,
+            "search_configuration": {
+                "model_type": self.settings.model_type,
+                "objective": self.settings.objective,
+                "n_calls": self.settings.n_calls,
+                "n_initial_points": self.settings.n_initial_points,
+                "random_state": self.settings.random_state,
+                "search_space_definition": self.search_space_config,
+            },
+            "best_result": {
+                "parameters": best_params,
+                "score": best_score,
+            },
+            "optimization_history": self.optimization_history,
+        }
+
+        if result is not None:
+            summary["optimizer_state"] = {
+                "x_iters": result.x_iters,
+                "func_vals": result.func_vals.tolist(),
+                "space": str(result.space),
+            }
+
+        output_path = self.settings.output_dir / f"bayesian_search_summary_{self.settings.model_type}_{timestamp}.json"
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(self._to_json_safe(summary), handle, indent=2)
+        logger.info("Saved Bayesian search summary to %s", output_path)
+
+    def _plot_optimization_progress(self) -> None:
+        if not self.optimization_history:
+            return
+
+        iterations = [item["iteration"] for item in self.optimization_history]
+        scores = np.array([item["score"] for item in self.optimization_history], dtype=float)
+        finite_mask = np.isfinite(scores)
+        if not finite_mask.any():
+            logger.warning("No finite scores available for plotting.")
+            return
 
         plt.figure(figsize=(10, 6))
-        plt.plot(iterations, scores, marker='o', linestyle='-', color='#2c7bb6', markersize=5, label="Objective Score per Iteration")
-        
-        # Plot a running minimum to show convergence
-        running_min_scores = np.minimum.accumulate(scores)
-        plt.plot(iterations, running_min_scores, marker='.', linestyle='--', color='#d7191c', label="Best Score So Far")
+        plt.plot(np.array(iterations)[finite_mask], scores[finite_mask], marker="o", linewidth=1.2, label="Score")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        plot_file_path = self.output_dir / f"bayesian_optimization_progress_{self.model_type}_{timestamp}.png"
-        plt.title(f"Bayesian Optimization Progress ({self.model_type})\nObjective: Minimize Score")
-        plt.xlabel("Iteration Number")
-        plt.ylabel("Objective Function Score")
+        best_trace = np.minimum.accumulate(scores[finite_mask]) if self.settings.objective == "minimize" else np.maximum.accumulate(scores[finite_mask])
+        plt.plot(np.array(iterations)[finite_mask], best_trace, linestyle="--", label="Best so far")
+
+        plt.title(f"Bayesian Optimization Progress ({self.settings.model_type})")
+        plt.xlabel("Iteration")
+        plt.ylabel("Score")
+        plt.grid(True, linestyle="--", alpha=0.4)
         plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.7)
         plt.tight_layout()
 
-        try:
-            plt.savefig(plot_file_path)
-            logger.info(f"Optimization progress plot saved to: {plot_file_path.resolve()}")
-        except Exception as e:
-            logger.error(f"Failed to save plot to {plot_file_path.resolve()}: {e}", exc_info=True)
-        finally:
-            plt.close() # Close the figure to free memory
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        plot_path = self.settings.output_dir / f"bayesian_progress_{self.settings.model_type}_{timestamp}.png"
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info("Saved Bayesian optimization plot to %s", plot_path)
 
-    def _convert_numpy_types(self, obj: Any) -> Any:
-        """Recursively convert numpy types to native Python types."""
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.bool_):
-            return bool(obj)
-        return obj
-
-    def _make_dict_json_serializable(self, data: Any) -> Dict:
-        """
-        Recursively process data to convert numpy types to native Python types.
-        Handles dictionaries, lists, and nested structures.
-        """
+    def _to_json_safe(self, data: Any) -> Any:
         if isinstance(data, dict):
-            return {key: self._make_dict_json_serializable(value) for key, value in data.items()}
-        elif isinstance(data, list):
-            return [self._make_dict_json_serializable(item) for item in data]
-        else:
-            return self._convert_numpy_types(data)
+            return {k: self._to_json_safe(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._to_json_safe(v) for v in data]
+        if isinstance(data, tuple):
+            return [self._to_json_safe(v) for v in data]
+        if isinstance(data, np.integer):
+            return int(data)
+        if isinstance(data, np.floating):
+            return float(data)
+        if isinstance(data, np.ndarray):
+            return data.tolist()
+        if isinstance(data, np.bool_):
+            return bool(data)
+        return data
 
-class BayesianLoggerCallback:
-    def __init__(self, bayesian_search_instance):
-        self.bayesian_search = bayesian_search_instance
-        self.iteration_count = 0
 
-    def __call__(self, res):
-        self.iteration_count += 1
-        params = dict(zip(res.space.dimension_names, res.x_iters[-1]))
-        score = res.func_vals[-1]
-        
-        if score < self.bayesian_search.best_score_so_far:
-            self.bayesian_search.best_score_so_far = score
-            self.bayesian_search.best_params_so_far = params
-            logger.info(f"Iteration {self.iteration_count}: New best score: {score:.6f} with params: {params}")
-        else:
-            logger.info(f"Iteration {self.iteration_count}: Score: {score:.6f} with params: {params}")
-        
-        # Store in history
-        self.bayesian_search.optimization_history.append({
-            'iteration': self.iteration_count,
-            'parameters': params,
-            'score': score
-        })
-
-# ====================== Usage Example ======================
 if __name__ == "__main__":
-    print("\n=== Running Bayesian Search ===\n")
-    evaluation_function=None
-    output_dir_name = "bayesian_search"
-    
-    search1 = BayesianSearch(evaluation_function)
+    def _dummy_eval(params: Dict[str, Any]) -> float:
+        return float(np.random.default_rng(7).random()) + float(params.get("n_estimators", 0)) * 1e-5
 
-    print(f"{search1}")
-
-    print(f"\n* * * * * Phase 2 * * * * *\n")
-    def evaluation(params: Dict) -> float:
-        print(f"Evaluating parameters: {params}")
-        return np.random.rand()  # Example score
-    
-    search2 = BayesianSearch(evaluation)
-    best_params, best_score, _ = search2.run_search()
-
-    print(f"Best params: {best_params}")
-    print(f"Best score: {best_score:.4f}")
-    print(f"\n* * * * * Phase 3 * * * * *\n")
-
-    print("\n=== Successfully Ran Bayesian Search ===\n")
+    search = BayesianSearch(evaluation_function=_dummy_eval, model_type="GradientBoosting")
+    params, score, _ = search.run_search()
+    print(f"best params={params}, score={score}")

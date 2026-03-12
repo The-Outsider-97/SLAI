@@ -300,10 +300,22 @@ class MultiModalMemory:
         if not self.policy_interventions:
             return {}
 
+        df = pd.DataFrame(self.policy_interventions)
+        if df.empty or 'type' not in df:
+            return {}
+
+        if 'causal_impact' not in df:
+            df['causal_impact'] = np.nan
+
+        return df.groupby('type').agg({
+            'effect_size': ['mean', 'std', 'count'],
+            'causal_impact': 'median'
+        }).to_dict()
+
     def detect_drift(self, window_size: int = 30) -> bool:
         """Performance-based concept drift detection"""
         if len(self.parameter_evolution) < 2*window_size:
-            return kl_div > self.drift_threshold
+            return False
             
         recent = self.parameter_evolution['performance'][-window_size:].values
         historical = self.parameter_evolution['performance'][-2*window_size:-window_size].values
@@ -317,6 +329,13 @@ class MultiModalMemory:
 
     def _semantic_analysis(self) -> Dict:
         """Analyze semantic memory characteristics"""
+        if not self.semantic:
+            return {
+                'total_concepts': 0,
+                'avg_strength': 0.0,
+                'active_contexts': 0
+            }
+
         return {
             'total_concepts': len(self.semantic),
             'avg_strength': np.mean([v['strength'] for v in self.semantic.values()]),
@@ -353,11 +372,8 @@ class MultiModalMemory:
         y = np.array([effect['performance_delta']])
         self.causal_model.partial_fit(X, y)
             
-        df = pd.DataFrame(self.policy_interventions)
-        return df.groupby('type').agg({
-            'effect_size': ['mean', 'std'],
-            'causal_impact': 'median'
-        }).to_dict()
+        if self.policy_interventions:
+            self.policy_interventions[-1]['causal_impact'] = float(np.mean(np.abs(self.causal_model.coef_)))
 
     def consolidate(self):
         """Apply forgetting mechanisms to all memory systems with parameter-aware forgetting"""
@@ -410,7 +426,7 @@ class MultiModalMemory:
             self.parameter_evolution['timestamp'] > cutoff
         ]
 
-    def retrieve(self, query, context: Optional[Dict] = None,):
+    def retrieve(self, query, context: Optional[Dict] = None, limit: Optional[int] = None):
         """Context-aware retrieval with parameter prioritization"""
         results = []
         
@@ -435,7 +451,7 @@ class MultiModalMemory:
                 'type': 'episodic'
             })
 
-        limit = self.retrieval_limit
+        limit = self.retrieval_limit if limit is None else int(limit)
         
         return sorted(results, key=lambda x: x['score'], reverse=True)[:limit]
 
@@ -464,7 +480,7 @@ class MultiModalMemory:
                 features['temperature'] = recent['temperature']
         
         # Process query keywords
-        query = query.lower()
+        query = str(query).lower()
         modifiers = {
             'high': 1.5, 'increase': 1.3, 'boost': 1.2,
             'low': 0.5, 'reduce': 0.7, 'decrease': 0.8
@@ -569,7 +585,10 @@ class MultiModalMemory:
         max_val = np.max(final_bias) if np.any(final_bias != 0) else 1.0
         scaled_bias = final_bias - max_val  # For numerical stability
         exp_bias = np.exp(scaled_bias)
-        softmax_bias = exp_bias / np.sum(exp_bias)
+        exp_sum = np.sum(exp_bias)
+        if exp_sum <= 1e-12:
+            return np.zeros(self.action_dim)
+        softmax_bias = exp_bias / exp_sum
         
         # Scale to moderate influence (range: -1 to 1)
         return 2.0 * (softmax_bias - 0.5)
@@ -579,7 +598,9 @@ class MultiModalMemory:
         Sample a batch from the replay buffer and return it in a structured format.
         """
         batch = self.replay_buffer.sample(batch_size)
-    
+        if not batch:
+            return {"states": [], "actions": [], "advantages": []}
+
         # Extract first 5 fields (state, action, reward, next_state, done)
         trimmed_batch = [sample[:5] for sample in batch]
         states, actions, rewards, next_states, dones = zip(*trimmed_batch)
@@ -624,7 +645,8 @@ class MultiModalMemory:
 
     def _handle_emergency_exit(self, signum, frame):
         logger.critical("EMERGENCY EXIT - Forcing buffer unlock")
-        self.replay_buffer.lock.release()
+        if hasattr(self.replay_buffer, 'lock') and self.replay_buffer.lock.locked():
+            self.replay_buffer.lock.release()
         sys.exit(1)
 
 if __name__ == "__main__":

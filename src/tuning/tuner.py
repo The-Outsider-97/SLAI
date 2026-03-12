@@ -1,9 +1,7 @@
 import os, sys
-import logging
 import json
 import yaml
 
-# from src.tuning.configs.hyperparam_config_generator import HyperparamConfigGenerator
 from src.tuning.utils.config_loader import load_global_config, get_config_section
 from src.tuning.grid_search import GridSearch
 from src.tuning.bayesian_search import BayesianSearch
@@ -19,7 +17,7 @@ class HyperparamTuner:
     based on configuration or runtime input.
     """
 
-    def __init__(self, model_type=None, evaluation_function=None):
+    def __init__(self, model_type: Optional[str] = None, evaluation_function: Optional[Callable] = None):
         """
         Initializes the tuner.
 
@@ -67,37 +65,15 @@ class HyperparamTuner:
         else:
             raise ValueError(f"Unsupported strategy: {self.strategy}")
 
-    def run_tuning_pipeline(self, X_data=None, y_data=None):
-        """Execute the tuning pipeline."""
+    def run_tuning_pipeline(self, X_data: Optional[Any] = None, y_data: Optional[Any] = None) -> Dict[str, Any]:
         logger.info("Starting %s tuning...", self.strategy)
-        if self.strategy == 'grid':
+
+        if self.strategy == "grid":
             if X_data is None or y_data is None:
                 raise ValueError("X_data and y_data are required for GridSearch.")
             best_params = self.optimizer.run_search(X_data, y_data)
         else:
             best_params, _, _ = self.optimizer.run_search()
-        
+
         logger.info("Best parameters: %s", best_params)
         return best_params
-
-# ====================== Usage Example ======================
-if __name__ == "__main__":
-    import numpy as np
-    print("\n=== Running Hyperparameter Tuner ===\n")
-
-    print(f"\n* * * * * Phase 1 * * * * *\n")
-    tuner = HyperparamTuner(
-        evaluation_function=lambda params: np.random.rand()
-    )
-    tuner.run_tuning_pipeline()
-
-    # For Grid Search
-    # tuner = HyperparamTuner(
-    #     evaluation_function=lambda params, X_train, y_train, X_val, y_val: np.random.rand(),
-    #    strategy='grid'
-    # )
-    # X, y = load_your_data()
-    # best_params = tuner.run_tuning_pipeline(X, y)
-    print(f"\n* * * * * Phase 3 * * * * *\n")
-
-    print("\n=== Successfully Ran Hyperparameter Tuner ===\n")

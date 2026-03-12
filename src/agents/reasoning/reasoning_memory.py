@@ -254,8 +254,8 @@ class ReasoningMemory:
             indices = []
             experiences = []
             for i in range(len(self.tree)):
-                idx = (self.tree.write_ptr - i - 1) % self.capacity
-                if self.tree.tree[idx + self.capacity - 1] >= threshold:
+                idx = (self.tree.write_ptr - i - 1) % self.tree.capacity
+                if self.tree.tree[idx + self.tree.capacity - 1] >= threshold:
                     indices.append(idx)
                     experiences.append(self.tree.data[idx])
             return experiences

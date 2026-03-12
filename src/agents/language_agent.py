@@ -1,11 +1,9 @@
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
-import torch
 import math
 import time
-import re
+import re, sys
 import yaml, json
-import torch.nn as nn
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,10 +244,15 @@ class LanguageAgent(BaseAgent):
             dialogue_policy = self.load_dialogue_policy()
             if linguistic_frame.confidence < dialogue_policy.get('low_confidence_threshold', 0.5): # Using 0.5 as a fallback default
                 logger.info(f"Low confidence intent detected ({linguistic_frame.confidence:.2f}).")
-                self.dialogue_context.add_unresolved(
-                    issue="low_confidence_intent",
-                    slot=None 
+                already_pending = any(
+                    issue.get('description') == 'low_confidence_intent'
+                    for issue in self.dialogue_context.unresolved_issues
                 )
+                if not already_pending:
+                    self.dialogue_context.add_unresolved(
+                        issue="low_confidence_intent",
+                        slot=None 
+                    )
                 self.dialogue_context.update_environment_state(
                     "pending_intent", 
                     linguistic_frame.intent
@@ -258,6 +261,13 @@ class LanguageAgent(BaseAgent):
                     "pending_entities", 
                     linguistic_frame.entities
                 )
+            else:
+                self.dialogue_context.unresolved_issues = [
+                    issue for issue in self.dialogue_context.unresolved_issues
+                    if issue.get('description') != 'low_confidence_intent'
+                ]
+                self.dialogue_context.update_environment_state("pending_intent", None)
+                self.dialogue_context.update_environment_state("pending_entities", {})
 
         except Exception as e:
             logger.error(f"NLUEngine failed: {e}", exc_info=True)
@@ -292,34 +302,40 @@ class LanguageAgent(BaseAgent):
         
         agent_response_text = ""
         if pending_clarification:
-            clarification_intent = self.dialogue_context.get_environment_state("pending_intent")
+            if not self._handle_clarification_flow():
+                fallback_choices = self.load_dialogue_policy().get('fallback_responses', [])
+                agent_response_text = fallback_choices[0] if fallback_choices else "Could you please rephrase that?"
+            else:
+                clarification_intent = self.dialogue_context.get_environment_state("pending_intent")
             clarification_entities = self.dialogue_context.get_environment_state("pending_entities") or {}
-            
-            # Ensure entities are in a format NLG can handle (e.g., string representations)
-            formatted_entities_for_nlg = {}
-            if isinstance(clarification_entities, dict):
-                for k, v_list in clarification_entities.items():
-                    if isinstance(v_list, list) and v_list:
-                        # Take the first item if it's a list, or join if appropriate
-                        formatted_entities_for_nlg[k] = str(v_list[0]) 
-                    elif v_list is not None:
-                         formatted_entities_for_nlg[k] = str(v_list)
-            
-            clarification_frame = LinguisticFrame(
-                intent="clarification_request", # This intent should exist in nlg_templates.json
-                entities={
-                    "pending_intent": clarification_intent or "your request",
-                    "mentioned_entities": ", ".join(f"{k}: {v}" for k,v in formatted_entities_for_nlg.items()) or "the details provided"
-                },
-                sentiment=0.0,
-                modality="interrogative", # A clarification is often a question
-                confidence=1.0,
-                act_type=SpeechActType.DIRECTIVE # Requesting user to act (clarify)
-            )
-            agent_response_text = self.nlg_engine.generate(
-                frame=clarification_frame,
-                context=self.dialogue_context # Pass DialogueContext object
-            )
+            if not agent_response_text:
+                clarification_entities = self.dialogue_context.get_environment_state("pending_entities") or {}
+                
+                # Ensure entities are in a format NLG can handle (e.g., string representations)
+                formatted_entities_for_nlg = {}
+                if isinstance(clarification_entities, dict):
+                    for k, v_list in clarification_entities.items():
+                        if isinstance(v_list, list) and v_list:
+                            # Take the first item if it's a list, or join if appropriate
+                            formatted_entities_for_nlg[k] = str(v_list[0]) 
+                        elif v_list is not None:
+                            formatted_entities_for_nlg[k] = str(v_list)
+                
+                clarification_frame = LinguisticFrame(
+                    intent="clarification_request", # This intent should exist in nlg_templates.json
+                    entities={
+                        "pending_intent": clarification_intent or "your request",
+                        "mentioned_entities": ", ".join(f"{k}: {v}" for k,v in formatted_entities_for_nlg.items()) or "the details provided"
+                    },
+                    sentiment=0.0,
+                    modality="interrogative", # A clarification is often a question
+                    confidence=1.0,
+                    act_type=SpeechActType.DIRECTIVE # Requesting user to act (clarify)
+                )
+                agent_response_text = self.nlg_engine.generate(
+                    frame=clarification_frame,
+                    context=self.dialogue_context # Pass DialogueContext object
+                )
         else:
             if linguistic_frame is None: # Should have been caught or defaulted by NLU error handling
                  linguistic_frame = LinguisticFrame("internal_error", {}, 0.0, "error", 1.0, SpeechActType.ASSERTIVE)

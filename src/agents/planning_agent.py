@@ -43,7 +43,14 @@ from src.agents.planning.task_scheduler import DeadlineAwareScheduler
 from src.agents.planning.probabilistic_planner import ProbabilisticPlanner
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
 from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
-from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
+try:
+    from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
+except ImportError:
+    class ClassificationHead: pass
+    class RegressionHead: pass
+    class Seq2SeqHead: pass
+    print("Warning: perception module not found. Using dummy classes.")
+
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Agent")
@@ -148,8 +155,6 @@ class PlanningAgent(BaseAgent):
             logger.warning(f"Task '{task.name}' already registered. Overwriting.")
 
         self.task_library[task.name] = task
-        if task.name in self.task_library:
-            logger.warning(f"Task '{task.name}' already registered. Overwriting.")
 
         # Initialize probabilistic actions if applicable
         if task.is_probabilistic:
@@ -168,22 +173,21 @@ class PlanningAgent(BaseAgent):
         # Initialize stats for Bayesian method selection if it's an abstract task
         if task.task_type == TaskType.ABSTRACT and not task.methods:
             logger.warning(f"Abstract task {task.name} has no methods. Adding default fallback.")
-
-        fallback = Task(
-            name=f"{task.name}_fallback",
-            task_type=TaskType.PRIMITIVE,
-            preconditions=[lambda state: True],
-            effects=[lambda state: state.update({'fallback_completed': True})],
-            resource_requirements=ResourceProfile(
-                gpu=0.1,
-                ram=0.5,
-                specialized_hardware=[]
-            ),
-            start_time=10,
-            deadline=3600,
-            duration=300
-        )
-        task.methods = [[fallback]]  # Single method with fallback task
+            fallback = Task(
+                name=f"{task.name}_fallback",
+                task_type=TaskType.PRIMITIVE,
+                preconditions=[lambda state: True],
+                effects=[lambda state: state.update({'fallback_completed': True})],
+                resource_requirements=ResourceProfile(
+                    gpu=0.1,
+                    ram=0.5,
+                    specialized_hardware=[]
+                ),
+                start_time=10,
+                deadline=3600,
+                duration=300
+            )
+            task.methods = [[fallback]]  # Single method with fallback task
 
     def _validate_task_safety(self, task: Task) -> bool:
         """Ensure task meets basic safety constraints before registration"""
@@ -447,13 +451,59 @@ class PlanningAgent(BaseAgent):
 
     def _convert_to_schedule_format(self, plan):
         """Map plan tasks to scheduler format"""
+        now = time.time()
+
+        def _requirements_from_task(task: Task):
+            reqs = []
+            profile = getattr(task, 'resource_requirements', None)
+            if profile:
+                if getattr(profile, 'gpu', 0):
+                    reqs.append('gpu')
+                if getattr(profile, 'ram', 0):
+                    reqs.append('ram')
+                reqs.extend(getattr(profile, 'specialized_hardware', []) or [])
+            return reqs
+
+        def _dependency_ids(task: Task):
+            deps = getattr(task, 'dependencies', []) or []
+            if not isinstance(deps, list):
+                return []
+            dep_ids = []
+            for dep in deps:
+                if isinstance(dep, Task):
+                    dep_ids.append(dep.name)
+                elif isinstance(dep, str):
+                    dep_ids.append(dep)
+            return dep_ids
+
+        def _normalized_deadline(task: Task):
+            deadline = getattr(task, 'deadline', 0) or 0
+            if not isinstance(deadline, (int, float)) or deadline <= now:
+                return now + max(getattr(task, 'duration', 300.0), 300.0)
+            return deadline
+
         return [{
             'id': task.name,
-            'requirements': task.requirements,
-            'deadline': task.deadline,
+            'requirements': _requirements_from_task(task),
+            'deadline': _normalized_deadline(task),
             'risk_score': task.risk_score,
-            'dependencies': [t.name for t in task.dependencies]
+            'dependencies': _dependency_ids(task)
         } for task in plan]
+
+    def _create_task_from_assignment(self, assignment: Dict[str, Any]) -> Task:
+        """Rehydrate a scheduler assignment into a primitive executable task."""
+        return Task(
+            name=assignment.get('task_id', 'scheduled_task'),
+            task_type=TaskType.PRIMITIVE,
+            start_time=assignment.get('start_time', 0),
+            end_time=assignment.get('end_time', 0),
+            deadline=assignment.get('end_time', 0),
+            risk_score=assignment.get('risk_score', 0.0),
+            context={
+                'assigned_agent': assignment.get('agent_id'),
+                'assignment': assignment,
+            },
+        )
 
     def _convert_to_plan(self, schedule):
         """Convert scheduler output to executable plan"""
@@ -461,7 +511,21 @@ class PlanningAgent(BaseAgent):
 
     def _get_available_agents(self):
         """Get agent capabilities from collaborative agent's registry"""
-        return self.shared_memory.get('agent_registry', {})
+        registry = self.shared_memory.get('agent_registry', default={})
+        if isinstance(registry, dict) and registry:
+            return registry
+
+        # Safe fallback to keep scheduling operational even when no collaborative
+        # registry has been bootstrapped yet.
+        return {
+            'planner': {
+                'capabilities': ['gpu', 'ram'],
+                'current_load': 0.0,
+                'successes': 1,
+                'failures': 0,
+                'efficiency': 1.0,
+            }
+        }
 
     def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
         self._planning_start_time = time.time()
@@ -1195,8 +1259,13 @@ class HTNPlanner(PlanningAgent):
 
 class PartialOrderPlanner(PlanningAgent):
     """Implements Wilkins' temporal constraint management"""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config,
+            **kwargs,
+        )
         self.temporal_constraints: Set[Tuple[Task, Task, str]] = set()  # (A,B,relation)
         self.causal_links: Set[Tuple[Task, Task, Callable]] = set()  # (producer, consumer, condition)
 

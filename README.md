@@ -21,38 +21,47 @@ SLAI is a modular, distributed AI assistant framework composed of autonomous age
 
 [//]: < See `slai_flowchart.png` in the repo for the full data and agent pipeline.>
 
-```mermaid 
-graph LR
-    B[Collaboration Agent] --> I[Agent Factory]
-    I --> C[Specialist Agents]
-    C --> D[Safety + Evaluation]
-    D --> E[Final Output]
-    D --> F[Logs]
-    G[User Feedback] --> H[Feedback Loop: Adapt + Learn]
-    D --> H
-    H --> B
-    E --> A[User Input]
-    A --> B
-    A --> G
+```mermaid
+graph TD
+    U[User / External Trigger] --> CA[Collaborative Agent]
+    CA --> AF[Agent Factory + Registry]
 
-    subgraph C [Specialist Agents]
-        direction LR
-        C1[Perception Agent]
-        C2[Knowledge Agent]
-        C3[Planning Agent]
-        C4[Reasoning Agent]
-        C5[Execution Agent]
-        C6[Language Agent]
-    end
+    AF --> P[Perception Agent]
+    AF --> K[Knowledge Agent]
+    AF --> PL[Planning Agent]
+    AF --> R[Reasoning Agent]
+    AF --> EX[Execution Agent]
+    AF --> L[Language Agent]
+    AF --> LE[Learning Agent]
+    AF --> AD[Adaptive Agent]
+    AF --> SA[Safety Agent]
+    AF --> EV[Evaluation Agent]
+    AF --> AL[Alignment Agent]
 
-    subgraph D [Safety + Evaluation]
-        D1[Safety Agent] --> D2[Evaluation Agent]
-    end
+    P --> ORCH[Task Orchestration]
+    K --> ORCH
+    PL --> ORCH
+    R --> ORCH
+    EX --> ORCH
+    L --> ORCH
 
-    subgraph H [Feedback Loop: Adapt + Learn]
-        H1[Learning Agent]
-        H2[Adaptation Agent]
-    end
+    ORCH --> SAFE[Safety + Alignment Gate]
+    SA --> SAFE
+    AL --> SAFE
+
+    SAFE --> EVAL[Evaluation & Scoring]
+    EV --> EVAL
+
+    EVAL --> OUT[Final Response / Action]
+    OUT --> FB[User Feedback + Telemetry]
+    FB --> LE
+    FB --> AD
+    LE --> CA
+    AD --> CA
+
+    EVAL --> LOGS[(Memory / Metrics / Logs)]
+    LOGS --> K
+    LOGS --> LE
 ```
 
 ---
@@ -112,78 +121,13 @@ Note: If you see an error about execution policy:
 
 3. Install requirements:
    ```console
-   pip install ConcurrentLogHandler
-   pip install librosa
-   pip install music21
-   pip install mido
-   pip install tensorflow-cpu
-   pip install pypdf
+   pip install --upgrade pip
    pip install -r requirements.txt
-   pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
-   pip install ruptures
-   pip install fuzzywuzzy python-Levenshtein metaphone
-   pip install pympler
-   pip install flask_limiter
-   pip install flask_talisman
-   pip install flask_sqlalchemy
-   pip install apscheduler
-   pip install resource
-   pip install astor
-   pip install z3
-   pip install python-whois
-   pip install psutils
-   pip install pandas
-   pip install mlxtend
-   pip install cryptography
-   pip install PyQt5
-   pip install pynvml
-   pip install sentence_transformers
-   pip install tf-keras
-   pip install psycopg2-binary
-   pip install scikit-optimize
-   pip install statsmodels
-   pip install SpellChecker
-   pip install pyspellchecker
-   pip install textstat
-   pip install ply
-   pip install tenacity
-   pip install rollback
-   pip install evaluate
-   pip install bert-score
-   pip install rouge
-   pip install openai
-   pip install deepmerge
-   pip install sentencepiece
-   pip install flask_migrate
-   pip install Flask-Talisman==5.1.0
-   pip install Flask-Limiter==3.5.0
-   pip install bleach==6.0.0
-   pip install Werkzeug==2.3.7
-   pip install python-whois==0.9.0
-   pip install flask>=2.0.0
-   pip install django>=4.0
-   pip install fastapi>=0.85
-   pip install rotary_embedding_torch
-   pip install lz4
-   pip install gym
-   pip install pgmpy
-   pip install einops
-   pip install gymnasium
-   pip install opencv-python
-   pip install pyperclip
-   pip install psutil
-   pip install gputil
-   pip install pytz
-   pip install torch
-   pip install rdflib
-   pip install pyyaml
-   pip install pandas
-   pip install dotenv
-   pip install textblob
-   python -m pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
    ```
 
-4. Heaving trouble with tensosflow?
+   Optional: if you are using GPU-enabled PyTorch builds, install the CUDA wheel matching your system from the official PyTorch index.
+
+4. Having trouble with TensorFlow?
    ```console
    py -3.10 -m venv tfenv
    .\tfenv\Scripts\activate

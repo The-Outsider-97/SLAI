@@ -230,10 +230,8 @@ class SkillWorker:
         entropy: float = 0.0 
     ):
         """Store experience with all necessary components"""
-        # Update reward statistics
-        self._update_reward_statistics(reward)
-        
-        # Apply reward normalization
+
+        # Apply reward normalization (updates running stats internally)
         reward = self._normalize_reward(reward)
         
         # Create transition

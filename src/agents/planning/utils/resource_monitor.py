@@ -1,4 +1,3 @@
-
 import time
 import psutil
 import GPUtil
@@ -20,6 +19,8 @@ printer = PrettyPrinter
 
 class ResourceMonitor:
     """Real-time cluster resource tracking with failure resilience"""
+    _global_last_logged_cluster_signature = None
+    _global_last_log_ts = 0.0
     gpu_utilization: Dict[str, float] = field(default_factory=dict)
     ram_utilization: Dict[str, float] = field(default_factory=dict)
     cpu_utilization: Dict[str, float] = field(default_factory=dict)
@@ -339,7 +340,22 @@ class ResourceMonitor:
             # Only update if significant changes occur
             if new_resources != self.cluster_resources:
                 self.cluster_resources = new_resources
-                logger.info("Cluster resource map updated")
+
+                # Avoid log spam from volatile per-node allocation jitter.
+                cluster_signature = (
+                    new_resources.gpu_total,
+                    new_resources.ram_total,
+                    tuple(sorted(new_resources.specialized_hardware_available)),
+                )
+                now = time.time()
+                should_log = (
+                    cluster_signature != ResourceMonitor._global_last_logged_cluster_signature
+                    or (now - ResourceMonitor._global_last_log_ts) >= 60
+                )
+                if should_log:
+                    logger.info("Cluster resource map updated")
+                    ResourceMonitor._global_last_logged_cluster_signature = cluster_signature
+                    ResourceMonitor._global_last_log_ts = now
         finally:
             self._lock.release()
 

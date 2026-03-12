@@ -182,6 +182,9 @@ class PolicyManager:
 
     def update_policy(self):
         """Update manager policy based on stored experiences"""
+        if self.policy_network is None:
+            return
+
         if self.memory.size()['episodic'] < self.manager_config.get('min_batch_size', 16):
             return
             
@@ -210,7 +213,8 @@ class PolicyManager:
         
         # Forward pass
         probs = self.policy_network(states_t)
-        log_probs = torch.log(probs.gather(1, skills_t.unsqueeze(1)))
+        selected_probs = probs.gather(1, skills_t.unsqueeze(1)).clamp_min(1e-8)
+        log_probs = torch.log(selected_probs)
         
         # Policy gradient loss
         loss = -(log_probs * advantages_t).mean()

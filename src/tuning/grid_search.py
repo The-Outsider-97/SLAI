@@ -1,393 +1,369 @@
+"""Production-ready exhaustive grid search with cross-validation."""
 
-import yaml, json
-import numpy as np
+from __future__ import annotations
+
 import itertools
+import json
 import matplotlib.pyplot as plt
+import numpy as np
 
 from pathlib import Path
+from dataclasses import dataclass
 from joblib import Parallel, delayed
+from datetime import datetime, timezone
 from sklearn.model_selection import KFold
-from typing import Dict, List, Callable, Tuple, Any, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from logs.logger import get_logger 
+from src.tuning.utils.config_loader import get_config_section, load_global_config
+from logs.logger import get_logger
 
 logger = get_logger("GridSearch")
 
-CONFIG_PATH = "src/tuning/configs/hyperparam.yaml"
 
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
+@dataclass(frozen=True)
+class GridSearchSettings:
+    """Validated runtime settings for grid search."""
 
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config:
-        base_config.update(user_config)
-    return base_config
+    n_jobs: int
+    cross_val_folds: int
+    random_state: int
+    output_dir: Path
+    model_type: str
+
 
 class GridSearch:
-    """
-    Comprehensive Grid Search with k-fold cross-validation, parallel execution,
-    statistical analysis, and visualization.
-    
-    Features:
-    - Configuration via YAML file for hyperparameter search space.
-    - Parallel evaluation of hyperparameter combinations using joblib.
-    - k-fold cross-validation for robust performance estimation.
-    - Calculation of mean scores, standard deviations, and 95% confidence intervals.
-    - Effect size (Cohen's d) calculation for comparing parameter sets.
-    - Visualization of score progression, confidence intervals, and effect sizes.
-    - Detailed JSON output of all results and best parameters.
-    """
-    
-    def __init__(self, config,
-             evaluation_function: Callable[[Dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray], float]):
-        """
-        Initialize the GridSearch instance.
+    """Deterministic grid search with robust validation, tracking, and reporting."""
 
-        Args:
-            config_file (str): Path to the YAML configuration file defining the hyperparameter search space.
-            evaluation_function (Callable): The function used to evaluate a given set of hyperparameters.
-                It must accept: (params: Dict, X_train: np.ndarray, y_train: np.ndarray, 
-                                 X_val: np.ndarray, y_val: np.ndarray)
-                and return a single float score (higher is better).
-            n_jobs (int): Number of CPU cores to use for parallel execution. 
-                          -1 means use all available cores. Defaults to -1.
-            cross_val_folds (int): Number of folds for k-fold cross-validation. Defaults to 5.
-            random_state (Optional[int]): Seed for the random number generator used in KFold shuffling,
-                                          ensuring reproducibility. Defaults to 42.
-        """
-        config = load_config() or {}
-        
-        # Extract grid_search-specific parameters
-        self.grid_search_config = config.get('grid_search', {})
-        self.n_jobs = self.grid_search_config.get('n_jobs', -1)
-        self.cross_val_folds = self.grid_search_config.get('cross_val_folds', 5)
-        self.random_state = self.grid_search_config.get('random_state', 42)
-        
-        # Load hyperparameters from the root of the config
-        self.hyperparam_space, self.param_names = self._load_search_space(config)
-        
-        # Rest of the initialization remains unchanged
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        evaluation_function: Optional[
+            Callable[[Dict[str, Any], np.ndarray, np.ndarray, np.ndarray, np.ndarray], float]
+        ] = None,
+        model_type: Optional[str] = None,
+    ) -> None:
+        if evaluation_function is None:
+            raise ValueError("evaluation_function is required.")
+
+        self.config: Dict[str, Any] = config or load_global_config() or {}
+        self.settings = self._load_settings(model_type=model_type)
+        self.param_names, self.hyperparam_space = self._load_search_space(self.settings.model_type)
+        self._validate_search_space()
+
         self.evaluation_function = evaluation_function
-        self.results: List[Dict] = []
-        self.best_score: float = -np.inf
-        self.best_params: Optional[Dict] = None
-        self.best_score_std: float = 0.0
-        self.output_dir = Path("src/tuning/reports/grid_search")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.X_data: Optional[np.ndarray] = None
-        self.y_data: Optional[np.ndarray] = None
-        logger.info("Grid Search successfully initialized")
-
-    def _load_search_space(self, full_config: Dict) -> Tuple[List[List[Any]], List[str]]:
-        """Load hyperparameter search space from the full configuration."""
-        logger.info("Loading search space from config")
-        param_configs = full_config.get('hyperparameters', [])
-        
-        param_names = []
-        param_values_list = []
-        
-        for param_config in param_configs:
-            if not isinstance(param_config, dict) or 'name' not in param_config or 'values' not in param_config:
-                raise ValueError("Invalid hyperparameter configuration")
-            param_names.append(param_config['name'])
-            param_values_list.append(param_config['values'])
-            
-        return param_values_list, param_names
-
-    def _validate_search_space(self) -> None:
-        """Validate the search space, checking for combinatorial explosion."""
-        if not self.hyperparam_space: # Corresponds to empty hyperparameters list in config
-            total_combinations = 1 # Will evaluate one default/empty param set
-        else:
-            # np.prod returns 1.0 for an empty list of lengths (if hyperparam_space was [[],[]...])
-            # but _load_search_space ensures lists in param_values_list are non-empty
-            list_of_lengths = [len(v_list) for v_list in self.hyperparam_space]
-            total_combinations = np.prod(list_of_lengths) if list_of_lengths else 1
-            
-        logger.info(f"Total parameter combinations to evaluate: {total_combinations}")
-        
-        # This limit is arbitrary and can be adjusted based on computational resources.
-        if total_combinations > 10000:
-            logger.warning(f"High number of combinations ({total_combinations}). "
-                           "Grid search may take a significant amount of time.")
-        if total_combinations == 0 and self.hyperparam_space:
-            # This case should be caught by _load_search_space if a value list is empty.
-            # Defensive check.
-             raise ValueError("Hyperparameter space definition results in zero combinations. "
-                              "Ensure all parameter value lists are non-empty.")
-
-
-    def _cross_validate(self, params: Dict) -> Dict[str, Any]:
-        """
-        Perform k-fold cross-validation for a given set of parameters.
-        Uses data stored in self.X_data and self.y_data.
-        """
-        if self.X_data is None or self.y_data is None:
-            raise RuntimeError("X_data and y_data must be provided to run_search() before cross-validation.")
-
-        kf = KFold(n_splits=self.cross_val_folds, shuffle=True, random_state=self.random_state)
-        fold_scores: List[float] = []
-        
-        for fold_num, (train_idx, val_idx) in enumerate(kf.split(self.X_data, self.y_data)):
-            X_train_fold, X_val_fold = self.X_data[train_idx], self.X_data[val_idx]
-            y_train_fold, y_val_fold = self.y_data[train_idx], self.y_data[val_idx]
-            
-            try:
-                score = self.evaluation_function(params, X_train_fold, y_train_fold, X_val_fold, y_val_fold)
-                fold_scores.append(score)
-            except Exception as e:
-                logger.error(f"Evaluation failed for parameters {params} on fold {fold_num + 1}: {e}", exc_info=True)
-                fold_scores.append(-np.inf) # Assign a very low score for failures
-        
-        if not fold_scores: # Should only happen if self.cross_val_folds is 0 or less.
-            logger.error(f"No scores recorded for params {params}. Check cross_val_folds value.")
-            return {'mean': -np.inf, 'std': 0.0, 'ci95': (-np.inf, -np.inf), 'raw_scores': []}
-
-        mean_score = float(np.mean(fold_scores))
-        std_score = float(np.std(fold_scores))
-        
-        # Calculate 95% confidence interval for the mean score
-        # Using 1.96 (Z-value for 95% CI with normal approximation)
-        # More accurate for small samples would be t-distribution, but 1.96 is common.
-        ci_margin = 1.96 * std_score / np.sqrt(len(fold_scores)) if len(fold_scores) > 0 and std_score > 0 else 0.0
-        
-        return {
-            'mean': mean_score,
-            'std': std_score,
-            'ci95': (mean_score - ci_margin, mean_score + ci_margin),
-            'raw_scores': fold_scores
-        }
-
-    def _evaluate_combination_core(self, combo: Tuple) -> Dict:
-        """
-        Core evaluation logic for a single hyperparameter combination.
-        This method is designed to be called in parallel.
-        """
-        params = dict(zip(self.param_names, combo))
-        cv_results = self._cross_validate(params)
-        return {'params': params, 'scores': cv_results}
-
-    def run_search(self, X_data: np.ndarray, y_data: np.ndarray) -> Optional[Dict]:
-        """
-        Execute the grid search over the defined hyperparameter space.
-
-        Args:
-            X_data (np.ndarray): The feature matrix for the dataset.
-            y_data (np.ndarray): The target vector for the dataset.
-
-        Returns:
-            Optional[Dict]: The best hyperparameter combination found, or None if the search fails
-                            or no valid combinations are found.
-        """
-        self.X_data = X_data
-        self.y_data = y_data
-
-        # Reset state for a new search run
-        self.results = []
+        self.results: List[Dict[str, Any]] = []
         self.best_score = -np.inf
-        self.best_params = None
-        self.best_score_std = 0.0
+        self.best_score_std = np.nan
+        self.best_params: Optional[Dict[str, Any]] = None
 
-        if not self.param_names and not self.hyperparam_space:
-            # Case: No hyperparameters specified in config, evaluate with empty params (default model)
-            combinations_to_evaluate = [()] 
-            logger.info("No hyperparameters specified. Evaluating a single default parameter set.")
-        elif self.param_names and not self.hyperparam_space:
-            # This case should ideally be caught earlier, but defensive check.
-            logger.error("Parameter names are defined, but no hyperparameter values lists provided. Cannot run search.")
-            return None
-        else:
-            combinations_to_evaluate = list(itertools.product(*self.hyperparam_space))
-
-        if not combinations_to_evaluate:
-            logger.warning("No hyperparameter combinations to evaluate. Check configuration.")
-            return None
-            
-        num_combinations = len(combinations_to_evaluate)
-        logger.info(f"Starting grid search: {num_combinations} combinations, {self.cross_val_folds} CV folds each, "
-                    f"using {self.n_jobs if self.n_jobs != -1 else 'all available'} parallel jobs.")
-
-        # Parallel execution of _evaluate_combination_core for all combinations
-        all_combination_results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._evaluate_combination_core)(combo)
-            for combo in combinations_to_evaluate
+        self.settings.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "GridSearch initialized with model=%s, combinations=%s",
+            self.settings.model_type,
+            self._combination_count(),
         )
 
-        # Process results sequentially to calculate effect sizes and identify the best parameters
-        for i, core_result in enumerate(all_combination_results):
-            current_mean_score = core_result['scores']['mean']
-            current_std_dev = core_result['scores']['std']
+    def _load_settings(self, model_type: Optional[str]) -> GridSearchSettings:
+        section = get_config_section("grid_search") or {}
+        configured_model = model_type or section.get("model_type") or "GradientBoosting"
 
-            effect_size = 0.0  # Default for the first combination or if no prior best
-            if self.best_params is not None and self.best_score > -np.inf: # If a best has been established
-                # Calculate Cohen's d effect size: (M1 - M2) / SD_pooled
-                # SD_pooled = sqrt((SD1^2 + SD2^2) / 2) for equal group sizes (CV folds)
-                # Compares current params to the best params found *so far*.
-                # self.best_score_std is the std_dev of CV scores for the current self.best_params.
-                
-                # Ensure variance is positive before sqrt
-                variance_current = current_std_dev**2
-                variance_best_so_far = self.best_score_std**2
-                
-                pooled_std_denominator = np.sqrt((variance_current + variance_best_so_far) / 2.0)
-                
-                if pooled_std_denominator > 1e-9: # Avoid division by zero or tiny numbers
-                    effect_size = (current_mean_score - self.best_score) / pooled_std_denominator
-                else: # Denominator is zero or near-zero (e.g., both std_devs are zero)
-                    if np.isclose(current_mean_score, self.best_score):
-                        effect_size = 0.0
-                    else: # Scores differ, but stds are zero (implies deterministic scores within CV)
-                        effect_size = np.inf * np.sign(current_mean_score - self.best_score)
-            
-            full_result_entry = {
-                'id': i, # Iteration index
-                'params': core_result['params'],
-                'scores': core_result['scores'], # Contains mean, std, ci95, raw_scores
-                'effect_size': effect_size # Cohen's d vs. best_so_far
-            }
-            self.results.append(full_result_entry)
+        n_jobs = int(section.get("n_jobs", -1))
+        folds = int(section.get("cross_val_folds", 5))
+        random_state = int(section.get("random_state", 42))
+        output_dir = Path(section.get("output_dir", "src/tuning/reports/grid_search"))
 
-            if current_mean_score > self.best_score:
-                self.best_score = current_mean_score
-                self.best_params = core_result['params']
-                self.best_score_std = current_std_dev # Update std for the new best
-        
-        if self.best_params is not None:
-            logger.info(f"Grid search completed. Best parameters: {self.best_params} "
-                        f"achieved score (mean): {self.best_score:.4f} (std: {self.best_score_std:.4f})")
-            self._save_results_to_file()
-            self.plot_search_performance()
+        if n_jobs == 0:
+            raise ValueError("n_jobs cannot be 0.")
+        if folds < 2:
+            raise ValueError("cross_val_folds must be >= 2.")
+
+        return GridSearchSettings(
+            n_jobs=n_jobs,
+            cross_val_folds=folds,
+            random_state=random_state,
+            output_dir=output_dir,
+            model_type=configured_model,
+        )
+
+    def _load_search_space(self, model_type: str) -> Tuple[List[str], List[List[Any]]]:
+        hp_root = self.config.get("hyperparameters")
+
+        if isinstance(hp_root, dict):
+            param_specs = next((v for k, v in hp_root.items() if k.lower() == model_type.lower()), None)
+            if param_specs is None:
+                raise ValueError(f"No hyperparameter list found for model_type='{model_type}'.")
+        elif isinstance(hp_root, list):
+            param_specs = hp_root
         else:
-            logger.warning("Grid search completed, but no best parameters were identified. "
-                           "This might happen if all evaluations failed or returned non-finite scores.")
+            raise ValueError("'hyperparameters' must be a list or model-keyed dictionary.")
+
+        if not isinstance(param_specs, list):
+            raise ValueError("Hyperparameter configuration must be a list of parameter specs.")
+
+        param_names: List[str] = []
+        space: List[List[Any]] = []
+        for spec in param_specs:
+            if not isinstance(spec, dict):
+                raise ValueError(f"Invalid parameter spec: {spec!r}")
+
+            name = str(spec.get("name", "")).strip()
+            if not name:
+                raise ValueError(f"Missing hyperparameter name in spec: {spec!r}")
+            if name in param_names:
+                raise ValueError(f"Duplicate hyperparameter name detected: {name}")
+
+            values = self._normalize_values(spec)
+            if not values:
+                raise ValueError(f"Hyperparameter '{name}' has no candidate values.")
+
+            param_names.append(name)
+            space.append(values)
+
+        return param_names, space
+
+    def _normalize_values(self, spec: Dict[str, Any]) -> List[Any]:
+        if "values" in spec:
+            values = [v for v in spec["values"] if v is not None]
+            return values
+
+        raw_type = str(spec.get("type", "")).lower()
+        if "min" in spec and "max" in spec and raw_type in {"integer", "int"}:
+            low, high = int(spec["min"]), int(spec["max"])
+            if low > high:
+                raise ValueError(f"Invalid integer bounds in spec: {spec}")
+            return list(range(low, high + 1))
+
+        raise ValueError("Grid search requires 'values' or integer min/max bounds.")
+
+    def _validate_search_space(self) -> None:
+        combinations = self._combination_count()
+        if combinations <= 0:
+            raise ValueError("Search space produced zero combinations.")
+        if combinations > 100_000:
+            logger.warning("Large search space detected (%s combinations).", combinations)
+
+    def _combination_count(self) -> int:
+        if not self.hyperparam_space:
+            return 1
+        return int(np.prod([len(v) for v in self.hyperparam_space]))
+
+    def run_search(self, X_data: np.ndarray, y_data: np.ndarray) -> Optional[Dict[str, Any]]:
+        X, y = self._validate_dataset(X_data, y_data)
+
+        self.results = []
+        self.best_score = -np.inf
+        self.best_score_std = np.nan
+        self.best_params = None
+
+        combinations = list(itertools.product(*self.hyperparam_space)) if self.hyperparam_space else [()]
+        logger.info(
+            "Starting grid search across %s combinations with %s-fold CV.",
+            len(combinations),
+            self.settings.cross_val_folds,
+        )
+
+        evaluated = Parallel(n_jobs=self.settings.n_jobs, prefer="processes")(
+            delayed(self._evaluate_combination)(combo, X, y) for combo in combinations
+        )
+
+        for index, result in enumerate(evaluated):
+            result["id"] = index
+            self.results.append(result)
+            mean_score = result["scores"]["mean"]
+            if np.isfinite(mean_score) and mean_score > self.best_score:
+                self.best_score = mean_score
+                self.best_score_std = result["scores"]["std"]
+                self.best_params = result["params"]
+
+        self._attach_effect_sizes()
+        self._persist_results()
+        self.plot_search_performance()
+
+        if self.best_params is None:
+            logger.warning("Grid search completed but all configurations failed.")
+        else:
+            logger.info("Grid search best params=%s, mean_score=%.6f", self.best_params, self.best_score)
 
         return self.best_params
 
-    def _save_results_to_file(self) -> None:
-        """Save all search results, including best parameters and scores, to a JSON file."""
+    def _validate_dataset(self, X_data: np.ndarray, y_data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        X = np.asarray(X_data)
+        y = np.asarray(y_data)
+
+        if X.shape[0] != y.shape[0]:
+            raise ValueError(f"X and y must have the same sample count: {X.shape[0]} != {y.shape[0]}")
+        if X.shape[0] < self.settings.cross_val_folds:
+            raise ValueError("Number of samples must be >= cross_val_folds.")
+
+        return X, y
+
+    def _evaluate_combination(self, combo: Tuple[Any, ...], X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+        params = dict(zip(self.param_names, combo))
+        scores = self._cross_validate(params=params, X_data=X, y_data=y)
+        return {"params": params, "scores": scores}
+
+    def _cross_validate(self, params: Dict[str, Any], X_data: np.ndarray, y_data: np.ndarray) -> Dict[str, Any]:
+        kfold = KFold(
+            n_splits=self.settings.cross_val_folds,
+            shuffle=True,
+            random_state=self.settings.random_state,
+        )
+        fold_scores: List[float] = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X_data, y_data), start=1):
+            X_train, X_val = X_data[train_idx], X_data[val_idx]
+            y_train, y_val = y_data[train_idx], y_data[val_idx]
+
+            try:
+                score = float(self.evaluation_function(params, X_train, y_train, X_val, y_val))
+                if not np.isfinite(score):
+                    raise ValueError("non-finite score")
+                fold_scores.append(score)
+            except Exception as exc:
+                logger.error(
+                    "Fold evaluation failed for params=%s, fold=%s: %s",
+                    params,
+                    fold_idx,
+                    exc,
+                    exc_info=True,
+                )
+                fold_scores.append(float("-inf"))
+
+        finite_scores = np.array([s for s in fold_scores if np.isfinite(s)], dtype=float)
+        if finite_scores.size == 0:
+            return {"mean": float("-inf"), "std": float("inf"), "ci95": [float("-inf"), float("-inf")], "raw_scores": fold_scores}
+
+        mean_score = float(np.mean(finite_scores))
+        std_score = float(np.std(finite_scores))
+        margin = 1.96 * std_score / np.sqrt(finite_scores.size) if finite_scores.size > 1 else 0.0
+        return {
+            "mean": mean_score,
+            "std": std_score,
+            "ci95": [mean_score - margin, mean_score + margin],
+            "raw_scores": fold_scores,
+        }
+
+    def _attach_effect_sizes(self) -> None:
         if not self.results:
-            logger.warning("No results available to save.")
             return
 
-        output_content = {
-            'search_configuration': {
-                'config_file': str(self.config),
-                'cross_validation_folds': self.cross_val_folds,
-                'random_state': self.random_state,
-                'parameter_names': self.param_names,
-                'parameter_value_options': self.hyperparam_space
-            },
-            'best_result': {
-                'parameters': self.best_params,
-                'mean_score': self.best_score,
-                'score_std_dev': self.best_score_std,
-                # Find full details of the best result from self.results
-                'best_result_details': next((r for r in self.results if r['params'] == self.best_params), None)
-            },
-            'all_evaluated_combinations': self.results 
-        }
-        
-        results_file_path = self.output_dir / f"grid_search_results_{self.config.stem}.json"
-        try:
-            with open(results_file_path, 'w') as f:
-                # Custom JSON encoder for numpy types and other non-serializable objects if needed
-                json.dump(output_content, f, indent=2, default=lambda o: o.tolist() if isinstance(o, np.ndarray) else str(o))
-            logger.info(f"Full grid search results saved to: {results_file_path}")
-        except Exception as e:
-            logger.error(f"Failed to save results to {results_file_path}: {e}", exc_info=True)
+        running_best_mean = None
+        running_best_std = None
 
+        for item in self.results:
+            mean = item["scores"]["mean"]
+            std = item["scores"]["std"]
+
+            if running_best_mean is None:
+                item["effect_size_vs_best_so_far"] = 0.0
+                running_best_mean, running_best_std = mean, std
+                continue
+
+            pooled = np.sqrt((std**2 + running_best_std**2) / 2.0)
+            if pooled > 1e-12 and np.isfinite(pooled) and np.isfinite(mean) and np.isfinite(running_best_mean):
+                item["effect_size_vs_best_so_far"] = float((mean - running_best_mean) / pooled)
+            elif np.isclose(mean, running_best_mean, equal_nan=False):
+                item["effect_size_vs_best_so_far"] = 0.0
+            else:
+                item["effect_size_vs_best_so_far"] = float("nan")
+
+            if np.isfinite(mean) and mean > running_best_mean:
+                running_best_mean, running_best_std = mean, std
+
+    def _persist_results(self) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        payload = {
+            "created_at_utc": timestamp,
+            "search_configuration": {
+                "model_type": self.settings.model_type,
+                "n_jobs": self.settings.n_jobs,
+                "cross_val_folds": self.settings.cross_val_folds,
+                "random_state": self.settings.random_state,
+                "parameter_names": self.param_names,
+                "parameter_value_options": self.hyperparam_space,
+            },
+            "best_result": {
+                "parameters": self.best_params,
+                "mean_score": self.best_score,
+                "score_std_dev": self.best_score_std,
+            },
+            "all_evaluated_combinations": self.results,
+        }
+
+        output_path = self.settings.output_dir / f"grid_search_results_{self.settings.model_type}_{timestamp}.json"
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(self._to_json_safe(payload), handle, indent=2)
+        logger.info("Saved grid search results to %s", output_path)
 
     def plot_search_performance(self) -> None:
-        """Generate and save plots visualizing search performance metrics."""
         if not self.results:
-            logger.warning("No results available to plot.")
             return
 
-        num_combinations_evaluated = len(self.results)
-        iteration_indices = range(num_combinations_evaluated)
+        indices = np.arange(len(self.results))
+        means = np.array([r["scores"]["mean"] for r in self.results], dtype=float)
+        ci_low = np.array([r["scores"]["ci95"][0] for r in self.results], dtype=float)
+        ci_high = np.array([r["scores"]["ci95"][1] for r in self.results], dtype=float)
+        effects = np.array([r.get("effect_size_vs_best_so_far", np.nan) for r in self.results], dtype=float)
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True) # Two plots vertically, sharing x-axis
-        
-        # Plot 1: Score Confidence Intervals
-        mean_scores = np.array([r['scores']['mean'] for r in self.results])
-        lower_ci_bounds = np.array([r['scores']['ci95'][0] for r in self.results])
-        upper_ci_bounds = np.array([r['scores']['ci95'][1] for r in self.results])
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
+        finite_mean = np.isfinite(means)
+        finite_ci = np.isfinite(ci_low) & np.isfinite(ci_high)
 
-        # Handle non-finite values for plotting
-        finite_means_mask = np.isfinite(mean_scores)
-        ax1.plot(np.array(iteration_indices)[finite_means_mask], mean_scores[finite_means_mask], 
-                 color='#d7191c', marker='o', linestyle='-', markersize=5, label="Mean Score")
-        
-        finite_ci_mask = np.isfinite(lower_ci_bounds) & np.isfinite(upper_ci_bounds)
-        ax1.fill_between(np.array(iteration_indices)[finite_ci_mask], 
-                         lower_ci_bounds[finite_ci_mask], 
-                         upper_ci_bounds[finite_ci_mask], 
-                         alpha=0.2, color='#fdae61', label="95% CI")
-        
-        # Highlight the best score
+        ax1.plot(indices[finite_mean], means[finite_mean], marker="o", linewidth=1.1, label="Mean CV score")
+        ax1.fill_between(indices[finite_ci], ci_low[finite_ci], ci_high[finite_ci], alpha=0.2, label="95% CI")
+
         if self.best_params is not None:
-            try:
-                # Find index of the best parameters in the results list
-                best_param_id = next(r['id'] for r in self.results if r['params'] == self.best_params)
-                if np.isfinite(self.best_score):
-                    ax1.scatter([best_param_id], [self.best_score], marker='*', s=150, 
-                                color='gold', edgecolor='black', zorder=5, label="Best Score")
-            except StopIteration:
-                logger.warning("Could not locate best parameters in results for plotting highlight.")
+            best_idx = next(i for i, r in enumerate(self.results) if r["params"] == self.best_params)
+            ax1.scatter([best_idx], [self.best_score], s=120, marker="*", color="gold", edgecolor="black", label="Best")
 
-        ax1.set_title("Score per Hyperparameter Combination (with 95% CI)")
-        ax1.set_ylabel("Evaluation Score")
-        ax1.grid(True, linestyle='--', alpha=0.7)
+        ax1.set_ylabel("Score")
+        ax1.set_title(f"Grid Search CV Performance ({self.settings.model_type})")
+        ax1.grid(True, linestyle="--", alpha=0.4)
         ax1.legend()
 
-        # Plot 2: Effect Size Progression
-        effect_sizes = np.array([r['effect_size'] for r in self.results])
-        finite_effect_sizes_mask = np.isfinite(effect_sizes)
-
-        ax2.plot(np.array(iteration_indices)[finite_effect_sizes_mask], 
-                 effect_sizes[finite_effect_sizes_mask], 
-                 marker='.', linestyle='-', color='#2c7bb6', label="Cohen's d")
-        ax2.axhline(0, color='grey', linestyle=':', linewidth=0.8) # Zero line for reference
-        ax2.set_title("Effect Size Progression (Cohen's d vs. Best So Far)")
-        ax2.set_xlabel("Parameter Combination Index")
-        ax2.set_ylabel("Cohen's d Effect Size")
-        ax2.grid(True, linestyle='--', alpha=0.7)
+        finite_effect = np.isfinite(effects)
+        ax2.plot(indices[finite_effect], effects[finite_effect], marker=".", linestyle="-", label="Effect size")
+        ax2.axhline(0.0, color="gray", linestyle=":", linewidth=1.0)
+        ax2.set_xlabel("Combination index")
+        ax2.set_ylabel("Cohen's d")
+        ax2.grid(True, linestyle="--", alpha=0.4)
         ax2.legend()
-        
-        plt.tight_layout(pad=2.0)
-        fig.suptitle(f"Grid Search Performance Metrics ({self.config.stem})", fontsize=14, y=1.02)
-        
-        plot_file_path = self.output_dir / f"grid_search_performance_{self.config.stem}.png"
-        try:
-            plt.savefig(plot_file_path)
-            logger.info(f"Performance plots saved to: {plot_file_path}")
-        except Exception as e:
-            logger.error(f"Failed to save plots to {plot_file_path}: {e}", exc_info=True)
-        finally:
-            plt.close(fig) # Close the figure to free up memory
+
+        fig.tight_layout()
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        plot_path = self.settings.output_dir / f"grid_search_performance_{self.settings.model_type}_{timestamp}.png"
+        fig.savefig(plot_path)
+        plt.close(fig)
+        logger.info("Saved grid search performance plot to %s", plot_path)
+
+    def _to_json_safe(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: self._to_json_safe(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._to_json_safe(v) for v in data]
+        if isinstance(data, tuple):
+            return [self._to_json_safe(v) for v in data]
+        if isinstance(data, np.integer):
+            return int(data)
+        if isinstance(data, np.floating):
+            return float(data)
+        if isinstance(data, np.ndarray):
+            return data.tolist()
+        if isinstance(data, np.bool_):
+            return bool(data)
+        return data
 
 
-# ====================== Usage Example ======================
 if __name__ == "__main__":
-    print("\n=== Running Grid Search ===\n")
-    config = load_config()
-    evaluation_function=None
-    grid1 = GridSearch(config, evaluation_function)
+    rng = np.random.default_rng(5)
 
-    print(f"{grid1}")
-    print(f"\n* * * * * Phase 2 * * * * *\n")
-    def dummy_evaluation(params, X_train, y_train, X_val, y_val):
-        return np.random.rand()
-    grid2 = GridSearch(config, evaluation_function=dummy_evaluation)
-    X_dummy = np.random.rand(100, 5)  # 100 samples, 5 features
-    y_dummy = np.random.randint(0, 2, 100)  # Binary target
-    
-    # Execute the grid search
-    best_params = grid2.run_search(X_dummy, y_dummy)
-    print(f"\nBest parameters: {best_params}")
-    print(f"\n* * * * * Phase 3 * * * * *\n")
+    def _dummy_eval(params: Dict[str, Any], x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray) -> float:
+        _ = (x_train, y_train, x_val, y_val)
+        base = float(params.get("n_estimators", 0)) * 1e-4
+        return float(rng.random()) + base
 
-    print("\n=== Successfully Ran Grid Search ===\n")
+    X_demo = rng.normal(size=(100, 5))
+    y_demo = rng.integers(0, 2, size=100)
+
+    search = GridSearch(evaluation_function=_dummy_eval, model_type="GradientBoosting")
+    print(search.run_search(X_demo, y_demo))

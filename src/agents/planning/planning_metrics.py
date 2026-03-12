@@ -74,7 +74,15 @@ class PlanningMetrics(Task):
     
         logger.info(f"[TRACK COMPLETE] Plan '{plan_id}' completed in {duration:.2f}s with status: {final_status.name}")
     
-    def record_planning_metrics(self, plan: List[Task], start_time: float, end_time: float, success_rate: float):
+    def record_planning_metrics(
+        self,
+        plan: List[Task] = None,
+        start_time: float = None,
+        end_time: float = None,
+        success_rate: float = 0.0,
+        plan_length: int = None,
+        planning_time: float = None,
+    ):
         """
         Records and logs core planning metrics.
     
@@ -83,11 +91,24 @@ class PlanningMetrics(Task):
             planning_time (float): Duration of planning in seconds
             success_rate (float): 1.0 for success, 0.0 for failure
         """
-        self.planning_time = end_time - start_time
-        self.plan_length = len(plan)
+        if planning_time is not None:
+            self.planning_time = planning_time
+        elif start_time is not None and end_time is not None:
+            self.planning_time = end_time - start_time
+        else:
+            self.planning_time = 0.0
+
+        if plan_length is not None:
+            self.plan_length = plan_length
+        elif plan is not None:
+            self.plan_length = len(plan)
+        else:
+            self.plan_length = 0
+
+        self.success_rate = success_rate
         logger.info(f"[PLANNING METRICS] Length: {self.plan_length}, Time: {self.planning_time:.2f}s, Success: {success_rate:.2f}")
         # Optionally store in DB or structured file here
-    
+
     def record_execution_metrics(self, success_count: int, failure_count: int, resource_usage: Dict[str, float], execution_result: Dict):
         """
         Logs post-execution metrics, including task outcomes and system usage.

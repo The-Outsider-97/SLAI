@@ -15,8 +15,6 @@ base_agent:
     final_value_threshold: 0.7
     task_similarity_seq_elem_threshold: 0.8
 
-collaborative_agent: {}
-
 adaptive_agent:
     state_dim: 10
     num_actions: 2
@@ -42,9 +40,19 @@ alignment_agent:
     alignment_ttl: 604800
     fail_safe_action_space: []
     risk_threshold: 0.5
-    
 
 browser_agent: {}
+
+collaborative_agent:
+    risk_threshold: 0.7
+    max_concurrent_tasks: 100
+    load_factor: 0.75
+    optimization_weight_capability: 0.5
+    optimization_weight_load: 0.3
+    optimization_weight_risk: 0.2
+    bayes_prior_alpha: 1.0
+    bayes_prior_beta: 1.0
+    use_collaboration_manager: true
 
 evaluation_agent:
     risk_threshold: 0.5
@@ -101,6 +109,15 @@ operations_notification:
         url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
+
+handler_agent:
+    max_retries: 2
+    circuit_breaker_threshold: 5
+    cooldown_seconds: 30
+    failure_budget_window_seconds: 300
+    checkpoint_max_age_seconds: 600
+    telemetry_buffer_size: 1000
+    evaluator_hooks_enabled: true
 
 knowledge_agent:
     source: "local_files"

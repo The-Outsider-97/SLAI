@@ -475,8 +475,7 @@ class ProbabilisticModels(nn.Module):
                 return prior_prob if state else 1.0 - prior_prob
             return 0.5
 
-
-    def run_bayesian_learning_cycle(self, observations: list) -> None: # Keep this method
+    def run_bayesian_learning_cycle(self, observations: list, context: Optional[list] = None) -> None:
         """Iteratively refines prior probabilities using Bayesian updating"""
         self.observation_buffer.extend(observations)
         
@@ -565,7 +564,7 @@ class ProbabilisticModels(nn.Module):
             return 1.0 - min(0.5, abs(observed_value - 0.5))
         return 0.75  # Default confidence for less structured data
 
-    def probabilistic_query(self, fact: Tuple, evidence: Dict[Tuple, bool] = None) -> float:
+    def probabilistic_query(self, fact: Tuple, evidence: Dict[Tuple, bool] = None, context: Optional[list] = None) -> float:
         """
         Hybrid inference combining Bayesian inference, Markov Logic, and semantic similarity.
         """
@@ -599,7 +598,7 @@ class ProbabilisticModels(nn.Module):
         # Convert final summed log-odds back to probability
         return 1.0 / (1.0 + math.exp(-total_weight))
 
-    def multi_hop_reasoning(self, query: Tuple) -> float:
+    def multi_hop_reasoning(self, query: Tuple, context: Optional[list] = None, max_depth: int = 5) -> float:
         """
         Graph-based traversal for combining facts across sources.
         """
@@ -625,7 +624,7 @@ class ProbabilisticModels(nn.Module):
             aggregated_confidence = current_conf * path_len_penalty
             max_confidence = max(max_confidence, aggregated_confidence)
 
-            if len(path) > 5: continue # Limit depth
+            if len(path) > max_depth: continue # Limit depth
 
             for hop_type, next_node in self.hypothesis_graph.get(current_node, []):
                 if next_node not in visited:

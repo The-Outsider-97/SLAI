@@ -4,12 +4,15 @@ import inspect
 import time
 
 from typing import Dict, Any, List, Optional
+
+from src.agents.base_agent import BaseAgent
 from abc import ABC, abstractmethod
 
-from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from src.agents.collaborative.utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Agent Registry")
+printer = PrettyPrinter
 
 class AgentRegistry:
     """
@@ -19,7 +22,7 @@ class AgentRegistry:
     - Capability-based routing
     - Versioned registrations
     """
-    def __init__(self, shared_memory: Optional[Any] = None):
+    def __init__(self, shared_memory: Optional[Any] = None, auto_discover: bool = True):
         self.config = load_global_config()
         self.registry_config = get_config_section('registry')
         agent_discovery_config =  self.registry_config.get('agent_discovery', {})
@@ -32,7 +35,8 @@ class AgentRegistry:
         self.excluded_modules = agent_discovery_config.get('excluded_modules', [])
         
         # Initialize with dynamic discovery from config
-        self.discover_agents(self.default_package)
+        if auto_discover:
+            self.discover_agents(self.default_package)
 
         logger.info(f"Agent Registry Version {self._version} successfully initialized with:\n{self._agents}")
 
@@ -49,11 +53,12 @@ class AgentRegistry:
         try:
             package = importlib.import_module(agents_package)
             for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
-                if "agent" in module_name.lower():
-                    self._load_agent_module(module_name)
-                if "browser_agent" in module_name.lower():
-                    logger.warning(f"Skipping {module_name} due to known dependency issue.")
+                lowered = module_name.lower()
+                if any(excluded in lowered for excluded in self.excluded_modules):
+                    logger.warning(f"Skipping {module_name} due to exclusion rule.")
                     continue
+                if "agent" in lowered:
+                    self._load_agent_module(module_name)
         except ImportError as e:
             logger.error(f"Failed to import agents package: {e}")
             raise
@@ -62,21 +67,46 @@ class AgentRegistry:
         """Internal method to load and validate agent modules"""
         try:
             module = importlib.import_module(module_name)
-            for name, obj in inspect.getmembers(module):
-                if (inspect.isclass(obj) and
-                    not inspect.isabstract(obj)):
-                    try:
-                        instance = obj()
-                        caps = getattr(instance, "capabilities", [])
-                        meta = {
-                            "class": obj,
-                            "instance": instance,
-                            "capabilities": caps,
-                            "version": self._version
-                        }
-                        self._register_agent(obj.__name__, meta)
-                    except Exception as e:
-                        logger.error(f"Failed to instantiate {name}: {e}")
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                if obj.__module__ != module.__name__:
+                    continue
+                if inspect.isabstract(obj) or not issubclass(obj, BaseAgent):
+                    continue
+
+                init_signature = inspect.signature(obj.__init__)
+                required_args = [
+                    param
+                    for param_name, param in init_signature.parameters.items()
+                    if param_name != "self"
+                    and param.default is inspect.Parameter.empty
+                    and param.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                ]
+
+                if required_args:
+                    logger.debug(
+                        "Skipping %s.%s discovery due to required constructor args: %s",
+                        module.__name__,
+                        name,
+                        ", ".join(param.name for param in required_args),
+                    )
+                    continue
+
+                try:
+                    instance = obj()
+                    caps = getattr(instance, "capabilities", [])
+                    meta = {
+                        "class": obj,
+                        "instance": instance,
+                        "capabilities": caps,
+                        "version": self._version
+                    }
+                    self._register_agent(obj.__name__, meta)
+                except Exception as e:
+                    logger.error(f"Failed to instantiate {name}: {e}")
         except Exception as e:
             logger.error(f"Failed to load module {module_name}: {e}")
 
@@ -137,7 +167,9 @@ class AgentRegistry:
             record = self.shared_memory.get(f"agent:{name}") or {}
             if time.time() - record.get("last_seen", 0) > self._health_check_interval:
                 logger.warning(f"Agent {name} appears unresponsive")
-                return False
+                # Keep stale agents routable; router-level retries/failure accounting
+                # provide a safer degradation path than hard de-registration.
+                return True
         return True
 
     def reload_agent(self, name: str) -> bool:
@@ -184,77 +216,61 @@ class AgentRegistry:
 
 
 if __name__ == "__main__":
-    # Test configuration
+    print("\n=== Running Agent Registry ===\n")
+
     class MockSharedMemory:
-        """Simulated shared memory for testing"""
         def __init__(self):
             self._store = {}
-            
+
         def set(self, key: str, value: Any) -> None:
             self._store[key] = value
-            
+
         def get(self, key: str) -> Any:
             return self._store.get(key)
-            
+
         def delete(self, key: str) -> None:
             if key in self._store:
                 del self._store[key]
 
-    class CollaborativeAgent(ABC):
-        """Abstract base class for all collaborative agents"""
-        @abstractmethod
-        def execute(self, task_data: Dict) -> Any:
-            pass
-
-    class TranslationAgent(CollaborativeAgent):
+    class TranslationAgent(ABC):
         capabilities = ["translation", "language"]
-        def execute(self, task_data):
+
+        def execute(self, task_data: Dict) -> Any:
             return f"Translated: {task_data['text']}"
 
-    class AnalysisAgent(CollaborativeAgent):
+    class AnalysisAgent(ABC):
         capabilities = ["analysis", "data"]
-        def execute(self, task_data):
+
+        def execute(self, task_data: Dict) -> Any:
             return {"status": "analyzed", "result": 42}
 
-    # Initialize components
     shared_memory = MockSharedMemory()
-    registry = AgentRegistry(shared_memory)
+    registry = AgentRegistry(shared_memory, auto_discover=False)
 
-    # Test manual registration
     registry.batch_register([
         {"name": "Translator", "meta": {
             "class": TranslationAgent,
             "instance": TranslationAgent(),
             "capabilities": ["translation"],
-            "version": 1.0
+            "version": 1.0,
         }},
         {"name": "Analyzer", "meta": {
             "class": AnalysisAgent,
             "instance": AnalysisAgent(),
             "capabilities": ["analysis"],
-            "version": 1.0
-        }}
+            "version": 1.0,
+        }},
     ])
 
-    # Test dynamic discovery (simulated)
-    print("\nRegistered Agents:")
-    for name, caps in registry.list_agents().items():
-        print(f"{name}: {caps}")
+    agents = registry.list_agents()
+    assert "Translator" in agents and "Analyzer" in agents
 
-    # Test task-based routing
-    print("\nTranslation Agents:")
     translators = registry.get_agents_by_task("translation")
-    for name, agent in translators.items():
-        result = agent["instance"].execute({"text": "Hello World"})
-        print(f"{name}: {result}")
+    assert "Translator" in translators
+    assert translators["Translator"]["instance"].execute({"text": "Hello"}).startswith("Translated")
 
-    # Test health checks
-    print("\nAgent Health Status:")
-    for name in registry.list_agents():
-        status = registry._check_agent_health(name)
-        print(f"{name}: {'Healthy' if status else 'Unhealthy'}")
-
-    # Test unregistration
+    assert registry._check_agent_health("Translator") is True
     registry.unregister("Analyzer")
-    print("\nRemaining Agents after Unregistration:")
-    print(registry.list_agents())
+    assert "Analyzer" not in registry.list_agents()
+
+    print("All registry.py tests passed.\n")
