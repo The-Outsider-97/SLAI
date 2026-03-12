@@ -30,7 +30,7 @@ class AdaptiveCircuit(nn.Module):
         num_kb_embeddings = self.circuit_config.get('num_kb_embeddings')
 
         self.network_structure = network_structure
-        self.knowledge_base = knowledge_base
+        self.knowledge_base = knowledge_base or {}
 
         # Validate network structure
         if not network_structure or 'nodes' not in network_structure:

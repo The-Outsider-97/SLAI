@@ -1,5 +1,5 @@
 enabled: True
-namespace: "http://slaiknowledge.org/ontology#"
+namespace: "" # "http://slaiknowledge.org/ontology#"
 
 relevance_weights:
   semantic: 0.4

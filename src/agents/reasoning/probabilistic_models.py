@@ -61,11 +61,11 @@ class ProbabilisticModels(nn.Module):
 
         self.pgmpy_bn = PgmpyBayesianNetwork(self.bayesian_network)
         self.reasoning_memory = ReasoningMemory()
-        self.model_compute = ModelCompute(circuit=None)
         self.adaptive_circuit = AdaptiveCircuit(
             network_structure=self.bayesian_network, # Pass the raw JSON here
             knowledge_base=self.knowledge_base
         )
+        self.model_compute = ModelCompute(circuit=self.adaptive_circuit)
 
         # Link components
         self.agent = None
@@ -253,12 +253,19 @@ class ProbabilisticModels(nn.Module):
 
     def _load_bayesian_network(self, network_path: Path) -> Dict[str, Any]:
         """Load Bayesian network structure from JSON file"""
-        if not network_path.exists():
-            raise FileNotFoundError(f"Bayesian network file not found: {network_path}")
-
-        logger.info(f"Loading Bayesian network from {network_path}")
-        with open(network_path, 'r') as f:
-            return json.load(f)
+        try:
+            if not network_path.exists():
+                raise FileNotFoundError(f"Bayesian network file not found: {network_path}")
+                
+            with open(network_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading Bayesian network: {str(e)}")
+            return {
+                'nodes': [],
+                'edges': [],
+                'cpt': {}
+            }
 
     def _load_semantic_frames(self, path: Path) -> Dict[str, Any]:
         if not path.exists():
@@ -274,35 +281,37 @@ class ProbabilisticModels(nn.Module):
             raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
         logger.info(f"Loading knowledge base from {kb_path}")
         with open(kb_path, 'r') as f:
-            kb_data = json.load(f)
+            kb_data = json.load(f)  # Single load operation
         
         processed_kb = {}
-        for fact in kb_data.get("knowledge", []):
-            if isinstance(fact, dict):
-                s = fact.get("subject")
-                p = fact.get("predicate")
-                o = fact.get("object")
-                weight = fact.get("weight", 0.5)
-            try:
-                # Handle 4-element format: [subject, predicate, object, weight]
-                if len(fact) == 4:
-                    s, p, o, weight = fact
-                    # Convert object to boolean if needed
-                    if isinstance(o, str):
-                        if o.lower() == 'true':
-                            o_val = True
-                        elif o.lower() == 'false':
-                            o_val = False
-                        else:
-                            o_val = o
-                    else:
-                        o_val = o
-                    key = (s, p, o_val)
-                    processed_kb[key] = float(weight)
-            except Exception as e:
-                logger.warning(f"Skipping invalid fact in KB: {fact} | Error: {str(e)}")
         
-        logger.info(f"Loaded {len(processed_kb)} facts from knowledge base")
+        # Handle both list and dictionary formats
+        if isinstance(kb_data, dict) and "knowledge" in kb_data:
+            knowledge_items = kb_data["knowledge"]
+        else:
+            knowledge_items = kb_data
+            
+        for fact in knowledge_items:
+            if isinstance(fact, dict):
+                # Process dictionary format
+                try:
+                    s = fact.get("subject")
+                    p = fact.get("predicate")
+                    o = fact.get("object")
+                    weight = fact.get("weight", 0.5)
+                    key = (s, p, o)
+                    processed_kb[key] = float(weight)
+                except Exception as e:
+                    logger.warning(f"Skipping invalid fact: {fact}")
+            elif isinstance(fact, list) and len(fact) >= 3:
+                # Process list format
+                try:
+                    s, p, o = fact[:3]
+                    weight = fact[3] if len(fact) > 3 else 0.5
+                    key = (s, p, o)
+                    processed_kb[key] = float(weight)
+                except Exception as e:
+                    logger.warning(f"Skipping invalid fact: {fact}")
         return processed_kb
 
     def bayesian_inference(self, query: str, evidence: Dict[str, bool]) -> float:
@@ -311,6 +320,11 @@ class ProbabilisticModels(nn.Module):
         - Pearl (1988) Probabilistic Reasoning in Intelligent Systems
         - Koller & Friedman (2009) Probabilistic Graphical Models
         """
+        # Check if network is empty
+        if not self.bayesian_network.get('nodes'):
+            logger.warning("Bayesian network empty - returning default probability")
+            return 0.5
+
         if not self.pgmpy_bn:
             logger.error("Pgmpy Bayesian Network not available for inference. Returning 0.5")
             return 0.5 # Fallback probability

@@ -74,26 +74,157 @@ class DeadlineAwareScheduler(TaskScheduler):
         return self._apply_risk_mitigation(schedule, risk_assessor)
 
     def _validate_inputs(self, tasks, agents):
-        """Consistent validation with planning_agent patterns"""
-        printer.status("INIT", "Input validation succesfully initialized", "info")
-    
-        if not tasks or not agents:
-            logger.warning("Scheduling failed: empty tasks or agents")
+        """Robust validation with diagnostics, type checks, and safe defaults"""
+        printer.status("VALIDATION", "Input validation initialized", "info")
+        errors = []
+        warnings = []
+
+        # Top-level structure validation
+        if not isinstance(tasks, list):
+            errors.append("Tasks must be a list")
+        if not isinstance(agents, dict):
+            errors.append("Agents must be a dictionary")
+        if errors:
+            logger.error(f"Validation failed: {'; '.join(errors)}")
             return False
-    
-        # More flexible validation
-        for t in tasks:
-            if 'id' not in t:
-                logger.error("Task missing 'id' field")
-                return False
-            if 'requirements' not in t:
-                logger.warning("Task missing 'requirements', using default")
-                t['requirements'] = []
-            if 'deadline' not in t:
-                logger.warning("Task missing 'deadline', using default")
-                t['deadline'] = time.time() + 300  # Default 5 min deadline
-    
-        return True
+
+        # Task validation with detailed diagnostics
+        valid_task_ids = set()
+        for idx, task in enumerate(tasks):
+            task_errors = []
+            task_warnings = []
+            task_id = task.get('id', f"Unidentified task at index {idx}")
+
+            # ID validation
+            if 'id' not in task:
+                task_errors.append("Missing 'id' field")
+            elif not isinstance(task['id'], str):
+                task_errors.append("'id' must be a string")
+            elif not task['id'].strip():
+                task_errors.append("'id' cannot be empty")
+            elif task['id'] in valid_task_ids:
+                task_errors.append(f"Duplicate task ID: {task['id']}")
+            else:
+                valid_task_ids.add(task['id'])
+
+            # Requirements validation
+            if 'requirements' not in task:
+                task_warnings.append("Missing 'requirements', using default []")
+                task['requirements'] = []
+            elif not isinstance(task['requirements'], list):
+                task_errors.append("'requirements' must be a list")
+            else:
+                for i, req in enumerate(task['requirements']):
+                    if not isinstance(req, str):
+                        task_errors.append(f"Requirement {i} must be string")
+                    elif not req.strip():
+                        task_errors.append(f"Requirement {i} cannot be empty")
+
+            # Deadline validation
+            current_time = time.time()
+            if 'deadline' not in task:
+                task_warnings.append("Missing 'deadline', using default (now + 300s)")
+                task['deadline'] = current_time + 300
+            elif not isinstance(task['deadline'], (int, float)):
+                task_errors.append("'deadline' must be numeric")
+            else:
+                if task['deadline'] < current_time:
+                    task_warnings.append("Deadline is in the past")
+                elif task['deadline'] < current_time + 10:
+                    task_warnings.append("Deadline is too imminent (<10s)")
+
+            # Dependency validation
+            if 'dependencies' in task:
+                if not isinstance(task['dependencies'], list):
+                    task_errors.append("'dependencies' must be a list")
+                else:
+                    for dep in task['dependencies']:
+                        if not isinstance(dep, str):
+                            task_errors.append("Dependency must be string")
+                        elif dep not in valid_task_ids:
+                            task_warnings.append(f"Unknown dependency: {dep}")
+
+            # Collect diagnostics
+            if task_errors:
+                errors.append(f"Task {task_id}: {'; '.join(task_errors)}")
+            if task_warnings:
+                warnings.append(f"Task {task_id}: {'; '.join(task_warnings)}")
+
+        # Agent validation with capability checks
+        valid_agent_ids = set()
+        for agent_id, details in agents.items():
+            agent_errors = []
+            agent_warnings = []
+
+            if not isinstance(details, dict):
+                agent_errors.append("Agent details must be a dictionary")
+            else:
+                # Capability validation
+                if 'capabilities' not in details:
+                    agent_warnings.append("Missing 'capabilities', using default []")
+                    details['capabilities'] = []
+                elif not isinstance(details['capabilities'], list):
+                    agent_errors.append("'capabilities' must be a list")
+                else:
+                    for i, cap in enumerate(details['capabilities']):
+                        if not isinstance(cap, str):
+                            agent_errors.append(f"Capability {i} must be string")
+                        elif not cap.strip():
+                            agent_errors.append(f"Capability {i} cannot be empty")
+
+                # Load validation
+                if 'current_load' not in details:
+                    agent_warnings.append("Missing 'current_load', using default 0.0")
+                    details['current_load'] = 0.0
+                elif not isinstance(details['current_load'], (int, float)):
+                    agent_errors.append("'current_load' must be numeric")
+                elif details['current_load'] < 0:
+                    agent_warnings.append("Negative load reset to 0.0")
+                    details['current_load'] = max(0.0, details['current_load'])
+                elif details['current_load'] > 1.5:
+                    agent_warnings.append("Extremely high load (>1.5)")
+
+                # Performance metrics
+                for metric in ['successes', 'failures']:
+                    if metric in details and not isinstance(details[metric], int):
+                        agent_errors.append(f"'{metric}' must be integer")
+
+                # Efficiency validation
+                eff_attr = self.efficiency_attribute
+                if eff_attr in details and not isinstance(details[eff_attr], (int, float)):
+                    agent_errors.append(f"'{eff_attr}' must be numeric")
+
+            # Collect diagnostics
+            if agent_errors:
+                errors.append(f"Agent {agent_id}: {'; '.join(agent_errors)}")
+            if agent_warnings:
+                warnings.append(f"Agent {agent_id}: {'; '.join(agent_warnings)}")
+            else:
+                valid_agent_ids.add(agent_id)
+
+        # Final availability check
+        if not valid_task_ids:
+            errors.append("No valid tasks after validation")
+        if not valid_agent_ids:
+            errors.append("No valid agents after validation")
+
+        # Diagnostic reporting
+        for warning in warnings:
+            logger.warning(warning)
+        for error in errors:
+            logger.error(error)
+
+        # Create validation report
+        report = {
+            'valid_tasks': len(valid_task_ids),
+            'valid_agents': len(valid_agent_ids),
+            'errors': len(errors),
+            'warnings': len(warnings)
+        }
+        printer.status("VALIDATION", f"Validation report: {report}", 
+                      "success" if not errors else "error")
+
+        return not errors and valid_task_ids and valid_agent_ids
 
     def _prioritize_tasks(self, tasks, risk_assessor):
         """Risk-aware prioritization using collaborative agent's assessment"""

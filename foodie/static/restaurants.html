@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Restaurants - Foodie Aruba</title>
+    <link rel="icon" type="image/x-icon" href="img/logo.ico" />
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+
+    <header class="main-header">
+        <nav class="main-nav">
+            <a href="index.html" class="logo">
+                <i class="fa-solid fa-burger"></i>
+                <span>Foodie</span>
+            </a>
+            <ul class="nav-links" id="nav-links">
+                <li><a href="business_order.html"><i class="fa-solid fa-briefcase"></i> Business Order</a></li>
+                <li><a href="restaurants.html" class="active"><i class="fa-solid fa-store"></i> Restaurants</a></li>
+                <li><a href="indie.html"><i class="fa-solid fa-leaf"></i> Indie</a></li>
+            </ul>
+            <div class="nav-right">
+                <div id="nav-clock" class="nav-clock"></div>
+                <a href="user_profile.html" class="nav-icon" aria-label="Profile"><i class="fa-solid fa-user"></i></a>
+                <a href="#" class="nav-icon lang-btn" aria-label="Language">LANG</a>
+                <button class="hamburger" id="hamburger" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>
+            </div>
+        </nav>
+    </header>
+
+    <main class="page-container">
+        <div class="container">
+            <div class="page-header">
+                <h1>Explore Restaurants</h1>
+                <p>Discover the best restaurants in Aruba, delivered to your doorstep.</p>
+            </div>
+
+            <div class="filter-bar">
+                <input type="text" placeholder="Search by restaurant or dish..." class="filter-search">
+                <select class="filter-select" aria-label="Filter by cuisine">
+                    <option value="">All Cuisines</option>
+                    <option value="italian">Italian</option>
+                    <option value="caribbean">Caribbean</option>
+                    <option value="asian">Asian</option>
+                    <option value="american">American</option>
+                </select>
+                <button class="filter-btn">Apply</button>
+            </div>
+
+            <div class="featured-grid" id="cards-container">
+                <!-- Example Restaurant Cards
+                <div class="card">
+                    <img src="img/giannis.jpg" alt="Restaurant 1">
+                    <div class="card-content">
+                        <h3>Gianni's Ristorante Italiano</h3>
+                        <p>Authentic Italian pasta and seafood.</p>
+                        <span class="rating"><i class="fa-solid fa-star"></i> 4.8 (250+)</span>
+                        <a href="#" class="card-link">View Menu</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <img src="img/zeerovers.jpg" alt="Restaurant 2">
+                    <div class="card-content">
+                        <h3>Zeerovers</h3>
+                        <p>Fresh catch-of-the-day, fried to perfection.</p>
+                         <span class="rating"><i class="fa-solid fa-star"></i> 4.9 (500+)</span>
+                        <a href="#" class="card-link">View Menu</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <img src="img/yemanja.jpg" alt="Restaurant 3">
+                    <div class="card-content">
+                        <h3>Yemanja Woodfired Grill</h3>
+                        <p>Creative dishes with a Caribbean flair.</p>
+                         <span class="rating"><i class="fa-solid fa-star"></i> 4.7 (180+)</span>
+                        <a href="#" class="card-link">View Menu</a>
+                    </div>
+                </div>
+                 <div class="card">
+                    <img src="img/wacky.png" alt="Restaurant 4">
+                    <div class="card-content">
+                        <h3>Wacky Wahoo's</h3>
+                        <p>Gourmet seafood in a vibrant setting.</p>
+                         <span class="rating"><i class="fa-solid fa-star"></i> 4.6 (300+)</span>
+                        <a href="#" class="card-link">View Menu</a>
+                    </div>
+                </div> -->
+                <!-- More cards can be added here
+            </div>
+            <div class="featured-grid" id="cards-container"> -->
+                <!-- Cards will be injected here -->
+            </div>
+        </div>
+
+        <!-- Restaurant Registration Section -->
+        <section class="registration-section">
+            <div class="container">
+                <div class="form-container">
+                    <h2>Register Your Restaurant</h2>
+                    <p style="text-align: center; color: var(--light-text-color); margin-bottom: 30px;">Join our platform and reach more customers. Fill out the form below to get started.</p>
+                    <form class="contact-form" novalidate>
+                        <input type="hidden" id="is_restaurant" value="true">
+                        <div class="form-group">
+                            <label for="companyName">Company Name</label>
+                            <input type="text" id="companyName" name="companyName" placeholder="e.g., The Happy Diner" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyAddress">Company Address</label>
+                            <input type="text" id="companyAddress" name="companyAddress" placeholder="e.g., J.E. Irausquin Blvd 230" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyPhone">Company Phone Number</label>
+                            <input type="tel" id="companyPhone" name="companyPhone" placeholder="e.g., +297 586 1234" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="registrationNumber">Chamber of Commerce No.</label>
+                            <input type="text" id="registrationNumber" name="registrationNumber" placeholder="Your official registration number" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyWebsite">Website URL (Optional)</label>
+                            <input type="url" id="companyWebsite" name="companyWebsite" placeholder="https://www.yourrestaurant.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="companyPhoto">Restaurant Profile Photo</label>
+                            <input type="file" id="companyPhoto" name="companyPhoto" accept="image/png, image/jpeg" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="companyMotto">Company Motto</label>
+                            <input type="text" id="companyMotto" name="companyMotto" 
+                                   placeholder="e.g., Serving with love all day long." required>
+                        </div>
+                        <hr style="margin: 30px 0; border: 1px solid var(--border-color);">
+                        <div class="form-group">
+                            <label for="sellerName">Contact Person Name</label>
+                            <input type="text" id="sellerName" name="sellerName" placeholder="e.g., John Doe" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="sellerEmail">Contact Person Email</label>
+                            <input type="email" id="sellerEmail" name="sellerEmail" placeholder="e.g., john.doe@example.com" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="restaurantName">Restaurant Name</label>
+                            <input type="text" id="restaurantName" name="restaurantName" 
+                                   placeholder="e.g., The Happy Diner" required>
+                        </div>
+                        <div class="form-group">
+                             <label for="cuisineType">Primary Cuisine Type</label>
+                            <select id="cuisineType" name="cuisineType" required>
+                                <option value="" disabled selected>Select a cuisine</option>
+                                <option value="local">Local</option>
+                                <option value="caribbean">International</option>
+                                <option value="caribbean">Fusion</option>
+                                <option value="caribbean">Caribbean</option>
+                                <option value="italian">Italian</option>
+                                <option value="asian">Asian</option>
+                                <option value="american">American</option>
+                                <option value="mexican">Mexican</option>
+                                <option value="seafood">Seafood</option>
+                                <option value="seafood">Vegan</option>
+                                <option value="other">Other</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="submit-btn">Submit Registration</button>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="main-footer">
+        <div class="container">
+            <p>© 2025 Foodie Aruba. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="js/script.js"></script>
+    <script src="js/registrator.js"></script>
+    <script src="js/searchbar.js"></script>
+    <script src="js/clock.js"></script>
+</body>
+</html>

@@ -53,6 +53,7 @@ class DQNAgent:
         self.agent_id = agent_id
         self.state_dim = state_dim
         self.action_dim = action_dim
+        #self.save_model = []
 
         # Get DQN-specific configuration
         dqn_config = self.config.get('dqn', {})
@@ -271,6 +272,15 @@ class DQNAgent:
         
         return loss.item() if isinstance(loss, torch.Tensor) else loss
         # return loss or torch.mean(torch.square(current_q - target))
+
+    def save(self, path):
+        """Save policy network weights"""
+        torch.save({
+            'policy_net': self.policy_net.state_dict(),
+            'target_net': self.target_net.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }, path)
+        logger.info(f"Saved DQN model to {path}")
 
 
 # ====================== Evolutionary Optimization ======================

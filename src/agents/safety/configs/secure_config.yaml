@@ -89,13 +89,16 @@ compliance_checker:
   phishing_model_path: "src/agents/safety/models/phishing_model.json"
   enable_memory_bootstrap: true
   report_thresholds:
-    critical: 0.7
+    critical: 0.8
     warning: 0.9
   weights:
     data_security: 0.3
     model_security: 0.3
     app_security: 0.2
     operational_security: 0.2
+  identity_markers_for_harassment: ['gender', 'race', 'religion', 'orientation', 
+                                    'nationality', 'ethnicity', 'disability', 
+                                    'political affiliation', 'social class']
   
 safety_guard:
   epsilon: 1.0
@@ -136,3 +139,14 @@ cyber_safety:
   adaptive_centroid_lr: 0.01
 
 secure_stpa: {}
+
+score_model:
+  alignment_factor: 5.0
+  helpfulness_factor: 3.0
+  privacy_factor: 0.2
+  safety_factor: 2.0
+  truthfulness_factor: 5.0
+  harmful_terms_path: "src/agents/safety/templates/harmful_terms.txt"
+  helpful_terms_path: "src/agents/safety/templates/helpful_terms.txt"
+  risk_terms_path: "src/agents/safety/templates/risk_terms.txt"
+  misinformation_terms_path: "src/agents/safety/templates/misinformation_terms.txt"

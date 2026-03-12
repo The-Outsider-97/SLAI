@@ -1,0 +1,38 @@
+{
+  "ticket_id": "f06df567-9af1-4f66-b258-d4a6000e7634",
+  "created_at": "2025-07-10T19:53:14.205300",
+  "updated_at": "2025-07-10T19:53:14.227330",
+  "status": "resolved",
+  "priority": "high",
+  "category": "order_issue",
+  "user_id": "user_123",
+  "subject": "Missing items in order #ORD-456",
+  "description": "My order was missing 2 vegetarian meals",
+  "related_order": "ORD-456",
+  "assigned_agent": "agent_007",
+  "resolution": "Issued refund for missing items and sent discount coupon",
+  "history": [
+    {
+      "timestamp": "2025-07-10T19:53:14.205300",
+      "action": "ticket_created",
+      "agent": "system"
+    },
+    {
+      "timestamp": "2025-07-10T19:53:14.212304",
+      "action": "comment_added",
+      "author": "agent_007",
+      "comment": "Customer confirmed missing items via photo"
+    },
+    {
+      "timestamp": "2025-07-10T19:53:14.220812",
+      "action": "agent_assigned",
+      "agent": "agent_007"
+    },
+    {
+      "timestamp": "2025-07-10T19:53:14.227330",
+      "action": "ticket_resolved",
+      "agent": "agent_007",
+      "resolution": "Issued refund for missing items and sent discount coupon"
+    }
+  ]
+}

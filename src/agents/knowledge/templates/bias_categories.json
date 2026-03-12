@@ -1,0 +1,891 @@
+{
+  "schema_version": "1.0.0",
+  "description": "A comprehensive categorization of biases for AI knowledge base analysis, focusing on Gender, Race, and Religion.",
+  "categories": [
+    {
+      "id": "gender_bias",
+      "name": "Gender Bias",
+      "description": "Biases related to an individual's gender identity, gender expression, biological sex, or sexual orientation (as it often intersects with gender norms).",
+      "subcategories": [
+        {
+          "id": "gender_identity_bias",
+          "name": "Gender Identity Bias",
+          "description": "Bias based on an individual's internal sense of being male, female, both, neither, or somewhere else along the gender spectrum.",
+          "types": [
+            {
+              "id": "binary_gender_bias",
+              "name": "Binary Gender Bias",
+              "description": "Bias favoring or assuming cisgender male and female identities as the only valid ones, often marginalizing or invalidating non-binary and transgender identities.",
+              "keywords": ["cisnormativity", "gender essentialism", "male default", "female default"],
+              "potential_manifestations": [
+                "Assuming everyone is either male or female.",
+                "Using gendered language unnecessarily (e.g., 'mankind', 'guys' for a mixed group).",
+                "Forms or systems only offering male/female options."
+              ]
+            },
+            {
+              "id": "transphobia",
+              "name": "Transphobia",
+              "description": "Bias, discrimination, or prejudice against transgender or gender non-conforming people.",
+              "keywords": ["anti-trans", "transmisogyny", "transmisandry", "cissexism"],
+              "potential_manifestations": [
+                "Misgendering (deliberate or persistent).",
+                "Deadnaming (using a transgender person's pre-transition name).",
+                "Denial of identity or access to gender-affirming care/spaces.",
+                "Portraying trans individuals as deceptive or predatory.",
+                "Stereotyping trans individuals based on their assigned sex at birth."
+              ]
+            },
+            {
+              "id": "non_binary_erasure",
+              "name": "Non-Binary Erasure/Invisibilization",
+              "description": "Bias that ignores, invalidates, or marginalizes non-binary gender identities (e.g., genderqueer, genderfluid, agender).",
+              "keywords": ["enbiphobia", "genderqueerphobia", "invisibility"],
+              "potential_manifestations": [
+                "Forcing non-binary individuals into binary categories.",
+                "Lack of representation of non-binary people.",
+                "Dismissing non-binary identities as 'a phase' or 'not real'."
+              ]
+            },
+            {
+              "id": "intersex_bias",
+              "name": "Intersex Bias",
+              "description": "Bias, discrimination, or prejudice against individuals born with sex characteristics (chromosomes, gonads, or genitals) that do not fit typical binary notions of male or female bodies.",
+              "keywords": ["interphobia", "pathologization", "medical non-consent"],
+              "potential_manifestations": [
+                "Pathologizing intersex variations.",
+                "Forcing intersex individuals into binary sex categories.",
+                "Lack of awareness or representation."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "gender_expression_bias",
+          "name": "Gender Expression Bias",
+          "description": "Bias based on how an individual outwardly presents their gender (e.g., through clothing, behavior, voice), regardless of their gender identity.",
+          "types": [
+            {
+              "id": "gender_non_conformity_bias",
+              "name": "Gender Non-Conformity Bias",
+              "description": "Bias against individuals whose gender expression does not align with societal expectations for their perceived gender.",
+              "keywords": ["effeminacy (for men)", "masculinity (for women)", "androgyny"],
+              "potential_manifestations": [
+                "Negative judgment of men perceived as 'feminine'.",
+                "Negative judgment of women perceived as 'masculine'.",
+                "Pressure to conform to gendered appearance norms."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "sexism",
+          "name": "Sexism",
+          "description": "Prejudice, stereotyping, or discrimination, typically against women, on the basis of sex or gender.",
+          "types": [
+            {
+              "id": "misogyny",
+              "name": "Misogyny",
+              "description": "Dislike of, contempt for, or ingrained prejudice against women and girls.",
+              "keywords": ["anti-female", "female devaluation"],
+              "potential_manifestations": [
+                "Devaluing women's contributions.",
+                "Hostility or aggression towards women.",
+                "Objectification of women.",
+                "Portraying women as inherently inferior, overly emotional, or less capable."
+              ]
+            },
+            {
+              "id": "misandry",
+              "name": "Misandry",
+              "description": "Dislike of, contempt for, or ingrained prejudice against men and boys. (Less systemic but can exist).",
+              "keywords": ["anti-male", "male devaluation"],
+              "potential_manifestations": [
+                "Stereotyping men as inherently aggressive, unemotional, or simple-minded.",
+                "Devaluing men's roles in caregiving or emotional expression."
+              ]
+            },
+            {
+              "id": "benevolent_sexism",
+              "name": "Benevolent Sexism",
+              "description": "Subjectively positive but stereotyped views of women (e.g., women are pure, nurturing, need protection), which can be patronizing and limit opportunities.",
+              "keywords": ["patronizing", "protective paternalism", "chivalry (when restrictive)"],
+              "potential_manifestations": [
+                "Assuming women need help with tasks they are capable of.",
+                "Praising women for stereotypical feminine traits while discouraging others.",
+                "Restricting women's autonomy 'for their own good'."
+              ]
+            },
+            {
+              "id": "hostile_sexism",
+              "name": "Hostile Sexism",
+              "description": "Overtly negative attitudes and beliefs about women (e.g., women are manipulative, incompetent, or trying to control men).",
+              "keywords": ["overt discrimination", "antagonism"],
+              "potential_manifestations": [
+                "Openly derogatory comments about women.",
+                "Belief that women are less competent in certain fields (e.g., STEM).",
+                "Resentment towards women in power."
+              ]
+            },
+            {
+              "id": "gender_stereotyping",
+              "name": "Gender Stereotyping",
+              "description": "Oversimplified generalizations about the attributes, differences, and roles of individuals or groups based on their gender.",
+              "keywords": ["role assignment", "trait attribution", "occupational segregation"],
+              "potential_manifestations": [
+                "Assuming women are better at caregiving and men at leadership.",
+                "Attributing specific personality traits based on gender (e.g., 'women are emotional', 'men are logical').",
+                "Suggesting certain professions are 'for' men or women."
+              ]
+            },
+            {
+              "id": "gendered_language_bias",
+              "name": "Gendered Language Bias",
+              "description": "Use of language that reflects or perpetuates gender bias.",
+              "keywords": ["male default", "pronoun assumptions", "gendered terms"],
+              "potential_manifestations": [
+                "Using 'he' as a generic pronoun.",
+                "Using terms like 'chairman', 'policeman', 'mankind'.",
+                "Describing the same behavior differently based on gender (e.g., 'assertive' man vs. 'bossy' woman)."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "sexual_orientation_bias",
+          "name": "Sexual Orientation Bias",
+          "description": "Bias based on an individual's romantic or sexual attraction to others. Often intersects with gender bias due to normative expectations.",
+          "types": [
+            {
+              "id": "heteronormativity",
+              "name": "Heteronormativity",
+              "description": "The assumption that heterosexuality is the default or 'normal' sexual orientation, and that gender roles align with binary expectations.",
+              "keywords": ["compulsory heterosexuality", "heterosexism"],
+              "potential_manifestations": [
+                "Assuming everyone is heterosexual.",
+                "Lack of representation of non-heterosexual relationships.",
+                "Phrasing questions or scenarios assuming heterosexual relationships (e.g., 'your husband/wife')."
+              ]
+            },
+            {
+              "id": "homophobia",
+              "name": "Homophobia",
+              "description": "Bias, discrimination, or prejudice against gay men and lesbian women.",
+              "keywords": ["anti-gay", "anti-lesbian"],
+              "potential_manifestations": [
+                "Stereotyping gay men as effeminate or lesbians as masculine.",
+                "Denial of rights or equal treatment.",
+                "Portraying same-sex relationships negatively."
+              ]
+            },
+            {
+              "id": "biphobia",
+              "name": "Biphobia",
+              "description": "Bias, discrimination, or prejudice against bisexual individuals.",
+              "keywords": ["anti-bisexual", "bisexual erasure"],
+              "potential_manifestations": [
+                "Dismissing bisexuality as a phase, confusion, or promiscuity.",
+                "Expecting bisexual individuals to 'pick a side'.",
+                "Invisibility in discussions about sexual orientation."
+              ]
+            },
+            {
+              "id": "panphobia_acephobia_etc",
+              "name": "Other Sexual Orientation Phobias (Panphobia, Acephobia, etc.)",
+              "description": "Bias against other sexual orientations like pansexuality, asexuality, etc.",
+              "keywords": ["anti-pansexual", "anti-asexual", "erasure"],
+              "potential_manifestations": [
+                "Invalidating or misunderstanding these orientations.",
+                "Lack of representation."
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "racial_bias",
+      "name": "Racial Bias",
+      "description": "Biases related to an individual's perceived race or ethnicity.",
+      "subcategories": [
+        {
+          "id": "racial_stereotyping",
+          "name": "Racial Stereotyping",
+          "description": "Oversimplified generalizations about groups of people based on their perceived race or ethnicity.",
+          "types": [
+            {
+              "id": "positive_stereotyping_racial",
+              "name": "Positive Stereotyping (Racial)",
+              "description": "Attributing seemingly positive traits to a racial group that can still be limiting or inaccurate (e.g., 'model minority' myth).",
+              "keywords": ["model minority", "innate talent (racial)"],
+              "potential_manifestations": [
+                "Assuming all Asians are good at math.",
+                "Assuming all Black people are athletic."
+              ]
+            },
+            {
+              "id": "negative_stereotyping_racial",
+              "name": "Negative Stereotyping (Racial)",
+              "description": "Attributing negative traits to a racial group.",
+              "keywords": ["criminality association", "laziness stereotype", "intelligence stereotype (negative)"],
+              "potential_manifestations": [
+                "Associating certain racial groups with criminality or laziness.",
+                "Assuming intellectual inferiority/superiority based on race."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "systemic_racism",
+          "name": "Systemic/Institutional Racism",
+          "description": "Racism embedded in the laws, policies, and institutions of society that create disparate outcomes for different racial groups.",
+          "keywords": ["institutional bias", "structural inequality", "redlining", "hiring bias", "educational disparity"],
+          "potential_manifestations": [
+            "Data showing racial disparities in criminal justice, housing, employment, healthcare, or education.",
+            "Policies that disproportionately disadvantage certain racial groups, even if not overtly racist.",
+            "Underrepresentation of certain racial groups in positions of power."
+          ]
+        },
+        {
+          "id": "colorism",
+          "name": "Colorism",
+          "description": "Prejudice or discrimination against individuals with a darker skin tone, typically among people of the same ethnic or racial group.",
+          "keywords": ["skin tone bias", "light-skin preference", "dark-skin prejudice"],
+          "potential_manifestations": [
+            "Preferential treatment for lighter-skinned individuals within a racial group.",
+            "Negative stereotypes associated with darker skin tones.",
+            "Representation biases favoring lighter skin in media."
+          ]
+        },
+        {
+          "id": "xenophobia_racialized",
+          "name": "Xenophobia (Racialized)",
+          "description": "Fear, hatred, or prejudice against people from other countries, often intertwined with racial bias when targeting specific racialized immigrant groups.",
+          "keywords": ["anti-immigrant (racialized)", "nativism"],
+          "potential_manifestations": [
+            "Hostility towards immigrants of specific racial backgrounds.",
+            "Stereotyping immigrant groups based on race and national origin.",
+            "Assuming foreignness based on racial appearance."
+          ]
+        },
+        {
+          "id": "microaggressions_racial",
+          "name": "Racial Microaggressions",
+          "description": "Subtle, often unintentional, everyday verbal, nonverbal, and environmental slights, snubs, or insults which communicate hostile, derogatory, or negative messages to target persons based solely upon their marginalized group membership (race).",
+          "keywords": ["subtle racism", "backhanded compliments (racial)", "invalidation (racial)"],
+          "potential_manifestations": [
+            "'Where are you REALLY from?' to a person of color born and raised locally.",
+            "Clutching a purse when a person of a certain race approaches.",
+            "Complimenting a person of color on their English assuming it's not their first language."
+          ]
+        },
+        {
+          "id": "cultural_appropriation",
+          "name": "Cultural Appropriation (vs. Appreciation)",
+          "description": "The unacknowledged or inappropriate adoption of the customs, practices, ideas, etc. of one people or society by members of another and typically more dominant people or society. Can perpetuate stereotypes and disempower marginalized cultures.",
+          "keywords": ["cultural theft", "commodification of culture", "misrepresentation"],
+          "potential_manifestations": [
+            "Using sacred cultural symbols as fashion accessories without understanding or respect.",
+            "Profiting from cultural elements of marginalized groups without acknowledgment or reciprocity.",
+            "Trivializing or stereotyping cultural practices."
+          ]
+        },
+        {
+          "id": "racial_erasure_invisibility",
+          "name": "Racial Erasure/Invisibility",
+          "description": "Ignoring, omitting, or underrepresenting the presence, contributions, or experiences of certain racial groups.",
+          "keywords": ["whitewashing (history/media)", "underrepresentation", "marginalization"],
+          "potential_manifestations": [
+            "History texts focusing predominantly on one racial group's perspective.",
+            "Media lacking diverse racial representation.",
+            "Failing to acknowledge the impact of race in social analyses."
+          ]
+        },
+        {
+          "id": "fetishization_racial",
+          "name": "Racial Fetishization/Exoticization",
+          "description": "Sexualizing or romanticizing individuals based on racial stereotypes, reducing them to a set of perceived racial traits rather than seeing them as whole individuals.",
+          "keywords": ["exoticism", "racial objectification", "stereotype-based attraction"],
+          "potential_manifestations": [
+            "Expressing attraction to someone 'because' they are of a certain race, often tied to stereotypes (e.g., 'submissive Asian woman', 'fiery Latina').",
+            "Treating individuals as representatives of an 'exotic' culture."
+          ]
+        },
+        {
+          "id": "specific_racial_biases",
+          "name": "Specific Racial Group Biases",
+          "description": "Biases targeting specific racial or ethnic groups (Note: This is not exhaustive and groups/terms vary by region).",
+          "types": [
+            {
+              "id": "anti_black_racism",
+              "name": "Anti-Black Racism",
+              "description": "Prejudice, discrimination, or antagonism directed against Black people.",
+              "keywords": ["negrophobia", "anti-Blackness"]
+            },
+            {
+              "id": "anti_asian_racism",
+              "name": "Anti-Asian Racism",
+              "description": "Prejudice, discrimination, or antagonism directed against people of Asian descent.",
+              "keywords": ["sinophobia", "yellow peril"]
+            },
+            {
+              "id": "anti_indigenous_racism",
+              "name": "Anti-Indigenous Racism",
+              "description": "Prejudice, discrimination, or antagonism directed against Indigenous peoples.",
+              "keywords": ["colonialism effects", "erasure of sovereignty"]
+            },
+            {
+              "id": "anti_latine_hispanic_racism",
+              "name": "Anti-Latiné/Hispanic Racism",
+              "description": "Prejudice, discrimination, or antagonism directed against people of Latin American or Hispanic descent.",
+              "keywords": ["anti-immigrant (Latine)", "language prejudice"]
+            },
+            {
+              "id": "anti_mena_racism",
+              "name": "Anti-MENA (Middle Eastern/North African) Racism",
+              "description": "Prejudice, discrimination, or antagonism directed against people of Middle Eastern or North African descent.",
+              "keywords": ["arabophobia", "post-9/11 prejudice"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "religious_bias",
+      "name": "Religious Bias",
+      "description": "Biases related to an individual's religious beliefs, practices, affiliation, or lack thereof.",
+      "subcategories": [
+        {
+          "id": "religious_stereotyping",
+          "name": "Religious Stereotyping",
+          "description": "Oversimplified generalizations about groups of people based on their religion.",
+          "types": [
+            {
+              "id": "positive_stereotyping_religious",
+              "name": "Positive Stereotyping (Religious)",
+              "description": "Attributing seemingly positive traits to a religious group that can be limiting or inaccurate.",
+              "keywords": ["moral superiority (assumed)", "peacefulness (assumed)"],
+              "potential_manifestations": [
+                "Assuming all members of a certain faith are inherently peaceful or charitable (can mask internal diversity or issues)."
+              ]
+            },
+            {
+              "id": "negative_stereotyping_religious",
+              "name": "Negative Stereotyping (Religious)",
+              "description": "Attributing negative traits to a religious group.",
+              "keywords": ["extremism association", "intolerance stereotype", "backwardness stereotype"],
+              "potential_manifestations": [
+                "Associating an entire religion with extremism due to the actions of a few.",
+                "Stereotyping a religious group as inherently intolerant, violent, or unscientific."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "religious_discrimination",
+          "name": "Religious Discrimination",
+          "description": "Unfair treatment of individuals or groups based on their religious beliefs or practices.",
+          "keywords": ["employment bias (religious)", "housing bias (religious)", "educational bias (religious)"],
+          "potential_manifestations": [
+            "Denying employment or promotion based on religious affiliation or observance.",
+            "Harassment or ridicule based on religious attire or practices.",
+            "Exclusion from social or civic activities due to religion."
+          ]
+        },
+        {
+          "id": "anti_religious_bias",
+          "name": "Anti-Religious Bias / Secular Supremacy",
+          "description": "Prejudice or discrimination against religious individuals or institutions, or the assumption of superiority of secular worldviews.",
+          "types": [
+            {
+              "id": "anti_theism",
+              "name": "Anti-Theism / Anti-Religion",
+              "description": "Active opposition or hostility towards religion in general or specific religions.",
+              "keywords": ["religion as harmful", "faith as irrational"],
+              "potential_manifestations": [
+                "Dismissing all religious belief as delusional or harmful.",
+                "Aggressive rhetoric against religious people or institutions."
+              ]
+            },
+            {
+              "id": "bias_against_non_religious",
+              "name": "Bias Against Non-Religious Individuals",
+              "description": "Prejudice or discrimination against atheists, agnostics, humanists, or other non-religious people.",
+              "keywords": ["atheophobia", "assumption of immorality (non-religious)"],
+              "potential_manifestations": [
+                "Assuming non-religious people lack morals or purpose.",
+                "Distrust or social exclusion of non-believers.",
+                "Equating national identity with a specific religious belief."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "inter_religious_bias",
+          "name": "Inter-Religious Bias",
+          "description": "Bias or prejudice between different religious groups.",
+          "keywords": ["sectarianism (between religions)", "religious conflict", "proselytization (aggressive)"],
+          "potential_manifestations": [
+            "One religious group viewing another as heretical, inferior, or a threat.",
+            "Aggressive or coercive proselytization.",
+            "Historical or ongoing conflicts fueled by religious differences."
+          ]
+        },
+        {
+          "id": "intra_religious_bias",
+          "name": "Intra-Religious Bias (Sectarianism)",
+          "description": "Bias or prejudice between different denominations, sects, or schools of thought within the same religion.",
+          "keywords": ["denominational bias", "heresy accusations (internal)"],
+          "potential_manifestations": [
+            "One denomination viewing another within the same faith as 'not true believers' or 'misguided'.",
+            "Discrimination or conflict between sects (e.g., Sunni vs. Shia in Islam, Catholic vs. Protestant in Christianity)."
+          ]
+        },
+        {
+          "id": "religious_extremism_bias",
+          "name": "Religious Extremism Bias (Source & Target)",
+          "description": "Bias stemming from extremist interpretations of religion, OR bias that unfairly associates an entire religion with the actions of its extremist factions.",
+          "keywords": ["fundamentalism (when leading to harm)", "terrorism (religiously motivated)", "guilt by association (religious)"],
+          "potential_manifestations": [
+            "Extremist groups promoting hatred or violence against other groups.",
+            "Generalizing the actions of religious extremists to all adherents of that faith (e.g., Islamophobia post-9/11)."
+          ]
+        },
+        {
+          "id": "specific_religious_phobias_prejudices",
+          "name": "Specific Religious Phobias/Prejudices",
+          "description": "Targeted biases against specific religions.",
+          "types": [
+            {
+              "id": "islamophobia",
+              "name": "Islamophobia",
+              "description": "Fear, hatred, or prejudice against Islam or Muslims.",
+              "keywords": ["anti-muslim", "terrorism association"]
+            },
+            {
+              "id": "antisemitism",
+              "name": "Antisemitism",
+              "description": "Fear, hatred, or prejudice against Jewish people, Judaism, or Jewish institutions.",
+              "keywords": ["anti-jewish", "holocaust denial", "conspiracy theories (Jewish)"]
+            },
+            {
+              "id": "anti_christian_bias",
+              "name": "Anti-Christian Bias",
+              "description": "Fear, hatred, or prejudice against Christianity or Christians.",
+              "keywords": ["christianophobia"]
+            },
+            {
+              "id": "anti_hindu_bias",
+              "name": "Anti-Hindu Bias",
+              "description": "Fear, hatred, or prejudice against Hinduism or Hindus.",
+              "keywords": ["hinduphobia"]
+            },
+            {
+              "id": "anti_sikh_bias",
+              "name": "Anti-Sikh Bias",
+              "description": "Fear, hatred, or prejudice against Sikhism or Sikhs.",
+              "keywords": ["mistaken identity (with Muslims)", "turban prejudice"]
+            },
+            {
+              "id": "anti_buddhist_bias",
+              "name": "Anti-Buddhist Bias",
+              "description": "Fear, hatred, or prejudice against Buddhism or Buddhists.",
+              "keywords": []
+            }
+          ]
+        },
+        {
+          "id": "religious_privilege_normativity",
+          "name": "Religious Privilege/Normativity",
+          "description": "Systemic advantages or assumptions favoring a dominant religion in a society, often making other religions or non-religion invisible or marginalized.",
+          "keywords": ["christian normativity (in some Western countries)", "state religion effects", "religious holidays (dominant)"],
+          "potential_manifestations": [
+            "Public holidays aligning only with the dominant religion's calendar.",
+            "Assumption of shared religious beliefs in public discourse.",
+            "Legal or social systems that implicitly or explicitly favor one religion."
+          ]
+        }
+      ]
+    },
+
+
+
+    {
+      "id": "age_bias",
+      "name": "Age Bias (Ageism)",
+      "description": "Biases related to an individual's age, including prejudice against older adults, younger adults, or specific age groups.",
+      "subcategories": [
+        {
+          "id": "age_stereotyping",
+          "name": "Age Stereotyping",
+          "description": "Oversimplified generalizations about individuals based on their age group.",
+          "types": [
+            {
+              "id": "stereotyping_older_adults",
+              "name": "Stereotyping of Older Adults",
+              "keywords": ["gerontophobia", "senility assumption", "technologically inept", "frail", "conservative (assumed)"],
+              "potential_manifestations": [
+                "Assuming older adults are weak, incompetent, resistant to change, or a burden.",
+                "Portraying older adults as out of touch or asexual.",
+                "Patronizing language or behavior towards older adults ('elderspeak')."
+              ]
+            },
+            {
+              "id": "stereotyping_younger_adults_youth",
+              "name": "Stereotyping of Younger Adults/Youth",
+              "keywords": ["ephebiphobia", "juvenoia", "entitled", "lazy", "inexperienced (overgeneralized)", "irresponsible"],
+              "potential_manifestations": [
+                "Assuming younger people are naive, reckless, entitled, or lack work ethic.",
+                "Dismissing the opinions or contributions of younger individuals due to their age.",
+                "Over-romanticizing or over-demonizing youth culture."
+              ]
+            },
+            {
+              "id": "adultism",
+              "name": "Adultism",
+              "description": "Systematic prejudice and discrimination against young people and children, where adults hold power and their perspectives are prioritized.",
+              "keywords": ["child disregard", "youth marginalization", "paternalism (towards youth)"],
+              "potential_manifestations": [
+                "Not taking children's or teenagers' concerns seriously.",
+                "Imposing rules on young people without their input.",
+                "Viewing young people as 'adults-in-training' rather than individuals with current validity."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "age_discrimination",
+          "name": "Age Discrimination",
+          "description": "Unfair treatment of individuals based on their age, particularly in employment, healthcare, and social opportunities.",
+          "keywords": ["employment age bias", "healthcare age limits", "social exclusion (age)"],
+          "potential_manifestations": [
+            "Denying jobs or promotions due to age (either too old or too young).",
+            "Forced retirement or pressure to retire.",
+            "Unequal access to medical treatments or resources based on age.",
+            "Marketing or services that exclude certain age groups."
+          ]
+        },
+        {
+          "id": "age_related_language_bias",
+          "name": "Age-Related Language Bias",
+          "description": "Use of language that reflects or perpetuates age-based stereotypes or discrimination.",
+          "keywords": ["elderspeak", "ageist terms", "generational labels (pejorative)"],
+          "potential_manifestations": [
+            "Using terms like 'old geezer', 'codger', 'over the hill' for older adults.",
+            "Using terms like 'snowflake', 'millennial' (pejoratively) for younger adults.",
+            "Speaking in a patronizing or overly simplified manner to older adults."
+          ]
+        },
+        {
+          "id": "internalized_ageism",
+          "name": "Internalized Ageism",
+          "description": "When individuals internalize negative societal stereotypes about their own age group, impacting self-perception and behavior.",
+          "keywords": ["self-limiting beliefs (age)", "fear of aging"],
+          "potential_manifestations": [
+            "Older adults believing they are incapable of learning new things.",
+            "Younger adults feeling pressured to achieve certain milestones by a specific age.",
+            "Excessive worry or denial about the aging process."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "disability_bias",
+      "name": "Disability Bias (Ableism)",
+      "description": "Prejudice, discrimination, and social oppression against people with disabilities (physical, mental, intellectual, sensory, developmental, or chronic illness).",
+      "subcategories": [
+        {
+          "id": "ableist_stereotyping",
+          "name": "Ableist Stereotyping",
+          "description": "Oversimplified generalizations about people with disabilities.",
+          "types": [
+            {
+              "id": "pity_inspiration_porn",
+              "name": "Pity / Inspiration Porn",
+              "keywords": ["objectification (disability)", "hero narrative (disability)", "tragic figure"],
+              "potential_manifestations": [
+                "Viewing disabled people as objects of pity or charity.",
+                "Portraying disabled people as inspirational solely for living with a disability or performing ordinary tasks.",
+                "Reducing disabled individuals to their disability, often for the emotional gratification of non-disabled people."
+              ]
+            },
+            {
+              "id": "assumption_of_incapacity_inferiority",
+              "name": "Assumption of Incapacity or Inferiority",
+              "keywords": ["infantilization (disability)", "dehumanization", "cognitive underestimation"],
+              "potential_manifestations": [
+                "Assuming people with disabilities cannot live full, independent lives.",
+                "Speaking to disabled adults as if they are children.",
+                "Underestimating the intelligence or capabilities of someone with a disability."
+              ]
+            },
+            {
+              "id": "assumption_of_asexuality_disability",
+              "name": "Assumption of Asexuality (Disability)",
+              "keywords": ["desexualization", "relationship denial"],
+              "potential_manifestations": [
+                "Assuming people with disabilities are not interested in or capable of romantic or sexual relationships."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "systemic_ableism",
+          "name": "Systemic/Institutional Ableism",
+          "description": "Ableism embedded in laws, policies, societal norms, and infrastructure that create barriers and disadvantages for people with disabilities.",
+          "keywords": ["inaccessibility", "exclusionary policies", "lack of accommodation", "segregation"],
+          "potential_manifestations": [
+            "Lack of accessible buildings, transportation, or websites.",
+            "Discriminatory hiring practices or lack of workplace accommodations.",
+            "Segregated education or living situations.",
+            "Healthcare disparities for people with disabilities."
+          ]
+        },
+        {
+          "id": "ableist_language",
+          "name": "Ableist Language",
+          "description": "Use of language that demeans, pathologizes, or perpetuates negative stereotypes about disability.",
+          "keywords": ["slurs (disability)", "metaphorical disability (negative)", "person-first vs identity-first debate"],
+          "potential_manifestations": [
+            "Using terms like 'crippled', 'lame', 'retarded', 'crazy', 'psycho' pejoratively or casually.",
+            "Using disability as a metaphor for something negative (e.g., 'blind to the truth', 'deaf to reason').",
+            "Debates around person-first ('person with autism') vs. identity-first ('autistic person') language can reflect underlying biases if one form is imposed."
+          ]
+        },
+        {
+          "id": "microaggressions_ableist",
+          "name": "Ableist Microaggressions",
+          "description": "Subtle, often unintentional, everyday slights or insults towards people with disabilities.",
+          "keywords": ["unsolicited advice (disability)", "intrusive questions", "backhanded compliments (disability)"],
+          "potential_manifestations": [
+            "'You're too pretty to be in a wheelchair.'",
+            "'I don't even think of you as disabled.'",
+            "Touching a person's mobility device without permission.",
+            "Speaking to a disabled person's companion instead of directly to them."
+          ]
+        },
+        {
+          "id": "medical_model_vs_social_model",
+          "name": "Medical Model vs. Social Model of Disability Bias",
+          "description": "Bias stemming from viewing disability solely as a medical problem residing in the individual, rather than as a social construct created by environmental and attitudinal barriers.",
+          "keywords": ["pathologization", "individual deficit focus", "societal barriers ignored"],
+          "potential_manifestations": [
+            "Focusing solely on 'fixing' or 'curing' the individual rather than removing societal barriers.",
+            "Blaming the individual for lack of access or participation.",
+            "Lack of understanding that society 'disables' people through inaccessible design and attitudes."
+          ]
+        },
+        {
+          "id": "bias_against_invisible_disabilities",
+          "name": "Bias Against Invisible Disabilities/Chronic Illness",
+          "description": "Skepticism, disbelief, or lack of accommodation for disabilities or illnesses that are not immediately apparent.",
+          "keywords": ["skepticism", "faking it accusation", "mental health stigma", "chronic pain dismissal"],
+          "potential_manifestations": [
+            "Accusing someone of 'faking' their disability because they 'don't look sick'.",
+            "Dismissing the impact of mental health conditions, chronic pain, or fatigue.",
+            "Requiring 'proof' of disability beyond what is reasonable."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "socioeconomic_status_bias",
+      "name": "Socioeconomic Status Bias (Classism)",
+      "description": "Prejudice, stereotyping, or discrimination based on an individual's or group's perceived social class or economic standing.",
+      "subcategories": [
+        {
+          "id": "class_stereotyping",
+          "name": "Class Stereotyping",
+          "description": "Oversimplified generalizations about individuals based on their perceived socioeconomic class.",
+          "types": [
+            {
+              "id": "stereotyping_poor_working_class",
+              "name": "Stereotyping of Poor/Working Class Individuals",
+              "keywords": ["laziness stereotype (class)", "unintelligent stereotype (class)", "criminality association (class)", "welfare queen myth"],
+              "potential_manifestations": [
+                "Assuming poor people are lazy, unintelligent, or responsible for their poverty.",
+                "Associating poverty with immorality or criminality.",
+                "Portraying working-class individuals as uncultured or crude."
+              ]
+            },
+            {
+              "id": "stereotyping_wealthy_upper_class",
+              "name": "Stereotyping of Wealthy/Upper Class Individuals",
+              "keywords": ["out of touch stereotype", "greedy stereotype", "entitled stereotype (class)", "snobbery"],
+              "potential_manifestations": [
+                "Assuming wealthy people are inherently greedy, snobbish, or out of touch with reality.",
+                "Romanticizing wealth or attributing virtue solely based on affluence."
+              ]
+            }
+          ]
+        },
+        {
+          "id": "systemic_classism",
+          "name": "Systemic/Institutional Classism",
+          "description": "Class bias embedded in societal structures, policies, and institutions that perpetuate inequality.",
+          "keywords": ["educational inequality (class)", "healthcare disparity (class)", "justice system bias (class)", "opportunity hoarding"],
+          "potential_manifestations": [
+            "Unequal access to quality education, healthcare, or legal representation based on wealth.",
+            "Policies that disproportionately benefit the wealthy (e.g., tax loopholes).",
+            "Hiring or promotion practices that favor individuals from privileged backgrounds (e.g., unpaid internships, reliance on elite school networks)."
+          ]
+        },
+        {
+          "id": "internalized_classism",
+          "name": "Internalized Classism",
+          "description": "When individuals internalize societal messages about their own or other social classes, impacting self-worth, aspirations, or inter-class interactions.",
+          "keywords": ["shame (class)", "imposter syndrome (class)", "class aspiration pressure"],
+          "potential_manifestations": [
+            "Individuals from lower-income backgrounds feeling shame or inadequacy.",
+            "Individuals from higher-income backgrounds feeling unearned superiority or guilt.",
+            "Limiting one's ambitions based on perceived class limitations."
+          ]
+        },
+        {
+          "id": "linguistic_classism",
+          "name": "Linguistic Classism (Accent/Dialect Prejudice)",
+          "description": "Discrimination or prejudice based on a person's accent, dialect, or manner of speaking, often linked to perceived social class.",
+          "keywords": ["accent prejudice", "dialect bias", "code-switching pressure"],
+          "potential_manifestations": [
+            "Assuming someone is less intelligent or competent based on their accent.",
+            "Mocking or devaluing certain regional or class-associated dialects.",
+            "Pressure to adopt a 'standard' or more 'prestigious' accent."
+          ]
+        },
+        {
+          "id": "consumer_classism",
+          "name": "Consumer Classism",
+          "description": "Bias based on consumption patterns, brand preferences, or perceived ability to afford certain goods and services.",
+          "keywords": ["status symbols", "brand snobbery", "judgment of spending habits"],
+          "potential_manifestations": [
+            "Judging individuals based on the brands they wear or products they own.",
+            "Assuming moral character based on spending habits (e.g., 'frivolous spending' by the poor vs. 'investment' by the rich)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nationality_origin_bias",
+      "name": "Nationality/Geographic Origin Bias",
+      "description": "Prejudice, stereotyping, or discrimination based on an individual's country of birth, citizenship, ancestry, or perceived foreignness (distinct from, though often overlapping with, racial bias).",
+      "subcategories": [
+        {
+          "id": "xenophobia",
+          "name": "Xenophobia",
+          "description": "Fear, hatred, or prejudice against people perceived as foreign or from other countries/cultures.",
+          "keywords": ["anti-immigrant", "nativism", "foreigner suspicion", "cultural intolerance"],
+          "potential_manifestations": [
+            "Hostility or suspicion towards immigrants or tourists.",
+            "Belief that immigrants threaten national identity, jobs, or resources.",
+            "Resistance to multiculturalism or cultural diversity."
+          ]
+        },
+        {
+          "id": "national_stereotyping",
+          "name": "National Stereotyping",
+          "description": "Oversimplified and often inaccurate generalizations about people from specific countries or national groups.",
+          "keywords": ["country stereotypes", "cultural caricature", "behavioral assumptions (national)"],
+          "potential_manifestations": [
+            "Assuming all people from a certain country share specific traits (e.g., 'all [Nationality X] are loud/reserved/hardworking/lazy').",
+            "Relying on caricatures or outdated portrayals of national cultures.",
+            "Jokes or comments based on negative national stereotypes."
+          ]
+        },
+        {
+          "id": "linguistic_nationalism_bias",
+          "name": "Linguistic Nationalism / Language Purity Bias",
+          "description": "Bias favoring a national language and disfavoring or discriminating against speakers of other languages or dialects within a nation, or pressuring assimilation to a dominant language.",
+          "keywords": ["language purity", "accent discrimination (national)", "english-only (or equivalent) movements"],
+          "potential_manifestations": [
+            "Discrimination against individuals who do not speak the dominant national language fluently.",
+            "Mocking or devaluing foreign accents or minority languages.",
+            "Policies promoting linguistic homogeneity and suppressing linguistic diversity."
+          ]
+        },
+        {
+          "id": "citizenship_status_bias",
+          "name": "Citizenship Status Bias",
+          "description": "Discrimination or prejudice based on an individual's citizenship status (e.g., citizen, permanent resident, refugee, asylum seeker, undocumented immigrant).",
+          "keywords": ["anti-undocumented", "refugee bias", "second-class citizen treatment"],
+          "potential_manifestations": [
+            "Denial of rights, services, or opportunities based on citizenship status.",
+            "Stereotyping or dehumanizing undocumented immigrants or refugees.",
+            "Exploitation of non-citizens in labor or housing."
+          ]
+        },
+        {
+          "id": "geopolitical_bias",
+          "name": "Geopolitical Bias",
+          "description": "Bias in information or portrayal of nations based on political alliances, conflicts, or dominant global narratives.",
+          "keywords": ["enemy nation portrayal", "ally nation favoritism", "media bias (geopolitical)"],
+          "potential_manifestations": [
+            "Consistently negative or one-sided portrayal of countries perceived as adversaries.",
+            "Uncritical or overly positive portrayal of allied nations.",
+            "Information filtered through a nationalistic or dominant power lens."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "appearance_bias",
+      "name": "Appearance Bias (Lookism)",
+      "description": "Prejudice, stereotyping, or discrimination based on an individual's physical appearance, including attractiveness, body weight/shape, height, and other physical traits not explicitly covered by race, gender, or disability.",
+      "subcategories": [
+        {
+          "id": "attractiveness_bias",
+          "name": "Attractiveness Bias (Beauty Bias)",
+          "description": "Preferential treatment or positive stereotyping of individuals perceived as physically attractive, and negative bias towards those perceived as unattractive.",
+          "keywords": ["pretty privilege", "halo effect (appearance)", "lookism"],
+          "potential_manifestations": [
+            "Assuming attractive people are more competent, intelligent, or trustworthy.",
+            "Attractive individuals receiving more favorable treatment in hiring, social interactions, or legal settings.",
+            "Discrimination against individuals perceived as unattractive."
+          ]
+        },
+        {
+          "id": "weight_bias_sizeism",
+          "name": "Weight Bias (Sizeism / Fatphobia)",
+          "description": "Prejudice, stereotyping, or discrimination against individuals based on their body weight or size, particularly against people with larger bodies.",
+          "keywords": ["fatphobia", "anti-fat bias", "thin privilege", "health at every size (HAES) denial"],
+          "potential_manifestations": [
+            "Assuming overweight or obese individuals are lazy, undisciplined, or unhealthy.",
+            "Discrimination in employment, healthcare (e.g., medical bias), or social settings.",
+            "Mockery or shaming based on body weight.",
+            "Lack of accessible seating or clothing options."
+          ]
+        },
+        {
+          "id": "height_bias",
+          "name": "Height Bias",
+          "description": "Prejudice or stereotyping based on an individual's height, often favoring taller individuals, particularly men.",
+          "keywords": ["short stature prejudice", "tall privilege"],
+          "potential_manifestations": [
+            "Associating height with leadership ability or competence.",
+            "Discrimination or social disadvantages for shorter individuals."
+          ]
+        },
+        {
+          "id": "bias_based_on_physical_features",
+          "name": "Bias Based on Specific Physical Features",
+          "description": "Prejudice related to specific, non-racialized, non-disabled physical features (e.g., hair type/color not tied to race, facial features, visible body modifications).",
+          "keywords": ["tattoo prejudice", "piercing prejudice", "hair color bias (non-racial)"],
+          "potential_manifestations": [
+            "Negative judgments or discrimination based on tattoos, piercings, or unconventional hairstyles.",
+            "Stereotypes associated with certain non-racialized hair colors (e.g., 'dumb blonde' stereotype)."
+          ]
+        },
+        {
+          "id": "conformity_to_appearance_norms",
+          "name": "Bias Towards Conformity to Appearance Norms",
+          "description": "Pressure or preference for individuals to conform to prevailing societal or subcultural standards of dress, grooming, and overall appearance.",
+          "keywords": ["dress code bias", "grooming standards prejudice", "non-conformity penalty"],
+          "potential_manifestations": [
+            "Negative judgment of individuals who do not adhere to conventional fashion or grooming standards.",
+            "Workplace dress codes that are overly restrictive or biased.",
+            "Penalizing individuals for unique or alternative self-expression through appearance."
+          ]
+        }
+      ]
+    }
+  ]
+}

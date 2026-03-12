@@ -18,12 +18,15 @@ import math
 import time
 import hashlib
 import uuid
+import threading
 import numpy as np
 import pandas as pd
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 from transformers import AutoTokenizer
 from heapq import nlargest
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
 from sentence_transformers import SentenceTransformer
 
@@ -63,6 +66,7 @@ class KnowledgeAgent(BaseAgent):
             config=config
         )
         self.knowledge_agent = []
+        self.cache = None
         self.learning_agent = None
         self.reasoning_agent = None
         self.shared_memory = shared_memory
@@ -75,6 +79,7 @@ class KnowledgeAgent(BaseAgent):
         self.stopwords = self.knowledge_config.get('stopwords')
         self.cache_size = self.knowledge_config.get('cache_size')
         self.first_pass = self.knowledge_config.get('first_pass')
+        self.max_workers = self.knowledge_config.get('max_workers')
         self._decay_factor = self.knowledge_config.get('decay_factor')
         self.knowledge_tag = self.knowledge_config.get('knowledge_tag')
         self.retrieval_mode = self.knowledge_config.get('retrieval_mode')
@@ -83,7 +88,6 @@ class KnowledgeAgent(BaseAgent):
         self.directory_path = self.knowledge_config.get('directory_path')
         self.embedding_model = self.knowledge_config.get('embedding_model')
         self.use_graph_ontology = self.knowledge_config.get('use_graph_ontology')
-        self.embedding_model_path = self.knowledge_config.get('embedding_model_path')
         self.similarity_threshold = self.knowledge_config.get('similarity_threshold')
         self.bias_detection_enabled = self.knowledge_config.get('bias_detection_enabled')
         self.use_ontology_expansion = self.knowledge_config.get('use_ontology_expansion')
@@ -91,9 +95,10 @@ class KnowledgeAgent(BaseAgent):
         if not self.embedding_model:
             logger.error("KnowledgeAgent misconfigured: 'embedding_model' is not set in config.")
 
-        self.cache = KnowledgeCache()
+        self.knowledge_cache = KnowledgeCache()
         self.perform_action = PerformAction()
         self.ontology_manager = OntologyManager()
+        self.cache_lock = threading.Lock()
 
         self.sbert_model: Optional[SentenceTransformer] = None
         self.doc_embeddings: Dict[str, np.ndarray] = {}
@@ -103,10 +108,14 @@ class KnowledgeAgent(BaseAgent):
         self.embedding_fallback = None
         self.vocabulary = set()
         self.document_frequency = defaultdict(int)
+        self.safety_check_callback = None
         self.total_documents = 0
         self.doc_vectors = {}
         self.doc_tf_idf_vectors = {}
+        self.token_cache = {}
         self.sorted_vocab = []
+        self.content_hashes = set()
+        self.expanded_terms_cache = {}
         
         self.governor = self._initialize_governance()
         self.stopwords = self._load_stopwords(self.stopwords)
@@ -138,18 +147,44 @@ class KnowledgeAgent(BaseAgent):
         self._decay_factor = value
 
     def _initialize_sbert_model(self):
-            """Initializes the SentenceTransformer model."""
-            try:
-                model_name_or_path = self.embedding_model
-                if not model_name_or_path:
-                    raise ValueError("Config 'embedding_model' is not set.")
-                
-                # The SentenceTransformer library handles caching and loading from a path or Hugging Face Hub automatically.
-                self.sbert_model = SentenceTransformer(model_name_or_path)
-                logger.info(f"SentenceTransformer model '{model_name_or_path}' loaded successfully.")
+        """Initializes the SentenceTransformer model with robust error handling."""
+        try:
+            # Get model path from config with fallback
+            model_path = self.embedding_model or "sentence-transformers/all-MiniLM-L6-v2"
+            
+            if not model_path:
+                logger.error("SBERT initialization failed: No embedding_model configured")
+                self.sbert_model = None
+                return
     
-            except Exception as e:
-                logger.error(f"Failed to load SentenceTransformer model '{self.embedding_model}': {e}", exc_info=True)
+            # Check if path is valid
+            is_local_path = os.path.exists(model_path)
+            
+            # Log model source
+            source_type = "local" if is_local_path else "Hugging Face Hub"
+            logger.info(f"Loading SBERT model from {source_type}: {model_path}")
+            
+            # Load model with timeout
+            self.sbert_model = SentenceTransformer(
+                model_path, 
+                device='cpu',  # Ensures compatibility
+                cache_folder="src/agents/knowledge/models/cache"
+            )
+            logger.info(f"SBERT model loaded successfully. Embedding dimension: {self.sbert_model.get_sentence_embedding_dimension()}")
+            
+        except Exception as e:
+            logger.error(f"SBERT initialization failed: {str(e)}")
+            logger.info("Attempting fallback to default model")
+            
+            try:
+                # Fallback to lightweight model
+                self.sbert_model = SentenceTransformer(
+                    "sentence-transformers/all-MiniLM-L6-v2",
+                    device='cpu'
+                )
+                logger.warning("Using fallback SBERT model: sentence-transformers/all-MiniLM-L6-v2")
+            except Exception as fallback_error:
+                logger.critical(f"Fallback model failed: {str(fallback_error)}")
                 self.sbert_model = None
 
     def _initialize_governance(self):
@@ -172,9 +207,10 @@ class KnowledgeAgent(BaseAgent):
 
     def load_from_directory(self):
         """Loads all .txt and .json files in the directory as knowledge documents."""
+        logger.debug(f"Loading documents from: {self.directory_path}")
         if not os.path.isdir(self.directory_path):
             logger.error(f"Invalid directory: {self.directory_path}")
-            return 0  # Explicitly return 0 when directory is invalid
+            return 0
     
         initial_count = len(self.knowledge_agent)
     
@@ -184,10 +220,11 @@ class KnowledgeAgent(BaseAgent):
                 if fname.endswith(".txt"):
                     with open(fpath, "r", encoding="utf-8") as f:
                         text = f.read().strip()
-                        self.add_document(text, metadata={
+                        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                        self.add_document(text, doc_id=content_hash, metadata={
                             "source": fname,
                             "timestamp": time.time(),
-                            "checksum": hashlib.sha1(text.encode("utf-8")).hexdigest()
+                            "checksum": content_hash
                         })
                 elif fname.endswith(".json"):
                     with open(fpath, "r", encoding="utf-8") as f:
@@ -200,7 +237,8 @@ class KnowledgeAgent(BaseAgent):
                             else:
                                 logger.warning(f"Unexpected entry format in {fname}: {type(entry)} — {entry}")
                                 continue
-                            self.add_document(text, metadata={"source": fname})
+                            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                            self.add_document(text, doc_id=content_hash, metadata={"source": fname})
             except Exception as e:
                 logger.error(f"Failed to load {fname}: {str(e)}", exc_info=True)
     
@@ -245,7 +283,7 @@ class KnowledgeAgent(BaseAgent):
             return _tokenizer_instance
     
         try:
-            model_path = self.embedding_model_path or self.embedding_model
+            model_path = self.embedding_model
     
             if not model_path or not os.path.exists(model_path):
                 raise FileNotFoundError(f"Tokenizer path not found: {model_path}")
@@ -265,7 +303,21 @@ class KnowledgeAgent(BaseAgent):
 
     def add_document(self, text, doc_id=None, metadata=None):
         """Store documents, generate TF-IDF, and dense embeddings."""
-        doc_id = doc_id or str(uuid.uuid4())
+        # Generate content-based hash for deduplication
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        
+        # Skip if content already exists (regardless of doc_id)
+        if content_hash in self.content_hashes:
+            logger.debug(f"Document content already exists. Skipping.")
+            return
+        self.content_hashes.add(content_hash)
+    
+        doc_id = doc_id or content_hash # str(uuid.uuid4())
+
+        # Skip very short documents
+        if not isinstance(text, str) or len(text.strip()) < 3:
+            logger.debug(f"Skipping short document: '{text}'")
+            return
 
         if isinstance(text, tuple) and len(text) == 3:
             self.ontology_manager.add_triple(*text)
@@ -315,6 +367,16 @@ class KnowledgeAgent(BaseAgent):
 
         tf_idf_vector_dict = self._calculate_tfidf(tokens)
         self.doc_tf_idf_vectors[doc_id] = tf_idf_vector_dict
+
+        # Safety validation before adding document
+        if self.safety_check_callback:
+            validation = self._validate_with_safety(
+                {"operation": "add_document", "content": text[:500]},
+                {"source": "knowledge_agent"}
+            )
+            if not validation:
+                logger.warning("Document addition blocked by safety check")
+                return  # Skip adding document
         
         logger.debug(f"Added document {doc_id}. Total docs: {self.total_documents}. Vocab size: {len(self.vocabulary)}")
         
@@ -350,19 +412,83 @@ class KnowledgeAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Web retrieval failed: {str(e)}")
             return ""
+        
+    def precompute_expansions(self, terms: set, max_terms=5000):
+        """Batch precompute with size limits and parallelization"""
+        # Filter to most significant terms
+        significant_terms = nlargest(max_terms, terms, key=lambda term: len(term))
+        
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(self._compute_expansion, term): term for term in significant_terms}
+            for future in tqdm(as_completed(futures), total=len(significant_terms), desc="Precomputing expansions"):
+                term = futures[future]
+                try:
+                    self.expanded_terms_cache[term] = future.result()
+                except Exception as e:
+                    logger.error(f"Expansion failed for {term}: {e}")
+    
+    def _compute_expansion(self, term: str) -> str:
+        """Non-recursive expansion with cycle protection"""
+        expanded = set([term])
+        visited = set()
+        queue = deque([term])
+        
+        while queue:
+            current = queue.popleft()
+            if current in visited:
+                continue
+            visited.add(current)
+            
+            # Local ontology
+            if current in self.ontology:
+                # Add type
+                if (t := self.ontology[current].get('type')):
+                    expanded.add(t)
+                    queue.append(t)
+                    
+                # Add relations
+                for pred, obj in self.ontology[current].get('relations', set()):
+                    expanded.add(pred)
+                    expanded.add(obj)
+                    queue.append(obj)
+            
+            # Ontology manager
+            for related in self.ontology_manager.expand_query([current]):
+                expanded.add(related)
+                queue.append(related)
+                
+        return " ".join(expanded)
+            
+    def get_expansion(self, term: str) -> str:
+        """Get cached expansion or return term if not found"""
+        return self.expanded_terms_cache.get(term, term)
 
     def retrieve(self, query, k=5):
         cache_key = hashlib.sha256(query.encode()).hexdigest()
         start_time = time.time()
-        cache_hit = self.cache.get(cache_key) is not None
+        cache_hit = False
 
-        cached_result = self.cache.get(cache_key)
-        if cached_result is not None:
-            self.performance_metrics['cache_hits'].append(1)
-            self.performance_metrics['retrieval_times'].append(time.time() - start_time)
-            return cached_result
-        else:
-            self.performance_metrics['cache_hits'].append(0)
+        # Clear cache periodically
+        if len(self.expanded_terms_cache) > 100000:
+            self.expanded_terms_cache.clear()
+        
+        # Use lock for thread-safe cache access
+        with self.cache_lock:
+            cached_result = self.knowledge_cache.get(cache_key)
+            if cached_result is not None:
+                cache_hit = True
+                self.performance_metrics['cache_hits'].append(1)
+                self.performance_metrics['retrieval_times'].append(time.time() - start_time)
+                return cached_result
+            else:
+                self.performance_metrics['cache_hits'].append(0)
+
+        # Handle wildcard query - return all documents
+        if query.strip() == "*":
+            return [
+                (1.0, doc)  # Max similarity score
+                for doc in self.knowledge_agent
+            ][:k]
 
         # Preprocess and validate
         query_tokens = self._preprocess(query)
@@ -390,19 +516,12 @@ class KnowledgeAgent(BaseAgent):
                 similarities.append((similarity, doc))
 
         results = nlargest(k, similarities, key=lambda x: x[0])
-        if len(self.cache) > self.cache_size:
-            self.cache.popitem()
-        self.cache.set(cache_key, results)
 
-        self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in results])
-    
-        expanded_query_text = query
         if self.use_ontology_expansion and self.first_pass:
             query_terms = self._preprocess(query)
-            expanded_terms = self._expand_with_ontology(query_terms)
-            if expanded_terms:
-                expanded_query_text = " ".join(expanded_terms)
-                logger.debug(f"Original query: '{query}', Expanded query for retrieval: '{expanded_query_text}'")
+            expanded_terms = [self.get_expansion(term) for term in query_terms]
+            expanded_query_text = " ".join(expanded_terms)
+            logger.debug(f"Original query: '{query}', Expanded query for retrieval: '{expanded_query_text}'")
 
         # --- Dense Retrieval ---
         dense_similarities = []
@@ -427,7 +546,6 @@ class KnowledgeAgent(BaseAgent):
             if query_tokens:
                 query_tfidf_vector_dict = self._calculate_tfidf(query_tokens)
                 # Convert query TF-IDF dict to NumPy array based on current vocabulary for consistent comparison
-                # This requires a stable, sorted vocabulary list
                 current_sorted_vocab = sorted(list(self.vocabulary)) # Get a stable order
                 query_tfidf_numpy = np.array([query_tfidf_vector_dict.get(term, 0.0) for term in current_sorted_vocab])
 
@@ -467,7 +585,7 @@ class KnowledgeAgent(BaseAgent):
         else:
             logger.error(f"Unknown retrieval mode: {self.retrieval_mode}")
             return []
-
+        
         # Sort and get top-k
         # Ensure unique documents if combining, then sort
         unique_docs = {}
@@ -477,7 +595,6 @@ class KnowledgeAgent(BaseAgent):
         
         results_before_k = sorted(list(unique_docs.values()), key=lambda x: x[0], reverse=True)
         final_k_results = results_before_k[:k]
-
 
         # Governance and Bias Auditing
         if self.governor:
@@ -496,12 +613,91 @@ class KnowledgeAgent(BaseAgent):
             final_k_results = self._apply_bias_analysis(final_k_results)
 
         serializable_results = [(float(score), doc) for score, doc in final_k_results]
-        self.cache.set(cache_key, serializable_results)
+        
+        # Thread-safe cache update
+        with self.cache_lock:
+            if len(self.knowledge_cache) > self.cache_size:
+                self.knowledge_cache.popitem()
+            self.knowledge_cache.set(cache_key, serializable_results)
+            
         self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in final_k_results])
         self.performance_metrics['retrieval_times'].append(time.time() - start_time)
         
-        logger.info(f"Retrieved {len(final_k_results)} documents for query '{query}' using {self.retrieval_mode} mode.")
+        safe_query = query.encode('ascii', 'replace').decode('ascii')
+        logger.info(f"Retrieved {len(final_k_results)} documents for query '{safe_query}' using {self.retrieval_mode} mode.")
         return final_k_results
+    
+    #def retrieve_batch(self, queries: List[str], k: int = 2) -> List[Tuple[float, Dict[str, Any]]]:
+    #    """
+    #    Retrieves relevant documents for a batch of queries efficiently.
+    #    Fixed implementation using existing attributes and methods.#
+
+    #    Args:
+    #        queries (List[str]): A list of query strings.
+    #        k (int): The number of documents to retrieve for each query.
+
+    #    Returns:
+    #        A list where each element is a list of retrieved documents for the corresponding query.
+    #    """
+    #    if not queries or not self.knowledge_agent:
+    #        return [[] for _ in queries]
+            
+        #try:
+            # Process in chunks to avoid resource exhaustion
+            #CHUNK_SIZE = 500  # Optimal for memory/CPU balance
+            #batch_results = [None] * len(queries)
+            
+            #with tqdm(total=len(queries), desc="Batch Retrieval") as pbar:
+            #    for start_idx in range(0, len(queries), CHUNK_SIZE):
+            #        end_idx = min(start_idx + CHUNK_SIZE, len(queries))
+            #        chunk = queries[start_idx:end_idx]
+                    
+            #        with ThreadPoolExecutor(max_workers=8) as executor:
+            #            future_to_index = {
+            #                executor.submit(self.retrieve, query, k): idx 
+            #                for idx, query in enumerate(chunk, start=start_idx)
+            #            }
+                        
+            #            for future in as_completed(future_to_index):
+            #                idx = future_to_index[future]
+            #                try:
+            #                    batch_results[idx] = future.result()
+            #                except Exception as e:
+            #                    logger.error(f"Retrieval failed for query index {idx}: {e}")
+            #                    batch_results[idx] = []
+            #                finally:
+            #                    pbar.update(1)
+
+            # return batch_results
+
+        #except Exception as e:
+        #    logger.error(f"Batch retrieval failed: {str(e)}")
+        #    return [[] for _ in queries]
+
+    def retrieve_batch(self, original_texts: List[str], k: int = 2) -> List[Tuple[float, Dict[str, Any]]]:
+
+        if not original_texts or not self.knowledge_agent:
+            return [[] for _ in original_texts]
+
+        CHUNK_SIZE = 1000
+        batch_results = [None] * len(original_texts)
+        
+        for start_idx in range(0, len(original_texts), CHUNK_SIZE):
+            end_idx = min(start_idx + CHUNK_SIZE, len(original_texts))
+            chunk = original_texts[start_idx:end_idx]
+            
+            # Process chunk with separate thread pool
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_index = {
+                    executor.submit(self.retrieve, query, k=2): idx 
+                    for idx, query in enumerate(chunk, start=start_idx)
+                }
+                
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    batch_results[idx] = future.result()
+
+        return batch_results
 
     def _expand_with_ontology(self, terms):
         """Hierarchical expansion with property inheritance with cycle detection"""
@@ -542,8 +738,12 @@ class KnowledgeAgent(BaseAgent):
 
     def _preprocess(self, text: str) -> List[str]:
         """Text normalization and tokenization."""
-        text = re.sub(r'[^\w\s]', '', text.lower()) # Keep alphanumeric and spaces
-        tokens = [token for token in text.split() if token and token not in self.stopwords] # Filter empty tokens
+        cache_key = text.lower()
+        if cache_key in self.token_cache:
+            return self.token_cache[cache_key]
+        
+        tokens = [token for token in text.split() if token not in self.stopwords]
+        self.token_cache[cache_key] = tokens
         return tokens
 
     def _calculate_tfidf(self, tokens: List[str]) -> Dict[str, float]:
@@ -1046,6 +1246,52 @@ class KnowledgeAgent(BaseAgent):
         
         return cosine_sim(np_vec1, np_vec2)
     
+    def _validate_with_safety(self, action_params: Dict, context: Optional[Dict] = None) -> bool:
+        """
+        Executes registered safety validation if available
+        
+        Returns:
+            True if approved, False if rejected or no callback registered
+        """
+        if not self.safety_check_callback:
+            return True  # Default approve if no callback
+        
+        try:
+            result = self.safety_check_callback(action_params, context or {})
+            return result.get('approved', False)
+        except Exception as e:
+            logger.error(f"Safety validation failed: {str(e)}")
+            return False  # Reject on failure
+    
+    def register_safety_check(self, safety_check_callback: callable):
+        """
+        Registers a safety validation callback that can be used to validate 
+        knowledge operations. This provides a flexible hook for security validation.
+        
+        Args:
+            safety_check_callback: Function with signature:
+                (action_params: Dict, action_context: Optional[Dict]) -> Dict
+                Must return a dict with at least 'approved' (bool) key
+        """
+        if not callable(safety_check_callback):
+            logger.error("Safety check callback must be callable")
+            raise TypeError("Safety callback must be callable")
+        
+        # Validate callback signature
+        try:
+            test_result = safety_check_callback(
+                {"action": "test_validation"},
+                {"context": "signature_verification"}
+            )
+            if not isinstance(test_result, dict) or 'approved' not in test_result:
+                raise ValueError("Callback must return dict with 'approved' key")
+        except Exception as e:
+            logger.error(f"Safety callback validation failed: {str(e)}")
+            raise
+        
+        self.safety_check_callback = safety_check_callback
+        logger.info("Safety validation callback registered successfully")
+    
     def attach_learning(self, learning_agent):
         """Connect LearningAgent to KnowledgeAgent"""
         self.learning_agent = learning_agent
@@ -1070,8 +1316,10 @@ if __name__ == "__main__":
     print("\n* * * * * Phase 3 * * * * *\n")
     query="AI ethics principles for autonomous systems"
     retriever = agent.retrieve(query=query, k=5)
+    batch = agent.retrieve_batch(k=2, original_texts=query)
 
     printer.status("RETRIEVE", retriever, "success" if retriever else "error")
+    printer.pretty("BATCH", batch, "success" if batch else "error")
 
     print("\n* * * * * Phase 4 - Memory * * * * *\n")
     key = "ethics_guideline_v1"

@@ -7,11 +7,11 @@ import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Dict, Any, Union
 
+from src.agents.base.utils.math_science import (sigmoid, sigmoid_derivative, relu, relu_derivative,
+                                                tanh, tanh_derivative, leaky_relu, leaky_relu_derivative, 
+                                                elu, elu_derivative, swish, swish_derivative, softmax,
+                                                cross_entropy as cross_entropy_loss_func, cross_entropy_derivative)
 from src.agents.safety.utils.config_loader import load_global_config, get_config_section
-from src.agents.math.utils.math_science import (
-        sigmoid, sigmoid_derivative, relu, relu_derivative, tanh, tanh_derivative,
-        leaky_relu, leaky_relu_derivative, elu, elu_derivative, swish, swish_derivative,
-        softmax, cross_entropy as cross_entropy_loss_func, cross_entropy_derivative)
 from logs.logger import get_logger
 
 logger = get_logger("Cyber-Security Neural-Network")

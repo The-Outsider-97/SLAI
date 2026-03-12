@@ -157,6 +157,9 @@ class ResourceProfile:
     ram: int = 0  # In GB
     specialized_hardware: List[str] = field(default_factory=list)
 
+    def count_requirements(self):
+        return len(self.__dict__)
+
 @dataclass
 class ClusterResources:
     gpu_total: int = 0
@@ -321,19 +324,23 @@ class Task:
     learning_curve: float = 0.0  # How much the task improves with repetition
     example_goal: Optional[Dict] = field(default=None)
 
-    #def __init__(self, **kwargs):
-    #    # Set default values for critical attributes
-    #    self.start_time = kwargs.get('start_time', time.time() + 60)
-    #    self.deadline = kwargs.get('deadline', time.time() + 3600)
-    #    self.duration = kwargs.get('duration', 300)
-        # ... other attributes ...
-        
-        # Auto-set derived fields
-    #    if not hasattr(self, 'end_time'):
-    #        self.end_time = self.start_time + self.duration
-
     def __post_init__(self):
         self.type = self.task_type
+        current_time = time.time()
+        
+        # Convert relative times to absolute times
+        if isinstance(self.start_time, (int, float)) and self.start_time < current_time:
+            self.start_time = current_time + self.start_time
+            
+        if isinstance(self.deadline, (int, float)) and self.deadline < current_time:
+            self.deadline = current_time + self.deadline
+            
+        # Set derived fields
+        if self.estimated_duration == 0.0 and self.duration > 0:
+            self.estimated_duration = self.duration
+        if not hasattr(self, 'end_time') and self.start_time and self.duration:
+            self.end_time = self.start_time + self.duration
+
         if not hasattr(self, 'methods'):
             self.methods = []
         # Set estimated_duration to duration if not specified

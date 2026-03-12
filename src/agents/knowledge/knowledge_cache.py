@@ -3,6 +3,7 @@ import os
 import re
 import string
 import json, yaml
+import time
 import hashlib
 
 from typing import Optional, Any, Dict, Union, List
@@ -36,6 +37,9 @@ class KnowledgeCache:
         self.character_ngram = self.cache_config.get('character_ngram')
         self.enable_encryption = self.cache_config.get('enable_encryption')
 
+        self._expiration = {}
+        self._last_cleanup_time = time.time()
+
         logger.info(f"Knowledge Cache initialized with: {self.cache}")
 
     def __contains__(self, key):
@@ -48,6 +52,14 @@ class KnowledgeCache:
         return len(self.cache)
 
     def get(self, key: str) -> Optional[Any]:
+        """Retrieve value with expiration check"""
+        current_time = time.time()
+        
+        # Check if expired
+        if key in self._expiration and self._expiration[key] <= current_time:
+            self._evict(key)
+            return None
+
         if key not in self.cache:
             return None
             
@@ -60,7 +72,17 @@ class KnowledgeCache:
             return json.loads(self.cipher.decrypt(value).decode())
         return value
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+        """Set a value with optional TTL (in seconds)"""
+        current_time = time.time()
+        
+        # Handle TTL if provided
+        if ttl is not None:
+            self._expiration[key] = current_time + ttl
+        elif key in self._expiration:
+            # Clear existing TTL if not provided
+            del self._expiration[key]
+
         # Encrypt if enabled (using dictionary access)
         if self.cache_config.get('enable_encryption'):
             value = self.cipher.encrypt(json.dumps(value).encode())
@@ -69,10 +91,33 @@ class KnowledgeCache:
         if key in self.cache:
             self.cache.move_to_end(key)
         self.cache[key] = value
-        
+
+        # Perform lazy expiration check
+        if current_time - self._last_cleanup_time > 300:  # Every 5 minutes
+            self.cleanup_expired()
+            self._last_cleanup_time = current_time
+
         # Evict oldest if over capacity
         if len(self.cache) > self.max_size:
             self.cache.popitem(last=False)
+
+    def cleanup_expired(self):
+        """Remove all expired items"""
+        current_time = time.time()
+        expired_keys = [
+            key for key, expiry in self._expiration.items() 
+            if expiry <= current_time
+        ]
+        for key in expired_keys:
+            self._evict(key)
+        return len(expired_keys)
+
+    def _evict(self, key):
+        """Remove key from all data structures"""
+        if key in self.cache:
+            del self.cache[key]
+        if key in self._expiration:
+            del self._expiration[key]
 
     def hash_query(self, query: str) -> str:
         """Semantic hashing using SimHash or MD5 with configurable methods"""

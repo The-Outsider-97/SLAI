@@ -68,6 +68,10 @@ class MoveToAction(BaseAction):
             
             # Main movement loop
             while not self._has_reached_destination():
+                if self.context.get("energy", 0) <= 0:
+                    logger.error("Energy depleted!")
+                    return False
+
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > max_duration:
@@ -171,8 +175,10 @@ class MoveToAction(BaseAction):
                 neighbor = (current[0] + dx, current[1] + dy)
                 
                 # Check bounds and obstacles using modulo indexing
-                grid_x = int(neighbor[0]) % len(grid)
-                grid_y = int(neighbor[1]) % len(grid[0])
+                if not (0 <= neighbor[0] < len(grid)) or not (0 <= neighbor[1] < len(grid[0])):
+                    continue  # Skip out-of-bounds
+                grid_x = int(neighbor[0])
+                grid_y = int(neighbor[1])
                 if grid[grid_x][grid_y] == 1:  # 1 = obstacle
                     continue
                     
@@ -543,9 +549,10 @@ if __name__ == "__main__":
         printer.pretty("POSITION", f"({pos[0]:.2f}, {pos[1]:.2f})", "info")
 
     print("\n* * * * * Phase 4 - Execute * * * * *\n")
+    execute = move_action._execute()
 
     try:
-        printer.pretty("EXECUTION", move_action._execute(), "success")
+        printer.pretty("EXECUTION", execute, "success" if execute else "error")
     except ActionInterruptionError:
         printer.pretty("INTERRUPT", "Action safely interrupted", "warning")
 

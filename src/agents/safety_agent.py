@@ -1,19 +1,4 @@
 
-"""
-SAFE_AI_FACTORY.PY - Constitutional Safety Framework
-
-Implements:
-1. RLHF-based reward modeling (Christiano et al., 2017)
-2. Constitutional AI principles (Bai et al., 2022)
-3. Mechanistic interpretability (Bereska & Gavves, 2024)
-4. STPA safety analysis (Leveson, 2011)
-
-Academic Foundations:
-- Constitutional Rules: Anthropic's Constitutional AI (arXiv:2212.08073)
-- Safety Layers: DeepMind's SAFE Framework (arXiv:2310.00064)
-- Interpretability: Causal Scrubbing (arXiv:2304.00683)
-"""
-
 from datetime import datetime
 import random
 import hashlib
@@ -39,7 +24,6 @@ from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.safety.compliance_checker import ComplianceChecker
 from src.agents.safety.attention_monitor import AttentionMonitor
 from src.agents.safety.adaptive_security import AdaptiveSecurity
-from src.agents.collaborative.shared_memory import get_shared_memory
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
@@ -111,6 +95,8 @@ class SafetyAgent(BaseAgent):
 
         self.learning_factory = self._init_learning_factory()
 
+        logger.info(f"Safety Agent succesfully initialized with: {self.training_data}")
+
     def _load_constitution(self) -> Dict:
         """Load constitutional rules from the path specified in SafetyAgentConfig."""
         try:
@@ -133,10 +119,8 @@ class SafetyAgent(BaseAgent):
         # Initialize Learning Factory for adaptive risk aggregation
         if self.enable_learnable_aggregation:
             from src.agents.learning.learning_factory import LearningFactory
-            learning_factory_config = self.global_config.get('learning_factory', {})
             self.learning_factory = LearningFactory(
                 env=self._create_risk_aggregation_env(),
-                config=learning_factory_config
             )
             self.risk_aggregator = None
         else:
@@ -514,9 +498,7 @@ class SafetyAgent(BaseAgent):
                 self.observation_space = gym.spaces.Box(
                     low=0, high=1, shape=(6,), dtype=np.float32
                 )
-                self.action_space = gym.spaces.Box(
-                    low=0, high=1, shape=(1,), dtype=np.float32
-                )
+                self.action_space = gym.spaces.Discrete(101)  # 101 possible actions (0-100)
                 self.current_obs = None
                 self.ground_truth = None
                 self.step_count = 0
@@ -529,8 +511,8 @@ class SafetyAgent(BaseAgent):
     
             def step(self, action):
                 self.step_count += 1
-                prediction = np.clip(action[0], 0, 1)
-                reward = -abs(prediction - self.ground_truth)  # lower distance = higher reward
+                prediction = action / 100.0  # Convert to [0.0, 1.0]
+                reward = -abs(prediction - self.ground_truth)
                 done = self.step_count >= self.max_steps
                 obs, self.ground_truth = self._generate_sample()
                 self.current_obs = obs
@@ -828,7 +810,7 @@ class SafetyAgent(BaseAgent):
             if parsed_email_data:
                 self.adaptive_security.train_phishing_model('email', parsed_email_data)
 
-        url_training_data = self.secure_memory.recall(tag="feedback_url_phishing", top_k=1000)
+        url_training_data = self.reward_model.memory.recall(tag="feedback_url_phishing", top_k=1000)
         parsed_url_data = []
         if url_training_data:
             for item in url_training_data:
@@ -838,7 +820,7 @@ class SafetyAgent(BaseAgent):
                 self.adaptive_security.train_phishing_model('url', parsed_url_data)
 
         # Example: Retrain RewardModel (if it has a retrain method)
-        reward_model_training_data = self.secure_memory.recall(tag="feedback_reward_model", top_k=500)
+        reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
         if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
            parsed_reward_data = [item['data'] for item in reward_model_training_data] # Adjust parsing as needed
            self.reward_model.retrain_model(parsed_reward_data)
@@ -1053,14 +1035,17 @@ class SafetyAgent(BaseAgent):
 
     def update_reward_model(self, min_samples=100):
         """Trigger reward model retraining"""
+        reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
+        if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
+            parsed_reward_data = [item['value'] for item in reward_model_training_data]
+            self.reward_model.retrain_model(parsed_reward_data)
+    
         feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples*2)
-        training_data = [item['value'] for item in feedback_items]
-
         if len(feedback_items) < min_samples:
             logger.info(f"Not enough feedback ({len(feedback_items)}/{min_samples})")
             return False
 
-        training_data = [entry["data"] for entry in feedback_items]
+        training_data = [item['value'] for item in feedback_items]
         self.reward_model.retrain_model(training_data)
         return True
 
@@ -1153,11 +1138,44 @@ class SafetyAgent(BaseAgent):
     
         return analysis
 
+
+    def register_utility(self, name: str, utility: Any) -> None:
+        """
+        Register a utility object (e.g., map, database) by name.
+        These utilities can be accessed later during agent operations.
+
+        Args:
+            name: Unique identifier for the utility
+            utility: The utility object to store
+        """
+        if not hasattr(self, '_utilities'):
+            self._utilities = {}
+        self._utilities[name] = utility
+        logger.debug(f"Registered utility '{name}'")
+
+
     # --- Helper method from original for audit logging ---
     def _get_timestamp(self) -> int:
         """Simplified timestamp. Using time.time() for float precise timestamps now."""
         return int(time.time())
 
+    def predict(self, input_data: Any, context: Optional[Dict] = None) -> Dict:
+        """
+        Predict safety assessment for input data. Primary interface for safety evaluations.
+        """
+        return self.perform_task(input_data, context)
+    
+    def act(self, action_params: Dict, action_context: Optional[Dict] = None) -> Dict:
+        """
+        Validate an action before execution. Primary interface for action validation.
+        """
+        return self.validate_action(action_params, action_context)
+    
+    def get_action(self, observation: Any, context: Optional[Dict] = None) -> Dict:
+        """
+        Alias for predict() to maintain compatibility with reinforcement learning interfaces.
+        """
+        return self.predict(observation, context)
 
 if __name__ == "__main__":
     from src.agents.collaborative.shared_memory import SharedMemory

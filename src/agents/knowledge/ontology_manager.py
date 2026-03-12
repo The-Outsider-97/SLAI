@@ -5,6 +5,7 @@ import re
 import sqlite3
 
 from pathlib import Path
+from urllib.parse import quote
 from typing import Dict, List, Optional, Tuple, Union
 from rdflib import Graph, URIRef, Literal, Namespace
 from rdflib.namespace import RDF, RDFS
@@ -78,6 +79,10 @@ class OntologyManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to load ontology from DB: {str(e)}")
 
+    def _safe_uri(self, s: str) -> str:
+        """URL-encode string for safe use in URIs"""
+        return quote(s, safe='')  # Encode special characters
+
     def add_triple(self, 
                   subject: str, 
                   predicate: str, 
@@ -89,11 +94,25 @@ class OntologyManager:
             # Validate inputs
             if not all([subject, predicate, obj]):
                 raise ValueError("Subject, predicate, and object must be non-empty")
-                
+
+            # URL-encode all components
+            safe_subject = self._safe_uri(subject)
+            safe_predicate = self._safe_uri(predicate)
+
             # Prepare triple for RDF
             subj_ref = URIRef(self.ns[subject])
             pred_ref = URIRef(self.ns[predicate])
-            
+    
+            if predicate in {'is_a', 'type', 'class'}:
+                safe_obj = self._safe_uri(obj)
+                obj_ref = URIRef(self.ns[safe_obj])
+                self.graph.add((subj_ref, RDF.type, obj_ref))
+            else:
+                # Add original expression as literal
+                self.graph.add((subj_ref, pred_ref, Literal(obj)))
+                # Also store as a separate property if needed
+                self.graph.add((subj_ref, self.ns["hasExpression"], Literal(obj)))
+    
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT INTO ontology (subject, predicate, object, source, metadata)

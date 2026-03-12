@@ -1,0 +1,33 @@
+{
+  "user_id": "a5993917-daa1-4028-8607-b6fb5e2efafd",
+  "profile_type": "customer",
+  "created_at": "2025-07-11T08:25:40.897787",
+  "updated_at": "2025-07-11T08:25:40.897787",
+  "version": 1,
+  "addresses": [],
+  "payment_methods": [],
+  "order_history": [],
+  "preferences": {
+    "dietary_restrictions": [],
+    "favorite_cuisines": [],
+    "notification_preferences": {
+      "email": true,
+      "sms": false,
+      "push": true
+    }
+  },
+  "metadata": {
+    "profile_source": "self_registration",
+    "verification_status": "pending",
+    "safety_flags": {
+      "status": "review_required",
+      "recommendation": "block_or_review",
+      "final_score": 0.7000000000000001,
+      "timestamp": "2025-07-11T08:25:40.906794"
+    }
+  },
+  "name": "Test User",
+  "contact_email": "user9751@test.com",
+  "ip_address": "192.168.105.243",
+  "user_agent": "Simulated Chrome Browser"
+}

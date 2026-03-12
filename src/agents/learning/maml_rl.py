@@ -35,6 +35,7 @@ class MAMLAgent:
         self.agent_id = agent_id
         self.state_size = state_size
         self.action_size = action_size
+        #self.save_model = []
 
         # Retrieve MAML-specific parameters
         maml_config = self.config.get('maml', {})
@@ -525,6 +526,15 @@ class MAMLAgent:
     def _sample_evaluation_task(self):
         """Override with evaluation task sampling"""
         return gym.make("CartPole-v1")  # Placeholder
+    
+    def save(self, path):
+        """Save policy network weights"""
+        torch.save({
+            'policy_net': self.policy_net.state_dict(),
+            'target_net': self.target_net.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }, path)
+        logger.info(f"Saved DQN model to {path}")
 
 class DecentralizedMAMLFleet:
     def __init__(self, num_agents, global_config, env_creator_fn, state_size, action_size):

@@ -62,7 +62,11 @@ class StrategySelector:
             logger.warning("observe() called with None arguments")
             return
             
-        if not isinstance(task_embedding, torch.Tensor):
+        if isinstance(task_embedding, np.ndarray):
+            task_embedding = torch.tensor(task_embedding, dtype=torch.float32)
+        elif isinstance(task_embedding, (list, tuple)):
+            task_embedding = torch.tensor(task_embedding, dtype=torch.float32)
+        elif not isinstance(task_embedding, torch.Tensor):
             logger.error(f"task_embedding must be Tensor, got {type(task_embedding)}")
             return
             
@@ -146,4 +150,5 @@ class StrategySelector:
             strategy_index = torch.argmax(probs).item()
         
         strategy_names = list(self.agent_strategies_map.keys())
+
         return strategy_names[strategy_index]
