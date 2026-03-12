@@ -1,144 +1,88 @@
-The files tuning/ module work together to create a modular and intelligent hyperparameter tuning system, with support for Bayesian Optimization, Grid Search, CLI integration, and future extension with Reasoning Agents. Here's a breakdown of how each file contributes:
+This module provides the project’s hyperparameter-tuning surface and uncertainty-aware utility models.
 
-# Individual File Roles
-## 1. hyperparam_config_generator.py
-Purpose: Auto-generates grid and bayesian config JSON files from a default hyperparameter schema.
-Core Functions:
+## Scope
 
-create_default_config(): Specifies a rich, generalizable hyperparameter schema.
+- **Search orchestration:** `tuner.py` chooses and executes the configured strategy.
+- **Search strategies:**
+  - `bayesian_search.py` for Bayesian optimization.
+  - `grid_search.py` for exhaustive discrete search.
+- **Config management:** `configs/hyperparam.yaml` with strategy- and model-specific parameter spaces.
+- **Utilities:** `utils/` contains helper components (including the Bayesian neural network implementation).
 
-generate_and_save(): Converts this schema into two formats:
+## Design principles
 
-grid_config.json (with discrete values)
+The tuning stack should be treated as production infrastructure, not experimental notebooks:
 
-bayesian_config.json (with continuous ranges, priors)
+1. **Deterministic where practical**
+   - Explicit random seeds for optimization/model sampling.
+   - Timestamped run artifacts for traceability.
 
-Academic Insight: Enables reproducible research by enforcing consistent, declarative config formats (cf. Feurer et al., AutoML, 2019).
+2. **Strict validation and fail-fast behavior**
+   - Validate strategy settings (fold counts, call budgets, etc.) at startup.
+   - Validate search spaces (duplicate names, invalid bounds, empty candidate sets).
 
-## 2. grid_search.py
-Purpose: Performs exhaustive hyperparameter search using Cartesian product of values (brute-force).
-Core Functions:
+3. **Failure isolation**
+   - Individual trial/fold failures should not crash entire runs.
+   - Failures are logged and reflected in result artifacts.
 
-_load_search_space(): Parses grid_config.json and builds the search space.
+4. **Operational observability**
+   - Structured logs for start/stop, best-so-far updates, and failures.
+   - Persisted JSON summaries and progress plots for post-run analysis.
 
-run_search(): Iteratively tests each combination, logs, and saves the best.
+5. **Consistent interfaces**
+   - Shared conventions across search strategies for initialization, execution, and outputs.
 
-Why it matters: Grid search is mathematically guaranteed to find the global optimum only if the optimal hyperparameters lie within the grid (cf. Bergstra & Bengio, 2012).
+## Configuration contract
 
-## 3. bayesian_search.py
-Purpose: Performs Bayesian Optimization using Gaussian Processes (gp_minimize).
-Core Features:
+Primary config file: `src/tuning/configs/hyperparam.yaml`.
 
-Uses skopt.space to build search space.
+Expected top-level sections:
 
-Integrates with a reasoning agent for adaptive suggestions.
+- `hyperparameters`: model-keyed search-space definitions.
+- `tuning`: global strategy selection.
+- `bayesian_search`: Bayesian runtime settings.
+- `grid_search`: grid runtime settings.
 
-Tracks history, logs results, and serializes outputs.
+### Hyperparameter specification
 
-Advanced Behavior:
+Each parameter spec should provide:
 
-Blends suggestions from a ReasoningAgent, which can nudge the optimizer intelligently based on past performance.
+- `name` (unique per model)
+- `type` (`integer`, `real`, or `categorical` depending on strategy)
+- either explicit `values` or numeric bounds (`min`/`max`) where supported.
 
-Why it matters: Bayesian search balances exploration/exploitation better than grid or random search. Adds intelligence via the reasoning agent—potentially linked to SLAI's reasoning_agent.
+## Usage patterns
 
-## 4. tuner.py
-Purpose: Unified entry point that chooses and runs the correct strategy (grid or bayesian) using provided configs.
-Core Role:
+### Bayesian search
 
-Acts as the controller class.
+- Provide an objective function `f(params: dict) -> float`.
+- Choose objective semantics (`minimize` or `maximize`).
+- Run `run_search()` and consume:
+  - best parameters,
+  - best score,
+  - optimizer state.
 
-Supports dynamic selection, injection of evaluation_function, and parameter overrides.
+### Grid search
 
-Why it matters: This abstraction lets any SLAI agent or config plug into a standardized tuner.
+- Provide evaluation function
+  `f(params, X_train, y_train, X_val, y_val) -> float`.
+- Run `run_search(X, y)` with data arrays.
+- Consume best parameters and persisted result summary.
 
-## 5. tuner_cli.py
-Purpose: Command-line interface to launch the tuner with arguments.
-Key Capabilities:
+## Bayesian Neural Network utility
 
-Select strategy with --strategy.
+`utils/bayesian_neural_network.py` provides a lightweight variational BNN that can be used by planning/selection components for uncertainty-aware scoring.
 
-Specify config via --config.
+Key behavior:
 
-Uses a realistic RLAgent for training/evaluation.
+- Gaussian variational posterior over weights/biases.
+- Reparameterization trick for Monte Carlo estimates.
+- ELBO-based updates and predictive uncertainty from MC sampling.
+- JSON save/load for reproducible deployment snapshots.
 
-What makes it powerful: Enables non-programmers or pipelines to trigger experiments with reproducible CLI commands—critical for MLops.
+## Operational recommendations
 
-## 6. hyperparam.yaml
-Purpose: Unified configuration file for experiments.
-Sections:
-
-Agent metadata (DQN, MAML, RSI)
-
-Hyperparameter definitions
-
-Tuning strategy and paths
-
-Monitoring, rollback, compliance, logging
-
-Why it’s essential: YAML is preferred in academic/industry ML for structured, readable, and easily overridden config control (cf. Ray Tune & Hydra).
-
-## 7. bayesian_config.json and grid_config.json
-Generated by: hyperparam_config_generator.py
-Purpose: Precomputed tuning schemas for each search strategy:
-
-grid_config.json: Fixed value lists
-
-bayesian_config.json: Ranges + priors for smarter search
-
----
-1. [Author or agent] writes tuning schema in YAML or uses generator.
-2. `hyperparam_config_generator.py` creates configs.
-3. `tuner.py` loads chosen strategy and config.
-
-   ├── if grid → `GridSearch`
-   └── if bayesian → `BayesianSearch`
-5. Evaluation function (usually a `RLAgent`) trains + scores model.
-6. Best params & results saved in `results/`, monitored via logs.
-7. `tuner_cli.py` provides easy shell-level access to this entire pipeline.
----
-
-```mermaid 
-graph TD
-    A[Start Tuning Process] --> B{Use Existing Config or Generate New?}
-    B -->|Generate| C[hyperparam_config_generator.py<br>Create JSON config files]
-    B -->|Existing| D[Use YAML or JSON Config]
-
-    D --> E[Parse config - tuner.py]
-    C --> E
-
-    E --> F{Strategy?}
-    F -->|Bayesian| G[bayesian_search.py<br>Run gp_minimize]
-    F -->|Grid| H[grid_search.py<br>Run full Cartesian product]
-
-    G --> I[Optionally Query Reasoning Agent]
-    H --> J[Evaluate with RLAgent]
-
-    I --> K[Evaluate with RLAgent]
-    K --> L[Log Score + Params]
-    J --> L
-
-    L --> M[Compare & Save Best]
-    M --> N[Export Results to JSON]
-    N --> O[Done]
-
-    subgraph CLI Usage
-        P[tuner_cli.py] --> D
-        P --> E
-    end
-
-    subgraph Controller Layer
-        E[tuner.py]
-    end
-```
-
-```mermaid 
-graph LR
-    A[Grid Config] -->|Explicit Values| B[Space Generation]
-    B --> C[Combinatorial Validation]
-    C -->|Pass| D[Parallel Evaluation]
-    D --> E[Statistical Analysis]
-    E --> F[Space Pruning]
-    F --> G{Improvement Significant?}
-    G -->|Yes| D
-    G -->|No| H[Final Ranking]
-```
+- Keep search spaces bounded and auditable; avoid unreviewed auto-generated large spaces.
+- Track dependency versions (`numpy`, `scikit-learn`, `scikit-optimize`, `joblib`, `matplotlib`) in lock files.
+- Prefer small smoke tests in CI and larger tuning jobs in scheduled/batch environments.
+- Version artifact schemas if external tooling depends on JSON field names.
