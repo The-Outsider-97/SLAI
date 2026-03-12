@@ -6,7 +6,7 @@ This module provides the metadata and adaptation layer used to register agent im
 
 ```text
 factory/
-├── __init__,py
+├── __init__.py
 ├── agent_meta_data.py
 ├── metrics_adapter.py
 ├── configs/
@@ -63,8 +63,3 @@ flowchart LR
     F --> G[update_factory_config]
     G --> H[Adjusted exploration/risk params]
 ```
-
-## Notes
-
-- This module is focused on orchestration metadata and control adaptation, not task execution.
-- The filename `__init__,py` appears to include a comma; if package import issues appear, verify whether this is intentional.
