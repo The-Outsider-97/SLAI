@@ -14,10 +14,10 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication # no-audit
 
 from shared_memory_cleaner import SharedMemoryCleaner
-from src.collaborative.shared_memory import SharedMemory
 from src.agents.agent_factory import AgentFactory
 from src.utils.system_optimizer import SystemOptimizer
 from src.agents.collaborative_agent import CollaborativeAgent
+from src.agents.collaborative.shared_memory import SharedMemory
 from frontend.startup_screen import StartupScreen # no-audit
 from frontend.main_window import MainWindow # no-audit
 from logs.logger import get_logger, get_log_queue
