@@ -1,133 +1,129 @@
-from collections import defaultdict, deque
-from typing import TYPE_CHECKING, Any, Dict, List
-
-import torch
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from src.agents.factory.utils.config_loader import get_config_section, load_global_config
 from logs.logger import PrettyPrinter, get_logger
 
-if TYPE_CHECKING:
-    from src.agents.agent_factory import AgentFactory
-
-logger = get_logger("Metrics Adapter")
+logger = get_logger("Agent Meta Data")
 printer = PrettyPrinter
 
 
-class MetricsAdapter:
-    """Bridge metrics analysis with configuration adaptation."""
+class DotDict(dict):
+    def __getattr__(self, item):
+        return self.get(item)
 
-    def __init__(self):
+
+@dataclass(slots=True)
+class AgentMetaData:
+    name: str
+    class_name: str
+    module_path: str
+    required_params: Tuple[str, ...] = ()
+    version: Optional[str] = None
+    description: str = ""
+    author: str = "Unknown"
+    dependencies: Optional[List[str]] = None
+    config: Optional[Dict] = None
+    meta_config: Optional[Dict] = None
+    required_fields: Optional[List[str]] = None
+    validation_rules: Optional[Dict] = None
+
+    def __post_init__(self):
         self.config = load_global_config()
-        self.meta_config = get_config_section("metrics")
+        self.meta_config = get_config_section("agent_meta")
+        if self.version is None:
+            self.version = self.meta_config.get("default_version")
 
-        self.history_size = self.meta_config.get("history_size", 50)
-        self.metric_history = deque(maxlen=self.history_size)
-
-        self.error_config = self.meta_config.get(
-            "error_config",
-            {
-                "fairness_target": 0.0,
-                "performance_target": 0.0,
-                "bias_target": 0.0,
-            },
+        self.required_fields = self.meta_config.get(
+            "required_fields", ["name", "class_name", "module_path", "version"]
         )
-        self.pid_params = self.meta_config.get("pid_params", {"Kp": 0.1, "Ki": 0.01, "Kd": 0.05})
-        self.safety_bounds = self.meta_config.get("safety_bounds", {"default": 1.0})
+        self.validation_rules = DotDict(
+            self.meta_config.get(
+                "validation_rules",
+                {"max_name_length": 64, "allowed_modules": ["agents.", "src.agents."]},
+            )
+        )
 
-        self._init_control_parameters()
+        self.dependencies = self.dependencies or []
+        self._validate()
 
-    def _init_control_parameters(self):
-        self.Kp = self.pid_params["Kp"]
-        self.Ki = self.pid_params["Ki"]
-        self.Kd = self.pid_params["Kd"]
-        self.integral = defaultdict(float)
-        self.prev_error = defaultdict(float)
+    def _validate(self):
+        for field in self.required_fields:
+            if not getattr(self, field, None):
+                raise ValueError(f"Missing required field: {field}")
 
-    def _calculate_metric_deltas(self) -> Dict[str, float]:
-        if len(self.metric_history) < 2:
-            return {}
+        max_length = self.validation_rules.max_name_length or 64
+        if len(self.name) > max_length:
+            raise ValueError(f"Name exceeds maximum length of {max_length} characters")
 
-        current = self.metric_history[-1]
-        previous = self.metric_history[-2]
+        allowed_modules = self.validation_rules.allowed_modules or []
+        if allowed_modules and not any(self.module_path.startswith(m) for m in allowed_modules):
+            raise ValueError(f"Invalid module path: {self.module_path}")
 
+    def to_dict(self) -> Dict:
         return {
-            "fairness": current.get("demographic_parity", 0) - previous.get("demographic_parity", 0),
-            "performance": current.get("calibration_error", 0) - previous.get("calibration_error", 0),
+            "name": self.name,
+            "class_name": self.class_name,
+            "module_path": self.module_path,
+            "version": self.version,
+            "dependencies": self.dependencies,
+            "config": self.config,
         }
 
-    def _calculate_error(self, metrics: Dict[str, Any], metric_type: str) -> float:
-        target = self.error_config.get(f"{metric_type}_target", 0.0)
-        current = metrics.get(metric_type, {}).get("value", {})
+    @classmethod
+    def from_dict(cls, data: Dict) -> "AgentMetaData":
+        return cls(**data)
 
-        try:
-            if metric_type == "fairness":
-                return self._calculate_fairness_error(current, target)
-            if metric_type == "performance":
-                return self._calculate_performance_error(current, target)
-            if metric_type == "bias":
-                return self._calculate_bias_error(metrics, target)
-            raise ValueError(f"Unknown metric type: {metric_type}")
-        except KeyError as e:
-            logger.warning(f"Missing metric data for {metric_type}: {str(e)}")
-            return 0.0
 
-    def _calculate_fairness_error(self, current: Dict[str, float], target: float) -> float:
-        dpd = current.get("demographic_parity_diff", 0.0)
-        return (dpd - target) / (1.0 + abs(dpd))
+class AgentRegistry:
+    def __init__(self):
+        self.config = load_global_config()
+        self.registry_config = get_config_section("agent_registry")
+        self.agents: Dict[str, AgentMetaData] = {}
+        self.version_map = defaultdict(list)
+        self.dependency_graph = defaultdict(set)
 
-    def _calculate_performance_error(self, current: Dict[str, float], target: float) -> float:
-        calibration_error = current.get("calibration_error", 0.0)
-        accuracy = current.get("accuracy", 0.0)
-        return (calibration_error - target) * (1.0 - accuracy)
+    def register(self, metadata: AgentMetaData):
+        if not isinstance(metadata, AgentMetaData):
+            raise TypeError("Only AgentMetaData objects can be registered")
 
-    def _calculate_bias_error(self, metrics: Dict[str, Any], target: float) -> float:
-        group_metrics = metrics.get("bias", {}).get("group_metrics", {})
-        if len(group_metrics) < 2:
-            return 0.0
+        self.agents[metadata.name] = metadata
+        self.version_map[metadata.version].append(metadata.name)
 
-        values = [v.get("score", 0.0) for v in group_metrics.values()]
-        max_disparity = max(values) - min(values)
-        return (max_disparity - target) / (1.0 + max_disparity)
+        for dep in metadata.dependencies:
+            self.dependency_graph[metadata.name].add(dep)
 
-    def process_metrics(self, metrics: Dict[str, Any], agent_types: List[str]) -> Dict[str, torch.Tensor]:
-        self.metric_history.append(metrics)
-        delta = self._calculate_metric_deltas()
+        logger.info(f"Registered agent: {metadata.name} v{metadata.version}")
 
-        adjustments = {}
-        for metric_type in ["fairness", "performance", "bias"]:
-            error = self._calculate_error(metrics, metric_type)
-            adjustments.update(self._pid_control(metric_type, error, delta.get(metric_type, 0.0)))
+    def get(self, agent_name: str, version: Optional[str] = None) -> AgentMetaData:
+        if agent_name not in self.agents:
+            raise KeyError(f"Agent '{agent_name}' not registered")
 
-        return self._apply_safety_bounds(adjustments, agent_types)
+        if version and self.agents[agent_name].version != version:
+            candidates = [m for m in self.version_map[version] if m == agent_name]
+            if not candidates:
+                raise ValueError(f"Version {version} not available for {agent_name}")
+            return self.agents[candidates[0]]
 
-    def _apply_safety_bounds(self, adjustments: Dict[str, torch.Tensor], agent_types: List[str]):
-        for agent_type in agent_types:
-            bound = self.safety_bounds.get(agent_type, self.safety_bounds.get("default", 1.0))
-            for key, value in adjustments.items():
-                value_f = value.item() if isinstance(value, torch.Tensor) else value
-                if abs(value_f) > bound:
-                    adjustments[key] = torch.tensor(bound * (1 if value_f > 0 else -1), dtype=torch.float32)
-        return adjustments
+        return self.agents[agent_name]
 
-    def _pid_control(self, metric_type: str, error: float, delta: float) -> Dict[str, torch.Tensor]:
-        self.integral[metric_type] += error
-        derivative = error - self.prev_error[metric_type]
+    def get_dependencies(self, agent_name: str) -> List[str]:
+        if agent_name not in self.dependency_graph:
+            return []
+        return list(self.dependency_graph[agent_name])
 
-        adjustment = self.Kp * error + self.Ki * self.integral[metric_type] + self.Kd * derivative
-        adjustment_tensor = torch.tensor(adjustment, dtype=torch.float32)
+    def resolve_dependency_tree(self, agent_name: str) -> List[str]:
+        visited = set()
+        load_order: List[str] = []
 
-        self.prev_error[metric_type] = error
-        return {f"{metric_type}_adjustment": adjustment_tensor}
+        def resolve(name):
+            if name in visited:
+                return
+            for dep in self.get_dependencies(name):
+                resolve(dep)
+            visited.add(name)
+            load_order.append(name)
 
-    def update_factory_config(self, factory: "AgentFactory", adjustments: Dict[str, torch.Tensor]):
-        for metadata in factory.registry.agents.values():
-            performance_adj = adjustments.get("performance_adjustment", torch.tensor(0.0))
-            performance_adj = performance_adj.item() if isinstance(performance_adj, torch.Tensor) else performance_adj
-
-            if hasattr(metadata, "exploration_rate"):
-                metadata.exploration_rate = min(metadata.exploration_rate * (1 + performance_adj), 1.0)
-
-            fairness_adj = adjustments.get("fairness_adjustment", torch.tensor(0.0))
-            fairness_adj = fairness_adj.item() if isinstance(fairness_adj, torch.Tensor) else fairness_adj
-            if hasattr(metadata, "risk_threshold"):
-                metadata.risk_threshold *= (1 - fairness_adj)
+        resolve(agent_name)
+        return load_order
