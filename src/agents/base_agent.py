@@ -493,10 +493,98 @@ class BaseAgent(abc.ABC):
             self.logger.debug(f"[{self.name}] No standard performance metrics extracted from result of type {type(result)}.")
         return metrics
 
-    @abc.abstractmethod
+    def _invoke_capability(self, fn, task_data: Any, context: Any = None):
+        """Invoke a capability function with signature-aware argument mapping."""
+        signature = inspect.signature(fn)
+        params = list(signature.parameters.values())
+
+        accepts_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+
+        if accepts_varargs:
+            return fn(task_data, context)
+
+        kwargs = {}
+        positional = []
+
+        for param in params:
+            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                if param.name in {"task_data", "data", "input_data", "state", "task", "query", "payload"}:
+                    positional.append(task_data)
+                elif param.name in {"context", "ctx"}:
+                    positional.append(context)
+            elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                if param.name in {"task_data", "data", "input_data", "state", "task", "query", "payload"}:
+                    kwargs[param.name] = task_data
+                elif param.name in {"context", "ctx"}:
+                    kwargs[param.name] = context
+
+        if not positional and not kwargs:
+            if accepts_varkw:
+                return fn(task_data=task_data, context=context)
+            return fn(task_data)
+
+        return fn(*positional, **kwargs)
+
     def perform_task(self, task_data: Any) -> Any:
-        """Execute a task and return a result payload."""
-        raise NotImplementedError("Subclasses must implement perform_task.")
+        """Execute a task using common capability hooks.
+
+        This default implementation is shared by all agents and is designed to
+        support diverse method signatures without forcing boilerplate overrides.
+
+        Supported input conventions:
+        - Plain payloads: forwarded directly.
+        - Dict payloads:
+          - ``context`` is extracted and passed when supported.
+          - ``operation`` can explicitly select ``predict``/``get_action``/``act``.
+
+        Dispatch order:
+        1. explicit ``operation`` target (if provided)
+        2. ``predict``
+        3. ``get_action``
+        4. ``act``
+        """
+        context = None
+        operation = None
+        payload = task_data
+
+        if isinstance(task_data, dict):
+            context = task_data.get("context")
+            operation = task_data.get("operation")
+            payload = task_data.get("task_data", task_data.get("input_data", task_data.get("payload", task_data)))
+
+        dispatch_order = ["predict", "get_action", "act"]
+
+        if operation:
+            normalized = str(operation).strip().lower()
+            preferred = {
+                "predict": "predict",
+                "inference": "predict",
+                "infer": "predict",
+                "get_action": "get_action",
+                "action": "get_action",
+                "act": "act"
+            }.get(normalized)
+            if preferred:
+                dispatch_order = [preferred] + [m for m in dispatch_order if m != preferred]
+
+        errors = []
+        for method_name in dispatch_order:
+            capability = getattr(self, method_name, None)
+            if not callable(capability):
+                continue
+            try:
+                return self._invoke_capability(capability, payload, context)
+            except TypeError as exc:
+                errors.append(f"{method_name}: {exc}")
+                self.logger.debug(f"[{self.name}] Signature mismatch in {method_name}: {exc}")
+                continue
+
+        error_details = "; ".join(errors) if errors else "No compatible capability methods found"
+        raise NotImplementedError(
+            f"{self.__class__.__name__} cannot execute task. {error_details}. "
+            "Implement perform_task or provide predict/get_action/act with compatible signatures."
+        )
 
     def execute_plan(self, plan: Any, goal: Any = None) -> Any:
         """
