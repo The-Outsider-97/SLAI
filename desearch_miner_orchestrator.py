@@ -5,17 +5,18 @@ import hashlib
 import json, yaml
 import numpy as np
 import matplotlib.pyplot as plt
+import requests
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from collections import deque
 from datetime import datetime
 from threading import Thread
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory # type: ignore
 
 from src.agents.learning.slaienv import SLAIEnv
 from src.agents.knowledge_agent import KnowledgeAgent
 from src.agents.collaborative.shared_memory import SharedMemory
-from src.agents.safety_agent import SafetyAgent, SafetyAgentConfig # Import SafetyAgentConfig
+from src.agents.safety_agent import SafetyAgent
 from src.agents.reasoning_agent import ReasoningAgent
 from src.agents.evaluation_agent import EvaluationAgent
 from src.agents.adaptive_agent import AdaptiveAgent
@@ -48,37 +49,74 @@ def load_config(config_path):
         return {}
 
 # --- Functions ---
+def _extract_task_texts(payload: Any) -> List[str]:
+    """Normalize common DeSearch/Subnet-22 task payloads into a list of text prompts."""
+    candidate_keys = ("text", "query", "prompt", "document", "content", "task", "question")
+    extracted: List[str] = []
+
+    if isinstance(payload, list):
+        for item in payload:
+            extracted.extend(_extract_task_texts(item))
+        return extracted
+
+    if isinstance(payload, dict):
+        if "tasks" in payload:
+            extracted.extend(_extract_task_texts(payload.get("tasks")))
+
+        for key in candidate_keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                extracted.append(value.strip())
+                break
+        return extracted
+
+    if isinstance(payload, str) and payload.strip():
+        extracted.append(payload.strip())
+
+    return extracted
+
+
 def fetch_data(batch_size=5) -> List[str]:
     """
     Simulates fetching new documents.
     In a real system, this would connect to data sources (e.g., web crawlers, APIs, databases).
     """
-    logger.info(f"Fetching {batch_size} new documents (simulated)...")
-#    docs = []
+    logger.info(f"Fetching {batch_size} new documents/tasks...")
 
-#    for i in range(batch_size):
-#        doc_type = random.choice(["news_article", "research_paper", "blog_post", "forum_discussion"])
-#        safety_keyword = random.choice(["safe", "secure", "vulnerability", "exploit", "privacy", "threat", "benign", "helpful"])
-#        tech_keyword = random.choice(["blockchain", "AI", "machine learning", "cybersecurity", "cloud computing", "quantum", "robotics"])
-#        action_keyword = random.choice(["discusses", "analyzes", "reviews", "questions", "explores"])
-#        content_length = random.randint(50, 200) # Shorter for easier debugging
-#        doc_content = f"Document {i+1} ({doc_type}): This document {action_keyword} {tech_keyword} and its relation to {safety_keyword}. "
-#        doc_content += " ".join([f"word{j}" for j in range(content_length)])
-#        if random.random() < 0.3:
-#            doc_content += f" More info at http://example-domain-{random.randint(1,100)}.com/path{i} or contact researcher{i}@example-domain.org."
-#        if random.random() < 0.1: 
-#            # Add PII-like content sometimes
-#            doc_content += f" User SSN is {random.randint(100,999)}-{random.randint(10,99)}-{random.randint(1000,9999)} and password for access is 'test{random.randint(100,999)}Key'."
-#        docs.append(doc_content)
-#    return docs
+    collab_cfg = configs.get("collaborative", {})
+    desearch_cfg = collab_cfg.get("desearch", {}) if isinstance(collab_cfg, dict) else {}
+    task_api_url = os.getenv("DESEARCH_TASK_API_URL") or desearch_cfg.get("task_api_url") or collab_cfg.get("task_api_url")
+    api_key = os.getenv("DESEARCH_API_KEY") or desearch_cfg.get("api_key") or collab_cfg.get("api_key")
 
-    tasks = []
-    miner_instance = Miner(config_path="config.yaml")
-    for _ in range(batch_size):
-        task = miner_instance.get_task()
-        if task and "text" in task:
-            tasks.append(task["text"])
-    return tasks
+    if task_api_url:
+        params = {"limit": int(batch_size)}
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            response = requests.get(task_api_url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            tasks = _extract_task_texts(payload)[:batch_size]
+            if tasks:
+                logger.info(f"Fetched {len(tasks)} tasks from configured DeSearch endpoint.")
+                return tasks
+            logger.warning("DeSearch endpoint returned no parseable task text; using local fallback tasks.")
+        except Exception as e:
+            logger.warning(f"Failed to fetch DeSearch tasks from {task_api_url}: {e}. Falling back to local tasks.")
+
+    fallback_topics = [
+        "Subnets and dTAO incentives",
+        "Bittensor Subnet 22 search relevance",
+        "Cybersecurity threat intelligence",
+        "LLM safety and constitutional constraints",
+        "Decentralized information retrieval",
+    ]
+    return [
+        f"Fallback task {i+1}: Analyze {random.choice(fallback_topics)} and summarize key insights for DeSearch miners."
+        for i in range(batch_size)
+    ]
+
 def get_recent_rewards(processed_docs_info: list) -> List[float]:
     """
     Generates reward signals based on the evaluation and safety scores of recently processed documents.
@@ -136,7 +174,7 @@ def submit_data(doc_content: str, submission_metadata: dict):
         # Log submission to collaborative shared_memory
         recent_submissions_log = shared_memory.get("recent_submissions_log") or deque(maxlen=200)
         if not isinstance(shared_memory.get("recent_submissions_log"), (list, deque)):
-            shared_memory["recent_submissions_log"] = deque(maxlen=200)
+            shared_memory.set("recent_submissions_log", deque(maxlen=200))
         submission_metadata_copy = submission_metadata.copy() # Avoid modifying original dict
         submission_metadata_copy["submission_to_orchestrator_log_timestamp"] = datetime.utcnow().isoformat()
         recent_submissions_log.append(submission_metadata_copy)
@@ -181,34 +219,30 @@ def extract_embedding(text: str) -> np.ndarray:
     return np.random.rand(embedding_dim)
 # --- End Functions ---
 
-
 # Load all configurations
 configs = {name: load_config(path) for name, path in CONFIG_PATHS.items()}
 
 shared_memory = SharedMemory()
 agent_factory_placeholder = lambda name, cfg: None
 
-
 safety_agent_global_config = configs.get("safety", {})
-# SafetyAgent's own config is expected under a 'safety_agent' key within that, or passed directly
 safety_agent_specific_config_data = safety_agent_global_config.get("safety_agent", {})
 
-# Ensure essential keys for SafetyAgentConfig are present with defaults
+# SafetyAgent in this repo expects a dict-like config (not SafetyAgentConfig dataclass).
 default_sa_params = {
     "constitutional_rules_path": "src/agents/safety/templates/constitutional_rules.json",
     "risk_thresholds": {"overall_safety": 0.7, "cyber_risk": 0.6, "compliance_failure_is_blocker": False},
     "audit_level": 1,
-    "collect_feedback": safety_agent_global_config.get("collect_feedback", False), # Get from global or default
+    "collect_feedback": safety_agent_global_config.get("collect_feedback", False),
     "enable_learnable_aggregation": safety_agent_global_config.get("enable_learnable_aggregation", False),
-    "secure_memory": safety_agent_global_config.get("secure_memory", {}) # Pass secure_memory section from global
+    "secure_memory": safety_agent_global_config.get("secure_memory", {}),
 }
 final_safety_agent_params = {**default_sa_params, **safety_agent_specific_config_data}
-safety_agent_config_obj = SafetyAgentConfig(**final_safety_agent_params)
 
 safety_agent = SafetyAgent(
     shared_memory=shared_memory,
     agent_factory=agent_factory_placeholder,
-    config=safety_agent_config_obj
+    config=final_safety_agent_params,
 )
 
 reasoning_agent = ReasoningAgent(
@@ -263,37 +297,28 @@ knowledge_agent = KnowledgeAgent(
 
 # Load knowledge base on startup
 def initialize_knowledge_base():
-    """Load knowledge from directory and database"""
+    """Load knowledge from directory and optional persisted file when supported by KnowledgeAgent."""
     try:
-        # Initialize semantic fallback and stopwords for KnowledgeAgent
-        # This requires a LanguageAgent instance. If not available, KA will use defaults.
-        lang_agent_for_ka = agent_factory_placeholder("LanguageAgent", configs.get("language", {})) # Or however you get it
-        knowledge_agent._initialize_semantic_fallback(lang_agent_for_ka) # Call this early
-        knowledge_agent.initialize_stopwords() # Call explicitly if not done in _initialize_semantic_fallback
-
         knowledge_dir = knowledge_config.get("knowledge_dir", "data/knowledge_base")
-        if os.path.exists(knowledge_dir) and os.path.isdir(knowledge_dir): # Check if directory exists AND is a directory
-            knowledge_agent.load_from_directory(knowledge_dir)
-            logger.info(f"Loaded knowledge from directory: {knowledge_dir}")
+        if knowledge_dir and os.path.isdir(knowledge_dir):
+            knowledge_agent.directory_path = knowledge_dir
+            loaded_count = knowledge_agent.load_from_directory()
+            logger.info(f"Loaded {loaded_count} documents from knowledge directory: {knowledge_dir}")
         else:
             logger.warning(f"Knowledge directory not found or not a directory: {knowledge_dir}")
-        
-        if persist_file_path and os.path.exists(persist_file_path) and os.path.isfile(persist_file_path): # Check if file exists AND is a file
-            knowledge_agent.load_knowledge_db(persist_file_path)
-            logger.info(f"Loaded knowledge database: {persist_file_path}")
-        elif persist_file_path:
-            logger.warning(f"Knowledge DB file not found: {persist_file_path}")
-        else:
-            logger.warning("No persist_file path configured for knowledge DB.")
+
+        # Optional persisted DB loader for compatibility with alternate KnowledgeAgent implementations.
+        if persist_file_path and hasattr(knowledge_agent, "load_knowledge_db"):
+            if os.path.isfile(persist_file_path):
+                knowledge_agent.load_knowledge_db(persist_file_path)
+                logger.info(f"Loaded knowledge database: {persist_file_path}")
+            else:
+                logger.warning(f"Knowledge DB file not found: {persist_file_path}")
 
         logger.info("Knowledge base initialization attempted.")
     except Exception as e:
         logger.error(f"Knowledge base initialization failed: {str(e)}", exc_info=True)
 
-initialize_knowledge_base()
-
-
-# Initialize on import
 initialize_knowledge_base()
 
 def process_document(doc_content: str) -> Optional[Dict]:
@@ -371,11 +396,19 @@ def process_document(doc_content: str) -> Optional[Dict]:
             "knowledge": context.get("retrieved_knowledge", []),
             "reasoning_output": reasoning_output_for_eval if isinstance(reasoning_output_for_eval, dict) else {}
         }
-        current_eval_result = evaluation_agent.perform_task(evaluation_input) 
-        
+        current_eval_result = evaluation_agent.perform_task(evaluation_input)
+
         passing_score_val = configs.get("evaluation", {}).get("passing_score", 0.7)
-        current_score = current_eval_result.get("score", 0.0) if isinstance(current_eval_result, dict) else 0.0
-        
+        if isinstance(current_eval_result, dict):
+            current_score = float(
+                current_eval_result.get("score")
+                or current_eval_result.get("confidence")
+                or current_eval_result.get("prediction", {}).get("confidence")
+                or 0.0
+            )
+        else:
+            current_score = 0.0
+
         if current_score < passing_score_val:
             logger.info(f"[SKIPPED ID {doc_hash}] Low evaluation score: {current_score:.2f} < {passing_score_val}")
             shared_memory.set(f"processing_status:{doc_hash}", {"status": "rejected_evaluation", "score": current_score})
@@ -389,7 +422,7 @@ def process_document(doc_content: str) -> Optional[Dict]:
     try:
         embedding = extract_embedding(doc_content)
         if embedding is not None and isinstance(embedding, np.ndarray):
-            learning_agent.observe((embedding.tolist(), [1])) 
+            learning_agent.observe(embedding.tolist(), "dqn")
             obs_count = shared_memory.get("learning_observations", 0)
             shared_memory.set("learning_observations", obs_count + 1)
     except Exception as e:
@@ -400,7 +433,7 @@ def process_document(doc_content: str) -> Optional[Dict]:
         "doc_id": doc_hash,
         "content_preview": doc_content[:100],
         "timestamp": context["timestamp"],
-        "eval_score": current_eval_result.get("score", 0.0) if current_eval_result else 0.0,
+        "eval_score": current_score if 'current_score' in locals() else (current_eval_result.get("score", 0.0) if isinstance(current_eval_result, dict) else 0.0),
         "safety_score": current_safety_assessment.get("final_safety_score", 0.0) if current_safety_assessment else 0.0,
         "cyber_risk": current_safety_assessment.get("reports", {}).get("cyber_safety", {}).get("risk_score", 1.0) if current_safety_assessment else 1.0,
         "status": "approved_for_submission"
@@ -418,12 +451,6 @@ def process_document(doc_content: str) -> Optional[Dict]:
         submission_metadata["error"] = str(e)
         shared_memory.set(f"processing_status:{doc_hash}", submission_metadata)
         return None
-
-def extract_embedding(text):
-    """Placeholder for embedding generation"""
-    import numpy as np
-    # Ensure output matches observation_space shape for LearningAgent
-    return np.random.rand(configs.get("learning", {}).get("embedding_dim", 512))
 
 STATIC_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 if not os.path.exists(STATIC_FOLDER):
