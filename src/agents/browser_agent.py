@@ -902,8 +902,13 @@ class SafetyAgent(BaseAgent):
             top_k=min_samples * 2
         )
 
-        if len(feedback) < min_samples:
-            logger.info(f"Not enough feedback ({len(feedback)}/{min_samples})")
+        training_data = [
+            entry.get("data") for entry in feedback
+            if isinstance(entry, dict) and isinstance(entry.get("data"), dict)
+        ]
+
+        if len(training_data) < min_samples:
+            logger.info(f"Not enough feedback ({len(training_data)}/{min_samples})")
             return False
 
         training_data = [entry["data"] for entry in feedback]
