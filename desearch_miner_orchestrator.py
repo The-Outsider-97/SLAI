@@ -149,6 +149,30 @@ def get_recent_rewards(processed_docs_info: list) -> List[float]:
         logger.debug(f"Doc ID {doc_info.get('doc_id', 'N/A')}: Eval={eval_score:.2f}, Safety={safety_score:.2f}, CyberContr={cyber_security_contribution:.2f} -> Reward={final_reward:.2f}")
     return rewards
 
+def get_or_initialize_recent_submissions_log(maxlen: int = 200) -> deque:
+    """
+    Return a normalized recent submissions log from shared memory.
+
+    This persists the normalized deque back to shared_memory so subsequent
+    readers don't repeatedly see None/invalid types.
+    """
+    recent_submissions_raw = shared_memory.get("recent_submissions_log")
+    if isinstance(recent_submissions_raw, deque):
+        return recent_submissions_raw
+
+    if isinstance(recent_submissions_raw, list):
+        normalized_log = deque(recent_submissions_raw, maxlen=maxlen)
+    else:
+        normalized_log = deque(maxlen=maxlen)
+        if recent_submissions_raw is not None:
+            logger.warning(
+                "recent_submissions_log was not a deque or list, reinitialized. "
+                f"Type was: {type(recent_submissions_raw)}"
+            )
+
+    shared_memory.set("recent_submissions_log", normalized_log)
+    return normalized_log
+
 def submit_data(doc_content: str, submission_metadata: dict):
     """
     Submits an approved document to the KnowledgeAgent and logs the submission.
@@ -172,9 +196,7 @@ def submit_data(doc_content: str, submission_metadata: dict):
             }
         )
         # Log submission to collaborative shared_memory
-        recent_submissions_log = shared_memory.get("recent_submissions_log") or deque(maxlen=200)
-        if not isinstance(shared_memory.get("recent_submissions_log"), (list, deque)):
-            shared_memory.set("recent_submissions_log", deque(maxlen=200))
+        recent_submissions_log = get_or_initialize_recent_submissions_log(maxlen=200)
         submission_metadata_copy = submission_metadata.copy() # Avoid modifying original dict
         submission_metadata_copy["submission_to_orchestrator_log_timestamp"] = datetime.utcnow().isoformat()
         recent_submissions_log.append(submission_metadata_copy)
@@ -268,9 +290,6 @@ learning_config = configs.get("learning", {})
 slai_env_state_dim = learning_config.get("embedding_dim", 512) # Match LearningAgent's expectation
 slai_env_action_dim = 2 # Assuming binary classification for learning_agent.observe
 slaienv = SLAIEnv(
-    SLAILM=None, 
-    agent_factory=agent_factory_placeholder,
-    shared_memory=shared_memory,
     state_dim=slai_env_state_dim,
     action_dim=slai_env_action_dim
 )
@@ -502,16 +521,7 @@ def favicon():
 @dashboard_app.route('/metrics')
 def dashboard_metrics():
     try:
-        # Ensure recent_submissions_log is a deque
-        recent_submissions_raw = shared_memory.get("recent_submissions_log", deque(maxlen=200))
-        if not isinstance(recent_submissions_raw, deque):
-            if isinstance(recent_submissions_raw, list):
-                recent_submissions = deque(recent_submissions_raw, maxlen=200)
-            else:
-                recent_submissions = deque(maxlen=200)
-                logger.warning(f"recent_submissions_log was not a deque or list, reinitialized. Type was: {type(recent_submissions_raw)}")
-        else:
-            recent_submissions = recent_submissions_raw
+        recent_submissions = get_or_initialize_recent_submissions_log(maxlen=200)
 
         batch_size = configs.get("collaborative", {}).get("batch_size", 5)
         # Get the latest 'batch_size' items from the deque
