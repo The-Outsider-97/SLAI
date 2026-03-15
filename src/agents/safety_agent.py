@@ -1034,19 +1034,27 @@ class SafetyAgent(BaseAgent):
         logger.info(f"Collected human feedback for reward model training")
 
     def update_reward_model(self, min_samples=100):
-        """Trigger reward model retraining"""
+        """Trigger reward model retraining from secure and shared feedback stores."""
         reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
         if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
-            parsed_reward_data = [item['value'] for item in reward_model_training_data]
-            self.reward_model.retrain_model(parsed_reward_data)
-    
-        feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples*2)
-        if len(feedback_items) < min_samples:
-            logger.info(f"Not enough feedback ({len(feedback_items)}/{min_samples})")
+            parsed_reward_data = [
+                item.get('data') for item in reward_model_training_data
+                if isinstance(item, dict) and isinstance(item.get('data'), dict)
+            ]
+            if parsed_reward_data:
+                self.reward_model.retrain_model(parsed_reward_data)
+
+        feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples * 2)
+        valid_feedback_items = [
+            item.get('value') for item in feedback_items
+            if isinstance(item, dict) and isinstance(item.get('value'), dict)
+        ]
+
+        if len(valid_feedback_items) < min_samples:
+            logger.info(f"Not enough feedback ({len(valid_feedback_items)}/{min_samples})")
             return False
 
-        training_data = [item['value'] for item in feedback_items]
-        self.reward_model.retrain_model(training_data)
+        self.reward_model.retrain_model(valid_feedback_items)
         return True
 
     def _generate_self_critique(self, output_text: str, original_prompt: Optional[str] = None) -> str:
