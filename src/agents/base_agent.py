@@ -1,5 +1,6 @@
 __version__ = "1.9.0"
 
+import inspect
 import re
 import os, sys
 import abc
