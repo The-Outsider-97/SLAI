@@ -126,8 +126,19 @@ On **Linux/MacOS**:
 
 On **Windows (PowerShell)**:
    ```console
-   python3.10 -m venv venv
+   py -3.10 -m venv venv
    .\venv\Scripts\Activate.ps1
+   ```
+
+If `py -3.10` is unavailable, use the default launcher target instead:
+   ```console
+   py -m venv venv
+   .\venv\Scripts\Activate.ps1
+   ```
+
+To verify which Python versions are installed and visible to the launcher:
+   ```console
+   py -0p
    ```
 
 Note: If you see an error about execution policy:
