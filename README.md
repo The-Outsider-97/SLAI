@@ -64,6 +64,23 @@ graph TD
     LOGS --> LE
 ```
 
+### Flow Explanation
+
+SLAI begins when a user request or external event reaches the **Collaborative Agent**, which coordinates execution through the **Agent Factory + Registry**. The factory activates specialized agents (perception, knowledge, planning, reasoning, execution, and language) so each stage of understanding and task handling is performed by a focused component.
+
+Outputs from these core agents are merged by **Task Orchestration**, producing a unified intermediate result. Before any user-visible response is released, this result is passed through a dedicated **Safety + Alignment Gate**, informed by both the **Safety Agent** and **Alignment Agent** to enforce policy, risk controls, and behavioral constraints.
+
+After gating, the result proceeds to **Evaluation & Scoring**, where quality and correctness are assessed with support from the **Evaluation Agent**. The system then emits the **Final Response / Action**.
+
+SLAI closes the loop through two feedback channels:
+
+- **User Feedback + Telemetry** updates the **Learning Agent** and **Adaptive Agent**, which in turn inform future coordination decisions through the Collaborative Agent.
+- **Memory / Metrics / Logs** generated from evaluation are stored and reused by the **Knowledge Agent** and **Learning Agent** to improve retrieval quality, decision-making, and long-term system performance.
+
+In practice, this forms a continuous cycle: **specialized processing -> orchestration -> safety/alignment enforcement -> evaluation -> output -> learning and adaptation**.
+
+---
+
 ---
 
 ## Minimum System Requirements
