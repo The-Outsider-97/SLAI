@@ -303,3 +303,22 @@ class HandlerAgent(BaseAgent):
             "checkpoint_id": checkpoint_id,
             "recommendation": "escalate_to_planning_or_evaluation",
         }
+
+
+if __name__ == "__main__":
+    print("\n=== Running Handler Agent ===\n")
+    printer.status("TEST", "Starting Handler Agent tests", "info")
+    from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
+
+    memory = SharedMemory()
+    factory = AgentFactory()
+    execution_config = get_config_section('handler_agent')
+    agent_type="handler"
+
+    agent = HandlerAgent(
+        shared_memory=memory,
+        agent_factory=factory,
+        config=execution_config
+    )
+    print("\n=== All tests completed successfully! ===\n")
