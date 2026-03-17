@@ -1,6 +1,9 @@
 import time
+
 from typing import Any, Dict, Optional
 
+from src.agents.collaborative.reliability import ReliabilityManager
+from src.agents.collaborative.router_strategy import BaseRouterStrategy, build_router_strategy
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("SLAI Task Router")
@@ -8,11 +11,21 @@ printer = PrettyPrinter
 
 
 class TaskRouter:
-    """Capability-based router backed by AgentRegistry."""
+    """Capability-based router backed by AgentRegistry with pluggable strategy and reliability controls."""
 
-    def __init__(self, registry=None, shared_memory=None):
+    def __init__(
+        self,
+        registry=None,
+        shared_memory=None,
+        strategy: Optional[BaseRouterStrategy] = None,
+        reliability_manager: Optional[ReliabilityManager] = None,
+    ):
         self.registry = registry
         self.shared_memory = shared_memory
+        self.strategy = strategy or build_router_strategy("weighted")
+        self.reliability_manager = reliability_manager or ReliabilityManager()
+
+        logger.info("Task Router initialized")
 
     def route(self, task_type: str, task_data: Dict[str, Any]) -> Any:
         if self.registry is None:
@@ -22,12 +35,18 @@ class TaskRouter:
         if not eligible_agents:
             raise RuntimeError(f"No agents found for task type '{task_type}'")
 
-        ranked = self._rank_agents(eligible_agents)
+        ranked = self.strategy.rank_agents(eligible_agents, stats=self._get_stats(), task_data=task_data)
         last_error: Optional[Exception] = None
         for agent_name, agent_meta, _ in ranked:
+            if not self.reliability_manager.is_available(agent_name):
+                last_error = RuntimeError(f"Agent '{agent_name}' unavailable due to open circuit")
+                continue
             try:
                 self._set_active_tasks(agent_name, +1)
-                result = agent_meta["instance"].execute(task_data)
+                result = self.reliability_manager.execute(
+                    agent_name,
+                    lambda: agent_meta["instance"].execute(task_data),
+                )
                 self._record_success(agent_name)
                 return result
             except Exception as exc:
@@ -38,20 +57,6 @@ class TaskRouter:
                 self._set_active_tasks(agent_name, -1)
 
         raise RuntimeError(f"All agents failed for task type '{task_type}': {last_error}")
-
-    def _rank_agents(self, agents: Dict[str, Dict[str, Any]]):
-        stats = self._get_stats()
-        ranked = []
-        for name, agent in agents.items():
-            meta = stats.get(name, {})
-            successes = float(meta.get("successes", 0))
-            failures = float(meta.get("failures", 0))
-            active_tasks = float(meta.get("active_tasks", 0))
-            total = successes + failures
-            success_rate = successes / total if total else 1.0
-            score = success_rate - (0.25 * active_tasks)
-            ranked.append((name, agent, score))
-        return sorted(ranked, key=lambda x: x[2], reverse=True)
 
     def _get_stats(self) -> Dict[str, Dict[str, Any]]:
         if self.shared_memory is None:
