@@ -7,6 +7,32 @@ handler_agent:
   checkpoint_max_age_seconds: 600
   telemetry_buffer_size: 1000
   evaluator_hooks_enabled: true
+  adaptive_retry_min: 0
+  adaptive_retry_max: 4
+  adaptive_retry_min_samples: 3
+  default_recovery_budget_seconds: 30
+  default_sla_max_attempts: 2
+  strategy_priors:
+    network: 0.20
+    timeout: 0.20
+    memory: 0.15
+    runtime: 0.25
+    dependency: 0.10
+    resource: 0.07
+    unicode: 0.03
+  escalation_matrix:
+    critical:
+      retryable: safety_agent
+      non_retryable: planning_agent
+    high:
+      retryable: planning_agent
+      non_retryable: evaluation_agent
+    medium:
+      retryable: handler_agent
+      non_retryable: planning_agent
+    low:
+      retryable: handler_agent
+      non_retryable: handler_agent
 
 memory:
   max_checkpoints: 100
@@ -18,3 +44,29 @@ policy:
   cooldown_seconds: 30
   failure_budget_window_seconds: 300
   evaluator_hooks_enabled: true
+  adaptive_retry_min: 0
+  adaptive_retry_max: 4
+  adaptive_retry_min_samples: 3
+  default_recovery_budget_seconds: 30
+  default_sla_max_attempts: 2
+  strategy_priors:
+    network: 0.20
+    timeout: 0.20
+    memory: 0.15
+    runtime: 0.25
+    dependency: 0.10
+    resource: 0.07
+    unicode: 0.03
+  escalation_matrix:
+    critical:
+      retryable: safety_agent
+      non_retryable: planning_agent
+    high:
+      retryable: planning_agent
+      non_retryable: evaluation_agent
+    medium:
+      retryable: handler_agent
+      non_retryable: planning_agent
+    low:
+      retryable: handler_agent
+      non_retryable: handler_agent
