@@ -31,8 +31,9 @@ class HandlerPolicy:
     def can_attempt(self, agent_name: str) -> bool:
         return time.time() >= self._breaker_open_until.get(agent_name, 0.0)
 
-    def retries_allowed(self, attempted_retries: int) -> bool:
-        return attempted_retries < self.max_retries
+    def retries_allowed(self, attempted_retries: int, max_retries: Optional[int] = None) -> bool:
+        limit = self.max_retries if max_retries is None else max(0, int(max_retries))
+        return attempted_retries < limit
 
     def record_failure(self, agent_name: str) -> None:
         now = time.time()
