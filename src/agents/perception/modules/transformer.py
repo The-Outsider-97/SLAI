@@ -25,19 +25,15 @@ class Transformer(BaseTransformer, nn.Module):
         BaseTransformer.__init__(self)
         nn.Module.__init__(self)
         self.config = load_global_config()
-        self.training = self.config.get('training')
+        # self.training = self.config.get('training')
         self.embed_dim = self.config.get('embed_dim')
         self.num_heads = self.config.get('num_heads')
         self.dropout_rate = self.config.get('dropout_rate')
         self.num_layers = self.config.get('num_layers')
         self.num_styles = self.config.get('num_styles')
         self.max_position_embeddings = self.config.get('max_position_embeddings')
-
         self.trans_config = get_config_section('transformer')
         self.return_hidden = self.trans_config.get('return_hidden')
-
-        # Override return_hidden if specified
-        self.return_hidden = True
 
         self.memory = PerceptionMemory()
 
@@ -235,8 +231,17 @@ class Transformer(BaseTransformer, nn.Module):
             # Attention block
             residual = x
             x = layer['norm1'](x)
-            x_attn = self.memory.run_checkpointed(layer['attention'], x)
-            x = residual + nn.Dropout(self.dropout_rate)(x_attn)
+            x_attn = self.memory.run_checkpointed(
+                layer['attention'],
+                x,
+                context,
+                context_mask
+            )
+            x = residual + torch.nn.functional.dropout(
+                x_attn,
+                p=self.dropout_rate,
+                training=self.training
+            )
 
             # Cache intermediate attention output
             self.memory.cache_item(
@@ -249,8 +254,12 @@ class Transformer(BaseTransformer, nn.Module):
             # Feedforward block
             residual = x
             x = layer['norm2'](x)
-            x_ff = self.memory.run_checkpointed(layer['ff'], x)
-            x = residual + nn.Dropout(self.dropout_rate)(x_ff)
+            x_ff = self.memory.run_checkpointed(layer['ff'], x, context)
+            x = residual + torch.nn.functional.dropout(
+                x_ff,
+                p=self.dropout_rate,
+                training=self.training
+            )
 
             # Cache final layer output
             self.memory.cache_item(
