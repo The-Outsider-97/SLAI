@@ -23,7 +23,7 @@ class MultiModalDataset(Dataset):
         self.mode = mode
         self.modalities = self._detect_modalities()
 
-        self.tokenizer = Tokenizer(self.config) if "text" in self.modalities else None
+        self.tokenizer = Tokenizer() if "text" in self.modalities else None
         self.training_ext = TrainingExtensions(self.config, self.modalities)
         self.inference_opt = InferenceOptimizer(self.config)
 
