@@ -105,11 +105,14 @@ class PerceptionMemory(nn.Module):
         """Remove key from tag index"""
         printer.status("MEMORY", "Removing key from tag index", "info")
 
+        empty_tags = []
         for tag, keys in self.tag_index.items():
             if key in keys:
                 keys.remove(key)
             if not keys:
-                del self.tag_index[tag]
+                empty_tags.append(tag)
+        for tag in empty_tags:
+            del self.tag_index[tag]
 
     def retrieve(self, 
                key: Optional[str] = None, 
