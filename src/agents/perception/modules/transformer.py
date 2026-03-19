@@ -239,10 +239,11 @@ class Transformer(BaseTransformer, nn.Module):
             x = residual + nn.Dropout(self.dropout_rate)(x_attn)
 
             # Cache intermediate attention output
-            self.memory(
-                input=(f"layer_{i}_out", x),
-                operation='update',
-                tags=["layer_output", f"layer_{i}"]
+            self.memory.cache_item(
+                tensor=x,
+                key=f"layer_{i}_attn_out",
+                tags=["layer_output", f"layer_{i}"],
+                metadata={"block": "attention"}
             )
 
             # Feedforward block
@@ -252,10 +253,11 @@ class Transformer(BaseTransformer, nn.Module):
             x = residual + nn.Dropout(self.dropout_rate)(x_ff)
 
             # Cache final layer output
-            self.memory(
-                input=(f"layer_{i}_out", x),
-                operation='update',
-                tags=["layer_output", f"layer_{i}"]
+            self.memory.cache_item(
+                tensor=x,
+                key=f"layer_{i}_ff_out",
+                tags=["layer_output", f"layer_{i}"],
+                metadata={"block": "feedforward"}
             )
 
         if self.return_hidden:
