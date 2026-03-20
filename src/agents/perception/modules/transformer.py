@@ -212,7 +212,10 @@ class Transformer(BaseTransformer, nn.Module):
         return head_spec["class"](**params)
 
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, context_mask: Optional[torch.Tensor] = None,
-                style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+                style_id: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Accept the commonly used alias to keep compatibility with encoder callers.
+        if context_mask is None and attention_mask is not None:
+            context_mask = attention_mask
         # Add positional and style embeddings
         seq_len = x.shape[1]
         x = x + self.positional_encoding[:seq_len, :].unsqueeze(0)
