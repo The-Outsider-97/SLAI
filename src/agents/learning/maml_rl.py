@@ -22,9 +22,10 @@ from collections import namedtuple, defaultdict
 from src.agents.learning.utils.config_loader import load_global_config
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.learning.utils.policy_network import PolicyNetwork, NoveltyDetector
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Model-Agnostic Meta-Learning")
+printer = PrettyPrinter
 
 Transition = namedtuple('Transition', ['state', 'action', 'reward', 'log_prob', 'message'])
 
@@ -60,10 +61,9 @@ class MAMLAgent:
     def _init_nlp(self, action_size):
         try:
             from src.agents.language.nlp_engine import NLPEngine
-            NLP_ENGINE_AVAILABLE = True
+            nlp_engine = NLPEngine()
         except ImportError:
-            NLP_ENGINE_AVAILABLE = False
-        nlp_engine = NLPEngine()
+            nlp_engine = None
         maml_config = self.config.get('maml', {})
         self.vocab_size = maml_config.get('vocab_size', 50)
         self.max_message_length = maml_config.get('max_message_length', 10)
@@ -97,12 +97,10 @@ class MAMLAgent:
         if state_tensor.ndim == 1: # If single state, unsqueeze to make it a batch of 1
             state_tensor = state_tensor.unsqueeze(0)
         
-        probs = current_policy(state_tensor) # PolicyNetwork's forward method
-        
-        # If PolicyNetwork outputs logits for a Categorical distribution
-        dist = torch.distributions.Categorical(logits=probs) # Use logits if output is not softmaxed
-        # If PolicyNetwork output IS ALREADY probabilities (e.g. softmaxed)
-        # dist = torch.distributions.Categorical(probs=probs)
+        probs = current_policy(state_tensor) # PolicyNetwork returns action probabilities by default
+
+        # PolicyNetwork defaults to softmax output, so use probabilities.
+        dist = torch.distributions.Categorical(probs=probs)
 
         action = dist.sample()
         log_prob = dist.log_prob(action)
