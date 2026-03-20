@@ -843,8 +843,8 @@ class RLTransformer(RLEncoder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         from src.agents.perception.modules.transformer import Transformer
-        self.transformer = Transformer(config['transformer'])
-        self.state_memory = deque(maxlen=config['sequence_length'])
+        self.transformer = Transformer(rl_config['transformer'])
+        self.state_memory = deque(maxlen=rl_config['sequence_length'])
         
     def select_action(self, state):
         # Process state sequence
@@ -907,7 +907,7 @@ if __name__ == "__main__":
         # Agent configuration
         agent_id = "RL-Vision-Agent"
         possible_actions = [0, 1]  # CartPole actions (left/right)
-        state_size = vision_config['transformer']['embed_dim']  # Embedding size as state size
+        state_size = vision_config.get('embed_dim', 512)  # Embedding size as state size
         
         # Create RL agent with vision processing
         print("\n * * * * Phase 1 * * * *")
