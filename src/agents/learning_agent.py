@@ -15,6 +15,11 @@ Academic Foundations:
 - Meta-Learning: Finn et al. (2017) MAML
 - Evolutionary Strategies: Salimans et al. (2017)
 """
+import numpy as np
+
+# NumPy 2.x compatibility for environments that still use legacy Gym internals.
+if not hasattr(np, "bool8"):
+    np.bool8 = np.bool_
 
 import os
 import torch
@@ -24,7 +29,6 @@ import math
 import psutil
 import random
 import functools
-import numpy as np
 import torch.nn as nn
 import gymnasium as gym
 
