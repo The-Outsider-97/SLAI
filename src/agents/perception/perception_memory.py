@@ -190,7 +190,8 @@ class PerceptionMemory(nn.Module):
             
         return checkpoint(
             fn, 
-            *args, 
+            *args,
+            use_reentrant=False,
             preserve_rng_state=preserve_rng_state,
             **kwargs
         )
