@@ -9,13 +9,17 @@ Best Used When:
     Tasks are highly variable but share underlying structure.
     You need fast learning or transfer in changing environments.
 """
-import gym
 import yaml
 import copy
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import numpy as np
+import torch.nn as nn
+import gymnasium as gym
+import torch.optim as optim
+
+# NumPy 2.x compatibility for legacy Gym internals that still reference np.bool8.
+if not hasattr(np, "bool8"):
+    np.bool8 = np.bool_
 
 from collections import namedtuple, defaultdict
 
@@ -86,7 +90,7 @@ class MAMLAgent:
     def get_action(self, state, current_policy=None, is_speaking_task=False):
         if current_policy is None:
             current_policy = self.policy
-        
+
         # Ensure state is a FloatTensor
         if not isinstance(state, torch.Tensor):
             state_array = np.array(state, dtype=np.float32)
@@ -96,7 +100,7 @@ class MAMLAgent:
 
         if state_tensor.ndim == 1: # If single state, unsqueeze to make it a batch of 1
             state_tensor = state_tensor.unsqueeze(0)
-        
+
         probs = current_policy(state_tensor) # PolicyNetwork returns action probabilities by default
 
         # PolicyNetwork defaults to softmax output, so use probabilities.
@@ -104,9 +108,9 @@ class MAMLAgent:
 
         action = dist.sample()
         log_prob = dist.log_prob(action)
-        
+
         action_item = action.item()
-        
+
         # Conceptual: if it's a speaking task, action_item is a token_id.
         # We might form a message from a sequence of such actions.
         # For now, action is just the item. Message part of trajectory can store generated message.
@@ -119,19 +123,19 @@ class MAMLAgent:
         # Real multi-agent communication would be more complex.
         if current_policy is None:
             current_policy = self.policy
-            
+
         trajectory = []
-        state, _ = env.reset() # Assuming standard Gym env
-        
+        state = self._safe_reset(env)
+
         # Conceptual message passing
         current_message_sequence = []
 
         for step in range(self.max_trajectory_steps):
             # If listener, state might need to incorporate message from speaker (partner_agent)
             # For simplicity, we assume env handles this or task is non-communicative for now.
-            
+
             action, log_prob, msg_token = self.get_action(state, current_policy, is_speaking_task)
-            
+
             if is_speaking_task and msg_token is not None:
                 current_message_sequence.append(msg_token)
                 # Speaker's "reward" might be delayed until listener acts, or based on message quality.
@@ -140,14 +144,17 @@ class MAMLAgent:
                 # env.speak_token(msg_token) # Hypothetical
                 if len(current_message_sequence) == self.max_message_length:
                     # Message complete, environment might transition or give reward
-                    next_state, reward, done, truncated, _ = env.step(action) # action might be special "end_message" action
+                    next_state, reward, done, truncated, _ = self._safe_step(env, action) # action might be special "end_message" action
                     full_message = copy.deepcopy(current_message_sequence)
                     current_message_sequence = [] # Reset for next potential message
                 else: # Mid-message
-                    next_state, reward, done, truncated, _ = env.step_speaker(action) # Hypothetical step for speaker
+                    if hasattr(env, "step_speaker"):
+                        next_state, reward, done, truncated, _ = self._safe_step(env, action, step_method="step_speaker") # Hypothetical step for speaker
+                    else:
+                        next_state, reward, done, truncated, _ = self._safe_step(env, action)
                     full_message = None
             else: # Standard RL step or listener step
-                next_state, reward, done, truncated, _ = env.step(action)
+                next_state, reward, done, truncated, _ = self._safe_step(env, action)
                 full_message = None
 
             trajectory.append(Transition(state, action, reward, log_prob, full_message))
@@ -155,6 +162,33 @@ class MAMLAgent:
             if done or truncated:
                 break
         return trajectory
+
+    @staticmethod
+    def _safe_reset(env):
+        """
+        Handle both Gymnasium-style (obs, info) and legacy Gym-style obs reset outputs.
+        """
+        reset_result = env.reset()
+        if isinstance(reset_result, tuple) and len(reset_result) == 2:
+            return reset_result[0]
+        return reset_result
+
+    @staticmethod
+    def _safe_step(env, action, step_method="step"):
+        """
+        Handle both Gymnasium-style 5-tuple and legacy Gym-style 4-tuple step outputs.
+        """
+        step_fn = getattr(env, step_method)
+        step_result = step_fn(action)
+        if isinstance(step_result, tuple) and len(step_result) == 5:
+            next_state, reward, terminated, truncated, info = step_result
+            return next_state, reward, bool(terminated), bool(truncated), info
+        if isinstance(step_result, tuple) and len(step_result) == 4:
+            next_state, reward, done, info = step_result
+            return next_state, reward, bool(done), False, info
+        raise ValueError(
+            f"Unexpected step output from '{step_method}': expected tuple length 4 or 5, got {type(step_result)}"
+        )
 
     def compute_loss_from_trajectory(self, trajectory, policy_to_evaluate):
         # policy_to_evaluate is used if we need to re-calculate log_probs for an adapted policy.
@@ -330,42 +364,44 @@ class MAMLAgent:
         }
         
         for _ in range(num_eval_tasks):
-            env = self._sample_evaluation_task()
-            task_type = getattr(env, 'task_type', 'default')
-            
+            # Respect caller-provided environment when supplied (e.g., LearningAgent passes self.env).
+            # Fall back to sampled tasks only when no env is provided.
+            task_env = env if env is not None else self._sample_evaluation_task()
+            task_type = getattr(task_env, 'task_type', 'default')
+
             # Baseline performance (no adaptation)
-            baseline_trajectory = self.collect_trajectory(env, self.policy)
+            baseline_trajectory = self.collect_trajectory(task_env, self.policy)
             baseline_return = sum(t.reward for t in baseline_trajectory)
             evaluation_metrics['baseline_performance'] = sum(t.reward for t in baseline_trajectory)
-            
+
             if not meta_eval:
                 # Adaptation process
                 adapted_policy = self.policy
                 adaptation_rewards = []
-                
+
                 for step in range(adaptation_steps):
-                    trajectory = self.collect_trajectory(env, adapted_policy)
+                    trajectory = self.collect_trajectory(task_env, adapted_policy)
                     adaptation_rewards.append(sum(t.reward for t in trajectory))
                     loss = self.compute_loss_from_trajectory(trajectory, adapted_policy)
-                    adapted_policy = self.inner_update(env, adapted_policy)
-                
+                    adapted_policy = self.inner_update(task_env, adapted_policy)
+
                 # Post-adaptation performance
-                final_trajectory = self.collect_trajectory(env, adapted_policy)
+                final_trajectory = self.collect_trajectory(task_env, adapted_policy)
                 final_return = sum(t.reward for t in final_trajectory)
                 adaptation_gain = final_return - baseline_return
-                
+
                 # Update metrics
                 evaluation_metrics['adapted_performance'] = final_return
                 evaluation_metrics['adaptation_gain'] = final_return - evaluation_metrics['baseline_performance']
                 evaluation_metrics['adaptation_speed'].append(
                     (np.mean(adaptation_rewards[-3:]) - baseline_return) if adaptation_steps > 3 else 0
                 )
-                
+
                 # Task-specific metrics
-                final_metrics = self._compute_task_metrics(final_trajectory, env)
+                final_metrics = self._compute_task_metrics(final_trajectory, task_env)
                 evaluation_metrics['communication_accuracy'] += final_metrics['communication_success']
                 evaluation_metrics['task_success_rate'] += final_metrics['task_success']
-                
+
                 # Reward decomposition
                 for key, value in final_metrics.items():
                     if 'reward' in key or 'bonus' in key:
