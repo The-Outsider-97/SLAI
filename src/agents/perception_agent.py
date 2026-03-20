@@ -1,5 +1,5 @@
-__version__ = "1.9.0"
-
+__version__ = "2.0.0"
+ 
 """
 Perception Agent:
 - Weight initialization
@@ -601,12 +601,57 @@ class PerceptionAgent(BaseAgent, nn.Module):
             # Release training lock
             self.shared_memory.put(self.sm_keys['training_state'], False)
 
-    def train(self):
-        """Set all model components to training mode."""
-        for name in ['encoder', 'decoder', 'projection_layer']:
-            module = getattr(self, name, None)
+    def train(self, mode: bool = True):
+        """
+        Match nn.Module.train signature so internal calls like self.eval()
+        (which invokes self.train(False)) keep working.
+        """
+        super().train(mode)
+        for module in [
+            self.text_encoder,
+            self.vision_encoder,
+            self.audio_encoder,
+            self.text_generator,
+            self.vision_generator,
+            self.audio_generator,
+            self.text_prediction_head,
+            self.vision_prediction_head,
+            self.audio_prediction_head,
+            self.text_contrastive_proj,
+            self.vision_contrastive_proj,
+            self.audio_contrastive_proj,
+            self.multi_modal_projector,
+        ]:
             if isinstance(module, torch.nn.Module):
-                module.train()
+                module.train(mode)
+        return self
+
+    def _apply_agent_state_dict(self, model_state_dict: Dict[str, Any]) -> None:
+        """
+        Load either:
+        1) a full flattened PerceptionAgent state_dict
+        2) a legacy nested component dict {text_encoder: ..., ...}
+        """
+        if not isinstance(model_state_dict, dict):
+            raise TypeError("model_state_dict must be a dictionary")
+
+        nested_keys = {"text_encoder", "vision_encoder", "audio_encoder", "text_decoder", "vision_decoder", "audio_decoder"}
+        if nested_keys.intersection(model_state_dict.keys()):
+            if "text_encoder" in model_state_dict:
+                self.text_encoder.load_state_dict(model_state_dict["text_encoder"])
+            if "vision_encoder" in model_state_dict:
+                self.vision_encoder.load_state_dict(model_state_dict["vision_encoder"])
+            if "audio_encoder" in model_state_dict:
+                self.audio_encoder.load_state_dict(model_state_dict["audio_encoder"])
+            if "text_decoder" in model_state_dict:
+                self.text_generator.load_state_dict(model_state_dict["text_decoder"])
+            if "vision_decoder" in model_state_dict:
+                self.vision_generator.load_state_dict(model_state_dict["vision_decoder"])
+            if "audio_decoder" in model_state_dict:
+                self.audio_generator.load_state_dict(model_state_dict["audio_decoder"])
+            return
+
+        self.load_state_dict(model_state_dict)
 
     def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:
         self.train()
@@ -833,7 +878,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
             # Potentially load transformer part of text_encoder
             # self.text_encoder.transformer.load_pretrained(weights_data.get('transformer_weights', {}))
         elif source_format == "perception_agent_checkpoint": # Loading a full agent checkpoint
-            self.load_state_dict(weights_data['model_state_dict'])
+            self._apply_agent_state_dict(weights_data['model_state_dict'])
             self.optimizer.load_state_dict(weights_data['optimizer_state_dict'])
             logger.info("Loaded full PerceptionAgent checkpoint.")
         else:
@@ -1197,7 +1242,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
         """Load model state from shared memory"""
         snapshot = self.shared_memory.get(self.sm_keys['model_snapshot'])
         if snapshot:
-            self.load_state_dict(snapshot['model_state_dict'])
+            self._apply_agent_state_dict(snapshot['model_state_dict'])
             self.optimizer.load_state_dict(snapshot['optimizer_state'])
             logger.info(f"Loaded model state from shared memory")
             return True
