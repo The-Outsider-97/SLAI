@@ -2,7 +2,7 @@
 import copy
 import time
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.learning.utils.main_config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Learning Agent")
@@ -11,7 +11,7 @@ printer = PrettyPrinter
 class RecoverySystem:
     def __init__(self, learning_agent):
         self.learning_agent = learning_agent
-        self.config = learning_agent.config.get('recovery_system', {})
+        self.config = get_config_section('recovery_system', {})
         self.error_count = 0
         self.last_error_time = time.time()
         
