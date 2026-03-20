@@ -5,7 +5,7 @@ import time
 from src.agents.learning.utils.main_config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("Learning Agent")
+logger = get_logger("Recovery System")
 printer = PrettyPrinter
 
 class RecoverySystem:
