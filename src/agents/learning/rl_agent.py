@@ -8,7 +8,6 @@ Best Used When:
     The environment is small and fast to simulate.
     Quick prototyping or testing different exploration strategies.
 """
-import numpy as np
 import math
 import yaml
 import cv2
@@ -31,9 +30,10 @@ from src.agents.perception.encoders.vision_encoder import VisionEncoder
 from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.learning_memory import LearningMemory
 from src.agents.learning.utils.rl_engine import StateProcessor, ExplorationStrategies, QTableOptimizer
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Recursive Learning")
+printer = PrettyPrinter
 
 class RLAgent:
     """
@@ -59,7 +59,6 @@ class RLAgent:
     def __init__(self, agent_id, possible_actions: List[Any], state_size: int):
         """
         Initializes the RL Agent.
-
         Args:
             possible_actions (list): A list of all possible actions the agent can take.
             learning_rate (float): The learning rate (alpha) for updating value estimates.
@@ -179,6 +178,10 @@ class RLAgent:
         - Terminal state handling
         - Batch updates from experience
         """
+        if not self.state_history or not self.action_history:
+            logger.warning("learn() called before any step() history was recorded")
+            return
+
         processed_state = self.state_history[-1]
         processed_next_state = self._process_state(next_state)
         action = self.action_history[-1]
@@ -194,6 +197,8 @@ class RLAgent:
             self.q_optimizer.batch_update(
                 self._prepare_batch_updates(processed_next_state, reward, done)
             )
+
+        self.episode_count += 1
 
     def _prepare_batch_updates(self, next_state, reward, done):
         """Prepare batch updates for Q-table optimizer"""
