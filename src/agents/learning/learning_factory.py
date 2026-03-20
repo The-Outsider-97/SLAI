@@ -5,8 +5,7 @@ import torch
 import random
 import numpy as np
 
-from collections import defaultdict, deque
-from typing import Counter
+from collections import Counter, defaultdict, deque
 
 from src.agents.learning.utils.config_loader import load_global_config, get_config_section
 from src.agents.learning.dqn import DQNAgent
@@ -14,9 +13,10 @@ from src.agents.learning.maml_rl import MAMLAgent
 from src.agents.learning.rsi import RSIAgent
 from src.agents.learning.rl_agent import RLAgent
 from src.agents.learning.learning_memory import LearningMemory
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("Leaning Factory")
+logger = get_logger("Learning Factory")
+printer = PrettyPrinter
 
 class LearningFactory:
     """Evolutionary strategy optimization factory with parameter mutation"""
@@ -25,7 +25,7 @@ class LearningFactory:
         if env is None or not hasattr(env, 'observation_space') or not hasattr(env, 'action_space'):
             raise ValueError("LearningFactory requires valid environment with observation_space and action_space")
         self.env = env
-        self.performance_metrics = {}
+        self.performance_metrics = performance_metrics or {}
         self.state_dim = env.observation_space.shape[0]
         self.config = load_global_config()
         self.factory_config = get_config_section('evolutionary')
@@ -67,6 +67,8 @@ class LearningFactory:
         self.permanent_agents = ['dqn', 'maml', 'rsi', 'rl']
         self.agent_pool = {name: getattr(self, name) for name in self.permanent_agents}
         self.task_registry = defaultdict(int)  # Track task type frequencies
+        self.agents = {name: getattr(self, name) for name in self.permanent_agents}
+        self._mutation_q_values = {agent_name: 1.0 for agent_name in self.param_bounds}
 
         # Additional monitoring setup
         self.selection_history = deque(maxlen=500)
@@ -114,7 +116,7 @@ class LearningFactory:
         if checkpoint_dir:
             for agent_name in ['dqn', 'maml', 'rsi', 'rl']:
                 checkpoint_path = os.path.join(checkpoint_dir, f"{agent_name}_checkpoint.pt")
-                if os.path.exists(checkpoint_path):
+                if os.path.exists(checkpoint_path) and hasattr(getattr(self, agent_name), "load_checkpoint"):
                     getattr(self, agent_name).load_checkpoint(checkpoint_path)
     
         # Initialize monitoring system
@@ -193,7 +195,7 @@ class LearningFactory:
             return 0
 
     def _classify_task(self, task_metadata):
-        return task_metadata
+        return task_metadata if task_metadata is not None else {}
 
     def monitor_architecture(self):
         """Track agent architecture details for NeuralNetwork-based agents"""
@@ -252,7 +254,7 @@ class LearningFactory:
             )
         
         return optimized_agents
-    
+
     def _mutate_parameters(self, agent_id):
         """Apply q-Gaussian mutation with self-adaptation to parameters within defined bounds."""
         params = {}
@@ -261,7 +263,7 @@ class LearningFactory:
             base_val = (min_val + max_val) / 2
             
             # Self-adapting q-value (initialize at Gaussian)
-            q = self.agent_pool[agent_id].get('q_value', 1.0)
+            q = self._mutation_q_values.get(agent_id, 1.0)
             
             # Generate q-Gaussian noise using Box-Muller method
             u1 = np.random.uniform(0, 1)
@@ -286,12 +288,12 @@ class LearningFactory:
             
             # Update parameters
             params[param] = np.clip(mutated, min_val, max_val)
-            params['q_value'] = q  # Store for next mutation
             
             # Handle integer parameters
             if param in ['hidden_size', 'batch_size', 'memory_size', 'adaptation_steps']:
                 params[param] = int(params[param])
-                
+
+        self._mutation_q_values[agent_id] = float(q)
         return params
 
     def _determine_agent_architecture(self, task_signature):
@@ -337,7 +339,7 @@ class LearningFactory:
         # Default to DQN hybrid
         return 'dqn_hybrid'
 
-    def _create_agent(self, task_signature):
+    def _create_agent(self, task_signature, evolved_params=None):
         # Check for existing temporary agent
         for agent_hash, data in self.temporary_agents.items():
             if agent_hash.startswith(str(task_signature)):
@@ -348,7 +350,7 @@ class LearningFactory:
     
         # Create new agent configuration using evolutionary strategy
         agent_type = self._determine_agent_architecture(task_signature)
-        new_agent = self._evolve_new_agent(agent_type, task_signature)
+        new_agent = self._evolve_new_agent(agent_type, task_signature, evolved_params=evolved_params)
         
         # Store temporary agent
         agent_hash = f"{task_signature}_{hash(new_agent)}"
@@ -359,18 +361,13 @@ class LearningFactory:
         
         return new_agent
     
-    def _evolve_new_agent(self, agent_type, task_signature):
+    def _evolve_new_agent(self, agent_type, task_signature, evolved_params=None):
         state_dim = self.env.observation_space.shape[0]
         action_size = self.env.action_space.n
         
-        # Hybrid configuration using best-performing agents
-        base_config = self._get_base_config(agent_type)
-        evolved_params = {
-            'hidden_size': np.random.choice([128, 256, 512]),
-            'learning_rate': 10**np.random.uniform(-4, -2),
-            'gamma': np.clip(np.random.normal(0.95, 0.03), 0.9, 0.999)
-        }
-        
+        # Placeholder for future parameterized constructors.
+        _ = evolved_params or self._get_base_config(agent_type)
+
         # Create agent based on type
         if agent_type == 'dqn_hybrid':
             return DQNAgent(
@@ -448,15 +445,17 @@ class LearningFactory:
         setattr(self, agent_name, agent)
         self.permanent_agents.append(agent_name)
         self.agent_pool[agent_name] = agent
-        
+        self.agents[agent_name] = agent
+
         # Update factory components
         self.performance_tracker[agent_name] = deque(maxlen=100)
         del self.temporary_agents[agent_hash]
-        
+
         # Save to learning memory
+        agent_config = agent.get_config() if hasattr(agent, "get_config") else {"agent_type": type(agent).__name__}
         self.learning_memory.set(
             key=f"promoted_agents/{agent_name}",
-            value=agent.get_config()
+            value=agent_config
         )
 
     def _crossover(self, agent_id1, agent_id2):
@@ -475,6 +474,7 @@ class LearningFactory:
                 hybrid_params[param] = self.param_bounds[agent_id2][param][1]
         return hybrid_params
 
+    @staticmethod
     def compute_intrinsic_reward(state, action, next_state):
         return action
 
