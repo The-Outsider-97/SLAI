@@ -214,7 +214,7 @@ class RLAgent:
     def step(self, state: Any) -> Any:
         """Record state and choose action"""
         processed_state = self._process_state(state)
-        action = self.select_action(processed_state)
+        action = self._epsilon_greedy(processed_state)
         # Store processed state (already in tuple form)
         self.state_history.append(processed_state)
         self.action_history.append(action)
@@ -540,12 +540,11 @@ class RLVisualizer:
     
     def _setup_color_maps(self):
         """Create perceptually uniform color maps"""
-        self.value_cmap = LinearSegmentedColormap.from_list(
-            'q_values', ['#2A0A12', '#C62F2F', '#F9D379'], N=256)
+        self.value_cmap = cv2.COLORMAP_HOT   # Use OpenCV's hot colormap
         self.trajectory_cmap = plt.get_cmap('viridis')
         self.exploration_palette = np.array([
-            [42, 157, 143],   # Exploration color
-            [233, 196, 106]   # Exploitation color
+            [42, 157, 143],
+            [233, 196, 106]
         ], dtype=np.uint8)
         
     def _init_gpu_acceleration(self):
@@ -627,60 +626,59 @@ class RLVisualizer:
             return self._cpu_interpolate(prev_frame, current_frame, flow_map, num_interpolations)
 
     def animate_policy(self, fps=60, max_steps=1000, render_metrics=True):
-        """Real-time rendering pipeline with performance optimizations"""
+        """Real-time rendering pipeline (sequential version)"""
         raw_obs, _ = self.env.reset()
-        state = raw_obs
-        
+        state = raw_obs                     # raw image
+        processed_state = self.agent._process_state(state)   # embeddings tuple
+    
         # Get frame dimensions from first render
         test_frame = self.env.render()
+        if test_frame is None:
+            raise RuntimeError("Environment render() returned None. Make sure render_mode is set to 'rgb_array'.")
         frame_height, frame_width = test_frame.shape[:2]
-        
+    
         video_writer = cv2.VideoWriter(
-            'policy_animation.mp4', 
-            cv2.VideoWriter_fourcc(*'mp4v'), fps, 
-            (frame_width*2, frame_height*2)  # Use actual frame dimensions
+            'policy_animation.mp4',
+            cv2.VideoWriter_fourcc(*'mp4v'), fps,
+            (frame_width, frame_height)   # original size
         )
-        
+    
         prev_frame = None
-        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
-            futures = []
-            
-            for step in range(max_steps):
-                frame = self.env.render()
-                action = self.agent.get_policy().get(
-                    self.agent._process_state(state), 
-                    random.choice(self.agent.possible_actions)
-                )
-                
-                # Parallel frame processing
-                future = executor.submit(
-                    self._process_frame, frame, state, action, step)
-                futures.append(future)
-                
-                if len(futures) > 5:  # Pipeline depth
-                    processed_frame = futures.pop(0).result()
-                    if prev_frame is not None:
-                        interpolated = self.interpolate_frames(prev_frame, processed_frame)
-                        for interp in interpolated:
-                            video_writer.write(interp)
-                    video_writer.write(processed_frame)
-                    prev_frame = processed_frame
-                
-                next_raw_obs, reward, terminated, truncated, info = self.env.step(action)
-                done = terminated or truncated
-                state = next_raw_obs
-                if done: break
-                
-            video_writer.release()
-            self._postprocess_animation('policy_animation.mp4')
+        for step in range(max_steps):
+            frame = self.env.render()
+            if frame is None:
+                break
+    
+            action = self.agent.get_policy().get(
+                processed_state,   # use processed state for policy lookup
+                random.choice(self.agent.possible_actions)
+            )
+    
+            # Process the frame using the processed state
+            processed_frame = self._process_frame(frame, processed_state, action, step)
+    
+            video_writer.write(processed_frame)
+            prev_frame = processed_frame
+    
+            next_raw_obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+            if done:
+                break
+            state = next_raw_obs
+            processed_state = self.agent._process_state(state)   # update for next step
+    
+        video_writer.release()
+        self._postprocess_animation('policy_animation.mp4')
 
-    def _process_frame(self, frame, state, action, step):
-        """Frame processing worker function"""
-        q_values = [self.agent._get_q_value(state, a) for a in self.agent.possible_actions]
-        frame = self.render_heatmap_overlay(frame, state, q_values)
-        frame = self._draw_trajectory(frame, step)
+    def _process_frame(self, frame, processed_state, action, step):
+        """Frame processing using the processed state (embeddings tuple)."""
+        q_values = [self.agent._get_q_value(processed_state, a) for a in self.agent.possible_actions]
+        frame = self.render_heatmap_overlay(frame, processed_state, q_values)
+        # frame = self._draw_trajectory(frame, step)  # TODO: implement if needed
         frame = self._render_metrics(frame, step)
-        frame = cv2.resize(frame, (self.env.width*2, self.env.height*2))
+        # Resize using the frame's dimensions, not env.width/height
+        h, w = frame.shape[:2]
+        frame = cv2.resize(frame, (w*2, h*2))
         return frame
 
     def _render_metrics(self, frame, step):
@@ -811,11 +809,26 @@ class RLEncoder(RLAgent):
     def _visual_state_processor(self, raw_state):
         """Process raw pixels using VisionEncoder"""
         with torch.no_grad():
+            # Convert to numpy if needed
+            if isinstance(raw_state, torch.Tensor):
+                raw_state = raw_state.cpu().numpy()
+            
+            # Reshape if 1D and length matches image size
+            if isinstance(raw_state, np.ndarray) and raw_state.ndim == 1:
+                if raw_state.size == 84 * 84 * 3:
+                    raw_state = raw_state.reshape(84, 84, 3)
+            
             state_tensor = torch.tensor(raw_state, dtype=torch.float32)
+            # If still 1D, raise a clear error
+            if state_tensor.dim() == 1:
+                raise ValueError(
+                    f"Expected 3D image tensor, got 1D tensor of size {state_tensor.shape[0]}. "
+                    "Check your environment wrapper."
+                )
+            
             state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
             embeddings = self.vision_encoder(state_tensor)
-
-        return tuple(float(x) for x in embeddings.cpu().numpy().flatten().tolist())
+        return tuple(embeddings.cpu().numpy().flatten())
 
     def _process_state(self, raw_state):
         """Override state processing for visual inputs"""
@@ -831,13 +844,13 @@ class RLEncoder(RLAgent):
             return tuple(processed.cpu().numpy().flatten().tolist())
         return tuple(processed) if not isinstance(processed, tuple) else processed
 
-    def _visual_state_processor(self, raw_state):
-        """Process raw pixels using VisionEncoder"""
-        with torch.no_grad():
-            state_tensor = torch.tensor(raw_state, dtype=torch.float32)
-            state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
-            embeddings = self.vision_encoder(state_tensor)
-        return tuple(embeddings.cpu().numpy().flatten())
+    #def _visual_state_processor(self, raw_state):
+    #    """Process raw pixels using VisionEncoder"""
+    #    with torch.no_grad():
+    ##        state_tensor = torch.tensor(raw_state, dtype=torch.float32)
+    #        state_tensor = state_tensor.permute(2, 0, 1).unsqueeze(0)
+    #        embeddings = self.vision_encoder(state_tensor)
+    #    return tuple(embeddings.cpu().numpy().flatten())
 
 class RLTransformer(RLEncoder):
     def __init__(self, *args, **kwargs):
@@ -881,7 +894,9 @@ if __name__ == "__main__":
         
         def _process_frame(self):
             frame = self.env.render()
+            print(f"render() shape: {frame.shape if hasattr(frame, 'shape') else 'no shape'}")
             frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
+            print(f"after resize shape: {frame.shape}")
             return frame
     
     # Main test function
