@@ -1662,7 +1662,8 @@ class LearningAgent(BaseAgent):
 
     def _evolve_strategies(self, performance_data):
         """Use LearningFactory to generate optimized agents"""
-        self.learning_factory.performance = performance_data
+        # Keep factory metrics synchronized with latest strategy evaluation.
+        self.learning_factory.performance_metrics = performance_data
         return self.learning_factory.generate_new_strategies()
 
     def _update_agent_pool(self, optimized_agents):
