@@ -402,35 +402,10 @@ __all__ = ["RLAgent", "RLHyperparameters"]
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Recursive Learning ===\n")
-    class _SimpleFiniteEnv:
-        """Small deterministic environment for local RLAgent smoke testing."""
+    from src.agents.learning.slaienv import SLAIEnv
 
-        def __init__(self):
-            self.goal = 4
-            self.max_steps = 12
-            self.state = 0
-            self.steps = 0
-
-        def reset(self):
-            self.state = 0
-            self.steps = 0
-            return np.array([self.state], dtype=float), {}
-
-        def step(self, action: int):
-            self.steps += 1
-            if action == 1:
-                self.state = min(self.goal, self.state + 1)
-            else:
-                self.state = max(0, self.state - 1)
-
-            done = self.state == self.goal or self.steps >= self.max_steps
-            reward = 1.0 if self.state == self.goal else -0.05
-            return np.array([self.state], dtype=float), reward, done, False, {}
-
-        def render(self):
-            return None
-    
-    env = _SimpleFiniteEnv()
+    agent_id = None
+    env = SLAIEnv(state_dim=4, action_dim=3)
     agent = RLAgent(agent_id="rl_main_test", possible_actions=[0, 1], state_size=1)
 
     policy = agent.train(env=env, num_tasks=3, episodes_per_task=20)
