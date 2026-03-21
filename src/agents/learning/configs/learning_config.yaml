@@ -15,8 +15,14 @@ evolutionary:
   population_size: 10
   generations: 20
   mutation_rate: 0.2
+  top_k: 2
   evaluation_episodes: 3
   elite_ratio: 0.3
+  creation_threshold: 0.4
+  promotion_threshold: 3
+  max_temporary_agents: 10
+  garbage_collect_interval: 1000
+  step_size_adaptation: true   # enable self-adaptive step size
 
 unified:
   validation_episodes: 5
