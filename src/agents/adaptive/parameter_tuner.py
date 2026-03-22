@@ -93,11 +93,7 @@ class LearningParameterTuner:
         printer.status("INIT", "Tuning succesfully initialized")
 
         # Initialize and run tuner
-        tuner = HyperparamTuner(
-            config_path=self.tuner_config.get('parameter_tuner'),
-            evaluation_function=evaluation_function,
-            strategy=self.tuner_config.get('strategy', 'bayesian')
-        )
+        tuner = HyperparamTuner(evaluation_function=evaluation_function)
         best_params = tuner.run_tuning_pipeline()
 
         # Log intervention in memory
@@ -117,9 +113,19 @@ class LearningParameterTuner:
         """Calculate performance impact of new parameters"""
         printer.status("INIT", "Change calculation succesfully initialized")
 
-        old_perf = np.mean(list(self.memory.parameter_evolution['performance'][-10:]))
+        if not self.memory.parameter_evolution.empty:
+            history = self.memory.parameter_evolution['performance'].values
+        else:
+            history = None
+        if history is None or len(history) == 0:
+            old_perf = 0.0
+        else:
+            old_perf = float(np.mean(list(history[-10:])))
         self.params.update(new_params)
-        new_perf = np.mean(list(self.memory.parameter_evolution['performance'][-10:]))
+        if history is None or len(history) == 0:
+            new_perf = old_perf
+        else:
+            new_perf = float(np.mean(list(history[-10:])))
         return new_perf - old_perf
 
     def decay_exploration(self, decay_factor: float = 0.9995) -> None:
