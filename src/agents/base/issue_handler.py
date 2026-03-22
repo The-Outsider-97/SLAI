@@ -3,6 +3,9 @@ import json
 import logging
 import difflib
 import traceback
+import inspect
+import importlib
+
 from typing import Any, Dict
 
 def handle_unicode_emoji_error(agent, task_data: Any, error_info: Dict) -> Any:
@@ -317,8 +320,34 @@ def handle_similar_past_error(agent, task_data: Any, error_info: Dict) -> Any:
     
     return {"status": "failed", "reason": "All similar solutions failed"}
 
+def handle_missing_inspect_error(agent, task_data: Any, error_info: Dict) -> Any:
+    """
+    Handles NameError where `inspect` is referenced but not imported in the
+    agent module (or one of its direct execution paths).
+    """
+    logger = logging.getLogger(f"{agent.name}.InspectNameHandler")
+    error_type = error_info.get("error_type", "")
+    error_msg = error_info.get("error_message", "")
+
+    if error_type != "NameError" or "name 'inspect' is not defined" not in error_msg:
+        return {"status": "failed", "reason": "Not a missing-inspect NameError"}
+
+    try:
+        module_name = agent.__class__.__module__
+        module = importlib.import_module(module_name)
+        if not hasattr(module, "inspect"):
+            setattr(module, "inspect", inspect)
+            logger.info(f"Injected missing 'inspect' import into module: {module_name}")
+
+        return agent.perform_task(task_data)
+    except Exception as e:
+        logger.error(f"Failed to recover from missing inspect import: {str(e)[:200]}")
+        return {"status": "failed", "reason": f"Inspect recovery failed: {str(e)[:200]}"}
+
 # Registry of default issue handlers
 DEFAULT_ISSUE_HANDLERS = {
+    "name 'inspect' is not defined": handle_missing_inspect_error,
+    "NameError": handle_missing_inspect_error,
     "RuntimeError": handle_runtime_error,
     "unicode": handle_unicode_emoji_error,
     "emoji": handle_unicode_emoji_error,
