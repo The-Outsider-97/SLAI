@@ -186,6 +186,13 @@ perception_agent:
 
 planning_agent: {}
 
+reader_agent:
+    default_output_format: "txt"
+    output_dir: "output/reader"
+    max_concurrency: 4
+    enable_cache: true
+    recovery_min_quality_score: 0.55
+
 reasoning_agent:
     learning_rate: 0.01
     exploration_rate: 0.1
