@@ -1,0 +1,20 @@
+dataset:
+  max_records: 1000000
+  enforce_alignment: true
+  allow_empty_payload: false
+  ingestion:
+    min_batch_size: 1
+    enforce_batch_alignment: true
+
+validation:
+  strict_types: true
+  fail_on_unknown_modality: true
+  max_field_items_default: 100000
+
+quality_gate:
+  max_null_ratio: 0.0
+  fail_on_nulls: true
+
+versioning:
+  registry_path: data/processed/dataset_registry.json
+  hash_algorithm: sha256
