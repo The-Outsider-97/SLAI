@@ -23,6 +23,7 @@ from .safety_agent import SafetyAgent
 from .adaptive_agent import AdaptiveAgent
 from .reasoning_agent import ReasoningAgent
 from .handler_agent import HandlerAgent
+from .reader_agent import ReaderAgent
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
@@ -46,6 +47,7 @@ class AgentFactory:
         'reasoning': ReasoningAgent,
         'safety': SafetyAgent,
         'handler': HandlerAgent,
+        'reader': ReaderAgent,
     }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
