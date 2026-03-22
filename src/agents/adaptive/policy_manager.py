@@ -62,8 +62,15 @@ class PolicyManager:
             raise ValueError("Cannot initialize PolicyManager with empty skills dictionary")
 
         if self.state_dim is None:
+            # first_skill = next(iter(skills.values()))
             first_skill = next(iter(skills.values()))
-            self.state_dim = int(first_skill.get('state_dim', 32))
+            if hasattr(first_skill, 'state_dim'):
+                self.state_dim = first_skill.state_dim
+            elif isinstance(first_skill, dict):
+                self.state_dim = int(first_skill.get('state_dim', 32))
+            else:
+                raise TypeError("Skills must be SkillWorker objects or dicts with 'state_dim'")
+            # self.state_dim = int(first_skill.get('state_dim', 32))
         if self.state_dim <= 0:
             raise ValueError("state_dim must be positive before initializing skills")
 
