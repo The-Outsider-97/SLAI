@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "2.0.0"
 
 """
 Adaptive Agent with Reinforcement Learning Capabilities
@@ -57,7 +57,7 @@ class AdaptiveAgent(BaseAgent):
 
     def __init__(self, shared_memory,
                  agent_factory, config=None,
-                 args=(), kwargs={}):
+                 args=(), kwargs=None):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
@@ -123,15 +123,16 @@ class AdaptiveAgent(BaseAgent):
         skills_config = self.adaptive_config.get('skills', {})
         skills = {}
         for skill_id, skill_meta in skills_config.items():
+            skill_idx = int(skill_id)
             # Ensure all skills use the agent's state_dim
-            skills[skill_id] = SkillWorker.create_worker(
-                skill_id, 
+            skills[skill_idx] = SkillWorker.create_worker(
+                skill_idx,
                 {
                     **skill_meta,
                     'state_dim': self.state_dim
                 }
             )
-            logger.debug(f"Initialized skill {skill_id} with state_dim={self.state_dim}")
+            logger.debug(f"Initialized skill {skill_idx} with state_dim={self.state_dim}")
         return skills
 
     def _create_fallback_skill(self) -> Dict[int, SkillWorker]:
@@ -447,27 +448,27 @@ class AdaptiveAgent(BaseAgent):
         except Exception as e:
             logger.error(f"LR adjustment failed: {str(e)}")
             return False
-    
+
     def _recover_full_reset(self):
         """Complete agent reset"""
         logger.info("[Recovery] Performing full agent reset")
         try:
             # Reset policy network
-            for layer in self.rl_engine.policy_net.children():
+            for layer in self.rl_engine.actor_critic.children():
                 if hasattr(layer, 'reset_parameters'):
                     layer.reset_parameters()
-                    
+
             # Clear all memory
-            self.rl_engine.local_memory
+            self.rl_engine.local_memory.clear_episodic()
             self.policy_manager.memory = self.rl_engine.local_memory
-            
+
             # Reset training state
             self.episode = 0
             self.total_steps = 0
             self.episode_reward = 0
             self.episode_length = 0
             self.last_reward = 0
-            
+
             logger.info("[Recovery] Full reset complete")
             return True
         except Exception as e:
@@ -508,10 +509,9 @@ class AdaptiveAgent(BaseAgent):
         rewards = [exp['reward'] for exp in self.rl_engine.local_memory.episodic]
         if rewards:
             self.tuner.adapt(rewards[-self.adaptive_config.get('tuning_window', 100):])
-        
+
         # Update policy manager with new parameters
-        batch = self.rl_engine.local_memory.sample(batch_size)
-        self.policy_manager.update_policy(batch["states"], batch["actions"], batch["advantages"])
+        self.policy_manager.update_policy()
 
     def learn_from_demonstration(self, demo_data: dict):
         """Learn from demonstration data"""
