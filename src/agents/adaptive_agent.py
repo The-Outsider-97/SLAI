@@ -586,7 +586,7 @@ class AdaptiveAgent(BaseAgent):
         
         # Delegate task
         handler = self.agent_factory.create(
-            "planning", 
+            "language", 
             self.shared_memory,
             env=self.env,
             config= {} # {'handler_id': handler_id}
