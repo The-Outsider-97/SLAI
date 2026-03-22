@@ -235,6 +235,9 @@ class SkillWorker:
         reward = self._normalize_reward(reward)
         
         # Create transition
+        state_arr = state.detach().cpu().numpy() if torch.is_tensor(state) else np.asarray(state)
+        next_state_arr = next_state.detach().cpu().numpy() if torch.is_tensor(next_state) else np.asarray(next_state)
+
         transition = Transition(
             state=torch.FloatTensor(state),
             action=torch.tensor(action),
@@ -246,10 +249,10 @@ class SkillWorker:
         
         # Store in memories
         self.local_memory.store_experience(
-            state=state.numpy() if torch.is_tensor(state) else state,
+            state=state_arr,
             action=action.item() if torch.is_tensor(action) else action,
             reward=reward,
-            next_state=next_state.numpy() if torch.is_tensor(next_state) else next_state,
+            next_state=next_state_arr,
             done=done,
             context=None,
             params=None,
@@ -307,10 +310,7 @@ class SkillWorker:
         actions = [e['action'] for e in experiences]
         rewards = [e['reward'] for e in experiences]
         dones = [e.get('done', False) for e in experiences]  # Handle missing 'done'
-        
-        # Extract log_probs if available
-        log_probs = [e.get('log_prob', 0.0) for e in experiences]
-        
+
         # Compute returns and advantages
         returns = self.compute_returns(rewards, dones)
         returns_tensor = torch.FloatTensor(returns)
@@ -329,8 +329,7 @@ class SkillWorker:
         # Convert to tensors
         states_tensor = torch.FloatTensor(np.array(states))
         actions_tensor = torch.tensor(actions)
-        old_log_probs_tensor = torch.tensor(log_probs)
-        
+
         # Actor update
         self.actor_optimizer.zero_grad()
         current_log_probs = []
@@ -346,11 +345,10 @@ class SkillWorker:
             
         current_log_probs_tensor = torch.stack(current_log_probs)
         entropy_tensor = torch.stack(entropies).mean()
-        
-        # Policy gradient loss
-        ratio = torch.exp(current_log_probs_tensor - old_log_probs_tensor.detach())
-        policy_loss = -(ratio * advantages.detach()).mean()
-        
+
+        # Vanilla actor-critic loss (more stable for this on-policy update path)
+        policy_loss = -(current_log_probs_tensor * advantages.detach()).mean()
+
         # Entropy bonus
         entropy_loss = -self.entropy_coef * entropy_tensor
         
