@@ -62,19 +62,16 @@ class MetaLearningWorker:
         logger.info(f"Using worker registry: {self.worker_registry_name}")
 
     def get_worker_registry(self):
-        """Retrieve worker registry from memory"""
-        # Access the semantic memory store directly
+        """Retrieve worker registry from local registry first, then memory fallback."""
+        if self.skill_worker_registry:
+            return self.skill_worker_registry
+
         registry_key = f"ctx_{self.worker_registry_name[:6]}"
-        
         if registry_key in self.memory.semantic:
             registry_data = self.memory.semantic[registry_key]['data']
             if isinstance(registry_data, dict):
                 return registry_data
-            else:
-                logger.warning(f"Registry data is not a dictionary: {type(registry_data)}")
-        else:
-            logger.warning(f"Worker registry '{self.worker_registry_name}' not found in memory")
-        
+            logger.warning(f"Registry data is not a dictionary: {type(registry_data)}")
         return {}
 
     def collect_performance_metrics(self) -> Dict[int, Dict]:
