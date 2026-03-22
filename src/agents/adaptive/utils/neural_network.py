@@ -36,6 +36,8 @@ class NeuralNetwork(nn.Module):
         self.nn_config = get_config_section('neural_network')
         self.input_dim = self.nn_config.get('input_dim')
         self.layer_config = self.nn_config.get('layer_config')
+        if not self.input_dim or not self.layer_config:
+            raise ValueError("neural_network config requires non-empty input_dim and layer_config")
         self.final_activation_name = self.nn_config.get(
             'final_activation',
             'sigmoid' if self.problem_type == 'binary_classification' else
@@ -264,8 +266,15 @@ class NeuralNetwork(nn.Module):
         printer.status("INIT", "Prepper succesfully initialized", "info")
 
         if self.problem_type == 'multiclass_classification':
-            # Convert to class indices for CrossEntropyLoss
-            return torch.LongTensor([np.argmax(t) for t in targets])
+            # Convert one-hot vectors OR scalar labels to class indices for CrossEntropyLoss
+            class_indices = []
+            for t in targets:
+                arr = np.asarray(t)
+                if arr.ndim == 0:
+                    class_indices.append(int(arr))
+                else:
+                    class_indices.append(int(np.argmax(arr)))
+            return torch.LongTensor(class_indices)
         return torch.FloatTensor(np.array(targets))
 
     def evaluate(self, test_data: List[Tuple[np.ndarray, np.ndarray]]) -> float:
@@ -309,16 +318,7 @@ class NeuralNetwork(nn.Module):
     @classmethod
     def load_model(cls, filepath: str):
         checkpoint = torch.load(filepath)
-        # Extract layer config from saved model
-        layer_config = []
-        for layer in checkpoint['layer_config']:
-            layer_config.append({
-                'neurons': layer.out_features,
-                # Add other params as needed
-            })
-            
-        # Create model instance
-        input_dim = checkpoint['layer_config'][0].in_features
+
         model = cls()
         model.load_state_dict(checkpoint['state_dict'])
         return model
@@ -498,9 +498,11 @@ class BayesianDQN(NeuralNetwork):
     def load_model(cls, filepath: str):
         """Load BayesianDQN with custom parameters"""
         checkpoint = torch.load(filepath)
-        model = cls(dropout_rate=checkpoint.get('dropout_rate', 0.1))
+        model = cls()
         model.load_state_dict(checkpoint['state_dict'])
-        
+        model.dropout_rate = checkpoint.get('dropout_rate', model.dropout_rate)
+        model._enable_dropout()
+
         # Load uncertainty config
         uncertainty_config = checkpoint.get('uncertainty_config', {})
         model.num_uncertainty_samples = uncertainty_config.get('num_samples', 10)
