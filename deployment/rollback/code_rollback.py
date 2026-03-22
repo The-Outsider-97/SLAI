@@ -1,14 +1,16 @@
 import subprocess
-import datetime
 import logging
 import hashlib
 import re
 
 from typing import List
+from datetime import datetime
 from packaging.version import Version
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+from logs.logger import get_logger, PrettyPrinter
+
+logger = get_logger("Rollback")
+printer = PrettyPrinter
 
 # Atomic rollback capability (Stonebraker 1987 - Crash Recovery)
 class AtomicRollback:
@@ -73,6 +75,19 @@ def get_sorted_tags() -> list:
         key=lambda x: (x[1], Version(x[0].lstrip('v'))),  # Uses packaging.version
         reverse=True
     )
+
+def rollback_to_previous_tag() -> bool:
+    """Rollback Git state to the previously created tag."""
+    tags = get_sorted_tags()
+    if len(tags) < 2:
+        logger.error("At least two tags are required to rollback")
+        return False
+
+    current_tag, _ = tags[0]
+    previous_tag, _ = tags[1]
+    logger.info("Rolling back from %s to %s", current_tag, previous_tag)
+    reset_to_commit(previous_tag)
+    return True
 
 def rollforward_to_next_tag():
     """Rolls forward to the next chronological tag using version navigation"""
