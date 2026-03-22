@@ -269,7 +269,9 @@ class ImitationLearningWorker:
             'dagger_demos': len(self.dagger_memory),
             'total_demos': len(self.demo_memory) + len(self.dagger_memory)
         }
-    
+
+    # === in __init__ it should look for src/agents/adaptive/demo/ === #
+    # === if folder doesn't exists, make one                       === #
     def save_demonstrations(self, filepath: str):
         """Save demonstrations to file"""
         # Implementation depends on storage format
@@ -279,3 +281,33 @@ class ImitationLearningWorker:
         """Load demonstrations from file."""
         # Implementation depends on storage format
         pass
+
+if __name__ == "__main__":
+    print("\n=== Running Imitation Learning Worker ===\n")
+    printer.status("TEST", "Starting Imitation Learning Worker tests", "info")
+    from src.agents.adaptive.reinforcement_learning import SkillWorker
+    from src.agents.learning.utils.policy_network import PolicyNetwork
+
+    state_dim = 10   # match your config
+    action_dim = 2   # match your config
+    policy_net = PolicyNetwork(state_dim, action_dim)
+
+    worker = ImitationLearningWorker(
+        action_dim=action_dim,
+        state_dim=state_dim,
+        policy_network=policy_net
+    )
+
+    # Dummy expert
+    def dummy_expert(state):
+        return 0  # always choose action 0
+
+    worker.register_expert(dummy_expert)
+
+    # Optionally add some dummy demonstrations
+    import numpy as np
+    dummy_demo = {'state': np.random.randn(state_dim), 'action': 0}
+    worker.load_demonstrations([dummy_demo])
+    worker.behavior_cloning(epochs=10)
+
+    print("\nAll tests completed successfully!\n")
