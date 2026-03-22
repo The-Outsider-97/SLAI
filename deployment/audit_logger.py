@@ -22,15 +22,10 @@ VALID_EVENT_TYPES = {
     "version_bump"
 }
 
-# Setup logger
-logger = logging.getLogger("SLAIDeploymentLogger")
-logger.setLevel(logging.INFO)
+from logs.logger import get_logger, PrettyPrinter
 
-if not logger.handlers:
-    handler = logging.FileHandler(LOG_FILE)
-    formatter = logging.Formatter('%(message)s')  # JSON lines
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+logger = get_logger("Audit Logger")
+printer = PrettyPrinter
 
 def _redact_sensitive(data: dict) -> dict:
     """Scrub sensitive values from details"""
