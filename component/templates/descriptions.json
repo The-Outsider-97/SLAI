@@ -1,0 +1,8 @@
+{
+  "SignalSentry": "Continuously monitors selected companies, products, categories, and market themes, then produces:<ul style='margin-top: 5px; margin-bottom: 0px; padding-left: 20px;'><li style='margin-bottom: 5px;'>Daily and weekly intelligence briefs</li><li style='margin-bottom: 5px;'>High-priority alert cards (launches, pricing shifts, messaging changes, hiring signals)</li><li style='margin-bottom: 5px;'>Trend and risk summaries with recommended follow-up actions</li></ul>",
+  "MusAI": "AI-driven music generation and composition assistant.<br><br>Dynamically creates responsive soundtracks for any digital medium, adapting in real-time to user interaction and pacing.",
+  "BuildUp": "Automated project scaffolding and architecture generation.<br><br>Instantly deploy production-ready codebases with integrated CI/CD pipelines, security scanning, and modern design patterns.",
+  "Documaster": "Intelligent document processing and automated extraction.<br><br>Seamlessly convert unstructured data into actionable insights, utilizing robust OCR and NLP to categorize information.",
+  "ContentOps Autopublisher": "Seamless content scheduling and automated publishing across platforms.<br><br>Optimize your audience reach with predictive AI analytics and cross-platform formatting.",
+  "Colony Clerk": "Distributed fleet management and resource orchestration.<br><br>Track, manage, and scale your autonomous agents in real-time, ensuring optimal computational resource allocation."
+}
