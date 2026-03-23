@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Colony Clerk - UI Mock</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #151b23;
+      --panel-2: #1d2633;
+      --muted: #8b9db6;
+      --text: #e6edf3;
+      --accent: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --info: #58a6ff;
+      --border: #2f3947;
+      --chip: #263445;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+      background: linear-gradient(180deg, #0b0f14, var(--bg));
+      color: var(--text);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 280px 1fr 360px;
+      gap: 12px;
+      min-height: 100vh;
+      padding: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .title {
+      margin: 0 0 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+    }
+    .header {
+      grid-column: 1 / 4;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+    }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+    .chip {
+      background: var(--chip);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .kpi {
+      background: #0f141c;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+    }
+    .kpi .label { font-size: 11px; color: var(--muted); }
+    .kpi .value { font-size: 20px; font-weight: 700; }
+    .bar {
+      height: 8px;
+      background: #0e1218;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .fill { height: 100%; }
+    .fill.good { background: var(--accent); }
+    .fill.warn { background: var(--warn); }
+    .fill.bad { background: var(--danger); }
+    .incident {
+      border-left: 3px solid var(--danger);
+      padding: 10px;
+      background: #1a1515;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    .incident h4 { margin: 0 0 4px; font-size: 14px; }
+    .incident p { margin: 0; font-size: 12px; color: var(--muted); }
+    .queue-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      background: #101720;
+      font-size: 12px;
+    }
+    .tag { font-size: 11px; color: #0b1220; padding: 2px 6px; border-radius: 999px; }
+    .tag.high { background: #ff7b72; }
+    .tag.med { background: #e3b341; }
+    .tag.low { background: #56d364; }
+    .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    button {
+      border: 1px solid var(--border);
+      background: #1a2432;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    button.primary { background: #1f6feb; border-color: #2f81f7; }
+    button.warn { background: #5d4300; border-color: #9e6a03; }
+    .map {
+      min-height: 420px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background:
+        radial-gradient(circle at 20% 20%, rgba(56,139,253,.18), transparent 25%),
+        radial-gradient(circle at 75% 70%, rgba(248,81,73,.2), transparent 24%),
+        linear-gradient(180deg, #101722, #0b1118);
+      position: relative;
+      overflow: hidden;
+    }
+    .node {
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 1px solid #fff3;
+    }
+    .node.power { background: #ffd33d; }
+    .node.med { background: #58a6ff; }
+    .node.hab { background: #7ee787; }
+    .node.risk { background: #ff7b72; }
+    .legend { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+    .log {
+      max-height: 300px;
+      overflow: auto;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: #0f141c;
+    }
+    .log div { padding: 4px 0; border-bottom: 1px dashed #2a3340; }
+    .log div:last-child { border-bottom: 0; }
+    @media (max-width: 1200px) {
+      .app { grid-template-columns: 1fr; }
+      .header { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="header">
+      <div>
+        <h1 style="margin:0;font-size:20px;">Colony Clerk — Operations Dashboard</h1>
+        <small style="color:var(--muted);">Shift 42 | Seed: ARCTURUS-7 | Difficulty: Balanced</small>
+      </div>
+      <div class="chips">
+        <span class="chip">Doctrine: Safety-First</span>
+        <span class="chip">AI Confidence: 0.82</span>
+        <span class="chip">Live Alerts: 3</span>
+      </div>
+    </section>
+
+    <aside class="card">
+      <h3 class="title">Colony KPIs</h3>
+      <div class="kpi-grid">
+        <div class="kpi"><div class="label">Stability</div><div class="value">78</div><div class="bar"><div class="fill good" style="width:78%"></div></div></div>
+        <div class="kpi"><div class="label">Safety</div><div class="value">64</div><div class="bar"><div class="fill warn" style="width:64%"></div></div></div>
+        <div class="kpi"><div class="label">Morale</div><div class="value">71</div><div class="bar"><div class="fill good" style="width:71%"></div></div></div>
+        <div class="kpi"><div class="label">Throughput</div><div class="value">59</div><div class="bar"><div class="fill warn" style="width:59%"></div></div></div>
+      </div>
+
+      <h3 class="title">Incidents</h3>
+      <article class="incident">
+        <h4>⚠ Oxygen Recycler Drift</h4>
+        <p>Sector B output is down 18%. Auto-dispatch proposed: maintenance squad + reroute from Sector D.</p>
+      </article>
+      <article class="incident" style="border-left-color:var(--warn);background:#1a1813">
+        <h4>⏱ Supply Delay</h4>
+        <p>Medical shipment ETA slipped by 6 hours. Alternative procurement available at +12% energy cost.</p>
+      </article>
+
+      <div class="btns">
+        <button class="primary">Approve AI Response</button>
+        <button class="warn">Request Safer Plan</button>
+        <button>Open Postmortem</button>
+      </div>
+    </aside>
+
+    <section class="card">
+      <h3 class="title">Colony Map & Task Flow</h3>
+      <div class="map">
+        <span class="node power" style="left:18%;top:26%"></span>
+        <span class="node hab" style="left:36%;top:40%"></span>
+        <span class="node med" style="left:60%;top:33%"></span>
+        <span class="node risk" style="left:52%;top:62%"></span>
+        <span class="node hab" style="left:74%;top:54%"></span>
+      </div>
+      <div class="legend">
+        <span>● Yellow: Power</span>
+        <span>● Blue: Med Bay</span>
+        <span>● Green: Habitat</span>
+        <span>● Red: Risk hotspot</span>
+      </div>
+
+      <h3 class="title" style="margin-top:14px">Autonomous Task Queue</h3>
+      <div class="queue-item"><span>Recalibrate Oxygen Recycler</span><span class="tag high">High</span></div>
+      <div class="queue-item"><span>Reassign Shift B Technicians</span><span class="tag med">Medium</span></div>
+      <div class="queue-item"><span>Expedite Medical Contract</span><span class="tag med">Medium</span></div>
+      <div class="queue-item"><span>Run Morale Debrief Session</span><span class="tag low">Low</span></div>
+    </section>
+
+    <aside class="card">
+      <h3 class="title">AI Explainability Feed</h3>
+      <div class="log">
+        <div>[09:12] PlanningAgent selected safety-biased schedule due to oxygen volatility > threshold.</div>
+        <div>[09:13] ExecutionAgent rerouted 2 technicians to Sector B.</div>
+        <div>[09:14] ReasoningAgent projected 27% contamination risk if delay > 20 min.</div>
+        <div>[09:15] SafetyAgent blocked throughput-max plan (violated medical reserve floor).</div>
+        <div>[09:16] EvaluationAgent scored current response 0.81 expected incident containment.</div>
+        <div>[09:17] LanguageAgent generated shift briefing for player sign-off.</div>
+      </div>
+
+      <h3 class="title" style="margin-top:12px">Policy Controls</h3>
+      <div class="btns">
+        <button>Doctrine: Balanced</button>
+        <button>Doctrine: Efficiency</button>
+        <button class="primary">Doctrine: Safety</button>
+        <button>Open Counterfactual Compare</button>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>
