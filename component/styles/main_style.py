@@ -1,4 +1,5 @@
-"""Shared SLAI desktop styling primitives.
+"""
+Shared SLAI desktop styling primitives.
 
 This module is intentionally reusable across multiple PyQt5 apps.
 """
