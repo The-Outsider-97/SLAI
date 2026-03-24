@@ -36,10 +36,14 @@ from component.utils.main_utils import fmt_pct, utc_timestamp_label
 from component.utils.signal_sentry_utils import (
     FeedbackEvent,
     MonitoredEntity,
+    OnboardingResult,
+    PipelineResult,
     Signal,
     SourceEntry,
     agent_status_for_tab,
     feedback_usefulness_ratio,
+    run_agentic_monitoring,
+    run_onboarding_workflow,
     seed_signals,
     seed_sources,
     seed_watchlist,
@@ -60,6 +64,11 @@ class SignalSentryWindow(QMainWindow):
         self.sources: List[SourceEntry] = seed_sources()
         self.watchlist: Dict[str, List[MonitoredEntity]] = seed_watchlist()
         self.feedback_events: List[FeedbackEvent] = []
+        self.last_pipeline_result: PipelineResult | None = None
+        self.onboarding_result: OnboardingResult = run_onboarding_workflow(
+            entities=[entity for group in self.watchlist.values() for entity in group],
+            sources=self.sources,
+        )
 
         self.setStyleSheet(SIGNAL_SENTRY_STYLE)
 
@@ -321,8 +330,9 @@ class SignalSentryWindow(QMainWindow):
         self.watchlist_state_label.setText(f"Seeded watchlist: {self._watchlist_total_count()} monitored targets")
 
     def _refresh_dashboard(self) -> None:
+        pipeline = self.last_pipeline_result or run_agentic_monitoring(self.signals, alignment_enabled=True)
         self.signal_list.clear()
-        for signal in self.signals:
+        for signal in pipeline.digest_signals:
             row = QListWidgetItem(
                 f"[{signal.severity.upper()} · {signal.priority_score:.2f}] {signal.title}\n"
                 f"{signal.signal_type} | conf {signal.confidence:.2f} | source {signal.source_url}\n"
@@ -331,21 +341,21 @@ class SignalSentryWindow(QMainWindow):
             self.signal_list.addItem(row)
 
         self.unresolved_list.clear()
-        for signal in [sig for sig in self.signals if sig.priority_score >= 0.75]:
-            owner = signal.owner or "unassigned"
+        for escalation in pipeline.escalations:
             self.unresolved_list.addItem(
-                f"{signal.title} | owner: {owner} | Handler status: pending human confirmation"
+                f"{escalation.title} | owner: {escalation.owner} | Handler status: {escalation.status}"
             )
 
     def _refresh_digest(self) -> None:
-        summary = summarize_digest(self.signals)
+        pipeline = self.last_pipeline_result or run_agentic_monitoring(self.signals, alignment_enabled=True)
+        summary = summarize_digest(pipeline.digest_signals)
         self.digest_summary.setText(
             f"{summary}\n\n"
             f"Coverage: {watchlist_summary()}\n"
-            f"Workflow: Planning→Browser→Knowledge→Reasoning→Evaluation→Language→Safety"
+            f"Workflow: {' | '.join(pipeline.workflow_trace)}"
         )
         self.digest_list.clear()
-        for signal in [sig for sig in self.signals if sig.priority_score >= 0.60]:
+        for signal in pipeline.digest_signals:
             self.digest_list.addItem(
                 f"{signal.title} (priority {signal.priority_score:.2f}) - evidence: {signal.source_url}"
             )
@@ -356,7 +366,10 @@ class SignalSentryWindow(QMainWindow):
             for entity in self.watchlist.get(key, []):
                 detail = entity.focus if entity.focus else entity.entity_type
                 widget.addItem(f"{entity.name}\n{detail}")
-        self.watchlist_count_label.setText(f"Seeded monitoring profile: {watchlist_summary()}")
+        self.watchlist_count_label.setText(
+            f"Seeded monitoring profile: {watchlist_summary()} | "
+            f"Taxonomy entities: {len(self.onboarding_result.taxonomy.get('entities', []))}"
+        )
 
     def _refresh_sources(self) -> None:
         self.source_table.setRowCount(len(self.sources))
@@ -381,12 +394,19 @@ class SignalSentryWindow(QMainWindow):
             self.agent_status.addItem(f"{agent} Agent: {state}")
 
     def _run_scan(self) -> None:
+        self.last_pipeline_result = run_agentic_monitoring(self.signals, alignment_enabled=True)
+        if self.last_pipeline_result.digest_signals:
+            self.signals = self.last_pipeline_result.digest_signals + self.last_pipeline_result.archived_signals
         self.run_state_label.setText(f"Last run: {utc_timestamp_label()}")
         self._refresh_all_views()
         QMessageBox.information(
             self,
             "Scan complete",
-            "Collaborative agent published refreshed digest after Safety and optional Alignment checks.",
+            (
+                "Collaborative agent published refreshed digest after Safety/Alignment checks.\n"
+                f"Signals in digest: {len(self.last_pipeline_result.digest_signals)}\n"
+                f"Critical escalations: {len(self.last_pipeline_result.escalations)}"
+            ),
         )
 
     def _mock_export(self) -> None:
@@ -402,6 +422,10 @@ class SignalSentryWindow(QMainWindow):
             QMessageBox.warning(self, "Missing URL", "Provide a source URL first.")
             return
         self.sources.append(SourceEntry("Custom source", url, "Manual", "Daily", "pending"))
+        self.onboarding_result = run_onboarding_workflow(
+            entities=[entity for group in self.watchlist.values() for entity in group],
+            sources=self.sources,
+        )
         self.source_input.clear()
         self._refresh_sources()
 
