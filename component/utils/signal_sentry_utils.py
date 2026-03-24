@@ -6,7 +6,7 @@ import importlib
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from component.utils.main_utils import weighted_average
 from src.agents.agent_factory import AgentFactory
@@ -125,22 +125,8 @@ AGENT_CLASS_MAP: Dict[str, Tuple[str, str]] = {
     "Handler": ("src.agents.handler_agent", "HandlerAgent"),
 }
 
-def _class_declared_in_module(module_path: str, class_name: str) -> bool:
-    """
-    Check whether `class_name` is declared in the module source without importing the module.
-    Useful when optional runtime dependencies are missing in local/dev environments.
-    """
-    spec = importlib.util.find_spec(module_path)
-    if spec is None or not spec.origin or spec.origin in {"built-in", "frozen"}:
-        return False
-    try:
-        with open(spec.origin, "r", encoding="utf-8") as source_file:
-            tree = ast.parse(source_file.read(), filename=spec.origin)
-        return any(isinstance(node, ast.ClassDef) and node.name == class_name for node in tree.body)
-    except Exception:
-        return False
-
 _AGENT_BINDINGS_CACHE: Optional[Dict[str, AgentBinding]] = None
+_AGENT_RUNTIME_CACHE: Optional[Dict[str, Any]] = None
 
 
 SEED_WATCHLIST: Dict[str, List[MonitoredEntity]] = {
@@ -177,33 +163,39 @@ WEIGHTS = {
 
 
 def resolve_agent_bindings() -> Dict[str, AgentBinding]:
-    """Resolve actual SLAI agent classes from repository modules."""
+    """Resolve and instantiate real SLAI agents/classes used by SignalSentry."""
     global _AGENT_BINDINGS_CACHE
     if _AGENT_BINDINGS_CACHE is not None:
         return _AGENT_BINDINGS_CACHE
 
+    runtime = _get_agent_runtime()
+    shared_memory = runtime["shared_memory"]
+    factory = runtime["factory"]
+
     bindings: Dict[str, AgentBinding] = {}
     for agent_name, (module_path, class_name) in AGENT_CLASS_MAP.items():
         try:
-            module = importlib.import_module(module_path)
-            getattr(module, class_name)
+            implementation = _bind_agent_runtime(
+                agent_name=agent_name,
+                module_path=module_path,
+                class_name=class_name,
+                shared_memory=shared_memory,
+                factory=factory,
+            )
             bindings[agent_name] = AgentBinding(
                 agent_name=agent_name,
                 module_path=module_path,
                 class_name=class_name,
                 available=True,
-                implementation=f"{module_path}.{class_name}",
+                implementation=implementation,
             )
         except Exception as exc:
-            deferred_available = _class_declared_in_module(module_path, class_name)
             bindings[agent_name] = AgentBinding(
                 agent_name=agent_name,
                 module_path=module_path,
                 class_name=class_name,
-                available=deferred_available,
-                implementation=(
-                    f"deferred_load:{module_path}.{class_name}" if deferred_available else "fallback_pipeline_logic"
-                ),
+                available=False,
+                implementation="unavailable",
                 error=str(exc),
             )
     _AGENT_BINDINGS_CACHE = bindings
@@ -211,7 +203,84 @@ def resolve_agent_bindings() -> Dict[str, AgentBinding]:
 
 
 def _binding_label(binding: AgentBinding) -> str:
-    return binding.implementation if binding.available else f"fallback ({binding.class_name} unavailable)"
+    return binding.implementation
+
+
+def _get_agent_runtime() -> Dict[str, Any]:
+    global _AGENT_RUNTIME_CACHE
+    if _AGENT_RUNTIME_CACHE is not None:
+        return _AGENT_RUNTIME_CACHE
+
+    _AGENT_RUNTIME_CACHE = {
+        "shared_memory": SharedMemory(),
+        "factory": AgentFactory(),
+        "instances": {},
+    }
+    return _AGENT_RUNTIME_CACHE
+
+
+def _bind_agent_runtime(
+    agent_name: str,
+    module_path: str,
+    class_name: str,
+    shared_memory: SharedMemory,
+    factory: AgentFactory,
+) -> str:
+    runtime = _get_agent_runtime()
+    instances = runtime["instances"]
+    if agent_name in instances:
+        return f"live:{instances[agent_name].__class__.__module__}.{instances[agent_name].__class__.__name__}"
+
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+
+    if agent_name == "Collaborative":
+        instances[agent_name] = cls(shared_memory=shared_memory, agent_factory=factory, config={})
+    elif agent_name == "Browser":
+        # Browser workflow class currently requires a driver object;
+        # we still bind to the real repository class for capability attribution.
+        instances[agent_name] = cls
+    else:
+        factory_map = {
+            "Planning": "planning",
+            "Knowledge": "knowledge",
+            "Reasoning": "reasoning",
+            "Evaluation": "evaluation",
+            "Language": "language",
+            "Safety": "safety",
+            "Alignment": "alignment",
+            "Handler": "handler",
+        }
+        agent_type = factory_map.get(agent_name)
+        if agent_type is None:
+            raise ValueError(f"No AgentFactory mapping for '{agent_name}'.")
+        instances[agent_name] = factory.create(agent_type, shared_memory)
+
+    target = instances[agent_name]
+    if isinstance(target, type):
+        return f"live_class:{target.__module__}.{target.__name__}"
+    return f"live:{target.__class__.__module__}.{target.__class__.__name__}"
+
+
+def _require_agents(bindings: Dict[str, AgentBinding], alignment_enabled: bool) -> None:
+    required = [
+        "Collaborative",
+        "Planning",
+        "Browser",
+        "Knowledge",
+        "Reasoning",
+        "Evaluation",
+        "Language",
+        "Safety",
+        "Handler",
+    ]
+    if alignment_enabled:
+        required.append("Alignment")
+
+    missing = [name for name in required if not bindings[name].available]
+    if missing:
+        details = "; ".join(f"{name}: {bindings[name].error}" for name in missing)
+        raise RuntimeError(f"SignalSentry requires live SLAI agents. Missing/failed: {details}")
 
 
 def compute_priority(signal: Signal) -> float:
@@ -307,6 +376,7 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
     -> Language -> Safety -> (optional Alignment) -> Handler escalation.
     """
     bindings = resolve_agent_bindings()
+    _require_agents(bindings, alignment_enabled=alignment_enabled)
     prioritized = enrich_signals(signals)
 
     workflow_trace: List[str] = [
@@ -361,25 +431,16 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
             )
 
     handler_binding = bindings["Handler"]
-    if handler_binding.available:
-        try:
-            handler_module = importlib.import_module(handler_binding.module_path)
-            handler_cls = getattr(handler_module, handler_binding.class_name)
-            handler = handler_cls(shared_memory=SharedMemory(), agent_factory=AgentFactory(), config={})
-            for escalation in escalations:
-                handler.failure_normalization(
-                    error_info={"error_type": "SignalEscalation", "error_message": escalation.rationale},
-                    context={"agent": "SignalSentry", "signal_id": escalation.signal_id},
-                )
-            workflow_trace.append(
-                f"Handler ({handler_binding.implementation}): routed {len(escalations)} critical alerts for human confirmation."
-            )
-        except Exception as exc:
-            workflow_trace.append(
-                f"Handler fallback: routed {len(escalations)} critical alerts (native handler call failed: {exc})."
-            )
-    else:
-        workflow_trace.append(f"Handler fallback: routed {len(escalations)} critical alerts for human confirmation.")
+    runtime = _get_agent_runtime()
+    handler = runtime["instances"]["Handler"]
+    for escalation in escalations:
+        handler.failure_normalization(
+            error_info={"error_type": "SignalEscalation", "error_message": escalation.rationale},
+            context={"agent": "SignalSentry", "signal_id": escalation.signal_id},
+        )
+    workflow_trace.append(
+        f"Handler ({handler_binding.implementation}): routed {len(escalations)} critical alerts for human confirmation."
+    )
 
     return PipelineResult(
         digest_signals=safe_digest,
