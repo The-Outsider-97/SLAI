@@ -1,6 +1,4 @@
-
-
-"""SignalSentry-specific logic: scoring, workflow state, and mock data shaping."""
+"""SignalSentry-specific logic: agent integration, scoring, workflow state, and seed data."""
 
 from __future__ import annotations
 
@@ -28,7 +26,7 @@ class Signal:
     owner: str = ""
     evidence_note: str = ""
     priority_score: float = 0.0
-    severity: str = "medium"
+    severity: str = "highlight"
 
 
 @dataclass
@@ -83,6 +81,15 @@ class AgentBinding:
     available: bool
     implementation: str
     error: str = ""
+
+
+@dataclass
+class OnboardingResult:
+    monitored_entities: List[MonitoredEntity]
+    approved_sources: List[SourceEntry]
+    excluded_sources: List[str]
+    taxonomy: Dict[str, List[str]]
+    confidence_rubric: Dict[str, float]
 
 
 AGENT_SEQUENCE = [
@@ -152,7 +159,6 @@ SEED_WATCHLIST: Dict[str, List[MonitoredEntity]] = {
 }
 
 
-# Product-specified weighting.
 WEIGHTS = {
     "impact": 0.35,
     "confidence": 0.30,
@@ -162,9 +168,7 @@ WEIGHTS = {
 
 
 def resolve_agent_bindings() -> Dict[str, AgentBinding]:
-    """
-    Resolve actual SLAI agent classes from repository modules.
-    """
+    """Resolve actual SLAI agent classes from repository modules."""
     global _AGENT_BINDINGS_CACHE
     if _AGENT_BINDINGS_CACHE is not None:
         return _AGENT_BINDINGS_CACHE
@@ -213,8 +217,8 @@ def classify_priority(score: float) -> str:
     if score >= 0.80:
         return "critical"
     if score >= 0.60:
-        return "high"
-    return "medium"
+        return "highlight"
+    return "archive"
 
 
 def enrich_signals(signals: List[Signal]) -> List[Signal]:
@@ -230,77 +234,110 @@ def summarize_digest(signals: List[Signal]) -> str:
     if not signals:
         return "No signals detected in the selected monitoring window."
     critical_count = sum(1 for sig in signals if sig.severity == "critical")
-    high_count = sum(1 for sig in signals if sig.severity == "high")
+    highlight_count = sum(1 for sig in signals if sig.severity == "highlight")
     avg_conf = weighted_average([sig.confidence for sig in signals], [1.0] * len(signals))
     top_title = signals[0].title
     return (
         f"SLAI captured {len(signals)} monitored changes in the last run. "
-        f"Critical: {critical_count}, digest highlights: {high_count}. "
+        f"Critical: {critical_count}, digest highlights: {highlight_count}. "
         f"Top development: {top_title}. "
         f"Mean confidence {avg_conf:.2f}."
     )
 
 
+def run_onboarding_workflow(
+    entities: List[MonitoredEntity],
+    sources: List[SourceEntry],
+    exclusions: Optional[List[str]] = None,
+) -> OnboardingResult:
+    """Workflow A from README: source/entity intake + taxonomy/rubric generation."""
+    exclusions_set = {value.lower() for value in (exclusions or [])}
+    approved = [s for s in sources if s.url.lower() not in exclusions_set]
+
+    taxonomy = {
+        "signal_types": [
+            "launch",
+            "pricing_shift",
+            "messaging_change",
+            "hiring_signal",
+            "integration",
+            "trend",
+            "risk",
+        ],
+        "entities": sorted({e.name for e in entities}),
+        "themes": [e.name for e in entities if e.entity_type.lower() == "theme"],
+    }
+    confidence_rubric = {
+        "high": 0.85,
+        "medium": 0.70,
+        "low": 0.50,
+    }
+
+    return OnboardingResult(
+        monitored_entities=list(entities),
+        approved_sources=approved,
+        excluded_sources=list(exclusions_set),
+        taxonomy=taxonomy,
+        confidence_rubric=confidence_rubric,
+    )
+
+
+def _safety_blocked(signal: Signal) -> bool:
+    text = f"{signal.title} {signal.evidence_note}".lower()
+    blocked_terms = ["password", "secret", "token leak", "private key", "credential"]
+    return any(term in text for term in blocked_terms)
+
+
 def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True) -> PipelineResult:
     """
-    Execute a lightweight end-to-end agent workflow so each agent impacts outputs.
-
-    Workflow (README aligned):
+    Workflow B/C from README:
     Collaborative -> Planning -> Browser -> Knowledge -> Reasoning -> Evaluation
-    -> Language -> Safety -> (optional Alignment) -> Handler
+    -> Language -> Safety -> (optional Alignment) -> Handler escalation.
     """
     bindings = resolve_agent_bindings()
     prioritized = enrich_signals(signals)
-    workflow_trace: List[str] = []
-    workflow_trace.append(
-        f"Collaborative ({_binding_label(bindings['Collaborative'])}): orchestrated {len(prioritized)} signal jobs."
-    )
-    workflow_trace.append(
-        f"Planning ({_binding_label(bindings['Planning'])}): sorted crawl windows by recency and source stability."
-    )
-    workflow_trace.append(
-        f"Browser ({_binding_label(bindings['Browser'])}): fetched monitored pages and extracted evidence snapshots."
-    )
-    workflow_trace.append(
-        f"Knowledge ({_binding_label(bindings['Knowledge'])}): compared current snapshots against historical memory."
-    )
-    workflow_trace.append(
-        f"Reasoning ({_binding_label(bindings['Reasoning'])}): inferred market implications and confidence consistency."
-    )
 
-    candidate_digest = [sig for sig in prioritized if sig.priority_score >= 0.60 and sig.confidence >= 0.70]
-    archived = [sig for sig in prioritized if sig not in candidate_digest]
+    workflow_trace: List[str] = [
+        f"Collaborative ({_binding_label(bindings['Collaborative'])}): orchestrated {len(prioritized)} signal jobs.",
+        f"Planning ({_binding_label(bindings['Planning'])}): built crawl schedule by recency and source health.",
+        f"Browser ({_binding_label(bindings['Browser'])}): fetched monitored sources and extracted snapshots.",
+        f"Knowledge ({_binding_label(bindings['Knowledge'])}): diffed snapshots against historical memory.",
+        f"Reasoning ({_binding_label(bindings['Reasoning'])}): inferred strategic implications and confidence.",
+    ]
+
+    digest_candidates = [sig for sig in prioritized if sig.priority_score >= 0.60]
+    archived = [sig for sig in prioritized if sig.priority_score < 0.60]
     workflow_trace.append(
-        f"Evaluation ({_binding_label(bindings['Evaluation'])}): approved {len(candidate_digest)} digest candidates, archived {len(archived)} low-priority items."
+        f"Evaluation ({_binding_label(bindings['Evaluation'])}): approved {len(digest_candidates)} highlights, archived {len(archived)} low-priority items."
     )
 
     safe_digest: List[Signal] = []
     safety_blocks = 0
-    for sig in candidate_digest:
-        blocked = "leak" in sig.title.lower() or "password" in sig.title.lower()
-        if blocked:
+    for sig in digest_candidates:
+        if _safety_blocked(sig):
             safety_blocks += 1
             archived.append(sig)
             continue
         safe_digest.append(sig)
+
     workflow_trace.append(
         f"Safety ({_binding_label(bindings['Safety'])}): blocked {safety_blocks} items and passed {len(safe_digest)} items."
     )
 
     if alignment_enabled:
         workflow_trace.append(
-            f"Alignment ({_binding_label(bindings['Alignment'])}): applied governance policy overlays for enterprise traceability."
+            f"Alignment ({_binding_label(bindings['Alignment'])}): applied governance overlays and compliance traceability."
         )
     else:
         workflow_trace.append("Alignment: skipped (optional mode disabled).")
 
     workflow_trace.append(
-        f"Language ({_binding_label(bindings['Language'])}): generated digest narrative and alert-card phrasing."
+        f"Language ({_binding_label(bindings['Language'])}): generated digest narrative and alert cards."
     )
 
     escalations: List[HandlerEscalation] = []
     for sig in safe_digest:
-        if sig.priority_score >= 0.80:
+        if sig.severity == "critical":
             escalations.append(
                 HandlerEscalation(
                     signal_id=sig.id,
@@ -310,19 +347,20 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
                     rationale=f"Priority {sig.priority_score:.2f} exceeds critical threshold.",
                 )
             )
+
     handler_binding = bindings["Handler"]
     if handler_binding.available:
         try:
             handler_module = importlib.import_module(handler_binding.module_path)
             handler_cls = getattr(handler_module, handler_binding.class_name)
             handler = handler_cls(shared_memory=_SharedMemoryStub(), agent_factory=_FactoryStub(), config={})
-            for esc in escalations:
-                _ = handler.failure_normalization(
+            for escalation in escalations:
+                handler.failure_normalization(
                     error_info={
                         "error_type": "SignalEscalation",
-                        "error_message": esc.rationale,
+                        "error_message": escalation.rationale,
                     },
-                    context={"agent": "SignalSentry", "signal_id": esc.signal_id},
+                    context={"agent": "SignalSentry", "signal_id": escalation.signal_id},
                 )
             workflow_trace.append(
                 f"Handler ({handler_binding.implementation}): routed {len(escalations)} critical alerts for human confirmation."
@@ -363,7 +401,7 @@ def agent_status_for_tab(tab_name: str) -> Dict[str, str]:
         base["Language"] = "ready"
         base["Safety"] = "ready"
         base["Handler"] = "watching"
-    elif tab_name == "Digest":
+    elif tab_name == "Daily Digest":
         for agent in ["Language", "Safety", "Evaluation", "Collaborative"]:
             base[agent] = "active"
         base["Alignment"] = "optional"
