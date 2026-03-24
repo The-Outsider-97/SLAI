@@ -5,6 +5,7 @@ Composition-only module: styles and business logic are sourced from dedicated la
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import sys
 from typing import Dict, List
 
@@ -33,24 +34,106 @@ from PyQt5.QtWidgets import (
 from component.styles.main_style import metric_card_style
 from component.styles.signal_sentry_style import SIGNAL_SENTRY_STYLE
 from component.utils.main_utils import fmt_pct, utc_timestamp_label
-from component.utils.signal_sentry_utils import (
-    FeedbackEvent,
-    MonitoredEntity,
-    OnboardingResult,
-    PipelineResult,
-    Signal,
-    SourceEntry,
-    agent_status_for_tab,
-    feedback_usefulness_ratio,
-    run_agentic_monitoring,
-    run_onboarding_workflow,
-    seed_signals,
-    seed_sources,
-    seed_watchlist,
-    summarize_digest,
-    watchlist_summary,
-)
 
+_BACKEND_IMPORT_ERROR = None
+
+try:
+    from component.utils.signal_sentry_utils import (
+        AgentBinding,
+        FeedbackEvent,
+        MonitoredEntity,
+        OnboardingResult,
+        PipelineResult,
+        Signal,
+        SourceEntry,
+        agent_status_for_tab,
+        feedback_usefulness_ratio,
+        run_agentic_monitoring,
+        run_onboarding_workflow,
+        seed_signals,
+        seed_sources,
+        seed_watchlist,
+        summarize_digest,
+        watchlist_summary,
+    )
+except Exception as exc:
+    _BACKEND_IMPORT_ERROR = exc
+
+    @dataclass
+    class Signal:
+        id: int = 0
+        title: str = "Backend unavailable"
+        severity: str = "low"
+        confidence: float = 0.0
+        priority_score: float = 0.0
+        signal_type: str = "system"
+        source_url: str = "-"
+        evidence_note: str = "SignalSentry backend failed to import."
+        suggested_action: str = "Fix backend dependencies and rerun."
+
+    @dataclass
+    class SourceEntry:
+        name: str
+        url: str
+        source_type: str
+        schedule: str
+        last_status: str
+
+    @dataclass
+    class MonitoredEntity:
+        name: str
+        entity_type: str = "unknown"
+        focus: str = ""
+
+    @dataclass
+    class FeedbackEvent:
+        signal_id: int
+        verdict: str
+
+    @dataclass
+    class OnboardingResult:
+        taxonomy: dict = field(default_factory=lambda: {"entities": []})
+
+    @dataclass
+    class AgentBinding:
+        available: bool = False
+        implementation: str = ""
+        error: str = "backend import failed"
+
+    @dataclass
+    class PipelineResult:
+        digest_signals: list = field(default_factory=list)
+        archived_signals: list = field(default_factory=list)
+        escalations: list = field(default_factory=list)
+        workflow_trace: list = field(default_factory=list)
+        agent_bindings: dict = field(default_factory=dict)
+
+    def agent_status_for_tab(_tab_name: str) -> dict:
+        return {"Backend": f"offline · {_BACKEND_IMPORT_ERROR}"}
+
+    def feedback_usefulness_ratio(_events) -> float:
+        return 0.0
+
+    def run_agentic_monitoring(*_args, **_kwargs):
+        raise RuntimeError(f"SignalSentry backend import failed: {_BACKEND_IMPORT_ERROR}")
+
+    def run_onboarding_workflow(*_args, **_kwargs):
+        return OnboardingResult()
+
+    def seed_signals():
+        return []
+
+    def seed_sources():
+        return []
+
+    def seed_watchlist():
+        return {"companies": [], "products": [], "themes": []}
+
+    def summarize_digest(_signals) -> str:
+        return f"Backend unavailable: {_BACKEND_IMPORT_ERROR}"
+
+    def watchlist_summary() -> str:
+        return "0 entities"
 
 class SignalSentryWindow(QMainWindow):
     """Desktop implementation of the SignalSentry intelligence workflow."""
@@ -100,6 +183,17 @@ class SignalSentryWindow(QMainWindow):
         self.tabs.addTab(self.feedback_tab, "Feedback & Tuning")
 
         self._refresh_all_views()
+
+        # if _BACKEND_IMPORT_ERROR is not None:
+        #     QMessageBox.warning(
+        #         self,
+        #         "SignalSentry backend unavailable",
+        #         f"The UI opened, but the backend could not load:\n\n{_BACKEND_IMPORT_ERROR}"
+        #     )
+
+    def _current_pipeline(self) -> PipelineResult:
+        """Return cached pipeline result or run a fresh monitoring pass."""
+        return self.last_pipeline_result or run_agentic_monitoring(self.signals, alignment_enabled=True)
 
     def _build_header(self) -> QWidget:
         container = QWidget()
@@ -329,8 +423,14 @@ class SignalSentryWindow(QMainWindow):
         self.metric_labels["Source Health"].setText(fmt_pct(health))
         self.watchlist_state_label.setText(f"Seeded watchlist: {self._watchlist_total_count()} monitored targets")
 
+    
     def _refresh_dashboard(self) -> None:
-        pipeline = self.last_pipeline_result or run_agentic_monitoring(self.signals, alignment_enabled=True)
+        pipeline = self.last_pipeline_result
+        if pipeline is None:
+            self.signal_list.clear()
+            self.unresolved_list.clear()
+            return
+    
         self.signal_list.clear()
         for signal in pipeline.digest_signals:
             row = QListWidgetItem(
@@ -339,15 +439,23 @@ class SignalSentryWindow(QMainWindow):
                 f"Reasoning: {signal.evidence_note}\nAction: {signal.suggested_action}"
             )
             self.signal_list.addItem(row)
-
+    
         self.unresolved_list.clear()
         for escalation in pipeline.escalations:
             self.unresolved_list.addItem(
                 f"{escalation.title} | owner: {escalation.owner} | Handler status: {escalation.status}"
             )
 
+    
     def _refresh_digest(self) -> None:
-        pipeline = self.last_pipeline_result or run_agentic_monitoring(self.signals, alignment_enabled=True)
+        pipeline = self.last_pipeline_result
+        if pipeline is None:
+            self.digest_summary.setText(
+                "SignalSentry is ready.\n\nPress 'Run scan now' to initialize the SLAI backend."
+            )
+            self.digest_list.clear()
+            return
+    
         summary = summarize_digest(pipeline.digest_signals)
         self.digest_summary.setText(
             f"{summary}\n\n"
@@ -389,12 +497,29 @@ class SignalSentryWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         tab_name = self.tabs.tabText(index)
         status_map = agent_status_for_tab(tab_name)
+        pipeline = self.last_pipeline_result
+    
+        if pipeline is not None:
+            for agent_name, binding in pipeline.agent_bindings.items():
+                if binding.available:
+                    status_map[agent_name] = f"live · {binding.implementation}"
+                else:
+                    status_map[agent_name] = f"error · {binding.error}"
+    
         self.agent_status.clear()
         for agent, state in status_map.items():
             self.agent_status.addItem(f"{agent} Agent: {state}")
 
     def _run_scan(self) -> None:
-        self.last_pipeline_result = run_agentic_monitoring(self.signals, alignment_enabled=True)
+        pipeline = self._ensure_pipeline_result(force=True)
+        if pipeline is None:
+            QMessageBox.critical(
+                self,
+                "Scan failed",
+                "SignalSentry could not bind required live SLAI agents. Check runtime dependencies/logs.",
+            )
+            return
+        self.last_pipeline_result = pipeline
         if self.last_pipeline_result.digest_signals:
             self.signals = self.last_pipeline_result.digest_signals + self.last_pipeline_result.archived_signals
         self.run_state_label.setText(f"Last run: {utc_timestamp_label()}")
@@ -442,6 +567,19 @@ class SignalSentryWindow(QMainWindow):
 
         self.feedback_events.append(FeedbackEvent(signal_id=signal_id, verdict=verdict))
         self._refresh_feedback()
+
+    def _ensure_pipeline_result(self, force: bool = False) -> PipelineResult | None:
+        if self.last_pipeline_result is not None and not force:
+            return self.last_pipeline_result
+        try:
+            self.last_pipeline_result = run_agentic_monitoring(self.signals, alignment_enabled=True)
+            return self.last_pipeline_result
+        except Exception as exc:  # noqa: BLE001
+            self.last_pipeline_result = None
+            self.run_state_label.setText(f"Last run failed: {utc_timestamp_label()}")
+            self.digest_summary.setText(f"Pipeline error: {exc}")
+            return None
+
 
 
 def launch_signal_sentry() -> None:
