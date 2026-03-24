@@ -1,6 +1,8 @@
 import json
 import math
 import sys
+import subprocess
+
 from pathlib import Path
 
 from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal
@@ -135,6 +137,7 @@ class LoginButton(QPushButton):
 class AppCard(QWidget):
     # Emitted when mouse enters or leaves the card. Passes (app_name, is_hovered)
     hover_changed = pyqtSignal(str, bool)
+    clicked = pyqtSignal(str)
 
     def __init__(self, parent: QWidget, name: str, image_path: Path, angle: float) -> None:
         super().__init__(parent)
@@ -193,6 +196,13 @@ class AppCard(QWidget):
         self.set_absolute_angle(self.absolute_angle)
         self.update()
         self.hover_changed.emit(self.name, False)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.name)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -276,6 +286,7 @@ class HubWindow(QWidget):
         self.target_rotation = 0.0
         self.current_rotation = 0.0
         self.app_cards: list[AppCard] =[]
+        self.child_window = None
 
         self._create_starfield()
         self._build_ui()
@@ -375,6 +386,7 @@ class HubWindow(QWidget):
             angle = (idx - 2) * ITEM_SPACING
             card = AppCard(self, name, img, angle)
             card.hover_changed.connect(self._on_app_hover_changed)
+            card.clicked.connect(self._on_app_clicked)
             self.app_cards.append(card)
 
         # Force UI overlays to front
@@ -413,6 +425,23 @@ class HubWindow(QWidget):
         self.desc_label.setText(html_content)
         self.desc_label.adjustSize()
         self.desc_label.show()
+
+    def _on_app_clicked(self, app_name: str) -> None:
+        if app_name != "SignalSentry":
+            return
+
+        try:
+            from component.signal_sentry import SignalSentryWindow
+        except Exception as exc:
+            print(f"Failed to import SignalSentry window: {exc}")
+            return
+
+        try:
+            self.child_window = SignalSentryWindow()
+            self.child_window.show()
+            self.close()
+        except Exception as exc:
+            print(f"Failed to launch SignalSentry: {exc}")
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()
