@@ -9,6 +9,13 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from component.utils.main_utils import weighted_average
+from src.agents.agent_factory import AgentFactory
+from src.agents.collaborative.shared_memory import SharedMemory
+from src.agents.collaborative_agent import CollaborativeAgent
+from logs.logger import get_logger, PrettyPrinter
+
+logger = get_logger("Signal Sentry Utils")
+printer = PrettyPrinter
 
 
 @dataclass
@@ -118,18 +125,20 @@ AGENT_CLASS_MAP: Dict[str, Tuple[str, str]] = {
     "Handler": ("src.agents.handler_agent", "HandlerAgent"),
 }
 
-
-class _SharedMemoryStub(dict):
-    def get(self, key, default=None):  # type: ignore[override]
-        return super().get(key, default)
-
-    def set(self, key, value, ttl=None):
-        self[key] = value
-
-
-class _FactoryStub:
-    pass
-
+def _class_declared_in_module(module_path: str, class_name: str) -> bool:
+    """
+    Check whether `class_name` is declared in the module source without importing the module.
+    Useful when optional runtime dependencies are missing in local/dev environments.
+    """
+    spec = importlib.util.find_spec(module_path)
+    if spec is None or not spec.origin or spec.origin in {"built-in", "frozen"}:
+        return False
+    try:
+        with open(spec.origin, "r", encoding="utf-8") as source_file:
+            tree = ast.parse(source_file.read(), filename=spec.origin)
+        return any(isinstance(node, ast.ClassDef) and node.name == class_name for node in tree.body)
+    except Exception:
+        return False
 
 _AGENT_BINDINGS_CACHE: Optional[Dict[str, AgentBinding]] = None
 
@@ -186,12 +195,15 @@ def resolve_agent_bindings() -> Dict[str, AgentBinding]:
                 implementation=f"{module_path}.{class_name}",
             )
         except Exception as exc:
+            deferred_available = _class_declared_in_module(module_path, class_name)
             bindings[agent_name] = AgentBinding(
                 agent_name=agent_name,
                 module_path=module_path,
                 class_name=class_name,
-                available=False,
-                implementation="fallback_pipeline_logic",
+                available=deferred_available,
+                implementation=(
+                    f"deferred_load:{module_path}.{class_name}" if deferred_available else "fallback_pipeline_logic"
+                ),
                 error=str(exc),
             )
     _AGENT_BINDINGS_CACHE = bindings
@@ -353,13 +365,10 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
         try:
             handler_module = importlib.import_module(handler_binding.module_path)
             handler_cls = getattr(handler_module, handler_binding.class_name)
-            handler = handler_cls(shared_memory=_SharedMemoryStub(), agent_factory=_FactoryStub(), config={})
+            handler = handler_cls(shared_memory=SharedMemory(), agent_factory=AgentFactory(), config={})
             for escalation in escalations:
                 handler.failure_normalization(
-                    error_info={
-                        "error_type": "SignalEscalation",
-                        "error_message": escalation.rationale,
-                    },
+                    error_info={"error_type": "SignalEscalation", "error_message": escalation.rationale},
                     context={"agent": "SignalSentry", "signal_id": escalation.signal_id},
                 )
             workflow_trace.append(
