@@ -54,6 +54,7 @@ class BaseTransformer(nn.Module):
         self.activation = transform_config.get('activation', 'relu')
         self.layer_norm_eps = transform_config.get('layer_norm_eps', 1e-5)
         self.batch_first = transform_config.get('batch_first', True)
+        self.norm_first = transform_config.get('norm_first', False)
         
         # Load optimizer params once
         self.lr = transform_config.get('lr', 0.0001)
@@ -86,7 +87,7 @@ class BaseTransformer(nn.Module):
             activation=self.activation,
             layer_norm_eps=self.layer_norm_eps,
             batch_first=self.batch_first,
-            norm_first=True  # Pre-LayerNorm configuration
+            norm_first=self.norm_first
         )
 
         # Output projection
