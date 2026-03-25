@@ -104,10 +104,17 @@ class AutopublisherWindow(QMainWindow):
         self.agents: Dict[str, Any] = {}
         self.runtime_initialized = False
         self.runtime_init_error: Optional[str] = None
+        self.agent_runtime_status: str = "not_initialized"
+        self.agent_runtime_error: Optional[str] = None
+        self.agent_statuses: Dict[str, str] = {}
+        self.torch_probe_details: str = "not_tested"
         self.runtime_components: Dict[str, str] = {
             "ui": "ready",
             "lightweight_runtime": "not_initialized",
-            "torch_subsystem": "unknown",
+            "shared_memory_module": "not_loaded",
+            "collaborative_agent_module": "not_loaded",
+            "agent_factory_module": "not_loaded",
+            "torch_subsystem": "untested",
         }
 
 
@@ -242,6 +249,19 @@ class AutopublisherWindow(QMainWindow):
     def _trace_import(self, module_path: str):
         logger.info("Autopublisher import stage: %s", module_path)
         return importlib.import_module(module_path)
+
+    def _probe_torch_subsystem(self) -> None:
+        try:
+            torch_module = importlib.import_module("torch")
+            version = getattr(torch_module, "__version__", "unknown")
+            cuda_version = getattr(getattr(torch_module, "version", None), "cuda", None)
+            cuda_text = cuda_version if cuda_version else "cpu"
+            self.runtime_components["torch_subsystem"] = "available"
+            self.torch_probe_details = f"import_ok version={version} cuda={cuda_text}"
+        except Exception as torch_exc:
+            self.runtime_components["torch_subsystem"] = "unavailable"
+            self.torch_probe_details = f"{type(torch_exc).__name__}: {torch_exc}"
+            logger.warning("Torch subsystem probe failed: %s", self.torch_probe_details)
 
     def initialize_runtime(self) -> bool:
         if self.runtime_initialized:
