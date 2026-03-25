@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 """
 Planning Agent with Alternative Method Search Strategies
@@ -45,11 +45,11 @@ from src.agents.planning.planning_types import Task, TaskType, TaskStatus, World
 from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
 try:
     from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
-except ImportError:
+except Exception:
     class ClassificationHead: pass
     class RegressionHead: pass
     class Seq2SeqHead: pass
-    print("Warning: perception module not found. Using dummy classes.")
+    print("Warning: perception module unavailable (likely optional torch stack). Using dummy classes.")
 
 from logs.logger import get_logger, PrettyPrinter
 
