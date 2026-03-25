@@ -4,9 +4,13 @@ __version__ = "2.0.0"
 
 """Browser agent facade that composes browser domain modules for web automation tasks."""
 
+from datetime import time
 from typing import Any, Dict, List, Optional
 
 from selenium import webdriver
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
@@ -20,9 +24,10 @@ from src.agents.browser.functions.do_scroll import DoScroll
 from src.agents.browser.functions.do_type import DoType
 from src.agents.browser.security import SecurityFeatures, exponential_backoff
 from src.agents.browser.workflow import WorkFlow
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Browser Agent")
+printer = PrettyPrinter
 
 
 class BrowserAgent(BaseAgent):
@@ -97,28 +102,84 @@ class BrowserAgent(BaseAgent):
         navigate_result = self.navigate(engine_url or self.default_search_engine)
         if navigate_result.get("status") != "success":
             return navigate_result
-
-        type_result = self.typer.type_text(search_box_selector, query)
-        if type_result.get("status") != "success":
-            return {"status": "error", "action": "search", "message": type_result.get("message")}
-
+    
+        # Wait for page to load and handle cookie consent
+        self._handle_cookie_consent()
+    
+        # Try multiple selectors for the search box
+        possible_selectors = [
+            search_box_selector,
+            "textarea[name='q']",          # newer Google interface
+            "input[type='text']",           # generic
+            "input[type='search']",
+            "[aria-label='Search']",
+            "[aria-label='Cerca']",          # other languages
+            ".gLFyf",                        # Google's class for search input
+        ]
+        
+        element = None
+        for selector in possible_selectors:
+            try:
+                element = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                break
+            except TimeoutException:
+                continue
+    
+        if not element:
+            return {"status": "error", "action": "search", "message": "Could not locate search box"}
+    
+        # Clear and type
+        element.clear()
+        element.send_keys(query)
+        element.send_keys(Keys.RETURN)
+    
+        # Check for CAPTCHA
+        if SecurityFeatures.detect_captcha(self.driver):
+            return {"status": "error", "action": "search", "message": "CAPTCHA detected"}
+    
+        # Wait for results to load
         try:
-            self.driver.find_element(By.CSS_SELECTOR, search_box_selector).send_keys(Keys.RETURN)
-            if SecurityFeatures.detect_captcha(self.driver):
-                return {"status": "error", "action": "search", "message": "CAPTCHA detected"}
-
-            links = self.driver.find_elements(By.XPATH, "//a[@href]")
-            results = []
-            for link in links[:10]:
-                href = link.get_attribute("href")
-                text = (link.text or "").strip()
-                if href and href.startswith("http"):
-                    item = {"link": href, "text": text}
-                    results.append(ContentHandling.postprocess_if_special(item, self.driver))
-
-            return {"status": "success", "action": "search", "query": query, "results": results}
-        except Exception as exc:
-            return {"status": "error", "action": "search", "message": str(exc)}
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div#search, div#rso"))
+            )
+        except TimeoutException:
+            pass
+    
+        # Extract results (use a more specific selector for result links)
+        links = self.driver.find_elements(By.CSS_SELECTOR, "h3 a, .yuRUbf a, .g a")
+        results = []
+        for link in links[:10]:
+            href = link.get_attribute("href")
+            text = (link.text or "").strip()
+            if href and href.startswith("http"):
+                item = {"link": href, "text": text}
+                results.append(ContentHandling.postprocess_if_special(item, self.driver))
+    
+        return {"status": "success", "action": "search", "query": query, "results": results}
+    
+    def _handle_cookie_consent(self):
+        """Accept common cookie consent banners."""
+        consent_selectors = [
+            "button[aria-label='Accept all']",
+            "button:contains('Accept all')",
+            "button:contains('Accept')",
+            "button:contains('I agree')",
+            "button[aria-label='Consent']",
+            "#L2AGLb",  # Google's "Accept all" button ID
+            "form button[jsname]",
+        ]
+        for selector in consent_selectors:
+            try:
+                button = WebDriverWait(self.driver, 3).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                button.click()
+                time.sleep(1)  # allow overlay to disappear
+                break
+            except:
+                continue
 
     def click(self, selector: str, wait_before_execution: Optional[float] = None) -> Dict[str, Any]:
         wait = self.default_wait if wait_before_execution is None else wait_before_execution
@@ -234,3 +295,53 @@ class BrowserAgent(BaseAgent):
             self.close()
         except Exception:
             pass
+
+
+if __name__ == "__main__":
+    print("\n=== Running Browser Agent ===\n")
+    printer.status("TEST", "Browser Agent initialized", "info")
+    from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+
+    agent = BrowserAgent(shared_memory=shared_memory,agent_factory=agent_factory, config=None, driver=None)
+    print(agent)
+
+    print("\n* * * * * Phase 2 - Task * * * * *\n")
+    data = {"task": "search", "query": "python selenium documentation"}
+
+    task = agent.perform_task(task_data=data)
+    print(task)
+
+    print("\n* * * * * Phase 3 - Browsing * * * * *\n")
+    
+    # 1. Navigate to Google
+    print("1. Navigating to Google...")
+    result = agent.navigate("https://www.google.com")
+    print(result)
+    
+    # 2. Search for something
+    print("\n2. Searching for 'rocket lab neutron'...")
+    result = agent.search("rocket lab neutron")
+    print(result.get("results", [])[:3])  # show first 3 results
+    
+    # 3. Click on the first result (if any)
+    if result.get("results"):
+        # Wait for the result link to be clickable
+        try:
+            first_result_link = WebDriverWait(agent.driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "h3 a, .yuRUbf a, .g a"))
+            )
+            click_result = agent.clicker._perform_click(selector="h3 a", wait_before_execution=1)
+            print(click_result)
+        except:
+            print("Could not click the first result")
+    
+    # 4. Extract content from the new page
+    print("\n4. Extracting page content...")
+    content = agent.extract_page_content(preview_only=False)
+    print(f"Title: {content.get('title')}")
+    print(f"Text preview: {content.get('text', '')[:500]}...")
+
+    print("\n=== Successfully ran the Browser Agent ===\n")
