@@ -1,3 +1,4 @@
+import ast
 import math
 import torch
 import random
@@ -280,14 +281,24 @@ class ProbabilisticModels(nn.Module):
         if not kb_path.exists():
             raise FileNotFoundError(f"Knowledge base file not found: {kb_path}")
         logger.info(f"Loading knowledge base from {kb_path}")
-        with open(kb_path, 'r') as f:
-            kb_data = json.load(f)  # Single load operation
+        try:
+            with open(kb_path, 'r', encoding='utf-8') as f:
+                kb_data = json.load(f)  # Single load operation
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in knowledge base ({kb_path}): {e}")
+            try:
+                kb_data = ast.literal_eval(kb_path.read_text(encoding='utf-8'))
+                logger.warning("Recovered knowledge base using ast.literal_eval fallback")
+            except Exception:
+                return {}
         
         processed_kb = {}
         
         # Handle both list and dictionary formats
         if isinstance(kb_data, dict) and "knowledge" in kb_data:
             knowledge_items = kb_data["knowledge"]
+        elif isinstance(kb_data, dict):
+            knowledge_items = kb_data.items()
         else:
             knowledge_items = kb_data
             
@@ -311,6 +322,14 @@ class ProbabilisticModels(nn.Module):
                     key = (s, p, o)
                     processed_kb[key] = float(weight)
                 except Exception as e:
+                    logger.warning(f"Skipping invalid fact: {fact}")
+            elif isinstance(fact, tuple) and len(fact) == 2 and isinstance(fact[0], str):
+                try:
+                    key_str, weight = fact
+                    if "||" in key_str:
+                        s, p, o = key_str.split("||", 2)
+                        processed_kb[(s, p, o)] = float(weight)
+                except Exception:
                     logger.warning(f"Skipping invalid fact: {fact}")
         return processed_kb
 
