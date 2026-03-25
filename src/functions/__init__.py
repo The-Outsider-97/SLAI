@@ -11,36 +11,43 @@ from .dropdown import (
 from .functions_memory import CredentialPolicy, PasswordHasher, PortableStore, TTLCache
 from .search import (
     BasicAnalyzer,
-    LanguageAwareAnalyzer,
-    SearchAnalyzer,
     SearchEngine,
     SearchResult,
     StemAnalyzer,
+    StopwordAnalyzer,
 )
 from .sidebar import Sidebar, SidebarAnimation, SidebarSection
+from .utils.inverted_index import InvertedIndex, BM25Scorer, SearchAnalyzer
 
 __all__ = [
-    "AnimationConfig",
+    # Auth
     "AuthService",
     "AuthSession",
     "AuthToken",
-    "BasicAnalyzer",
-    "CredentialPolicy",
+    "RefreshToken",
+    "UserRecord",
+    # Dropdown
+    "AnimationConfig",
     "DropdownMenu",
     "DropdownOption",
     "EASING_PRESETS",
     "INTERPOLATION_STRATEGIES",
-    "LanguageAwareAnalyzer",
+    # Memory & Security
+    "CredentialPolicy",
     "PasswordHasher",
     "PortableStore",
-    "RefreshToken",
-    "SearchAnalyzer",
+    "TTLCache",
+    # Search
+    "BasicAnalyzer",
     "SearchEngine",
     "SearchResult",
+    "StemAnalyzer",
+    "StopwordAnalyzer",
+    "InvertedIndex",
+    "BM25Scorer",
+    "SearchAnalyzer",
+    # Sidebar
     "Sidebar",
     "SidebarAnimation",
     "SidebarSection",
-    "StemAnalyzer",
-    "TTLCache",
-    "UserRecord",
 ]
