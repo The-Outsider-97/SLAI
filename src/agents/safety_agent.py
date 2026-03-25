@@ -1,18 +1,26 @@
+__version__ = "2.0.0"
 
-from datetime import datetime
+from __future__ import annotations
+
 import random
 import hashlib
 import os, sys
 import string
-import gym
+try:
+    import gymnasium as gym
+except Exception:
+    import gym
 import re
 import time
-import torch
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import torch
 import json, yaml
 import unicodedata
 import numpy as np
 
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict, dataclass, field, fields
 
