@@ -305,9 +305,12 @@ class AutopublisherWindow(QMainWindow):
 
             optional_failures: Dict[str, str] = {}
             unavailable_reasons: Dict[str, str] = {}
+            dependency_reasons: Dict[str, Dict[str, Any]] = {}
             available_count = 0
             requested_agents = [*self.CORE_AGENT_TYPES, *self.OPTIONAL_AGENT_TYPES]
             for name in requested_agents:
+                if hasattr(self.factory, "get_agent_dependency_report"):
+                    dependency_reasons[name] = self.factory.get_agent_dependency_report(name)
                 try:
                     self.agents[name] = self.factory.create(name, self.shared_memory)
                     available_count += 1
@@ -354,6 +357,7 @@ class AutopublisherWindow(QMainWindow):
                 "optional_total": len(self.OPTIONAL_AGENT_TYPES),
                 "missing_core": missing_core,
                 "unavailable_reasons": unavailable_reasons,
+                "dependency_profiles": dependency_reasons,
             }
             logger.info(
                 "Runtime init summary: status=%s available_agents=%s core=%s/%s optional=%s/%s",
