@@ -39,9 +39,14 @@ alignment_agent:
     corrections: {}
     alignment_ttl: 604800
     fail_safe_action_space: []
-    risk_threshold: 0.5
-
-browser_agent: {}
+    ris
+browser_agent:
+    max_retries: 3
+    default_wait: 0.0
+    default_search_engine: "https://www.google.com"
+    headless: true
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    window_size: [1366, 920]
 
 collaborative_agent:
     risk_threshold: 0.7
