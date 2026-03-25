@@ -88,7 +88,13 @@ class DropdownMenu:
             raise ValueError(f"Invalid option value: {value}")
 
     def transition_style(self) -> str:
-        return f"transition: all {self.animation.duration_ms}ms {self.animation.easing};"
+        """
+        Return stylesheet fragments safe for Qt stylesheets (QSS).
+
+        Qt does not support the web CSS ``transition`` property; animation is handled
+        through QPropertyAnimation in the UI layer instead.
+        """
+        return ""
 
     def animation_frames(self, steps: int = 8, strategy: str = "ease_in_out") -> List[float]:
         if steps <= 0:
