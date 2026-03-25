@@ -4,8 +4,9 @@ import sys
 import subprocess
 
 from pathlib import Path
+from datetime import datetime
 
-from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent
 from PyQt5.QtGui import (
     QColor,
     QFont,
@@ -25,17 +26,22 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QWidget,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QFrame,
     QVBoxLayout,
     QDialog,
     QLineEdit,
     QMessageBox,
     QHBoxLayout,
+    QTextEdit,
 )
 
 from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
 from src.functions.auth import AuthService
 from src.functions.search import SearchEngine
+from monitoring.metrics_collector import MetricsCollector
+from monitoring.health_check import HealthChecker
+from monitoring.drift_detection import DriftDetector
 
 
 SL_YELLOW = QColor("#eacb00")
@@ -232,6 +238,93 @@ class LoginButton(QPushButton):
         painter.drawPath(path)
 
 
+class SystemMonitoringDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle("System Monitoring")
+        self.setMinimumSize(780, 520)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #12161a; color: white; }
+            QLabel { color: white; font-family: Georgia; }
+            QTextEdit {
+                background: #0e1012;
+                border: 1px solid #3f454c;
+                border-radius: 10px;
+                color: #ffffff;
+                font-family: Consolas, monospace;
+                font-size: 13px;
+                padding: 10px;
+            }
+            QPushButton {
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-family: Georgia;
+            }
+            """
+        )
+        self.metrics_collector = MetricsCollector()
+        self.health_checker = HealthChecker()
+        self.drift_detector = DriftDetector()
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        title = QLabel("SLAI System Monitoring")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #eacb00;")
+        subtitle = QLabel("Realtime infrastructure snapshot and status summary.")
+        subtitle.setStyleSheet("font-size: 14px; color: #c9c9c9;")
+        self.body = QTextEdit(self)
+        self.body.setReadOnly(True)
+
+        button_row = QHBoxLayout()
+        refresh_button = QPushButton("Refresh")
+        close_button = QPushButton("Close")
+        refresh_button.clicked.connect(self._refresh)
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(refresh_button)
+        button_row.addStretch()
+        button_row.addWidget(close_button)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.body, stretch=1)
+        layout.addLayout(button_row)
+
+    def _refresh(self):
+        snapshot = self.metrics_collector.collect_snapshot()
+        health_result = self.health_checker.run_checks(
+            [
+                {"name": "SLAI Dashboard", "type": "tcp", "host": "127.0.0.1", "port": 5000, "timeout": 1.0},
+                {"name": "SLAI Hub HTTP", "type": "http", "url": "http://127.0.0.1:5000", "timeout": 1.5},
+            ]
+        )
+        drift_result = self.drift_detector.detect(
+            [snapshot.memory.percent_used, snapshot.cpu.percent_total],
+            [snapshot.memory.percent_used, snapshot.cpu.percent_total],
+            threshold=0.05,
+            metric_name="runtime_stability",
+        )
+        self.body.setText(
+            "\n".join(
+                [
+                    f"Generated: {datetime.now().isoformat()}",
+                    "",
+                    "[Metrics]",
+                    snapshot.to_pretty_string(),
+                    "",
+                    "[Health]",
+                    self.health_checker.format_report(health_result),
+                    "",
+                    "[Drift]",
+                    self.drift_detector.format_result(drift_result),
+                ]
+            )
+        )
+
+
 class AppCard(QWidget):
     # Emitted when mouse enters or leaves the card. Passes (app_name, is_hovered)
     hover_changed = pyqtSignal(str, bool)
@@ -401,9 +494,11 @@ class HubWindow(QWidget):
                 DropdownOption("Products", "products"),
                 DropdownOption("Pricing", "pricing"),
                 DropdownOption("Contact", "contact"),
+                DropdownOption("System Monitoring", "system_monitoring"),
             ],
             animation=AnimationConfig(duration_ms=220, preset="smooth"),
         )
+        self.monitoring_dialog = None
 
         self._create_starfield()
         self._build_ui()
@@ -474,6 +569,8 @@ class HubWindow(QWidget):
         self.search_expand_anim = QPropertyAnimation(self.search_bar, b"geometry", self)
         self.search_expand_anim.setDuration(240)
         self.search_expand_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.search_expand_anim.finished.connect(self._on_search_anim_finished)
+        self.search_animating_close = False
         self.search_open = False
 
         self.dropdown_panel = QFrame(self)
@@ -485,6 +582,17 @@ class HubWindow(QWidget):
         self.dropdown_layout = QVBoxLayout(self.dropdown_panel)
         self.dropdown_layout.setContentsMargins(12, 10, 12, 10)
         self.dropdown_layout.setSpacing(8)
+        self.dropdown_effect = QGraphicsOpacityEffect(self.dropdown_panel)
+        self.dropdown_panel.setGraphicsEffect(self.dropdown_effect)
+        self.dropdown_effect.setOpacity(0.0)
+        self.dropdown_anim = QPropertyAnimation(self.dropdown_panel, b"geometry", self)
+        self.dropdown_anim.setDuration(300)
+        self.dropdown_opacity_anim = QPropertyAnimation(self.dropdown_effect, b"opacity", self)
+        self.dropdown_opacity_anim.setDuration(300)
+        self.dropdown_anim.finished.connect(self._on_dropdown_anim_finished)
+        self.dropdown_open = False
+        self.dropdown_animating_close = False
+
         for option in self.dropdown_menu_model.options:
             btn = QPushButton(option.label, self.dropdown_panel)
             btn.setCursor(Qt.PointingHandCursor)
@@ -568,17 +676,28 @@ class HubWindow(QWidget):
         self.hamburger.mousePressEvent = self._toggle_dropdown_event
         self.search.mousePressEvent = self._toggle_search_event
         self.login_btn.clicked.connect(self._open_login_dialog)
+        QApplication.instance().installEventFilter(self)
 
     def _toggle_dropdown_event(self, event):
         if event.button() != Qt.LeftButton:
             return
         is_open = self.dropdown_menu_model.toggle()
-        self.dropdown_panel.setVisible(is_open)
+        if is_open:
+            self._open_dropdown_panel()
+        else:
+            self._close_dropdown_panel()
 
     def _select_dropdown(self, value: str):
         selected = self.dropdown_menu_model.select(value)
-        self.dropdown_panel.hide()
+        self._close_dropdown_panel()
+        if value == "system_monitoring":
+            self._open_monitoring_dialog()
+            return
         QMessageBox.information(self, "Menu", f"Selected: {selected.title()}")
+
+    def _open_monitoring_dialog(self):
+        self.monitoring_dialog = SystemMonitoringDialog(self)
+        self.monitoring_dialog.exec_()
 
     def _open_login_dialog(self):
         dialog = LoginDialog(self.auth_service, self)
@@ -599,14 +718,23 @@ class HubWindow(QWidget):
             self.search_open = True
             self.search_bar.setFocus()
         else:
-            self.search_expand_anim.stop()
-            self.search_expand_anim.setStartValue(self.search_bar.geometry())
-            self.search_expand_anim.setEndValue(QRect(icon_x, icon_y, 26, 30))
-            self.search_expand_anim.finished.connect(self._finish_search_close)
-            self.search_expand_anim.start()
+            self._close_search_bar()
 
-    def _finish_search_close(self):
-        self.search_expand_anim.finished.disconnect(self._finish_search_close)
+    def _close_search_bar(self):
+        if not self.search_open:
+            return
+        icon_x = self.search.x()
+        icon_y = self.search.y() - 2
+        self.search_animating_close = True
+        self.search_expand_anim.stop()
+        self.search_expand_anim.setStartValue(self.search_bar.geometry())
+        self.search_expand_anim.setEndValue(QRect(icon_x, icon_y, 26, 30))
+        self.search_expand_anim.start()
+
+    def _on_search_anim_finished(self):
+        if not self.search_animating_close:
+            return
+        self.search_animating_close = False
         self.search_bar.hide()
         self.search.setVisible(True)
         self.search_open = False
@@ -673,6 +801,25 @@ class HubWindow(QWidget):
         self._position_top_bar()
         self._position_hero()
         self._position_cards()
+        if self.dropdown_open and not self.dropdown_anim.state():
+            self.dropdown_panel.setGeometry(self._dropdown_open_rect())
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            click_pos = event.globalPos()
+            if self.dropdown_open:
+                dropdown_rect = QRect(self.dropdown_panel.mapToGlobal(QPoint(0, 0)), self.dropdown_panel.size())
+                hamburger_rect = QRect(self.hamburger.mapToGlobal(QPoint(0, 0)), self.hamburger.size())
+                if not dropdown_rect.contains(click_pos) and not hamburger_rect.contains(click_pos):
+                    self.dropdown_menu_model.close()
+                    self._close_dropdown_panel()
+
+            if self.search_open:
+                search_rect = QRect(self.search_bar.mapToGlobal(QPoint(0, 0)), self.search_bar.size())
+                icon_rect = QRect(self.search.mapToGlobal(QPoint(0, 0)), self.search.size())
+                if not search_rect.contains(click_pos) and not icon_rect.contains(click_pos):
+                    self._close_search_bar()
+        return super().eventFilter(obj, event)
 
     def wheelEvent(self, event) -> None:
         if event.angleDelta().y() > 0:
@@ -684,13 +831,63 @@ class HubWindow(QWidget):
     def _position_top_bar(self) -> None:
         center_y = 49
         self.hamburger.move(40, center_y - 12)
-        self.dropdown_panel.setGeometry(35, center_y + 18, 210, 190)
+        if not self.dropdown_open:
+            closed_rect = self._dropdown_closed_rect()
+            self.dropdown_panel.setGeometry(closed_rect)
         self.logo_label.adjustSize()
         self.logo_label.move(101, center_y - self.logo_label.height() // 2)
         self.login_btn.move(self.width() - 40 - 110, center_y - 19)
         self.search.move(self.login_btn.x() - 25 - 26, center_y - 13)
         if self.search_open:
             self.search_bar.setGeometry(self.search.x() - 260, self.search.y() - 2, 286, 36)
+
+    def _dropdown_open_rect(self):
+        x = 20
+        y = 10
+        width = 260
+        height = min(self.height() - 20, int(self.height() * 0.95))
+        return QRect(x, y, width, height)
+
+    def _dropdown_closed_rect(self):
+        open_rect = self._dropdown_open_rect()
+        return QRect(open_rect.x(), open_rect.y(), open_rect.width(), 0)
+
+    def _open_dropdown_panel(self):
+        self.dropdown_animating_close = False
+        self.dropdown_open = True
+        self.dropdown_panel.show()
+        self.dropdown_panel.raise_()
+        self.dropdown_anim.stop()
+        self.dropdown_opacity_anim.stop()
+        self.dropdown_anim.setStartValue(self._dropdown_closed_rect())
+        self.dropdown_anim.setEndValue(self._dropdown_open_rect())
+        self.dropdown_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.dropdown_opacity_anim.setStartValue(0.0)
+        self.dropdown_opacity_anim.setEndValue(1.0)
+        self.dropdown_opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.dropdown_anim.start()
+        self.dropdown_opacity_anim.start()
+
+    def _close_dropdown_panel(self):
+        if not self.dropdown_open:
+            return
+        self.dropdown_animating_close = True
+        self.dropdown_open = False
+        self.dropdown_anim.stop()
+        self.dropdown_opacity_anim.stop()
+        self.dropdown_anim.setStartValue(self.dropdown_panel.geometry())
+        self.dropdown_anim.setEndValue(self._dropdown_closed_rect())
+        self.dropdown_anim.setEasingCurve(QEasingCurve.InCubic)
+        self.dropdown_opacity_anim.setStartValue(self.dropdown_effect.opacity())
+        self.dropdown_opacity_anim.setEndValue(0.0)
+        self.dropdown_opacity_anim.setEasingCurve(QEasingCurve.InCubic)
+        self.dropdown_anim.start()
+        self.dropdown_opacity_anim.start()
+
+    def _on_dropdown_anim_finished(self):
+        if self.dropdown_animating_close:
+            self.dropdown_animating_close = False
+            self.dropdown_panel.hide()
 
     def _position_hero(self) -> None:
         self.hero.adjustSize()
