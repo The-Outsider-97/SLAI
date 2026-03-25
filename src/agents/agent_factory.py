@@ -25,18 +25,23 @@ class AgentFactory:
     _agent_specs: Dict[str, Dict[str, str]] = {
         'adaptive': {'module_path': 'src.agents.adaptive_agent', 'class_name': 'AdaptiveAgent'},
         'alignment': {'module_path': 'src.agents.alignment_agent', 'class_name': 'AlignmentAgent'},
+        'browser': {'module_path': 'src.agents.browser_agent', 'class_name': 'BrowserAgent'},
         'evaluation': {'module_path': 'src.agents.evaluation_agent', 'class_name': 'EvaluationAgent'},
         'execution': {'module_path': 'src.agents.execution_agent', 'class_name': 'ExecutionAgent'},
+        'handler': {'module_path': 'src.agents.handler_agent', 'class_name': 'HandlerAgent'},
         'knowledge': {'module_path': 'src.agents.knowledge_agent', 'class_name': 'KnowledgeAgent'},
         'language': {'module_path': 'src.agents.language_agent', 'class_name': 'LanguageAgent'},
         'learning': {'module_path': 'src.agents.learning_agent', 'class_name': 'LearningAgent'},
         'perception': {'module_path': 'src.agents.perception_agent', 'class_name': 'PerceptionAgent'},
         'planning': {'module_path': 'src.agents.planning_agent', 'class_name': 'PlanningAgent'},
+        'reader': {'module_path': 'src.agents.reader_agent', 'class_name': 'ReaderAgent'},
         'reasoning': {'module_path': 'src.agents.reasoning_agent', 'class_name': 'ReasoningAgent'},
         'safety': {'module_path': 'src.agents.safety_agent', 'class_name': 'SafetyAgent'},
-        'handler': {'module_path': 'src.agents.handler_agent', 'class_name': 'HandlerAgent'},
-        'reader': {'module_path': 'src.agents.reader_agent', 'class_name': 'ReaderAgent'},
     }
+    _agent_aliases: Dict[str, str] = {
+        "web": "browser",
+    }
+
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
@@ -127,6 +132,10 @@ class AgentFactory:
             ValueError: If the requested agent_type is unknown.
             TypeError: If the arguments provided do not match the agent's constructor signature.
         """
+        normalized_type = self._agent_aliases.get(agent_type, agent_type)
+        if normalized_type != agent_type:
+            logger.info("Resolved agent alias '%s' -> '%s'", agent_type, normalized_type)
+        agent_type = normalized_type
         printer.status("CREATE", f"Request to create agent of type: '{agent_type}'")
 
         # 1: Check the cache first. If agent already exists, return it.
@@ -217,6 +226,9 @@ class AgentFactory:
             self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
             raise
+
+    def get_registered_agent_types(self) -> list[str]:
+        return sorted(self.registry.agents.keys())
 
     def inspect_registered_agents(self) -> Dict[str, Dict[str, Any]]:
         """
