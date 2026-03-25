@@ -5,7 +5,6 @@ This module monitors system performance, model drift, health status, and sends a
 ## Components
 
 - **metrics_collector.py**: Collects CPU, memory, and disk metrics.
-- **log_handler.py**: Central logging using loguru.
 - **drift_detection.py**: Detects data drift with KS test.
 - **health_check.py**: Checks if services are alive.
 - **alert_manager.py**: Sends email alerts when thresholds are exceeded.
