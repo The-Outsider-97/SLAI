@@ -1,6 +1,6 @@
 import importlib
 import inspect
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
 from . import __version__ 
 
@@ -11,20 +11,6 @@ from .factory.reasoner import BasicZeroReasoner
 from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
-from .evaluation_agent import EvaluationAgent
-from .execution_agent import ExecutionAgent
-from .alignment_agent import AlignmentAgent
-from .knowledge_agent import KnowledgeAgent
-from .language_agent import LanguageAgent
-from .perception_agent import PerceptionAgent
-from .learning_agent import LearningAgent
-from .planning_agent import PlanningAgent
-from .safety_agent import SafetyAgent
-from .adaptive_agent import AdaptiveAgent
-from .reasoning_agent import ReasoningAgent
-from .handler_agent import HandlerAgent
-from .reader_agent import ReaderAgent
-
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
 
@@ -34,20 +20,20 @@ class AgentFactory:
     It uses a metadata registry for dynamic agent loading and a metrics
     adapter for runtime configuration tuning.
     """
-    _agent_classes: Dict[str, Type[BaseAgent]] = {
-        'adaptive': AdaptiveAgent,
-        'alignment': AlignmentAgent,
-        'evaluation': EvaluationAgent,
-        'execution': ExecutionAgent,
-        'knowledge': KnowledgeAgent,
-        'language': LanguageAgent,
-        'learning': LearningAgent,
-        'perception': PerceptionAgent,
-        'planning': PlanningAgent,
-        'reasoning': ReasoningAgent,
-        'safety': SafetyAgent,
-        'handler': HandlerAgent,
-        'reader': ReaderAgent,
+    _agent_specs: Dict[str, Dict[str, str]] = {
+        'adaptive': {'module_path': 'src.agents.adaptive_agent', 'class_name': 'AdaptiveAgent'},
+        'alignment': {'module_path': 'src.agents.alignment_agent', 'class_name': 'AlignmentAgent'},
+        'evaluation': {'module_path': 'src.agents.evaluation_agent', 'class_name': 'EvaluationAgent'},
+        'execution': {'module_path': 'src.agents.execution_agent', 'class_name': 'ExecutionAgent'},
+        'knowledge': {'module_path': 'src.agents.knowledge_agent', 'class_name': 'KnowledgeAgent'},
+        'language': {'module_path': 'src.agents.language_agent', 'class_name': 'LanguageAgent'},
+        'learning': {'module_path': 'src.agents.learning_agent', 'class_name': 'LearningAgent'},
+        'perception': {'module_path': 'src.agents.perception_agent', 'class_name': 'PerceptionAgent'},
+        'planning': {'module_path': 'src.agents.planning_agent', 'class_name': 'PlanningAgent'},
+        'reasoning': {'module_path': 'src.agents.reasoning_agent', 'class_name': 'ReasoningAgent'},
+        'safety': {'module_path': 'src.agents.safety_agent', 'class_name': 'SafetyAgent'},
+        'handler': {'module_path': 'src.agents.handler_agent', 'class_name': 'HandlerAgent'},
+        'reader': {'module_path': 'src.agents.reader_agent', 'class_name': 'ReaderAgent'},
     }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -66,27 +52,27 @@ class AgentFactory:
         self.registry = AgentRegistry()
 
         self.active_agents: Dict[str, BaseAgent] = {}
-        for name, cls in self._agent_classes.items():
+        for name, spec in self._agent_specs.items():
             self.registry.register(AgentMetaData(
                 name=name,
-                module_path=cls.__module__,
-                class_name=cls.__name__,
+                module_path=spec["module_path"],
+                class_name=spec["class_name"],
                 version=__version__,
-                dependencies=self._get_agent_dependencies(cls)
+                dependencies=[]
             ))
 
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
 
-    def _get_agent_dependencies(self, cls) -> list[str]:
-        """Stub for future dependency inspection."""
-        return getattr(cls, "REQUIRES", [])
-    
     def discover_agents(self):
         agents_module = importlib.import_module(__package__)
 
         for _, obj in inspect.getmembers(agents_module):
             if inspect.isclass(obj) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
-                self._agent_classes[obj.__name__.lower()] = obj
+                name = obj.__name__.lower()
+                self._agent_specs[name] = {
+                    "module_path": obj.__module__,
+                    "class_name": obj.__name__,
+                }
 
     def register_agent(self, metadata: AgentMetaData):
         """
