@@ -111,6 +111,9 @@ class AutopublisherWindow(QMainWindow):
         self.runtime_components: Dict[str, str] = {
             "ui": "ready",
             "lightweight_runtime": "not_initialized",
+            "runtime_core": "not_initialized",
+            "registry": "not_initialized",
+            "optional_heavy_agents": "not_attempted",
             "shared_memory_module": "not_loaded",
             "collaborative_agent_module": "not_loaded",
             "agent_factory_module": "not_loaded",
@@ -285,6 +288,8 @@ class AutopublisherWindow(QMainWindow):
             self.factory = AgentFactory()
             self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
             self.runtime_components["lightweight_runtime"] = "initialized"
+            self.runtime_components["runtime_core"] = "initialized"
+            self.runtime_components["registry"] = "initialized"
 
             try:
                 importlib.import_module("torch")
@@ -293,15 +298,27 @@ class AutopublisherWindow(QMainWindow):
                 self.runtime_components["torch_subsystem"] = f"unavailable ({type(torch_exc).__name__}: {torch_exc})"
                 logger.warning("Optional torch subsystem unavailable: %s", torch_exc)
 
-            for name in [
-                "planning", "browser", "knowledge", "reasoning", "language",
-                "evaluation", "safety", "alignment", "adaptive", "learning",
-            ]:
+            heavy_optional = {"alignment", "adaptive"}
+            optional_failures: Dict[str, str] = {}
+            available_count = 0
+            for name in ["planning", "browser", "knowledge", "reasoning", "language", "evaluation", "safety", "learning", "alignment", "adaptive"]:
                 try:
                     self.agents[name] = self.factory.create(name, self.shared_memory)
+                    available_count += 1
                 except Exception as exc:
-                    logger.warning("Agent '%s' unavailable during runtime init: %s", name, exc)
+                    status = "optional" if name in heavy_optional else "core"
+                    logger.warning("Agent '%s' unavailable during runtime init (%s): %s", name, status, exc)
                     self.agents[name] = None
+                    optional_failures[name] = f"{type(exc).__name__}: {exc}"
+
+            if optional_failures:
+                self.runtime_components["optional_heavy_agents"] = (
+                    "degraded: " + ", ".join(f"{k}={v}" for k, v in optional_failures.items() if k in heavy_optional)
+                )
+                logger.info("Runtime initialized in degraded mode. Optional failures: %s", optional_failures)
+            else:
+                self.runtime_components["optional_heavy_agents"] = "available"
+            logger.info("Runtime init summary: available_agents=%s unavailable=%s", available_count, len(optional_failures))
 
             self.runtime_initialized = True
             self.runtime_init_error = None
