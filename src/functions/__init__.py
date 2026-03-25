@@ -9,6 +9,7 @@ from .dropdown import (
     INTERPOLATION_STRATEGIES,
 )
 from .functions_memory import CredentialPolicy, PasswordHasher, PortableStore, TTLCache
+from .loader import Loader, LoaderContext
 from .search import (
     BasicAnalyzer,
     SearchEngine,
@@ -50,4 +51,7 @@ __all__ = [
     "Sidebar",
     "SidebarAnimation",
     "SidebarSection",
+    # Loader
+    "Loader",
+    "LoaderContext",
 ]
