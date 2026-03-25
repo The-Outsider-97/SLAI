@@ -480,7 +480,7 @@ class HubWindow(QWidget):
         self.dropdown_panel.setFrameShape(QFrame.StyledPanel)
         self.dropdown_panel.hide()
         self.dropdown_panel.setStyleSheet(
-            f"QFrame {{ background: #13171b; border: 1px solid #3f454c; border-radius: 10px; {self.dropdown_menu_model.transition_style()} }}"
+            "QFrame { background: #13171b; border: 1px solid #3f454c; border-radius: 10px; }"
         )
         self.dropdown_layout = QVBoxLayout(self.dropdown_panel)
         self.dropdown_layout.setContentsMargins(12, 10, 12, 10)
