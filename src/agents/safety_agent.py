@@ -1,6 +1,6 @@
-__version__ = "2.0.0"
-
 from __future__ import annotations
+
+__version__ = "2.0.0"
 
 import random
 import hashlib
@@ -30,7 +30,7 @@ from src.agents.safety.reward_model import RewardModel
 from src.agents.safety.cyber_safety import CyberSafetyModule
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.safety.compliance_checker import ComplianceChecker
-from src.agents.safety.attention_monitor import AttentionMonitor
+# from src.agents.safety.attention_monitor import AttentionMonitor
 from src.agents.safety.adaptive_security import AdaptiveSecurity
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
@@ -88,7 +88,7 @@ class SafetyAgent(BaseAgent):
 
         # Add SafetyAgent components
         self.reward_model = RewardModel()
-        self.attention_monitor = AttentionMonitor()
+        self.attention_monitor = self._initialize_attention_monitor()
         self.safety_guard = SafetyGuard()
         self.secure_stpa = SecureSTPA()
         self.compliance_checker = ComplianceChecker()
@@ -104,6 +104,14 @@ class SafetyAgent(BaseAgent):
         self.learning_factory = self._init_learning_factory()
 
         logger.info(f"Safety Agent succesfully initialized with: {self.training_data}")
+
+    def _initialize_attention_monitor(self):
+        try:
+            from src.agents.safety.attention_monitor import AttentionMonitor
+            return AttentionMonitor()
+        except Exception as exc:
+            logger.warning("AttentionMonitor unavailable (torch-dependent); using lightweight safety mode: %s", exc)
+            return None
 
     def _load_constitution(self) -> Dict:
         """Load constitutional rules from the path specified in SafetyAgentConfig."""
@@ -1103,7 +1111,6 @@ class SafetyAgent(BaseAgent):
         self._log_audit_event("self_critique_generated", {"output_preview": output_text[:100], "critique_summary": critique[:200]})
         return critique
 
-
     # --- Attention Monitor Integration ---
     def analyze_attention_matrix(self, attention_tensor: torch.Tensor, context: Optional[Dict] = None) -> Dict:
         """
@@ -1117,7 +1124,12 @@ class SafetyAgent(BaseAgent):
             Dict: Structured analysis including metrics, anomaly flags, and optional visualization.
         """
         printer.status("SAFETY", "Analyzing attention matrix", "info")
-    
+        if self.attention_monitor is None:
+            return {
+                "status": "unavailable",
+                "reason": "Attention monitor unavailable in lightweight mode (torch-dependent).",
+            }
+
         # Step 1: Format tensor (handle batch/head dimensions)
         if attention_tensor.dim() == 4:
             # [B, H, S, S] → mean over heads, take batch 0
