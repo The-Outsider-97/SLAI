@@ -34,6 +34,10 @@ from PyQt5.QtWidgets import (
 from component.styles.main_style import metric_card_style
 from component.styles.signal_sentry_style import SIGNAL_SENTRY_STYLE
 from component.utils.main_utils import fmt_pct, utc_timestamp_label
+from src.agents.agent_factory import AgentFactory
+from src.agents.collaborative.shared_memory import SharedMemory
+from src.agents.collaborative_agent import CollaborativeAgent
+from src.agents.planning.planning_types import Task, TaskType
 
 _BACKEND_IMPORT_ERROR = None
 
@@ -48,6 +52,7 @@ try:
         SourceEntry,
         agent_status_for_tab,
         feedback_usefulness_ratio,
+        get_signal_sentry_runtime,
         run_agentic_monitoring,
         run_onboarding_workflow,
         seed_signals,
@@ -142,6 +147,7 @@ class SignalSentryWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("SignalSentry · SLAI-driven")
         self.resize(1400, 900)
+        self._bootstrap_agents()
 
         self.signals: List[Signal] = seed_signals()
         self.sources: List[SourceEntry] = seed_sources()
@@ -190,6 +196,50 @@ class SignalSentryWindow(QMainWindow):
         #         "SignalSentry backend unavailable",
         #         f"The UI opened, but the backend could not load:\n\n{_BACKEND_IMPORT_ERROR}"
         #     )
+
+    def _bootstrap_agents(self) -> None:
+        """
+        Keep explicit agent wiring at the component level while syncing with shared utils runtime.
+        """
+        self._planning_task_registered = False
+        self._planning_enabled = True
+        self._runtime = None
+        if _BACKEND_IMPORT_ERROR is not None:
+            return
+
+        try:
+            self._runtime = get_signal_sentry_runtime()
+            self.shared_memory = self._runtime.shared_memory
+            self.factory = self._runtime.factory
+            self.collab = self._runtime.collab
+            self.knowledge_agent = self._runtime.knowledge_agent
+            self.planning_agent = self._runtime.planning_agent
+            self.execution_agent = self._runtime.execution_agent
+            self.learning_agent = self._runtime.learning_agent
+        except Exception:
+            self.shared_memory = SharedMemory()
+            self.factory = AgentFactory()
+            self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
+            self.knowledge_agent = self.factory.create("knowledge", self.shared_memory)
+            self.planning_agent = self.factory.create("planning", self.shared_memory)
+            self.execution_agent = self.factory.create("execution", self.shared_memory)
+            self.learning_agent = self.factory.create("learning", self.shared_memory)
+
+    def _ensure_planning_task_registered(self) -> None:
+        if self._planning_task_registered or not self._planning_enabled or _BACKEND_IMPORT_ERROR is not None:
+            return
+
+        task = Task(
+            id="signal_sentry_daily_monitoring",
+            name="SignalSentry daily monitoring",
+            task_description="Plan crawl/parse/diff/score/summarize workflow for monitored sources.",
+            task_type=TaskType.ABSTRACT,
+            owner="SignalSentry",
+            tags=["signal_sentry", "monitoring"],
+        )
+        if hasattr(self.planning_agent, "register_task"):
+            self.planning_agent.register_task(task)
+        self._planning_task_registered = True
 
     def _current_pipeline(self) -> PipelineResult:
         """Return cached pipeline result or run a fresh monitoring pass."""
@@ -511,6 +561,7 @@ class SignalSentryWindow(QMainWindow):
             self.agent_status.addItem(f"{agent} Agent: {state}")
 
     def _run_scan(self) -> None:
+        self._ensure_planning_task_registered()
         pipeline = self._ensure_pipeline_result(force=True)
         if pipeline is None:
             QMessageBox.critical(
