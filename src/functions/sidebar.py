@@ -37,7 +37,8 @@ class Sidebar:
         }
 
     def transition_style(self) -> str:
-        return f"transition: transform {self.animation.duration_ms}ms {self.animation.easing};"
+        # Qt QSS does not support CSS transitions; animations should use Qt animation APIs.
+        return ""
 
     def visibility_keyframes(self, steps: int = 10, strategy: str = "ease_out") -> List[float]:
         if steps <= 0:
