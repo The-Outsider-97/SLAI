@@ -21,6 +21,7 @@ Real-World Usage:
 import json
 import queue
 import re, os
+import tempfile
 import yaml
 import time
 import random
@@ -184,7 +185,7 @@ class ReasoningAgent(BaseAgent):
 
         # Keep shared memory and local state in sync
         self.shared_memory.set("reasoning_agent:knowledge_base", self.knowledge_base)
-        kb = self.knowledge_base
+        kb = self._serialize_knowledge_base(self.knowledge_base)
         rules = []
         rule_weights = {}
 
@@ -200,8 +201,35 @@ class ReasoningAgent(BaseAgent):
         }
     
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=4)
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=os.path.dirname(path), encoding="utf-8") as tmp:
+            json.dump(data, tmp, indent=4)
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)
+
+    def _serialize_knowledge_base(self, kb: Dict[Any, float]) -> List[Dict[str, Any]]:
+        """
+        Convert tuple-keyed KB into a JSON-safe list of fact dictionaries.
+        Includes both `confidence` and `weight` for compatibility with
+        RuleEngine, ValidationEngine, and ProbabilisticModels loaders.
+        """
+        serialized = {}
+        for fact, conf in kb.items():
+            if isinstance(fact, tuple) and len(fact) == 3:
+                key = fact
+            else:
+                key = (str(fact), "is", "true")
+            serialized[key] = float(conf)
+
+        return [
+            {
+                "subject": s,
+                "predicate": p,
+                "object": o,
+                "confidence": conf,
+                "weight": conf
+            }
+            for (s, p, o), conf in serialized.items()
+        ]
 
     def add_fact(self, fact: Union[Tuple, str], confidence: float = 1.0, publish=True) -> bool:
         """
