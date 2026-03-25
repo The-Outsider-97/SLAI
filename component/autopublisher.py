@@ -104,6 +104,12 @@ class AutopublisherWindow(QMainWindow):
         self.agents: Dict[str, Any] = {}
         self.runtime_initialized = False
         self.runtime_init_error: Optional[str] = None
+        self.runtime_components: Dict[str, str] = {
+            "ui": "ready",
+            "lightweight_runtime": "not_initialized",
+            "torch_subsystem": "unknown",
+        }
+
 
         self._build_ui()
         self._refresh_board()
@@ -241,11 +247,15 @@ class AutopublisherWindow(QMainWindow):
         if self.runtime_initialized:
             return True
 
-        self.status_label.setText("Initializing agent runtime...")
+        self.status_label.setText("Initializing lightweight agent runtime...")
+        self.runtime_components["lightweight_runtime"] = "initializing"
         try:
             shared_memory_mod = self._trace_import("src.agents.collaborative.shared_memory")
+            self.runtime_components["shared_memory_module"] = "loaded"
             collab_mod = self._trace_import("src.agents.collaborative_agent")
+            self.runtime_components["collaborative_agent_module"] = "loaded"
             factory_mod = self._trace_import("src.agents.agent_factory")
+            self.runtime_components["agent_factory_module"] = "loaded"
 
             SharedMemory = getattr(shared_memory_mod, "SharedMemory")
             CollaborativeAgent = getattr(collab_mod, "CollaborativeAgent")
@@ -254,6 +264,14 @@ class AutopublisherWindow(QMainWindow):
             self.shared_memory = SharedMemory()
             self.factory = AgentFactory()
             self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
+            self.runtime_components["lightweight_runtime"] = "initialized"
+
+            try:
+                importlib.import_module("torch")
+                self.runtime_components["torch_subsystem"] = "available"
+            except Exception as torch_exc:
+                self.runtime_components["torch_subsystem"] = f"unavailable ({type(torch_exc).__name__}: {torch_exc})"
+                logger.warning("Optional torch subsystem unavailable: %s", torch_exc)
 
             for name in [
                 "planning", "browser", "knowledge", "reasoning", "language",
@@ -267,12 +285,13 @@ class AutopublisherWindow(QMainWindow):
 
             self.runtime_initialized = True
             self.runtime_init_error = None
-            self.status_label.setText("Agent runtime initialized")
+            self.status_label.setText("UI ready; lightweight runtime initialized")
             self._refresh_agent_fleet()
             return True
         except Exception as exc:
             self.runtime_initialized = False
             self.runtime_init_error = f"{type(exc).__name__}: {exc}"
+            self.runtime_components["lightweight_runtime"] = f"failed ({self.runtime_init_error})"
             logger.error("Runtime init failed: %s", self.runtime_init_error, exc_info=True)
             detail = (
                 "Agent runtime failed to initialize.\n\n"
@@ -281,7 +300,7 @@ class AutopublisherWindow(QMainWindow):
                 "(for example, torch DLL dependency resolution on Windows)."
             )
             QMessageBox.critical(self, "Autopublisher Runtime Initialization Failed", detail)
-            self.status_label.setText("Runtime unavailable; UI still operational")
+            self.status_label.setText("UI ready; lightweight runtime unavailable")
             self._refresh_agent_fleet()
             return False
 
@@ -578,6 +597,10 @@ class AutopublisherWindow(QMainWindow):
 
     def _refresh_agent_fleet(self) -> None:
         lines = []
+        lines.append(f"UI status: {self.runtime_components.get('ui', 'ready')}")
+        lines.append(f"Lightweight runtime: {self.runtime_components.get('lightweight_runtime', 'unknown')}")
+        lines.append(f"Torch-dependent subsystem: {self.runtime_components.get('torch_subsystem', 'unknown')}")
+        lines.append("")
         if not self.runtime_initialized:
             lines.append("Agent runtime status: not initialized")
             if self.runtime_init_error:
