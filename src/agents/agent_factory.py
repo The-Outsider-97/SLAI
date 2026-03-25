@@ -41,6 +41,18 @@ class AgentFactory:
     _agent_aliases: Dict[str, str] = {
         "web": "browser",
     }
+    _agent_dependency_profiles: Dict[str, Dict[str, Any]] = {
+        "browser": {"torch_required": False, "notes": "Selenium/browser stack only."},
+        "planning": {"torch_required": False, "notes": "Core planning is torch-free; perception heads are optional."},
+        "knowledge": {"torch_required": False, "notes": "SBERT/transformers are optional; TF-IDF path can run without torch."},
+        "reasoning": {"torch_required": False, "notes": "Rule/probabilistic reasoning core does not require torch."},
+        "language": {"torch_required": False, "notes": "Lightweight language mode available without torch."},
+        "evaluation": {"torch_required": False, "notes": "Core evaluation works without deep anomaly torch module."},
+        "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
+        "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
+        "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
+        "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
+    }
 
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -59,6 +71,7 @@ class AgentFactory:
         self.metrics_adapter_status: str = "not_initialized"
         self.registry = AgentRegistry()
         self.unavailable_agents: Dict[str, str] = {}
+        self._torch_probe = self._probe_torch_runtime()
 
         self.active_agents: Dict[str, BaseAgent] = {}
         for name, spec in self._agent_specs.items():
@@ -71,6 +84,24 @@ class AgentFactory:
             ))
 
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
+
+    def _probe_torch_runtime(self) -> Dict[str, str]:
+        try:
+            torch_module = importlib.import_module("torch")
+            return {
+                "status": "available",
+                "version": str(getattr(torch_module, "__version__", "unknown")),
+                "cuda": str(getattr(getattr(torch_module, "version", None), "cuda", None) or "cpu"),
+            }
+        except Exception as exc:
+            return {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
+
+    def get_agent_dependency_report(self, agent_type: str) -> Dict[str, Any]:
+        normalized = self._agent_aliases.get(agent_type, agent_type)
+        profile = dict(self._agent_dependency_profiles.get(normalized, {}))
+        profile["agent_type"] = normalized
+        profile["torch_probe"] = self._torch_probe
+        return profile
 
     def _get_metrics_adapter(self) -> "MetricsAdapter":
         if self._metrics_adapter is not None:
@@ -150,6 +181,12 @@ class AgentFactory:
         if agent_type not in self.registry.agents:
             logger.error(f"Unknown agent type requested: '{agent_type}'. Ensure it is registered first.")
             raise ValueError(f"Unknown agent type requested: '{agent_type}'")
+
+        profile = self.get_agent_dependency_report(agent_type)
+        if profile.get("torch_required") and self._torch_probe.get("status") != "available":
+            reason = f"torch required by design; torch runtime unavailable ({self._torch_probe.get('error', 'unknown')})"
+            self.unavailable_agents[agent_type] = reason
+            raise RuntimeError(reason)
 
         # Resolve dependency order
         load_order = self.registry.resolve_dependency_tree(agent_type)
