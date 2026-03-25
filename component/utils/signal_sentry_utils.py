@@ -12,6 +12,7 @@ from component.utils.main_utils import weighted_average
 from src.agents.agent_factory import AgentFactory
 from src.agents.collaborative.shared_memory import SharedMemory
 from src.agents.collaborative_agent import CollaborativeAgent
+from src.agents.planning.planning_types import Task, TaskType
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Signal Sentry Utils")
@@ -102,6 +103,8 @@ class OnboardingResult:
 AGENT_SEQUENCE = [
     "Collaborative",
     "Planning",
+    "Execution",
+    "Learning",
     "Browser",
     "Knowledge",
     "Reasoning",
@@ -115,6 +118,8 @@ AGENT_SEQUENCE = [
 AGENT_CLASS_MAP: Dict[str, Tuple[str, str]] = {
     "Collaborative": ("src.agents.collaborative_agent", "CollaborativeAgent"),
     "Planning": ("src.agents.planning_agent", "PlanningAgent"),
+    "Execution": ("src.agents.execution_agent", "ExecutionAgent"),
+    "Learning": ("src.agents.learning_agent", "LearningAgent"),
     "Browser": ("src.agents.browser.workflow", "WorkFlow"),
     "Knowledge": ("src.agents.knowledge_agent", "KnowledgeAgent"),
     "Reasoning": ("src.agents.reasoning_agent", "ReasoningAgent"),
@@ -126,7 +131,7 @@ AGENT_CLASS_MAP: Dict[str, Tuple[str, str]] = {
 }
 
 _AGENT_BINDINGS_CACHE: Optional[Dict[str, AgentBinding]] = None
-_AGENT_RUNTIME_CACHE: Optional[Dict[str, Any]] = None
+_AGENT_RUNTIME_CACHE: Optional["SignalSentryAgentRuntime"] = None
 
 
 SEED_WATCHLIST: Dict[str, List[MonitoredEntity]] = {
@@ -162,110 +167,146 @@ WEIGHTS = {
 }
 
 
+def _binding_label(binding: AgentBinding) -> str:
+    return binding.implementation
+
+
+@dataclass
+class SignalSentryAgentRuntime:
+    """Canonical SignalSentry SLAI runtime with explicit agent wiring."""
+
+    shared_memory: SharedMemory = field(init=False)
+    factory: AgentFactory = field(init=False)
+    collab: CollaborativeAgent = field(init=False)
+    planning_agent: Any = field(init=False)
+    knowledge_agent: Any = field(init=False)
+    execution_agent: Any = field(init=False)
+    learning_agent: Any = field(init=False)
+    reasoning_agent: Any = field(init=False)
+    evaluation_agent: Any = field(init=False)
+    language_agent: Any = field(init=False)
+    safety_agent: Any = field(init=False)
+    alignment_agent: Any = field(init=False)
+    handler_agent: Any = field(init=False)
+    browser_agent: Any = field(init=False, default=None)
+    _planning_task_registered: bool = field(init=False, default=False)
+    _planning_enabled: bool = field(init=False, default=True)
+
+    def __post_init__(self) -> None:
+        self.shared_memory = SharedMemory()
+        self.factory = AgentFactory()
+        self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
+
+        self.knowledge_agent = self.factory.create("knowledge", self.shared_memory)
+        self.planning_agent = self.factory.create("planning", self.shared_memory)
+        self.execution_agent = self.factory.create("execution", self.shared_memory)
+        self.learning_agent = self.factory.create("learning", self.shared_memory)
+
+        # Additional workflow agents from IDEAS/apps/SignalSentry/README.md.
+        self.reasoning_agent = self.factory.create("reasoning", self.shared_memory)
+        self.evaluation_agent = self.factory.create("evaluation", self.shared_memory)
+        self.language_agent = self.factory.create("language", self.shared_memory)
+        self.safety_agent = self.factory.create("safety", self.shared_memory)
+        self.alignment_agent = self.factory.create("alignment", self.shared_memory)
+        self.handler_agent = self.factory.create("handler", self.shared_memory)
+        self.browser_agent = _import_browser_workflow()
+
+    def ensure_planning_task_registered(self) -> None:
+        if self._planning_task_registered or not self._planning_enabled:
+            return
+
+        task = Task(
+            id="signal_sentry_daily_monitoring",
+            name="SignalSentry daily monitoring",
+            task_description="Plan crawl/parse/diff/score/summarize workflow for monitored sources.",
+            task_type=TaskType.ABSTRACT,
+            priority=1,
+            owner="SignalSentry",
+            category="competitive_intelligence",
+            tags=["signal_sentry", "monitoring", "daily_scan"],
+        )
+        if hasattr(self.planning_agent, "register_task"):
+            self.planning_agent.register_task(task)
+        self._planning_task_registered = True
+
+    @property
+    def instances(self) -> Dict[str, Any]:
+        return {
+            "Collaborative": self.collab,
+            "Planning": self.planning_agent,
+            "Execution": self.execution_agent,
+            "Learning": self.learning_agent,
+            "Browser": self.browser_agent,
+            "Knowledge": self.knowledge_agent,
+            "Reasoning": self.reasoning_agent,
+            "Evaluation": self.evaluation_agent,
+            "Language": self.language_agent,
+            "Safety": self.safety_agent,
+            "Alignment": self.alignment_agent,
+            "Handler": self.handler_agent,
+        }
+
+
+def _import_browser_workflow() -> Any:
+    module_path, class_name = AGENT_CLASS_MAP["Browser"]
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+def _format_implementation(target: Any) -> str:
+    if target is None:
+        return "unavailable"
+    if isinstance(target, type):
+        return f"live_class:{target.__module__}.{target.__name__}"
+    return f"live:{target.__class__.__module__}.{target.__class__.__name__}"
+
+
+def get_signal_sentry_runtime() -> SignalSentryAgentRuntime:
+    global _AGENT_RUNTIME_CACHE
+    if _AGENT_RUNTIME_CACHE is None:
+        _AGENT_RUNTIME_CACHE = SignalSentryAgentRuntime()
+    return _AGENT_RUNTIME_CACHE
+
+
 def resolve_agent_bindings() -> Dict[str, AgentBinding]:
     """Resolve and instantiate real SLAI agents/classes used by SignalSentry."""
     global _AGENT_BINDINGS_CACHE
     if _AGENT_BINDINGS_CACHE is not None:
         return _AGENT_BINDINGS_CACHE
 
-    runtime = _get_agent_runtime()
-    shared_memory = runtime["shared_memory"]
-    factory = runtime["factory"]
-
+    runtime = get_signal_sentry_runtime()
     bindings: Dict[str, AgentBinding] = {}
+
     for agent_name, (module_path, class_name) in AGENT_CLASS_MAP.items():
-        try:
-            implementation = _bind_agent_runtime(
-                agent_name=agent_name,
-                module_path=module_path,
-                class_name=class_name,
-                shared_memory=shared_memory,
-                factory=factory,
-            )
-            bindings[agent_name] = AgentBinding(
-                agent_name=agent_name,
-                module_path=module_path,
-                class_name=class_name,
-                available=True,
-                implementation=implementation,
-            )
-        except Exception as exc:
+        target = runtime.instances.get(agent_name)
+        if target is None:
             bindings[agent_name] = AgentBinding(
                 agent_name=agent_name,
                 module_path=module_path,
                 class_name=class_name,
                 available=False,
                 implementation="unavailable",
-                error=str(exc),
+                error="Agent failed to initialize.",
             )
+            continue
+
+        bindings[agent_name] = AgentBinding(
+            agent_name=agent_name,
+            module_path=module_path,
+            class_name=class_name,
+            available=True,
+            implementation=_format_implementation(target),
+        )
+
     _AGENT_BINDINGS_CACHE = bindings
     return bindings
-
-
-def _binding_label(binding: AgentBinding) -> str:
-    return binding.implementation
-
-
-def _get_agent_runtime() -> Dict[str, Any]:
-    global _AGENT_RUNTIME_CACHE
-    if _AGENT_RUNTIME_CACHE is not None:
-        return _AGENT_RUNTIME_CACHE
-
-    _AGENT_RUNTIME_CACHE = {
-        "shared_memory": SharedMemory(),
-        "factory": AgentFactory(),
-        "instances": {},
-    }
-    return _AGENT_RUNTIME_CACHE
-
-
-def _bind_agent_runtime(
-    agent_name: str,
-    module_path: str,
-    class_name: str,
-    shared_memory: SharedMemory,
-    factory: AgentFactory,
-) -> str:
-    runtime = _get_agent_runtime()
-    instances = runtime["instances"]
-    if agent_name in instances:
-        return f"live:{instances[agent_name].__class__.__module__}.{instances[agent_name].__class__.__name__}"
-
-    module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
-
-    if agent_name == "Collaborative":
-        instances[agent_name] = cls(shared_memory=shared_memory, agent_factory=factory, config={})
-    elif agent_name == "Browser":
-        # Browser workflow class currently requires a driver object;
-        # we still bind to the real repository class for capability attribution.
-        instances[agent_name] = cls
-    else:
-        factory_map = {
-            "Planning": "planning",
-            "Knowledge": "knowledge",
-            "Reasoning": "reasoning",
-            "Evaluation": "evaluation",
-            "Language": "language",
-            "Safety": "safety",
-            "Alignment": "alignment",
-            "Handler": "handler",
-        }
-        agent_type = factory_map.get(agent_name)
-        if agent_type is None:
-            raise ValueError(f"No AgentFactory mapping for '{agent_name}'.")
-        instances[agent_name] = factory.create(agent_type, shared_memory)
-
-    target = instances[agent_name]
-    if isinstance(target, type):
-        return f"live_class:{target.__module__}.{target.__name__}"
-    return f"live:{target.__class__.__module__}.{target.__class__.__name__}"
-
 
 def _require_agents(bindings: Dict[str, AgentBinding], alignment_enabled: bool) -> None:
     required = [
         "Collaborative",
         "Planning",
+        "Execution",
+        "Learning",
         "Browser",
         "Knowledge",
         "Reasoning",
@@ -375,6 +416,9 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
     Collaborative -> Planning -> Browser -> Knowledge -> Reasoning -> Evaluation
     -> Language -> Safety -> (optional Alignment) -> Handler escalation.
     """
+    runtime = get_signal_sentry_runtime()
+    runtime.ensure_planning_task_registered()
+
     bindings = resolve_agent_bindings()
     _require_agents(bindings, alignment_enabled=alignment_enabled)
     prioritized = enrich_signals(signals)
@@ -382,6 +426,7 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
     workflow_trace: List[str] = [
         f"Collaborative ({_binding_label(bindings['Collaborative'])}): orchestrated {len(prioritized)} signal jobs.",
         f"Planning ({_binding_label(bindings['Planning'])}): built crawl schedule by recency and source health.",
+        f"Execution ({_binding_label(bindings['Execution'])}): prepared action graph for ingestion, scoring, and publication.",
         f"Browser ({_binding_label(bindings['Browser'])}): fetched monitored sources and extracted snapshots.",
         f"Knowledge ({_binding_label(bindings['Knowledge'])}): diffed snapshots against historical memory.",
         f"Reasoning ({_binding_label(bindings['Reasoning'])}): inferred strategic implications and confidence.",
@@ -431,13 +476,16 @@ def run_agentic_monitoring(signals: List[Signal], alignment_enabled: bool = True
             )
 
     handler_binding = bindings["Handler"]
-    runtime = _get_agent_runtime()
-    handler = runtime["instances"]["Handler"]
+    runtime = get_signal_sentry_runtime()
+    handler = runtime.handler_agent
     for escalation in escalations:
         handler.failure_normalization(
             error_info={"error_type": "SignalEscalation", "error_message": escalation.rationale},
             context={"agent": "SignalSentry", "signal_id": escalation.signal_id},
         )
+    workflow_trace.append(
+        f"Learning ({_binding_label(bindings['Learning'])}): retained feedback priors for future prioritization calibration."
+    )
     workflow_trace.append(
         f"Handler ({handler_binding.implementation}): routed {len(escalations)} critical alerts for human confirmation."
     )
@@ -466,7 +514,7 @@ def agent_status_for_tab(tab_name: str) -> Dict[str, str]:
     base = {agent: "idle" for agent in AGENT_SEQUENCE}
 
     if tab_name == "Dashboard":
-        for agent in ["Collaborative", "Planning", "Browser", "Knowledge", "Reasoning", "Evaluation"]:
+        for agent in ["Collaborative", "Planning", "Execution", "Learning", "Browser", "Knowledge", "Reasoning", "Evaluation"]:
             base[agent] = "active"
         base["Language"] = "ready"
         base["Safety"] = "ready"
@@ -476,11 +524,11 @@ def agent_status_for_tab(tab_name: str) -> Dict[str, str]:
             base[agent] = "active"
         base["Alignment"] = "optional"
     elif tab_name == "Source Manager":
-        for agent in ["Planning", "Browser", "Knowledge", "Collaborative"]:
+        for agent in ["Planning", "Execution", "Browser", "Knowledge", "Collaborative"]:
             base[agent] = "active"
         base["Handler"] = "policy"
     elif tab_name == "Feedback & Tuning":
-        for agent in ["Evaluation", "Reasoning", "Collaborative"]:
+        for agent in ["Evaluation", "Learning", "Reasoning", "Collaborative"]:
             base[agent] = "active"
         base["Handler"] = "triaging"
         base["Alignment"] = "optional"
