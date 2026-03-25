@@ -22,6 +22,8 @@ class AgentRegistry:
     - Capability-based routing
     - Versioned registrations
     """
+    _module_failures: Dict[str, str] = {}
+
     def __init__(self, shared_memory: Optional[Any] = None, auto_discover: bool = True):
         self.config = load_global_config()
         self.registry_config = get_config_section('registry')
@@ -33,6 +35,9 @@ class AgentRegistry:
         self._health_check_interval =  self.registry_config.get('health_check_interval', 300)
         self.default_package = agent_discovery_config.get('default_package', 'src.agents')
         self.excluded_modules = agent_discovery_config.get('excluded_modules', [])
+        self._discovered_packages = set()
+        self._agent_init_failures: Dict[str, str] = {}
+        
         
         # Initialize with dynamic discovery from config
         if auto_discover:
@@ -50,6 +55,10 @@ class AgentRegistry:
         Raises:
             ImportError: If package cannot be imported
         """       
+        if agents_package in self._discovered_packages:
+            logger.debug("Agent package %s already discovered for this registry instance; skipping re-scan.", agents_package)
+            return
+
         try:
             package = importlib.import_module(agents_package)
             for _, module_name, _ in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
@@ -57,14 +66,26 @@ class AgentRegistry:
                 if any(excluded in lowered for excluded in self.excluded_modules):
                     logger.warning(f"Skipping {module_name} due to exclusion rule.")
                     continue
+                # Avoid recursive registry bootstraps caused by discovering collaborative_agent itself.
+                if lowered.endswith(".collaborative_agent"):
+                    logger.debug("Skipping %s to avoid recursive collaboration manager bootstrap.", module_name)
+                    continue
                 if "agent" in lowered:
                     self._load_agent_module(module_name)
+            self._discovered_packages.add(agents_package)
         except ImportError as e:
             logger.error(f"Failed to import agents package: {e}")
             raise
 
     def _load_agent_module(self, module_name: str) -> None:
         """Internal method to load and validate agent modules"""
+        if module_name in self._module_failures:
+            logger.debug(
+                "Skipping module %s after cached import failure: %s",
+                module_name,
+                self._module_failures[module_name],
+            )
+            return
         try:
             module = importlib.import_module(module_name)
             for name, obj in inspect.getmembers(module, inspect.isclass):
@@ -73,41 +94,16 @@ class AgentRegistry:
                 if inspect.isabstract(obj) or not issubclass(obj, BaseAgent):
                     continue
 
-                init_signature = inspect.signature(obj.__init__)
-                required_args = [
-                    param
-                    for param_name, param in init_signature.parameters.items()
-                    if param_name != "self"
-                    and param.default is inspect.Parameter.empty
-                    and param.kind in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    )
-                ]
-
-                if required_args:
-                    logger.debug(
-                        "Skipping %s.%s discovery due to required constructor args: %s",
-                        module.__name__,
-                        name,
-                        ", ".join(param.name for param in required_args),
-                    )
-                    continue
-
-                try:
-                    instance = obj()
-                    caps = getattr(instance, "capabilities", [])
-                    meta = {
-                        "class": obj,
-                        "instance": instance,
-                        "capabilities": caps,
-                        "version": self._version
-                    }
-                    self._register_agent(obj.__name__, meta)
-                except Exception as e:
-                    logger.error(f"Failed to instantiate {name}: {e}")
+                caps = list(getattr(obj, "capabilities", []))
+                meta = {
+                    "class": obj,
+                    "instance": None,
+                    "capabilities": caps,
+                    "version": self._version,
+                }
+                self._register_agent(obj.__name__, meta)
         except Exception as e:
+            self._module_failures[module_name] = f"{type(e).__name__}: {e}"
             logger.error(f"Failed to load module {module_name}: {e}")
 
     def _register_agent(self, name: str, meta: Dict) -> None:
@@ -118,8 +114,9 @@ class AgentRegistry:
                 return
             logger.info(f"Upgrading {name} to version {self._version}")
 
+        agent_class = meta.get("class")
         required_attrs = ["execute", "capabilities"]
-        if not all(hasattr(meta["instance"], attr) for attr in required_attrs):
+        if not agent_class or not all(hasattr(agent_class, attr) for attr in required_attrs):
             raise ValueError(f"Agent {name} missing required attributes")
 
         self._agents[name] = meta
@@ -146,16 +143,50 @@ class AgentRegistry:
         Returns:
             Dictionary of qualified agents with their metadata
         """
-        return {
-            name: {
-                "instance": agent["instance"],
+        qualified: Dict[str, Dict] = {}
+        for name, agent in self._agents.items():
+            if task_type not in agent["capabilities"]:
+                continue
+            if not self._check_agent_health(name):
+                continue
+            instance = self._get_or_create_instance(name)
+            if instance is None:
+                continue
+            qualified[name] = {
+                "instance": instance,
                 "capabilities": agent["capabilities"],
-                "version": agent["version"]
+                "version": agent["version"],
             }
-            for name, agent in self._agents.items()
-            if task_type in agent["capabilities"] and 
-            self._check_agent_health(name)
-        }
+        return qualified
+
+    def _get_or_create_instance(self, name: str):
+        agent = self._agents.get(name)
+        if not agent:
+            return None
+        if agent.get("instance") is not None:
+            return agent["instance"]
+        if name in self._agent_init_failures:
+            logger.debug(
+                "Skipping agent %s after cached initialization failure: %s",
+                name,
+                self._agent_init_failures[name],
+            )
+            return None
+
+        try:
+            cls = agent["class"]
+            init_signature = inspect.signature(cls.__init__)
+            kwargs = {}
+            if "shared_memory" in init_signature.parameters:
+                kwargs["shared_memory"] = self.shared_memory
+            instance = cls(**kwargs)
+            agent["instance"] = instance
+            return instance
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            self._agent_init_failures[name] = error
+            logger.warning("Agent %s is unavailable for execution: %s", name, error)
+            return None
 
     def _check_agent_health(self, name: str) -> bool:
         """Perform health check on registered agent"""
