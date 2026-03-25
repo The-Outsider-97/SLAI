@@ -89,6 +89,8 @@ class Workspace:
 
 class AutopublisherWindow(QMainWindow):
     BOARD_COLUMNS = ["Backlog", "In Progress", "Ready", "Approved"]
+    CORE_AGENT_TYPES = ["planning", "browser", "knowledge", "reasoning", "language", "evaluation", "safety", "learning"]
+    OPTIONAL_AGENT_TYPES = ["alignment", "adaptive"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -107,6 +109,7 @@ class AutopublisherWindow(QMainWindow):
         self.agent_runtime_status: str = "not_initialized"
         self.agent_runtime_error: Optional[str] = None
         self.agent_statuses: Dict[str, str] = {}
+        self.agent_runtime_summary: Dict[str, Any] = {}
         self.torch_probe_details: str = "not_tested"
         self.runtime_components: Dict[str, str] = {
             "ui": "ready",
@@ -118,8 +121,9 @@ class AutopublisherWindow(QMainWindow):
             "collaborative_agent_module": "not_loaded",
             "agent_factory_module": "not_loaded",
             "torch_subsystem": "untested",
+            "core_agents": "not_evaluated",
+            "optional_agents": "not_evaluated",
         }
-
 
         self._build_ui()
         self._refresh_board()
@@ -289,7 +293,8 @@ class AutopublisherWindow(QMainWindow):
             self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
             self.runtime_components["lightweight_runtime"] = "initialized"
             self.runtime_components["runtime_core"] = "initialized"
-            self.runtime_components["registry"] = "initialized"
+            registered = self.factory.get_registered_agent_types()
+            self.runtime_components["registry"] = f"initialized ({len(registered)} registered)"
 
             try:
                 importlib.import_module("torch")
@@ -298,31 +303,76 @@ class AutopublisherWindow(QMainWindow):
                 self.runtime_components["torch_subsystem"] = f"unavailable ({type(torch_exc).__name__}: {torch_exc})"
                 logger.warning("Optional torch subsystem unavailable: %s", torch_exc)
 
-            heavy_optional = {"alignment", "adaptive"}
             optional_failures: Dict[str, str] = {}
+            unavailable_reasons: Dict[str, str] = {}
             available_count = 0
-            for name in ["planning", "browser", "knowledge", "reasoning", "language", "evaluation", "safety", "learning", "alignment", "adaptive"]:
+            requested_agents = [*self.CORE_AGENT_TYPES, *self.OPTIONAL_AGENT_TYPES]
+            for name in requested_agents:
                 try:
                     self.agents[name] = self.factory.create(name, self.shared_memory)
                     available_count += 1
                 except Exception as exc:
-                    status = "optional" if name in heavy_optional else "core"
+                    status = "optional" if name in self.OPTIONAL_AGENT_TYPES else "core"
                     logger.warning("Agent '%s' unavailable during runtime init (%s): %s", name, status, exc)
                     self.agents[name] = None
-                    optional_failures[name] = f"{type(exc).__name__}: {exc}"
+                    reason = f"{type(exc).__name__}: {exc}"
+                    unavailable_reasons[name] = reason
+                    if name in self.OPTIONAL_AGENT_TYPES:
+                        optional_failures[name] = reason
 
-            if optional_failures:
-                self.runtime_components["optional_heavy_agents"] = (
-                    "degraded: " + ", ".join(f"{k}={v}" for k, v in optional_failures.items() if k in heavy_optional)
-                )
-                logger.info("Runtime initialized in degraded mode. Optional failures: %s", optional_failures)
+            core_available = sum(1 for name in self.CORE_AGENT_TYPES if self.agents.get(name) is not None)
+            optional_available = sum(1 for name in self.OPTIONAL_AGENT_TYPES if self.agents.get(name) is not None)
+            missing_core = [name for name in self.CORE_AGENT_TYPES if self.agents.get(name) is None]
+            self.runtime_components["core_agents"] = f"{core_available}/{len(self.CORE_AGENT_TYPES)}"
+            self.runtime_components["optional_agents"] = f"{optional_available}/{len(self.OPTIONAL_AGENT_TYPES)}"
+            self.runtime_components["optional_heavy_agents"] = "available" if not optional_failures else "degraded"
+            self.agent_statuses = {k: ("online" if self.agents.get(k) is not None else f"unavailable: {unavailable_reasons.get(k, 'unknown')}") for k in requested_agents}
+
+            if core_available == 0:
+                self.agent_runtime_status = "blocked"
+                if str(self.runtime_components.get("torch_subsystem", "")).startswith("unavailable"):
+                    self.agent_runtime_error = "No core agents are available; torch-dependent runtime is unavailable."
+                else:
+                    self.agent_runtime_error = "No core agents are available."
+            elif missing_core:
+                self.agent_runtime_status = "degraded"
+                self.agent_runtime_error = f"Missing core agents: {', '.join(missing_core)}"
+            elif optional_available < len(self.OPTIONAL_AGENT_TYPES):
+                self.agent_runtime_status = "degraded"
+                self.agent_runtime_error = "Optional agents unavailable."
             else:
-                self.runtime_components["optional_heavy_agents"] = "available"
-            logger.info("Runtime init summary: available_agents=%s unavailable=%s", available_count, len(optional_failures))
+                self.agent_runtime_status = "fully_available"
+                self.agent_runtime_error = None
+
+            self.agent_runtime_summary = {
+                "registered_agents": registered,
+                "requested_agents": requested_agents,
+                "available_agents": available_count,
+                "core_available": core_available,
+                "core_total": len(self.CORE_AGENT_TYPES),
+                "optional_available": optional_available,
+                "optional_total": len(self.OPTIONAL_AGENT_TYPES),
+                "missing_core": missing_core,
+                "unavailable_reasons": unavailable_reasons,
+            }
+            logger.info(
+                "Runtime init summary: status=%s available_agents=%s core=%s/%s optional=%s/%s",
+                self.agent_runtime_status,
+                available_count,
+                core_available,
+                len(self.CORE_AGENT_TYPES),
+                optional_available,
+                len(self.OPTIONAL_AGENT_TYPES),
+            )
 
             self.runtime_initialized = True
             self.runtime_init_error = None
-            self.status_label.setText("UI ready; lightweight runtime initialized")
+            if self.agent_runtime_status == "fully_available":
+                self.status_label.setText("UI ready; agent runtime fully available")
+            elif self.agent_runtime_status == "degraded":
+                self.status_label.setText("UI ready; agent runtime degraded")
+            else:
+                self.status_label.setText("UI ready; agent runtime blocked")
             self._refresh_agent_fleet()
             return True
         except Exception as exc:
@@ -644,10 +694,15 @@ class AutopublisherWindow(QMainWindow):
                 lines.append(f"Last initialization error: {self.runtime_init_error}")
             lines.append("Use 'Initialize Agent Runtime' to load SharedMemory/AgentFactory/agents.")
         else:
-            lines.append("Agent runtime status: initialized")
+            lines.append(f"Agent runtime status: {self.agent_runtime_status}")
+            lines.append(f"Registry status: {self.runtime_components.get('registry', 'unknown')}")
+            lines.append(f"Core agents available: {self.runtime_components.get('core_agents', 'unknown')}")
+            lines.append(f"Optional agents available: {self.runtime_components.get('optional_agents', 'unknown')}")
+            if self.agent_runtime_error:
+                lines.append(f"Runtime note: {self.agent_runtime_error}")
             for name, agent in self.agents.items():
                 if agent is None:
-                    lines.append(f"- {name}: unavailable")
+                    lines.append(f"- {name}: {self.agent_statuses.get(name, 'unavailable')}")
                     continue
                 methods = [m for m in ["perform_task", "predict", "execute", "act", "get_action"] if hasattr(agent, m)]
                 lines.append(f"- {name}: online | methods={', '.join(methods) if methods else 'none'}")
