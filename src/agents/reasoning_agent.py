@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 """
 Reasoning Agent for Scalable Autonomous Intelligence
@@ -24,9 +24,6 @@ import re, os
 import yaml
 import time
 import random
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from collections import defaultdict, OrderedDict
 from typing import Any, Callable, Dict, List, Set, Tuple, Union, Optional
@@ -67,13 +64,12 @@ class Token:
     ner_tag: Optional[str] = None
     embedding: Optional[List[float]] = None
 
-class ReasoningAgent(BaseAgent, nn.Module):
+class ReasoningAgent(BaseAgent):
     """
     Initialize the Reasoning Agent with learning capabilities.
     """
     def __init__(self, shared_memory, agent_factory, config=None):
         BaseAgent.__init__(self, shared_memory, agent_factory, config=config)
-        nn.Module.__init__(self)
         self.rules = []
         self.rule_weights = {}
         self.reasoning_agent = []
