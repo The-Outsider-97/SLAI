@@ -53,6 +53,7 @@ class AgentFactory:
         self._metrics_adapter: Optional["MetricsAdapter"] = None
         self.metrics_adapter_status: str = "not_initialized"
         self.registry = AgentRegistry()
+        self.unavailable_agents: Dict[str, str] = {}
 
         self.active_agents: Dict[str, BaseAgent] = {}
         for name, spec in self._agent_specs.items():
@@ -132,6 +133,10 @@ class AgentFactory:
         if agent_type in self.active_agents:
             logger.info(f"Returning cached instance of agent: '{agent_type}'")
             return self.active_agents[agent_type]
+        if agent_type in self.unavailable_agents:
+            reason = self.unavailable_agents[agent_type]
+            logger.info("Skipping creation for unavailable agent '%s' (cached): %s", agent_type, reason)
+            raise RuntimeError(f"Agent '{agent_type}' unavailable: {reason}")
 
         if agent_type not in self.registry.agents:
             logger.error(f"Unknown agent type requested: '{agent_type}'. Ensure it is registered first.")
@@ -152,6 +157,7 @@ class AgentFactory:
             module = importlib.import_module(metadata.module_path)
             agent_class = getattr(module, metadata.class_name)
         except (ImportError, AttributeError) as e:
+            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
             raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
 
@@ -201,12 +207,14 @@ class AgentFactory:
             return agent_instance
 
         except TypeError as e:
+            self.unavailable_agents[agent_type] = f"TypeError: {e}"
             logger.error(
                 f"Failed to create agent '{agent_type}' due to a TypeError. "
                 f"Check if the constructor signature matches the provided arguments. Error: {e}"
             )
             raise
         except Exception as e:
+            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
             raise
 
