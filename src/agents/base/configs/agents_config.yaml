@@ -39,7 +39,8 @@ alignment_agent:
     corrections: {}
     alignment_ttl: 604800
     fail_safe_action_space: []
-    ris
+    risk_threshold: 0.5
+
 browser_agent:
     max_retries: 3
     default_wait: 0.0
