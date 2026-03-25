@@ -25,19 +25,15 @@ class Transformer(BaseTransformer, nn.Module):
         BaseTransformer.__init__(self)
         nn.Module.__init__(self)
         self.config = load_global_config()
-        self.training = self.config.get('training')
+        # self.training = self.config.get('training')
         self.embed_dim = self.config.get('embed_dim')
         self.num_heads = self.config.get('num_heads')
         self.dropout_rate = self.config.get('dropout_rate')
         self.num_layers = self.config.get('num_layers')
         self.num_styles = self.config.get('num_styles')
         self.max_position_embeddings = self.config.get('max_position_embeddings')
-
         self.trans_config = get_config_section('transformer')
         self.return_hidden = self.trans_config.get('return_hidden')
-
-        # Override return_hidden if specified
-        self.return_hidden = True
 
         self.memory = PerceptionMemory()
 
@@ -216,7 +212,10 @@ class Transformer(BaseTransformer, nn.Module):
         return head_spec["class"](**params)
 
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, context_mask: Optional[torch.Tensor] = None,
-                style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+                style_id: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Accept the commonly used alias to keep compatibility with encoder callers.
+        if context_mask is None and attention_mask is not None:
+            context_mask = attention_mask
         # Add positional and style embeddings
         seq_len = x.shape[1]
         x = x + self.positional_encoding[:seq_len, :].unsqueeze(0)
@@ -235,27 +234,42 @@ class Transformer(BaseTransformer, nn.Module):
             # Attention block
             residual = x
             x = layer['norm1'](x)
-            x_attn = self.memory.run_checkpointed(layer['attention'], x)
-            x = residual + nn.Dropout(self.dropout_rate)(x_attn)
+            x_attn = self.memory.run_checkpointed(
+                layer['attention'],
+                x,
+                context,
+                context_mask
+            )
+            x = residual + torch.nn.functional.dropout(
+                x_attn,
+                p=self.dropout_rate,
+                training=self.training
+            )
 
             # Cache intermediate attention output
-            self.memory(
-                input=(f"layer_{i}_out", x),
-                operation='update',
-                tags=["layer_output", f"layer_{i}"]
+            self.memory.cache_item(
+                tensor=x,
+                key=f"layer_{i}_attn_out",
+                tags=["layer_output", f"layer_{i}"],
+                metadata={"block": "attention"}
             )
 
             # Feedforward block
             residual = x
             x = layer['norm2'](x)
-            x_ff = self.memory.run_checkpointed(layer['ff'], x)
-            x = residual + nn.Dropout(self.dropout_rate)(x_ff)
+            x_ff = self.memory.run_checkpointed(layer['ff'], x, context)
+            x = residual + torch.nn.functional.dropout(
+                x_ff,
+                p=self.dropout_rate,
+                training=self.training
+            )
 
             # Cache final layer output
-            self.memory(
-                input=(f"layer_{i}_out", x),
-                operation='update',
-                tags=["layer_output", f"layer_{i}"]
+            self.memory.cache_item(
+                tensor=x,
+                key=f"layer_{i}_ff_out",
+                tags=["layer_output", f"layer_{i}"],
+                metadata={"block": "feedforward"}
             )
 
         if self.return_hidden:

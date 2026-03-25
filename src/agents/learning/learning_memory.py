@@ -9,9 +9,10 @@ from datetime import datetime
 from collections import namedtuple, defaultdict, OrderedDict
 
 from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Learning Memory")
+printer = PrettyPrinter
 
 torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
 
@@ -222,12 +223,11 @@ class LearningMemory:
     def get(self, key=None, default=None):
         with self.lock:
             if key is not None:
-                # Add type check
-                if not isinstance(key, int):
+                if isinstance(key, int):
+                    if key < len(self.tree.data) and self.tree.data[key] is not None:
+                        return self.tree.data[key]
                     return default
-                if key < len(self.tree.data) and self.tree.data[key] is not None:
-                    return self.tree.data[key]
-                return default
+                return self.key_value_store.get(key, default)
             return [self.tree.data[i] for i in range(len(self.tree)) 
                     if self.tree.data[i] is not None]
 

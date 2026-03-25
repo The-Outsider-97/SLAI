@@ -87,6 +87,12 @@ class MultiModalMemory:
     def _init_drb(self):
         self.replay_buffer = DistributedReplayBuffer()
 
+    def _handle_emergency_exit(self, signum, frame):
+        """Gracefully handle Ctrl+C or other SIGINT."""
+        logger.info("Emergency exit triggered. Cleaning up...")
+        # Optional: save state here if needed
+        sys.exit(0)
+
     def store_experience(self, state, action, reward, next_state=None, done=False, 
                          context: Optional[Dict] = None, params: Optional[Dict] = None,
                          **kwargs):
@@ -103,6 +109,8 @@ class MultiModalMemory:
                 'state': state,
                 'action': action,
                 'reward': reward,
+                'next_state': next_state,
+                'done': done,
                 'timestamp': datetime.now(),
                 'strength': 1.0,
                 'context_hash': context_hash,
@@ -643,11 +651,35 @@ class MultiModalMemory:
             )
             self.semantic[key]['last_accessed'] = datetime.now()
 
-    def _handle_emergency_exit(self, signum, frame):
-        logger.critical("EMERGENCY EXIT - Forcing buffer unlock")
-        if hasattr(self.replay_buffer, 'lock') and self.replay_buffer.lock.locked():
-            self.replay_buffer.lock.release()
-        sys.exit(1)
+    def export_state(self) -> Dict[str, Union[list, dict]]:
+        """Export serializable memory state for checkpointing."""
+        return {
+            'episodic': list(self.episodic),
+            'semantic': dict(self.semantic),
+            'parameter_evolution': self.parameter_evolution.to_dict('records'),
+            'policy_interventions': list(self.policy_interventions),
+            'concept_drift_scores': list(self.concept_drift_scores),
+            'reward_sum': self.reward_sum,
+            'reward_count': self.reward_count,
+            'max_abs_reward': self.max_abs_reward,
+        }
+
+    def import_state(self, state: Dict[str, Union[list, dict]]) -> None:
+        """Restore memory state from checkpoint payload."""
+        self.episodic = deque(state.get('episodic', []), maxlen=self.episodic.maxlen)
+        semantic_data = state.get('semantic', {})
+        self.semantic = defaultdict(lambda: {
+            'strength': 1.0,
+            'last_accessed': datetime.now(),
+            'data': None,
+            'context_hash': ''
+        }, semantic_data)
+        self.parameter_evolution = pd.DataFrame(state.get('parameter_evolution', []))
+        self.policy_interventions = state.get('policy_interventions', [])
+        self.concept_drift_scores = state.get('concept_drift_scores', [])
+        self.reward_sum = float(state.get('reward_sum', 0.0))
+        self.reward_count = int(state.get('reward_count', 0))
+        self.max_abs_reward = float(state.get('max_abs_reward', 0.0))
 
 if __name__ == "__main__":
     from datetime import datetime, timedelta

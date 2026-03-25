@@ -6,10 +6,38 @@ import os, sys
 import abc
 import time
 import json
-import torch
 import difflib
 import traceback
-import torch.nn as nn
+torch = None
+TORCH_AVAILABLE = None
+TORCH_IMPORT_ERROR = None
+
+
+class _NNFallback:
+    Module = object
+
+
+nn = _NNFallback()
+
+
+def _ensure_torch_imported():
+    global torch, nn, TORCH_AVAILABLE, TORCH_IMPORT_ERROR
+    if TORCH_AVAILABLE is True:
+        return True
+    if TORCH_AVAILABLE is False:
+        return False
+    try:
+        import torch as torch_module
+        import torch.nn as torch_nn
+        torch = torch_module
+        nn = torch_nn
+        TORCH_AVAILABLE = True
+        TORCH_IMPORT_ERROR = None
+        return True
+    except Exception as torch_import_error:
+        TORCH_AVAILABLE = False
+        TORCH_IMPORT_ERROR = torch_import_error
+        return False
 
 from typing import Any
 from collections import OrderedDict, defaultdict, deque
@@ -1003,6 +1031,12 @@ class BaseAgent(abc.ABC):
         """
         Returns a basic PyTorch neural network module.
         """
+        if not _ensure_torch_imported():
+            raise RuntimeError(
+                f"[{self.name}] torch is unavailable in this environment. "
+                f"Original torch import error: {TORCH_IMPORT_ERROR}"
+            )
+
         class PolicyNet(nn.Module):
             def __init__(self, input_dim: int, output_dim: int):
                 super().__init__()
@@ -1042,6 +1076,10 @@ class BaseAgent(abc.ABC):
         The current implementation is a HEURISTIC and not a standard gradient update.
         It assumes `self.projection` is a `torch.Tensor` and requires gradients.
         """
+        if not _ensure_torch_imported():
+            self.logger.warning(f"[{self.name}] torch unavailable; skipping 'update_projection'. Error: {TORCH_IMPORT_ERROR}")
+            return {"status": "skipped", "reason": "torch_unavailable", "error": str(TORCH_IMPORT_ERROR)}
+
         if not hasattr(self, 'projection') or not isinstance(getattr(self, 'projection', None), torch.Tensor):
             self.logger.warning(f"[{self.name}] 'projection' attribute not found or is not a torch.Tensor. Skipping 'update_projection'.")
             return

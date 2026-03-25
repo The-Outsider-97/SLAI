@@ -1,0 +1,43 @@
+authentication:
+    checkpoint_dir: "data/processed/functions_auth.json"
+    token_ttl_minutes:  15
+    refresh_ttl_days: 14
+    max_failed_attempts: 5
+    lockout_minutes: 15
+
+dropdown_animation:
+    duration_ms: 220
+    preset: "smooth"
+    is_open: False
+
+# Password hashing parameters (scrypt)
+password_hasher:
+    n: 16384   # 2**14
+    r: 8
+    p: 1
+
+# TTL cache defaults
+ttl_cache:
+    max_size: 512
+    ttl_seconds: 300
+
+# Credential policy (optional)
+credential_policy:
+    min_length: 12
+    require_upper: true
+    require_lower: true
+    require_digit: true
+    require_symbol: true
+
+language_aware:
+    stopwords: "src/agents/language/templates/stopwords.json"
+
+search_engine:
+    max_size: 2048
+    cache_ttl_seconds: 120
+    # BM25 parameters (optional)
+    fuzzy_threshold: 0.8
+
+bm25:
+    k1: 1.2
+    b: 0.75

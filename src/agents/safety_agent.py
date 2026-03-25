@@ -1,18 +1,26 @@
+from __future__ import annotations
 
-from datetime import datetime
+__version__ = "2.0.0"
+
 import random
 import hashlib
 import os, sys
 import string
-import gym
+try:
+    import gymnasium as gym
+except Exception:
+    import gym
 import re
 import time
-import torch
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import torch
 import json, yaml
 import unicodedata
 import numpy as np
 
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict, dataclass, field, fields
 
@@ -22,7 +30,7 @@ from src.agents.safety.reward_model import RewardModel
 from src.agents.safety.cyber_safety import CyberSafetyModule
 from src.agents.safety.safety_guard import SafetyGuard
 from src.agents.safety.compliance_checker import ComplianceChecker
-from src.agents.safety.attention_monitor import AttentionMonitor
+# from src.agents.safety.attention_monitor import AttentionMonitor
 from src.agents.safety.adaptive_security import AdaptiveSecurity
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
@@ -80,7 +88,7 @@ class SafetyAgent(BaseAgent):
 
         # Add SafetyAgent components
         self.reward_model = RewardModel()
-        self.attention_monitor = AttentionMonitor()
+        self.attention_monitor = self._initialize_attention_monitor()
         self.safety_guard = SafetyGuard()
         self.secure_stpa = SecureSTPA()
         self.compliance_checker = ComplianceChecker()
@@ -96,6 +104,14 @@ class SafetyAgent(BaseAgent):
         self.learning_factory = self._init_learning_factory()
 
         logger.info(f"Safety Agent succesfully initialized with: {self.training_data}")
+
+    def _initialize_attention_monitor(self):
+        try:
+            from src.agents.safety.attention_monitor import AttentionMonitor
+            return AttentionMonitor()
+        except Exception as exc:
+            logger.warning("AttentionMonitor unavailable (torch-dependent); using lightweight safety mode: %s", exc)
+            return None
 
     def _load_constitution(self) -> Dict:
         """Load constitutional rules from the path specified in SafetyAgentConfig."""
@@ -1034,19 +1050,27 @@ class SafetyAgent(BaseAgent):
         logger.info(f"Collected human feedback for reward model training")
 
     def update_reward_model(self, min_samples=100):
-        """Trigger reward model retraining"""
+        """Trigger reward model retraining from secure and shared feedback stores."""
         reward_model_training_data = self.reward_model.memory.recall(tag="feedback_reward_model", top_k=500)
         if reward_model_training_data and hasattr(self.reward_model, 'retrain_model'):
-            parsed_reward_data = [item['value'] for item in reward_model_training_data]
-            self.reward_model.retrain_model(parsed_reward_data)
-    
-        feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples*2)
-        if len(feedback_items) < min_samples:
-            logger.info(f"Not enough feedback ({len(feedback_items)}/{min_samples})")
+            parsed_reward_data = [
+                item.get('data') for item in reward_model_training_data
+                if isinstance(item, dict) and isinstance(item.get('data'), dict)
+            ]
+            if parsed_reward_data:
+                self.reward_model.retrain_model(parsed_reward_data)
+
+        feedback_items = self.shared_memory.get_by_tag("reward_feedback", limit=min_samples * 2)
+        valid_feedback_items = [
+            item.get('value') for item in feedback_items
+            if isinstance(item, dict) and isinstance(item.get('value'), dict)
+        ]
+
+        if len(valid_feedback_items) < min_samples:
+            logger.info(f"Not enough feedback ({len(valid_feedback_items)}/{min_samples})")
             return False
 
-        training_data = [item['value'] for item in feedback_items]
-        self.reward_model.retrain_model(training_data)
+        self.reward_model.retrain_model(valid_feedback_items)
         return True
 
     def _generate_self_critique(self, output_text: str, original_prompt: Optional[str] = None) -> str:
@@ -1087,7 +1111,6 @@ class SafetyAgent(BaseAgent):
         self._log_audit_event("self_critique_generated", {"output_preview": output_text[:100], "critique_summary": critique[:200]})
         return critique
 
-
     # --- Attention Monitor Integration ---
     def analyze_attention_matrix(self, attention_tensor: torch.Tensor, context: Optional[Dict] = None) -> Dict:
         """
@@ -1101,7 +1124,12 @@ class SafetyAgent(BaseAgent):
             Dict: Structured analysis including metrics, anomaly flags, and optional visualization.
         """
         printer.status("SAFETY", "Analyzing attention matrix", "info")
-    
+        if self.attention_monitor is None:
+            return {
+                "status": "unavailable",
+                "reason": "Attention monitor unavailable in lightweight mode (torch-dependent).",
+            }
+
         # Step 1: Format tensor (handle batch/head dimensions)
         if attention_tensor.dim() == 4:
             # [B, H, S, S] → mean over heads, take batch 0

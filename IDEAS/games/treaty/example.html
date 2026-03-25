@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Treaty Machine - UI Mock</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a2e;
+      --panel-2: #1a2440;
+      --border: #2c3a5c;
+      --text: #ebf0ff;
+      --muted: #9fb0d8;
+      --accent: #7ee787;
+      --danger: #ff7b72;
+      --warn: #f2cc60;
+      --info: #79c0ff;
+      --violet: #b392f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: linear-gradient(180deg, #070b16, var(--bg));
+      color: var(--text);
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 320px 1fr 360px;
+      gap: 12px;
+      min-height: 100vh;
+      padding: 12px;
+    }
+    .header {
+      grid-column: 1 / 4;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .title {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: #1f2a48;
+      margin-right: 6px;
+    }
+    .faction {
+      border: 1px solid var(--border);
+      background: #0f1730;
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .faction h4 { margin: 0 0 6px; font-size: 14px; }
+    .bar { height: 8px; border-radius: 999px; background: #0a0f20; border: 1px solid var(--border); overflow: hidden; }
+    .fill { height: 100%; }
+    .fill.good { background: var(--accent); }
+    .fill.warn { background: var(--warn); }
+    .fill.bad { background: var(--danger); }
+    .editor {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0f1730;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    select, input, textarea {
+      width: 100%;
+      background: #0c1428;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 12px;
+    }
+    textarea { min-height: 78px; }
+    .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #1f2d52;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.primary { background: #1f6feb; border-color: #2f81f7; }
+    button.ok { background: #1d4f35; border-color: #2b8253; }
+    .timeline {
+      max-height: 230px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: #0d1428;
+      font-size: 12px;
+    }
+    .event { border-left: 3px solid var(--info); padding: 6px 8px; margin-bottom: 6px; background: #121c35; border-radius: 6px; }
+    .event.risk { border-left-color: var(--danger); }
+    .event.neutral { border-left-color: var(--violet); }
+    .meter {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0,1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .metric {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: #0e1630;
+    }
+    .metric .v { font-size: 18px; font-weight: 700; }
+    .small { color: var(--muted); font-size: 12px; }
+    .risk-list { font-size: 12px; line-height: 1.45; }
+    @media (max-width: 1200px) {
+      .shell { grid-template-columns: 1fr; }
+      .header { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div>
+        <h1 style="margin:0;font-size:20px;">Treaty Machine — Negotiation Console</h1>
+        <small class="small">Turn 18 | Multipolar Crisis Scenario | Difficulty: Analyst</small>
+      </div>
+      <div>
+        <span class="pill">Draft v4</span>
+        <span class="pill">Compliance Forecast: 72%</span>
+        <span class="pill">Conflict Risk: Medium</span>
+      </div>
+    </header>
+
+    <aside class="panel">
+      <h3 class="title">Faction Dossiers</h3>
+
+      <article class="faction">
+        <h4>Helion Compact</h4>
+        <div class="small">Trust: 64 | Leverage: High | Priority: Security</div>
+        <div class="bar" style="margin-top:6px"><div class="fill good" style="width:64%"></div></div>
+      </article>
+
+      <article class="faction">
+        <h4>Neris Union</h4>
+        <div class="small">Trust: 47 | Leverage: Medium | Priority: Trade Access</div>
+        <div class="bar" style="margin-top:6px"><div class="fill warn" style="width:47%"></div></div>
+      </article>
+
+      <article class="faction">
+        <h4>Rook Territories</h4>
+        <div class="small">Trust: 33 | Leverage: Low | Priority: Resource Quotas</div>
+        <div class="bar" style="margin-top:6px"><div class="fill bad" style="width:33%"></div></div>
+      </article>
+
+      <h3 class="title" style="margin-top:14px;">Round Guidance</h3>
+      <div class="small">
+        ReasoningAgent flags sanction clause conflict with current humanitarian corridor language.
+      </div>
+      <div class="btns">
+        <button>Auto-Rewrite Clause</button>
+        <button class="ok">Generate Counteroffer</button>
+      </div>
+    </aside>
+
+    <section class="panel">
+      <h3 class="title">Clause Editor</h3>
+      <div class="editor">
+        <div class="row">
+          <select>
+            <option>Clause Type: Trade Access</option>
+            <option>Clause Type: Security Guarantee</option>
+            <option>Clause Type: Audit Rights</option>
+            <option>Clause Type: Sanction Trigger</option>
+          </select>
+          <select>
+            <option>Duration: 12 turns</option>
+            <option>Duration: 6 turns</option>
+            <option>Duration: 24 turns</option>
+          </select>
+        </div>
+        <div class="row">
+          <input value="Tariff cap 8%" />
+          <input value="Exception: humanitarian shipments" />
+        </div>
+        <textarea>Parties agree to maintain tariff levels below 8% for medical and food logistics. Violations trigger arbitration before sanctions.</textarea>
+        <div class="btns">
+          <button>Add Verification Subclause</button>
+          <button>Add Penalty Escalation</button>
+          <button class="primary">Run Consequence Simulation</button>
+        </div>
+      </div>
+
+      <h3 class="title">Consequence Preview (10-turn horizon)</h3>
+      <div class="meter">
+        <div class="metric"><div class="small">Stability</div><div class="v">+12</div></div>
+        <div class="metric"><div class="small">Prosperity</div><div class="v">+7</div></div>
+        <div class="metric"><div class="small">Conflict Risk</div><div class="v" style="color:#f2cc60">-4</div></div>
+      </div>
+
+      <div class="timeline">
+        <div class="event">Turn 19: Trade throughput increases by 9% in Neris corridor.</div>
+        <div class="event neutral">Turn 21: Rook disputes quota interpretation; arbitration window opens.</div>
+        <div class="event">Turn 23: Compliance holds after joint audit panel established.</div>
+        <div class="event risk">Turn 25: If sanctions trigger without carve-out, Helion trust drops by 11.</div>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h3 class="title">AI Explainability & Risk</h3>
+      <div class="risk-list">
+        <p><strong>ReasoningAgent:</strong> Clause set C4 + S2 introduces contradiction risk (penalty before arbitration).</p>
+        <p><strong>PlanningAgent:</strong> Best projected pathway is “soft enforcement + audit-first” under current trust graph.</p>
+        <p><strong>EvaluationAgent:</strong> Draft v4 fairness score: 0.79, solvability: 0.86.</p>
+        <p><strong>Safety/Alignment:</strong> No prohibited policy violations detected in current draft.</p>
+      </div>
+
+      <h3 class="title" style="margin-top:12px;">Negotiation Controls</h3>
+      <div class="btns">
+        <button>Save Draft</button>
+        <button>Request Counterfactual</button>
+        <button class="primary">Send Proposal</button>
+        <button>Open Arbitration View</button>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

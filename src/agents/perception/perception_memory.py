@@ -53,18 +53,6 @@ class PerceptionMemory(nn.Module):
         self.eviction_count = 0
         self.total_stored = 0
 
-        # Register cleanup hook
-        #self.register_buffer('dummy', torch.tensor(0))
-        self._register_cleanup_hook()
-
-    def _register_cleanup_hook(self):
-        """Register hook to clean up when module is deleted"""
-        def cleanup_hook(module, inputs):
-            self.clear_cache()
-            logger.info("Perception Memory cache cleared during destruction")
-
-        self.register_forward_pre_hook(cleanup_hook)
-
     def cache_item(self, 
                  tensor: torch.Tensor, 
                  key: Optional[str] = None, 
@@ -117,11 +105,14 @@ class PerceptionMemory(nn.Module):
         """Remove key from tag index"""
         printer.status("MEMORY", "Removing key from tag index", "info")
 
+        empty_tags = []
         for tag, keys in self.tag_index.items():
             if key in keys:
                 keys.remove(key)
             if not keys:
-                del self.tag_index[tag]
+                empty_tags.append(tag)
+        for tag in empty_tags:
+            del self.tag_index[tag]
 
     def retrieve(self, 
                key: Optional[str] = None, 
@@ -199,7 +190,8 @@ class PerceptionMemory(nn.Module):
             
         return checkpoint(
             fn, 
-            *args, 
+            *args,
+            use_reentrant=False,
             preserve_rng_state=preserve_rng_state,
             **kwargs
         )

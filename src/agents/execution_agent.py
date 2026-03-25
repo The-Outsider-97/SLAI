@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 """
 SLAI Execution Agent:
@@ -34,7 +34,6 @@ Real-World Application:
 
 import json
 import uuid
-import torch
 import copy
 import time
 import math
@@ -57,7 +56,6 @@ from src.agents.execution.actions.idle import IdleAction
 from src.agents.execution.execution_recovery import ExecutionRecovery
 from src.agents.execution.execution_validator import ExecutionValidator
 from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from src.agents.planning.planning_types import Task
 from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
@@ -309,17 +307,14 @@ class ExecutionAgent(BaseAgent):
                 except ActionInterruptionError as e:
                     logger.warning(f"Action interrupted: {e}")
                     self.task_coordinator.pause_task(self.current_task['name'])
+                    continue
                 except ActionFailureError as e:
-                    # SPECIAL HANDLING FOR MOVEMENT FAILURES
                     if "move_to" in str(e):
                         logger.warning("Movement failure detected, resetting state")
                         self.state["cancel_movement"] = False
-                        self.task_coordinator.retry_task(self.current_task['name'])
-                        continue  # Retry immediately
-
-                try:
-                    self._execution_step()
-                except (ExecutionError, InvalidContextError, StaleCheckpointError, 
+                    self.task_coordinator.retry_task(self.current_task['name'])
+                    continue
+                except (ExecutionError, InvalidContextError, StaleCheckpointError,
                         DeadlockError, CookieMismatchError) as e:
                     self.task_coordinator.fail_task(self.current_task['name'], reason=str(e))
                     logger.error(f"Execution step failed for task '{self.current_task['name']}' with error: {e}")
@@ -355,102 +350,88 @@ class ExecutionAgent(BaseAgent):
             self.task_coordinator.complete_task(self.current_task['name'])
             return
 
-        # Validate current task exists
         if not self.current_task:
             logger.error("Execution step aborted: No active task")
             return
-            
-        # Create checkpoint before action execution
+
         checkpoint_id = self.recovery.create_recovery_checkpoint(
             f"pre_{self.current_task['name']}",
             self.state
         )
         logger.debug(f"Created pre-action checkpoint: {checkpoint_id}")
 
+        selected_action_name = "unknown"
         try:
-            action_name = selected_action_dict.get("name", "unknown")
-            # Generate potential actions for the selector
-            potential_actions = [
-                {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
-                for name, cls in self.action_class_registry.items()
-            ]
+            selected_action = self._select_action(context)
+            selected_action_name = selected_action.get("name", "unknown")
+            self._validate_action(selected_action_name, context)
+            self._execute_selected_action(selected_action_name, context)
 
-            # Validate action before execution
-            is_valid, report = self.validator.validate_plan(
-                [Task(name=action_name)],
-                context,
-                mode="continuous",
-                level="strict"
-            )
-            if not is_valid:
-                raise ActionFailureError(
-                    action_name,
-                    f"Action validation failed: {report[0]['errors']}"
-                )
-
-            selected_action_dict = self.action_selector.select(potential_actions, context)
-            action_name = selected_action_dict.get("name")
-            action_class = self.action_class_registry.get(action_name)
-
-            if not action_class:
-                raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
-
-            # Instantiate and execute the chosen action
-            action_instance = action_class(context=context)
-            success = action_instance.execute()
-
-            if not success:
-                reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
-                raise ActionFailureError(action_name, reason)
-
-            # Update agent's master state from the action's resulting context
-            self._update_state_from_action(action_instance)
-
-            # Update task progress (example: based on distance or sub-goals)
             progress = self._calculate_task_progress(context)
             self.task_coordinator.update_task_progress(self.current_task['name'], progress)
-    
+
         except ActionInterruptionError as e:
             logger.warning(f"Action interrupted: {e}")
             self.task_coordinator.pause_task(self.current_task['name'])
-            
+            raise
         except (ActionFailureError, InvalidContextError) as e:
             logger.error(f"Action failed: {str(e)}")
-            
-            # Enhanced recovery with task validation
-            if self.current_task:  # Ensure task still exists
-                recovery_success, new_context = self.recovery.handle_failure(
-                    action_name, e, context
+            if self.current_task and not self._attempt_recovery(selected_action_name, e, context):
+                self.task_coordinator.fail_task(
+                    self.current_task['name'],
+                    f"Unrecoverable failure: {str(e)}"
                 )
-                
-                if recovery_success:
-                    self.state = {**self.state, **new_context}
-                    self.shared_memory.set(f"agent_state:{self.name}", self.state)
-                    logger.info("Retrying action after recovery")
-                    return self._execution_step()
-                else:
-                    self.task_coordinator.fail_task(
-                        self.current_task['name'],
-                        f"Unrecoverable failure: {str(e)}"
-                    )
-                    
+                raise
         except Exception as e:
-            # Handle unexpected errors with task validation
-            if self.current_task:
-                error = ActionFailureError("unknown", f"Unexpected error: {str(e)}")
-                recovery_success, new_context = self.recovery.handle_failure(
-                    "unknown", error, context
+            error = ActionFailureError("unknown", f"Unexpected error: {str(e)}")
+            if self.current_task and not self._attempt_recovery("unknown", error, context):
+                self.task_coordinator.fail_task(
+                    self.current_task['name'],
+                    f"Critical failure: {str(e)}"
                 )
-                
-                if recovery_success:
-                    self.state = {**self.state, **new_context}
-                    self.shared_memory.set(f"agent_state:{self.name}", self.state)
-                    return self._execution_step()
-                else:
-                    self.task_coordinator.fail_task(
-                        self.current_task['name'],
-                        f"Critical failure: {str(e)}"
-                    )
+                raise
+
+    def _build_potential_actions(self) -> list[Dict[str, Any]]:
+        return [
+            {"name": str(name), "priority": cls.priority, "preconditions": cls.preconditions}
+            for name, cls in self.action_class_registry.items()
+        ]
+
+    def _select_action(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        return self.action_selector.select(self._build_potential_actions(), context)
+
+    def _validate_action(self, action_name: str, context: Dict[str, Any]) -> None:
+        is_valid, report = self.validator.validate_plan(
+            [{"name": action_name}],
+            context,
+            mode="continuous",
+            level="strict"
+        )
+        if not is_valid:
+            raise ActionFailureError(action_name, f"Action validation failed: {report[0]['errors']}")
+
+    def _execute_selected_action(self, action_name: str, context: Dict[str, Any]) -> None:
+        action_class = self.action_class_registry.get(action_name)
+        if not action_class:
+            raise ActionFailureError(action_name, "Selected action is not registered in the agent.")
+
+        action_instance = action_class(context=context)
+        success = action_instance.execute()
+        if not success:
+            reason = action_instance.failure_reason or f"'{action_name}' execution returned false."
+            raise ActionFailureError(action_name, reason)
+
+        self._update_state_from_action(action_instance)
+
+    def _attempt_recovery(self, action_name: str, error: Exception, context: Dict[str, Any]) -> bool:
+        recovery_success, new_context = self.recovery.handle_failure(action_name, error, context)
+        if recovery_success:
+            self.state = {**self.state, **new_context}
+            self.shared_memory.set(f"agent_state:{self.name}", self.state)
+            logger.info("Retrying action after recovery")
+            self._execution_step()
+            return True
+        return False
 
     def _gather_context(self) -> Dict[str, Any]:
         """Merges agent state and task details into a comprehensive context object."""

@@ -178,21 +178,29 @@ class DialogueContext:
         """Returns the current summary."""
         return self.summary
 
-    def get_context_for_prompt(self, history_messages_window: Optional[int] = None) -> str:
+    def get_context_for_prompt(
+        self,
+        include_summary: Optional[bool] = None,
+        include_history: Optional[bool] = None,
+        history_messages_window: Optional[int] = None,
+    ) -> str:
         """
         Constructs a string representation of the context for prompting an LLM.
         Args:
-            include_summary (bool): Whether to include the summary.
-            include_history (bool): Whether to include the recent history.
+            include_summary (Optional[bool]): Override to include/exclude summary for this call.
+            include_history (Optional[bool]): Override to include/exclude history for this call.
             history_messages_window (Optional[int]): Number of recent messages to include from history.
         """
+        use_summary = self.include_summary if include_summary is None else include_summary
+        use_history = self.include_history if include_history is None else include_history
+
         parts = []
-        if self.include_summary and self.summary:
+        if use_summary and self.summary:
             parts.append(f"[Summary]\n{self.summary}")
         
-        if self.include_history and self.history:
+        if use_history and self.history:
             history_to_show = self.get_history_messages(window=history_messages_window)
-            
+
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history_to_show])
             if formatted_history:
                 parts.append(f"[History]\n{formatted_history}")

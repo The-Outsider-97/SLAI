@@ -352,7 +352,11 @@ class ActionSelector:
                 "do_nothing": "idle",
                 "standby": "idle"
             }
-            relevance = 1.0 if action_name == goal_actions.get(goal_type, "") else 0.3
+            goal_match = goal_actions.get(goal_type, "")
+            if isinstance(goal_match, list):
+                relevance = 1.0 if action_name in goal_match else 0.3
+            else:
+                relevance = 1.0 if action_name == goal_match else 0.3
         
         # Weight by goal priority (if available)
         goal_priority = active_goal.get("priority", 1.0) if isinstance(active_goal, dict) else 1.0
@@ -361,7 +365,6 @@ class ActionSelector:
     def _estimate_action_cost(self, action: Dict, context: Dict) -> float:
         """Estimate action cost using config values and context-sensitive factors"""
         action_name = action.get("name")
-        energy = context.get("energy", 10.0)
         
         # Base costs from configuration
         base_costs = {

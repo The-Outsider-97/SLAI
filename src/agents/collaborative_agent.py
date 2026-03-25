@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.agents.base.utils.main_config_loader import get_config_section, load_global_config
 from src.agents.base_agent import BaseAgent
 from src.agents.collaborative.collaboration_manager import CollaborationManager
+from src.agents.collaborative.policy_engine import PolicyDecision, PolicyEngine
+from src.agents.collaborative.task_contracts import TaskContractRegistry
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Collaborative Agent")
@@ -134,6 +136,10 @@ class CollaborativeAgent(BaseAgent):
 
         self._risk_model = BayesianRiskModel(alpha=self.bayes_prior_alpha, beta=self.bayes_prior_beta)
         self.collaboration_manager = CollaborationManager(shared_memory=self.shared_memory) if self.use_collaboration_manager else None
+        self.task_contracts = TaskContractRegistry()
+        self.policy_engine = PolicyEngine()
+        self._register_default_task_contracts()
+        self._register_default_policy_rules()
 
         self._metrics = {
             "assessments_completed": 0,
@@ -144,6 +150,9 @@ class CollaborativeAgent(BaseAgent):
             "avg_coordination_latency_ms": 0.0,
             "delegated_tasks": 0,
             "delegation_failures": 0,
+            "contract_validation_failures": 0,
+            "policy_denials": 0,
+            "policy_review_flags": 0,
         }
 
     def shared_get(self, key: str, default: Any = None) -> Any:
@@ -165,6 +174,41 @@ class CollaborativeAgent(BaseAgent):
             current.update(updates)
             self.shared_memory.set(key, current)
             return current
+
+    def _register_default_task_contracts(self) -> None:
+        self.task_contracts.register_contract(
+            task_type="general",
+            required_fields=["id", "type"],
+            optional_fields=["requirements", "priority", "deadline", "estimated_risk", "payload"],
+            field_types={
+                "id": (str, int),
+                "type": (str,),
+                "requirements": (list,),
+                "priority": (int, float),
+                "estimated_risk": (int, float),
+                "payload": (dict,),
+            },
+            allow_unknown_fields=True,
+        )
+
+    def _register_default_policy_rules(self) -> None:
+        deny_threshold = float(self.collaborative_config.get("policy_deny_risk_threshold", 0.98))
+        review_threshold = float(self.collaborative_config.get("policy_review_risk_threshold", 0.85))
+
+        self.policy_engine.add_simple_rule(
+            rule_id="deny_critical_risk",
+            description=f"Task denied because estimated risk is above {deny_threshold}.",
+            effect=PolicyDecision.DENY,
+            priority=10,
+            predicate=lambda task, _agent, _ctx: float(task.get("estimated_risk", 0.0)) >= deny_threshold,
+        )
+        self.policy_engine.add_simple_rule(
+            rule_id="review_high_risk",
+            description=f"Task requires review because estimated risk is above {review_threshold}.",
+            effect=PolicyDecision.REQUIRE_REVIEW,
+            priority=20,
+            predicate=lambda task, _agent, _ctx: float(task.get("estimated_risk", 0.0)) >= review_threshold,
+        )
 
     def assess_risk(
         self,
@@ -243,6 +287,16 @@ class CollaborativeAgent(BaseAgent):
         for task in sorted(tasks, key=lambda t: (t.get("deadline", float("inf")), -float(t.get("priority", 0)))):
             task_id = str(task.get("id", f"task-{len(assignments)+1}"))
 
+            contract_type = str(task.get("type", "general"))
+            contract_check = self.task_contracts.validate(contract_type, task)
+            if not contract_check.valid:
+                self._update_metric("contract_validation_failures", 1)
+                assignments[task_id] = {
+                    "status": "rejected_invalid_contract",
+                    "errors": contract_check.errors,
+                }
+                continue
+
             delegated = self._try_manager_delegation(task)
             if delegated is not None:
                 assignments[task_id] = delegated
@@ -251,6 +305,12 @@ class CollaborativeAgent(BaseAgent):
             chosen_agent, chosen_score = self._select_best_agent(task, available_agents, agent_loads)
             if chosen_agent is None:
                 assignments[task_id] = {"status": "unassigned", "reason": "no_capable_agent"}
+                continue
+
+            policy = self.policy_engine.evaluate(task, available_agents.get(chosen_agent, {}), context=constraints)
+            if policy.decision == PolicyDecision.DENY:
+                self._update_metric("policy_denials", 1)
+                assignments[task_id] = {"status": "rejected_policy", "agent": chosen_agent, "policy": policy.to_dict()}
                 continue
 
             assessment = self.assess_risk(
@@ -262,11 +322,17 @@ class CollaborativeAgent(BaseAgent):
                 assignments[task_id] = {"status": "rejected_high_risk", "agent": chosen_agent, "safety": assessment.to_dict()}
                 continue
 
+            assigned_status = "assigned"
+            if policy.decision == PolicyDecision.REQUIRE_REVIEW:
+                self._update_metric("policy_review_flags", 1)
+                assigned_status = "assigned_with_review"
+
             assignments[task_id] = {
-                "status": "assigned",
+                "status": assigned_status,
                 "agent": chosen_agent,
                 "optimization_score": round(chosen_score, 4),
                 "safety": assessment.to_dict(),
+                "policy": policy.to_dict(),
             }
             agent_loads[chosen_agent] += 1
             if agent_loads[chosen_agent] >= max_tasks_per_agent:
@@ -357,6 +423,8 @@ class CollaborativeAgent(BaseAgent):
                 "config": self.collaborative_config,
                 "metrics": self._metrics,
                 "risk_model": self._risk_model.snapshot(),
+                "task_contracts": self.task_contracts.list_contracts(),
+                "policy_rules": self.policy_engine.list_rules(),
                 "timestamp": time.time(),
             }
         )
@@ -418,6 +486,12 @@ if __name__ == "__main__":
     result = agent.coordinate_tasks(tasks, available_agents)
     assert result["status"] == "success"
     assert "t1" in result["assignments"] and "t2" in result["assignments"]
+
+    invalid_result = agent.coordinate_tasks([{"type": "general", "estimated_risk": 0.1}], available_agents)
+    assert invalid_result["assignments"]["task-1"]["status"] == "rejected_invalid_contract"
+
+    denied_result = agent.coordinate_tasks([{"id": "t3", "type": "general", "estimated_risk": 0.99}], available_agents)
+    assert denied_result["assignments"]["t3"]["status"] == "rejected_policy"
 
     state = agent.serialize_state()
     restored = CollaborativeAgent.deserialize_state(state, shared_memory=memory)

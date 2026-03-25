@@ -62,19 +62,16 @@ class MetaLearningWorker:
         logger.info(f"Using worker registry: {self.worker_registry_name}")
 
     def get_worker_registry(self):
-        """Retrieve worker registry from memory"""
-        # Access the semantic memory store directly
+        """Retrieve worker registry from local registry first, then memory fallback."""
+        if self.skill_worker_registry:
+            return self.skill_worker_registry
+
         registry_key = f"ctx_{self.worker_registry_name[:6]}"
-        
         if registry_key in self.memory.semantic:
             registry_data = self.memory.semantic[registry_key]['data']
             if isinstance(registry_data, dict):
                 return registry_data
-            else:
-                logger.warning(f"Registry data is not a dictionary: {type(registry_data)}")
-        else:
-            logger.warning(f"Worker registry '{self.worker_registry_name}' not found in memory")
-        
+            logger.warning(f"Registry data is not a dictionary: {type(registry_data)}")
         return {}
 
     def collect_performance_metrics(self) -> Dict[int, Dict]:
@@ -308,43 +305,37 @@ class MetaLearningWorker:
 if __name__ == "__main__":
     print("\n=== Running Meta Learning Worker ===\n")
     printer.status("TEST", "Starting Meta Learning Worker tests", "info")
-    skill_workers = {}
+    from src.agents.adaptive.reinforcement_learning import SkillWorker
 
     worker = MetaLearningWorker()
-    collector = worker.collect_performance_metrics()
-    class SkillWorker:
-        def get_performance_metrics(self):
-            return {'recent_reward': 0.85}
-    
-    registry = {1: SkillWorker()}
-    registry_key = f"ctx_{worker.worker_registry_name[:6]}"
-    
-    # Store registry in semantic memory
-    worker.memory.semantic[registry_key] = {
-        'data': registry,
-        'strength': 1.0,
-        'last_accessed': datetime.now(),
-        'context_hash': worker.worker_registry_name
-    }
-    
+
+    # Create a properly initialized skill worker
+    skill_metadata = {'name': 'test', 'state_dim': 8, 'action_dim': 4}
+    skill_worker = SkillWorker.create_worker(skill_id=1, skill_metadata=skill_metadata)
+    registry = {1: skill_worker}
+
+    # Store the registry directly in the meta-learning worker's local registry
+    worker.skill_worker_registry = registry
+
+    # Collect performance metrics
     collector = worker.collect_performance_metrics()
     printer.pretty("Collect", collector, "success" if collector else "error")
 
     print("\n* * * * * Phase 2 - Hyperparam * * * * *\n")
-    hyperparams ={
+    hyperparams = {
         'learning_rate': 0.001,
         'exploration_rate': 0.1,
         'entropy_coef': 0.01,
         'discount_factor': 0.95
     }
-    performance =0.78
+    performance = 0.78
 
     worker.store_hyperparameter_experience(hyperparams=hyperparams, performance=performance)
     printer.pretty("Store", "Experience stored", "success" if "Experience stored" else "error")
-    
+
     suggest = worker.suggest_hyperparameters()
     printer.pretty("Suggest", suggest, "success" if suggest else "error")
-    
+
     worker.update_skill_hyperparameters(hyperparams=suggest)
     printer.pretty("Update", "Hyperparameters updated", "success")
     print("\nAll tests completed successfully!\n")

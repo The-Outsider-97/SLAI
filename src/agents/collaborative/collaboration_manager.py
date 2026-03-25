@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 from src.agents.collaborative.registry import AgentRegistry
+from src.agents.collaborative.reliability import CircuitBreakerConfig, ReliabilityManager, RetryPolicy
+from src.agents.collaborative.router_strategy import build_router_strategy
 from src.agents.collaborative.task_router import TaskRouter
 from src.agents.collaborative.utils.config_loader import get_config_section
 from src.agents.collaborative.utils.collaboration_error import OverloadError
@@ -19,12 +21,35 @@ class CollaborationManager:
     def __init__(self, shared_memory=None):
         self.shared_memory = shared_memory
         manager_config = get_config_section("collaboration") or {}
+        routing_config = get_config_section("task_routing") or {}
+        reliability_config = get_config_section("reliability") or {}
+
         self.max_concurrent_tasks = int(manager_config.get("max_concurrent_tasks", 100))
         self.load_factor = float(manager_config.get("load_factor", 0.75))
 
         self.executor = ThreadPoolExecutor(max_workers=int(manager_config.get("thread_pool_workers", 10)))
         self.registry = AgentRegistry(shared_memory=self.shared_memory)
-        self.router = TaskRouter(registry=self.registry, shared_memory=self.shared_memory)
+
+        retry_policy = RetryPolicy(
+            max_attempts=int((routing_config.get("retry_policy") or {}).get("max_attempts", 1)),
+            backoff_factor=float((routing_config.get("retry_policy") or {}).get("backoff_factor", 0.0)),
+            max_backoff_seconds=float(reliability_config.get("max_backoff_seconds", 2.0)),
+            jitter_seconds=float(reliability_config.get("jitter_seconds", 0.0)),
+        )
+        breaker_config = CircuitBreakerConfig(
+            failure_threshold=int(reliability_config.get("failure_threshold", 3)),
+            recovery_timeout_seconds=float(reliability_config.get("recovery_timeout_seconds", 5.0)),
+            half_open_success_threshold=int(reliability_config.get("half_open_success_threshold", 1)),
+        )
+        self.reliability_manager = ReliabilityManager(retry_policy=retry_policy, breaker_config=breaker_config)
+        strategy_name = str(routing_config.get("strategy", "weighted"))
+        strategy = build_router_strategy(strategy_name, config=routing_config)
+        self.router = TaskRouter(
+            registry=self.registry,
+            shared_memory=self.shared_memory,
+            strategy=strategy,
+            reliability_manager=self.reliability_manager,
+        )
 
         logger.info("Collaboration manager initialized")
 
@@ -72,6 +97,9 @@ class CollaborationManager:
         if self.shared_memory is None:
             return {}
         return self.shared_memory.get("agent_stats", {}) or {}
+
+    def get_reliability_status(self):
+        return self.reliability_manager.status()
 
     def export_stats_to_json(self, filename="report/agent_stats.json"):
         os.makedirs(os.path.dirname(filename), exist_ok=True)

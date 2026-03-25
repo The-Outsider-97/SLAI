@@ -39,9 +39,10 @@ from src.agents.learning.utils.config_loader import load_global_config
 from src.agents.learning.utils.neural_network import NeuralNetwork
 from src.agents.learning.learning_memory import LearningMemory
 from src.utils.buffer.replay_buffer import ReplayBuffer
-from logs.logger import get_logger
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Deep-Q Network Agent")
+printer = PrettyPrinter
 
 # ====================== Core DQN Agent ======================
 class DQNAgent:

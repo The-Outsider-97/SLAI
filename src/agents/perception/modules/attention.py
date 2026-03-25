@@ -403,14 +403,33 @@ class EfficientAttention(BaseAttention):
                 standard_weights[key.replace('value', 'self.value')] = weights_dict[key]
         super().load_from_dict(standard_weights, prefix)
 
-    def forward(self, x):
+    def forward(self, x, context=None, mask=None, attn_bias=None,
+                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        """
+        Keep the same public forward signature as other attention variants so
+        Transformer layers can swap implementations safely.
+        """
+        # EfficientAttention currently implements self-attention in feature space.
+        # If cross-attention context is passed, use it as key/value source.
+        context = default(context, x)
         B, T, _ = x.shape
         q = self.query_proj(x)  # [B, T, F]
-        k = self.key_proj(x)
-        v = self.value_proj(x)
+        k = self.key_proj(context)
+        v = self.value_proj(context)
 
         q = self.kernel_fn(q)
         k = self.kernel_fn(k)
+
+        # Optional mask support (shape [B, T_ctx] or broadcastable variants)
+        if exists(mask):
+            if mask.ndim == 4:
+                mask = mask.squeeze(1).squeeze(1)
+            if mask.ndim == 3 and mask.size(1) == 1:
+                mask = mask.squeeze(1)
+            if mask.ndim == 2:
+                mask_bool = mask.to(torch.bool).unsqueeze(-1)
+                k = k.masked_fill(~mask_bool, 0.0)
+                v = v.masked_fill(~mask_bool, 0.0)
 
         # Key-Value contraction
         kv = torch.einsum('bnd,bne->bde', k, v)  # [B, F, E]

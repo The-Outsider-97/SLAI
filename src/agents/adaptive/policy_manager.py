@@ -26,7 +26,7 @@ class PolicyManager:
         self.manager_config = get_config_section('policy_manager')
         self.skills = None
         self.num_skills = 0
-        self.state_dim = self.manager_config.get('state_dim', 32)
+        self.state_dim = self.manager_config.get('state_dim')
         self.hidden_layers = self.manager_config.get('hidden_layers', [64, 32])
         self.activation = self.manager_config.get('activation', 'tanh')
         self.explore=self.manager_config.get('explore', True)
@@ -60,22 +60,32 @@ class PolicyManager:
         """Initialize the manager with specific skills"""
         if not skills:
             raise ValueError("Cannot initialize PolicyManager with empty skills dictionary")
-        
+
+        if self.state_dim is None:
+            # first_skill = next(iter(skills.values()))
+            first_skill = next(iter(skills.values()))
+            if hasattr(first_skill, 'state_dim'):
+                self.state_dim = first_skill.state_dim
+            elif isinstance(first_skill, dict):
+                self.state_dim = int(first_skill.get('state_dim', 32))
+            else:
+                raise TypeError("Skills must be SkillWorker objects or dicts with 'state_dim'")
+            # self.state_dim = int(first_skill.get('state_dim', 32))
         if self.state_dim <= 0:
-            raise ValueError("state_dim must be set before initializing skills")
-        
+            raise ValueError("state_dim must be positive before initializing skills")
+
         self.skills = skills
         self.num_skills = len(skills)
-        
+
         # Always reinitialize policy network to match current state_dim
         if hasattr(self, 'policy_network'):
             del self.policy_network
-            
+
         self.policy_network = PolicyNetwork(
             state_size=self.state_dim,
             action_size=self.num_skills
         )
-        
+
         logger.info(f"Policy Manager skills initialized with {self.num_skills} skills")
         logger.info(f"Skill Space: {self.num_skills}")
 
@@ -187,11 +197,11 @@ class PolicyManager:
 
         if self.memory.size()['episodic'] < self.manager_config.get('min_batch_size', 16):
             return
-            
+
         # Sample experiences
         batch_size = min(self.manager_config.get('batch_size', 32), self.memory.size()['episodic'])
-        experiences = self.memory.retrieve("", {}, limit=batch_size)
-        
+        experiences = self.memory.retrieve(query="manager", context=None, limit=batch_size)
+
         # Prepare training data
         states, skills, rewards = [], [], []
         for exp in experiences:
@@ -371,10 +381,12 @@ class PolicyManager:
             skill_id = np.random.choice(self.num_skills, p=probs)
         else:
             skill_id = np.argmax(probs)
-    
+
         # Now skill_id is defined, so we can use it
         skill_worker = self.skills.get(skill_id)
-        if skill_worker is not None:
+        if isinstance(skill_worker, dict):
+            skill_name = skill_worker.get('name', f"skill_{skill_id}")
+        elif skill_worker is not None and hasattr(skill_worker, 'name'):
             skill_name = skill_worker.name
         else:
             skill_name = f"skill_{skill_id}"
@@ -422,9 +434,10 @@ class PolicyManager:
 
     def save_checkpoint(self, path):
         """Save manager state"""
+        memory_state = self.memory.export_state() if hasattr(self.memory, 'export_state') else {}
         torch.save({
             'policy_state': self.policy_network.get_weights(),
-            'memory_state': self.memory.state_dict(),
+            'memory_state': memory_state,
             'skill_history': self.skill_history,
             'steps': self._steps
         }, path)
@@ -433,7 +446,8 @@ class PolicyManager:
         """Load manager state"""
         checkpoint = torch.load(path)
         self.policy_network.set_weights(checkpoint['policy_state'])
-        self.memory.load_state_dict(checkpoint['memory_state'])
+        if hasattr(self.memory, 'import_state'):
+            self.memory.import_state(checkpoint.get('memory_state', {}))
         self.skill_history = checkpoint.get('skill_history', [])
         self._steps = checkpoint.get('steps', 0)
 

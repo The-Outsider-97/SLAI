@@ -8,6 +8,10 @@ This directory provides SLAI's multi-agent coordination layer: **agent registrat
 - `registry.py` — dynamic discovery and in-memory registry of agent metadata/capabilities.
 - `task_router.py` — selects and executes eligible agents with ranking + fallback attempts.
 - `shared_memory.py` — thread-safe/process-safe memory fabric (TTL/versioning/pub-sub/CAS/metrics).
+- `task_contracts.py` — declarative task schemas/contracts with type + validator checks.
+- `policy_engine.py` — prioritized policy rules for allow/deny/review decisions.
+- `router_strategy.py` — pluggable ranking strategies (weighted / least-loaded).
+- `reliability.py` — retry/backoff and circuit-breaker protections per agent.
 - `utils/collaboration_error.py` — typed collaboration exceptions + audit report generation.
 - `configs/collaborative_config.yaml` — runtime tuning for load, routing, registry, and shared memory.
 
@@ -60,6 +64,7 @@ classDiagram
 
     class TaskRouter {
       +route(task_type, task_data)
+      +strategy + reliability hooks
     }
 
     class SharedMemory {
@@ -116,6 +121,9 @@ classDiagram
 
 - `collaboration`: max concurrency, load factor, thread pool sizing.
 - `task_routing`: risk threshold, retries/backoff, fallback plans.
+- `task_contracts`/`policy`: optional sections for contract + policy tuning in agent-level config overrides.
+- `reliability`: circuit-breaker and retry/backoff defaults.
+- `task_routing.strategy`: select router behavior (`weighted`, `least_loaded`).
 - `registry`: discovery defaults and exclusion rules.
 - `shared_memory`: memory limits, version cap, TTL and latency knobs.
 - `agents`: default priority + task limits.

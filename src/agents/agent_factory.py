@@ -1,28 +1,17 @@
 import importlib
 import inspect
-from typing import Any, Dict, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from . import __version__ 
 
 from .base.utils.main_config_loader import load_global_config
 from .factory.agent_meta_data import AgentMetaData, AgentRegistry
-from .factory.metrics_adapter import MetricsAdapter
 from .factory.reasoner import BasicZeroReasoner
 from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
-from .evaluation_agent import EvaluationAgent
-from .execution_agent import ExecutionAgent
-from .alignment_agent import AlignmentAgent
-from .knowledge_agent import KnowledgeAgent
-from .language_agent import LanguageAgent
-from .perception_agent import PerceptionAgent
-from .learning_agent import LearningAgent
-from .planning_agent import PlanningAgent
-from .safety_agent import SafetyAgent
-from .adaptive_agent import AdaptiveAgent
-from .reasoning_agent import ReasoningAgent
-from .handler_agent import HandlerAgent
+if TYPE_CHECKING:
+    from .factory.metrics_adapter import MetricsAdapter
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
@@ -33,20 +22,38 @@ class AgentFactory:
     It uses a metadata registry for dynamic agent loading and a metrics
     adapter for runtime configuration tuning.
     """
-    _agent_classes: Dict[str, Type[BaseAgent]] = {
-        'adaptive': AdaptiveAgent,
-        'alignment': AlignmentAgent,
-        'evaluation': EvaluationAgent,
-        'execution': ExecutionAgent,
-        'knowledge': KnowledgeAgent,
-        'language': LanguageAgent,
-        'learning': LearningAgent,
-        'perception': PerceptionAgent,
-        'planning': PlanningAgent,
-        'reasoning': ReasoningAgent,
-        'safety': SafetyAgent,
-        'handler': HandlerAgent,
+    _agent_specs: Dict[str, Dict[str, str]] = {
+        'adaptive': {'module_path': 'src.agents.adaptive_agent', 'class_name': 'AdaptiveAgent'},
+        'alignment': {'module_path': 'src.agents.alignment_agent', 'class_name': 'AlignmentAgent'},
+        'browser': {'module_path': 'src.agents.browser_agent', 'class_name': 'BrowserAgent'},
+        'evaluation': {'module_path': 'src.agents.evaluation_agent', 'class_name': 'EvaluationAgent'},
+        'execution': {'module_path': 'src.agents.execution_agent', 'class_name': 'ExecutionAgent'},
+        'handler': {'module_path': 'src.agents.handler_agent', 'class_name': 'HandlerAgent'},
+        'knowledge': {'module_path': 'src.agents.knowledge_agent', 'class_name': 'KnowledgeAgent'},
+        'language': {'module_path': 'src.agents.language_agent', 'class_name': 'LanguageAgent'},
+        'learning': {'module_path': 'src.agents.learning_agent', 'class_name': 'LearningAgent'},
+        'perception': {'module_path': 'src.agents.perception_agent', 'class_name': 'PerceptionAgent'},
+        'planning': {'module_path': 'src.agents.planning_agent', 'class_name': 'PlanningAgent'},
+        'reader': {'module_path': 'src.agents.reader_agent', 'class_name': 'ReaderAgent'},
+        'reasoning': {'module_path': 'src.agents.reasoning_agent', 'class_name': 'ReasoningAgent'},
+        'safety': {'module_path': 'src.agents.safety_agent', 'class_name': 'SafetyAgent'},
     }
+    _agent_aliases: Dict[str, str] = {
+        "web": "browser",
+    }
+    _agent_dependency_profiles: Dict[str, Dict[str, Any]] = {
+        "browser": {"torch_required": False, "notes": "Selenium/browser stack only."},
+        "planning": {"torch_required": False, "notes": "Core planning is torch-free; perception heads are optional."},
+        "knowledge": {"torch_required": False, "notes": "SBERT/transformers are optional; TF-IDF path can run without torch."},
+        "reasoning": {"torch_required": False, "notes": "Rule/probabilistic reasoning core does not require torch."},
+        "language": {"torch_required": False, "notes": "Lightweight language mode available without torch."},
+        "evaluation": {"torch_required": False, "notes": "Core evaluation works without deep anomaly torch module."},
+        "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
+        "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
+        "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
+        "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
+    }
+
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
@@ -60,31 +67,67 @@ class AgentFactory:
         if config:
             self.global_config.update(config)
 
-        self.metrics_adapter = MetricsAdapter()
+        self._metrics_adapter: Optional["MetricsAdapter"] = None
+        self.metrics_adapter_status: str = "not_initialized"
         self.registry = AgentRegistry()
+        self.unavailable_agents: Dict[str, str] = {}
+        self._torch_probe = self._probe_torch_runtime()
 
         self.active_agents: Dict[str, BaseAgent] = {}
-        for name, cls in self._agent_classes.items():
+        for name, spec in self._agent_specs.items():
             self.registry.register(AgentMetaData(
                 name=name,
-                module_path=cls.__module__,
-                class_name=cls.__name__,
+                module_path=spec["module_path"],
+                class_name=spec["class_name"],
                 version=__version__,
-                dependencies=self._get_agent_dependencies(cls)
+                dependencies=[]
             ))
 
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
 
-    def _get_agent_dependencies(self, cls) -> list[str]:
-        """Stub for future dependency inspection."""
-        return getattr(cls, "REQUIRES", [])
-    
+    def _probe_torch_runtime(self) -> Dict[str, str]:
+        try:
+            torch_module = importlib.import_module("torch")
+            return {
+                "status": "available",
+                "version": str(getattr(torch_module, "__version__", "unknown")),
+                "cuda": str(getattr(getattr(torch_module, "version", None), "cuda", None) or "cpu"),
+            }
+        except Exception as exc:
+            return {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
+
+    def get_agent_dependency_report(self, agent_type: str) -> Dict[str, Any]:
+        normalized = self._agent_aliases.get(agent_type, agent_type)
+        profile = dict(self._agent_dependency_profiles.get(normalized, {}))
+        profile["agent_type"] = normalized
+        profile["torch_probe"] = self._torch_probe
+        return profile
+
+    def _get_metrics_adapter(self) -> "MetricsAdapter":
+        if self._metrics_adapter is not None:
+            return self._metrics_adapter
+        try:
+            metrics_adapter_module = importlib.import_module("src.agents.factory.metrics_adapter")
+            metrics_adapter_cls = getattr(metrics_adapter_module, "MetricsAdapter")
+            self._metrics_adapter = metrics_adapter_cls()
+            self.metrics_adapter_status = "initialized"
+            return self._metrics_adapter
+        except Exception as exc:
+            self.metrics_adapter_status = f"failed ({type(exc).__name__}: {exc})"
+            raise RuntimeError(
+                f"Failed to initialize MetricsAdapter from src.agents.factory.metrics_adapter: {type(exc).__name__}: {exc}"
+            ) from exc
+
     def discover_agents(self):
         agents_module = importlib.import_module(__package__)
 
         for _, obj in inspect.getmembers(agents_module):
             if inspect.isclass(obj) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
-                self._agent_classes[obj.__name__.lower()] = obj
+                name = obj.__name__.lower()
+                self._agent_specs[name] = {
+                    "module_path": obj.__module__,
+                    "class_name": obj.__name__,
+                }
 
     def register_agent(self, metadata: AgentMetaData):
         """
@@ -120,16 +163,30 @@ class AgentFactory:
             ValueError: If the requested agent_type is unknown.
             TypeError: If the arguments provided do not match the agent's constructor signature.
         """
+        normalized_type = self._agent_aliases.get(agent_type, agent_type)
+        if normalized_type != agent_type:
+            logger.info("Resolved agent alias '%s' -> '%s'", agent_type, normalized_type)
+        agent_type = normalized_type
         printer.status("CREATE", f"Request to create agent of type: '{agent_type}'")
 
         # 1: Check the cache first. If agent already exists, return it.
         if agent_type in self.active_agents:
             logger.info(f"Returning cached instance of agent: '{agent_type}'")
             return self.active_agents[agent_type]
+        if agent_type in self.unavailable_agents:
+            reason = self.unavailable_agents[agent_type]
+            logger.info("Skipping creation for unavailable agent '%s' (cached): %s", agent_type, reason)
+            raise RuntimeError(f"Agent '{agent_type}' unavailable: {reason}")
 
         if agent_type not in self.registry.agents:
             logger.error(f"Unknown agent type requested: '{agent_type}'. Ensure it is registered first.")
             raise ValueError(f"Unknown agent type requested: '{agent_type}'")
+
+        profile = self.get_agent_dependency_report(agent_type)
+        if profile.get("torch_required") and self._torch_probe.get("status") != "available":
+            reason = f"torch required by design; torch runtime unavailable ({self._torch_probe.get('error', 'unknown')})"
+            self.unavailable_agents[agent_type] = reason
+            raise RuntimeError(reason)
 
         # Resolve dependency order
         load_order = self.registry.resolve_dependency_tree(agent_type)
@@ -146,27 +203,39 @@ class AgentFactory:
             module = importlib.import_module(metadata.module_path)
             agent_class = getattr(module, metadata.class_name)
         except (ImportError, AttributeError) as e:
+            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
             raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
 
-        # 3: Get the agent-specific configuration and merge with any runtime kwargs
+        # 3: Get the agent-specific configuration and merge with runtime config overrides
         agent_config_key = f"{agent_type}_agent"
         agent_config = dict(self.global_config.get(agent_config_key, {}))
-        agent_config.update(kwargs)
+        runtime_config_override = kwargs.get("config")
+        if isinstance(runtime_config_override, dict):
+            agent_config.update(runtime_config_override)
 
         try:
             constructor_params = inspect.signature(agent_class.__init__).parameters
-            constructor_args = {
-                "shared_memory": shared_memory,
-                "agent_factory": self,
-                "config": agent_config,
-                **kwargs
-            }
+            accepts_var_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in constructor_params.values()
+            )
+            constructor_args = {}
+
+            if "shared_memory" in constructor_params:
+                constructor_args["shared_memory"] = shared_memory
+            if "agent_factory" in constructor_params:
+                constructor_args["agent_factory"] = self
+            if "config" in constructor_params:
+                constructor_args["config"] = agent_config
+
             for key, value in kwargs.items():
-                if key in constructor_params:
+                if key == "config":
+                    continue
+                if key in constructor_params or accepts_var_kwargs:
                     constructor_args[key] = value
                 else:
-                    logger.debug(f"Skipping arg '{key}' for {agent_type} agent")
+                    logger.debug(f"Skipping unsupported arg '{key}' for {agent_type} agent")
             
             agent_instance = agent_class(**constructor_args)
             logger.info(f"Successfully created instance of agent: '{agent_type}'")
@@ -174,20 +243,29 @@ class AgentFactory:
             # Cache the newly created agent before returning it.
             self.active_agents[agent_type] = agent_instance
 
-            if not any(hasattr(agent_instance, method) for method in ['predict', 'get_action', 'act']):
-                raise TypeError(f"Agent {agent_type} must implement predict(), get_action(), or act() method")
+            required_methods = ['predict', 'get_action', 'act', 'perform_task', 'execute']
+            if not any(hasattr(agent_instance, method) for method in required_methods):
+                logger.warning(
+                    f"Agent '{agent_type}' does not expose standard action methods "
+                    f"({', '.join(required_methods)})."
+                )
                 
             return agent_instance
 
         except TypeError as e:
+            self.unavailable_agents[agent_type] = f"TypeError: {e}"
             logger.error(
                 f"Failed to create agent '{agent_type}' due to a TypeError. "
                 f"Check if the constructor signature matches the provided arguments. Error: {e}"
             )
             raise
         except Exception as e:
+            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
             raise
+
+    def get_registered_agent_types(self) -> list[str]:
+        return sorted(self.registry.agents.keys())
 
     def inspect_registered_agents(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -239,9 +317,9 @@ class AgentFactory:
         This affects the configuration of subsequently created agents.
         """
         logger.info("Running adaptation cycle based on new metrics...")
-        
+
         # 1. Process metrics to get adjustments
-        adjustments = self.metrics_adapter.process_metrics(metrics, agent_types)
+        adjustments = self._get_metrics_adapter().process_metrics(metrics, agent_types)
         printer.pretty("Generated Adjustments", adjustments, "info")
 
         # 2. Apply adjustments to the factory's global configuration

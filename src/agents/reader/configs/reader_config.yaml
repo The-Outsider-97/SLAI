@@ -1,0 +1,19 @@
+reader:
+  allowed_input_extensions:
+    - .pdf
+    - .docx
+    - .doc
+    - .txt
+    - .html
+    - .xml
+    - .md
+    - .json
+    - .csv
+  default_output_format: txt
+  output_dir: output/reader
+  enable_recovery: true
+  enable_semantic_recovery: true
+
+reader_memory:
+  checkpoint_dir: tmp/reader/checkpoints
+  cache_dir: tmp/reader/cache

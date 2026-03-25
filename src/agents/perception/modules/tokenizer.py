@@ -152,10 +152,10 @@ class Tokenizer(BaseTokenizer):
         # Continue with standard preparation
         return self._prepare_single_text(tokens)
 
-    def _prepare_single_text(self, text: str) -> Tuple[List[int], List[int]]:
-        """Tokenize, add special tokens, convert to IDs, handle padding/truncation"""
+    def _prepare_single_text(self, text: Union[str, List[str]]) -> Tuple[List[int], List[int]]:
+        """Tokenize/add special tokens, convert to IDs, and pad or truncate."""
         printer.status("TOKEN", "Preparing single text", "info")
-        tokens = self.tokenize(text)
+        tokens = text if isinstance(text, list) else self.tokenize(text)
 
         # Account for [CLS] and [SEP] tokens
         max_tokens = self.max_length - 2
@@ -178,8 +178,6 @@ class Tokenizer(BaseTokenizer):
             pad_id = self.token_to_id(self.pad_token)
             input_ids = TensorOps.pad_sequence(input_ids, self.max_length, value=pad_id)
             attention_mask = TensorOps.pad_sequence(attention_mask, self.max_length, value=0)
-            input_ids += [pad_id] * padding_length
-            attention_mask += [0] * padding_length
         elif padding_length < 0:
             logger.warning(f"Sequence truncated to max_length={self.max_length}")
             input_ids = input_ids[:self.max_length]
@@ -190,8 +188,8 @@ class Tokenizer(BaseTokenizer):
     def encode(self, text: str) -> Dict[str, torch.Tensor]:
         input_ids, attention_mask = self._prepare_single_text(text)
         return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.int32),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.int32)
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long)
         }
 
     def batch_encode(self, texts: List[str]) -> Dict[str, torch.Tensor]:

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+__version__ = "2.0.0"
+
 import hashlib
 import json
 import time
@@ -14,10 +18,14 @@ from src.agents.base.issue_handler import (
     handle_timeout_error,
     handle_unicode_emoji_error,
 )
+from src.agents.handler.adaptive_retry_policy import AdaptiveRetryPolicy
+from src.agents.handler.escalation_manager import EscalationManager
 from src.agents.handler.handler_memory import HandlerMemory
 from src.agents.handler.handler_policy import HandlerPolicy
+from src.agents.handler.sla_policy import SLARecoveryPolicy
+from src.agents.handler.strategy_selector import ProbabilisticStrategySelector
 from src.agents.handler.utils.config_loader import get_config_section, load_global_config
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import PrettyPrinter, get_logger
 
 logger = get_logger("Handler Agent")
 printer = PrettyPrinter
@@ -34,6 +42,11 @@ class HandlerAgent(BaseAgent):
 
         self.memory = HandlerMemory(config=self.handler_config)
         self.policy = HandlerPolicy(config=self.handler_config)
+        self.adaptive_retry_policy = AdaptiveRetryPolicy(config=self.handler_config)
+        self.strategy_selector = ProbabilisticStrategySelector(config=self.handler_config)
+        self.sla_policy = SLARecoveryPolicy(config=self.handler_config)
+        self.escalation_manager = EscalationManager(config=self.handler_config)
+
         self.recovery_strategies = {
             "network": handle_network_error,
             "timeout": handle_timeout_error,
@@ -108,8 +121,10 @@ class HandlerAgent(BaseAgent):
         else:
             severity = "low"
 
-        retryable = any(tag in lowered for tag in ["timeout", "network", "connection", "resource busy", "temporary"]) \
+        retryable = (
+            any(tag in lowered for tag in ["timeout", "network", "connection", "resource busy", "temporary"])
             and "invalid" not in lowered
+        )
 
         fingerprint_payload = {
             "error_type": error_type,
@@ -147,6 +162,8 @@ class HandlerAgent(BaseAgent):
                 "agent": context.get("agent"),
                 "task_id": context.get("task_id"),
             },
+            "sla": recovery_result.get("sla", {}),
+            "strategy_distribution": recovery_result.get("strategy_distribution", {}),
         }
 
         self.memory.append_telemetry(telemetry_event)
@@ -205,58 +222,76 @@ class HandlerAgent(BaseAgent):
         normalized_failure: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Select and apply recovery strategy using existing issue/recovery primitives."""
+        """Select and apply recovery strategy using adaptive retry, probabilistic routing, and SLA policy."""
         context = context or {}
         target_agent_name = getattr(target_agent, "name", context.get("agent", "unknown_agent"))
+        telemetry_history = self._telemetry_history()
+        sla = self.sla_policy.evaluate(context=context, normalized_failure=normalized_failure)
 
         if target_agent is None:
-            return {
+            failed = {
                 "status": "failed",
                 "strategy": "none",
                 "recommendation": "target_agent_missing",
+                "sla": sla,
             }
+            failed["escalation"] = self.escalation_manager.build_handoff_payload(
+                normalized_failure=normalized_failure,
+                recovery_result=failed,
+                context=context,
+                sla=sla,
+            )
+            return failed
 
         if not self.policy.can_attempt(target_agent_name):
-            return {
+            failed = {
                 "status": "failed",
                 "strategy": "circuit_breaker",
                 "recommendation": "defer_and_retry_later",
                 "breaker": self.policy.breaker_status(target_agent_name),
+                "sla": sla,
             }
+            failed["escalation"] = self.escalation_manager.build_handoff_payload(
+                normalized_failure=normalized_failure,
+                recovery_result=failed,
+                context=context,
+                sla=sla,
+            )
+            return failed
 
-        error_type = (normalized_failure.get("type") or "").lower()
-        error_message = (normalized_failure.get("message") or "").lower()
+        selection = self.strategy_selector.select(normalized_failure=normalized_failure, telemetry_history=telemetry_history)
+        strategy_key = selection["selected_strategy"]
+        strategy_distribution = selection["distribution"]
+        handler = self.recovery_strategies.get(strategy_key, handle_runtime_error)
+
+        max_retries_adaptive = self.adaptive_retry_policy.retries_for_fingerprint(
+            fingerprint=normalized_failure.get("context_hash", ""),
+            severity=normalized_failure.get("severity", "low"),
+            retryable=bool(normalized_failure.get("retryable")),
+            telemetry_history=telemetry_history,
+        )
+        max_retries = min(max_retries_adaptive, int(sla.get("recommended_attempts", 0)))
+
         error_info = {
             "error_type": normalized_failure.get("type", "UnknownError"),
             "error_message": normalized_failure.get("message", ""),
         }
 
-        strategy_key = "runtime"
-        if any(x in error_type or x in error_message for x in ["network", "connection", "http", "socket"]):
-            strategy_key = "network"
-        elif "timeout" in error_type or "timed out" in error_message:
-            strategy_key = "timeout"
-        elif any(x in error_type or x in error_message for x in ["memory", "outofmemory", "cuda"]):
-            strategy_key = "memory"
-        elif any(x in error_message for x in ["no module named", "cannot import name", "dll load failed"]):
-            strategy_key = "dependency"
-        elif any(x in error_message for x in ["resource", "gpu", "cpu", "busy"]):
-            strategy_key = "resource"
-        elif any(x in error_type for x in ["unicodeencodeerror", "unicodedecodeerror"]):
-            strategy_key = "unicode"
-
-        handler = self.recovery_strategies.get(strategy_key, handle_runtime_error)
-
         checkpoint_id = self.memory.save_checkpoint(
             label="pre_recovery",
             state={"task_data": task_data, "context": context, "target_agent_name": target_agent_name},
-            metadata={"strategy": strategy_key, "failure_type": normalized_failure.get("type")},
+            metadata={
+                "strategy": strategy_key,
+                "strategy_distribution": strategy_distribution,
+                "failure_type": normalized_failure.get("type"),
+                "sla": sla,
+            },
         )
 
         retries = 0
         last_result = {"status": "failed", "reason": "unattempted"}
 
-        while self.policy.retries_allowed(retries):
+        while self.policy.retries_allowed(retries, max_retries=max_retries) and sla.get("can_retry", False):
             result = handler(target_agent, task_data, error_info)
             last_result = result if isinstance(result, dict) else {"status": "recovered", "result": result}
 
@@ -265,15 +300,16 @@ class HandlerAgent(BaseAgent):
                 return {
                     "status": "recovered",
                     "strategy": strategy_key,
+                    "strategy_distribution": strategy_distribution,
                     "result": result,
                     "checkpoint_id": checkpoint_id,
                     "attempts": retries + 1,
+                    "sla": sla,
                 }
 
             retries += 1
 
-        # Fallback mode: if possible, enable lightweight mode and retry once.
-        if hasattr(target_agent, "use_lightweight_mode"):
+        if hasattr(target_agent, "use_lightweight_mode") and sla.get("remaining_seconds", 0.0) > 0:
             try:
                 target_agent.use_lightweight_mode(True)
                 fallback = target_agent.perform_task(task_data)
@@ -282,9 +318,11 @@ class HandlerAgent(BaseAgent):
                 return {
                     "status": "recovered",
                     "strategy": f"{strategy_key}+fallback_mode",
+                    "strategy_distribution": strategy_distribution,
                     "result": fallback,
                     "checkpoint_id": checkpoint_id,
                     "attempts": retries + 1,
+                    "sla": sla,
                 }
             except Exception:
                 try:
@@ -294,12 +332,112 @@ class HandlerAgent(BaseAgent):
 
         restored_state = self.memory.restore_checkpoint(checkpoint_id)
         self.policy.record_failure(target_agent_name)
-        return {
+        failed = {
             "status": "failed",
             "strategy": strategy_key,
+            "strategy_distribution": strategy_distribution,
             "attempts": retries,
+            "max_retries": max_retries,
             "last_result": last_result,
             "checkpoint_restored": restored_state is not None,
             "checkpoint_id": checkpoint_id,
             "recommendation": "escalate_to_planning_or_evaluation",
+            "sla": sla,
         }
+        failed["escalation"] = self.escalation_manager.build_handoff_payload(
+            normalized_failure=normalized_failure,
+            recovery_result=failed,
+            context=context,
+            strategy_distribution=strategy_distribution,
+            sla=sla,
+        )
+        return failed
+
+    def _telemetry_history(self) -> list[Dict[str, Any]]:
+        if hasattr(self.shared_memory, "get"):
+            return self.shared_memory.get("handler:telemetry") or []
+        return self.memory.recent_telemetry(limit=self.handler_config.get("telemetry_buffer_size", 1000))
+
+
+if __name__ == "__main__":
+    print("\n=== Running Handler Agent ===\n")
+    printer.status("TEST", "Starting Handler Agent tests", "info")
+    from src.agents.agent_factory import AgentFactory
+    from src.agents.collaborative.shared_memory import SharedMemory
+
+    memory = SharedMemory()
+    factory = AgentFactory()
+    execution_config = get_config_section("handler_agent")
+
+    agent = HandlerAgent(
+        shared_memory=memory,
+        agent_factory=factory,
+        config=execution_config,
+    )
+
+    class DemoTargetAgent:
+        def __init__(self, name="demo_target"):
+            self.name = name
+            self.failures_remaining = 0
+            self.lightweight_mode = False
+
+        def use_lightweight_mode(self, enabled: bool):
+            self.lightweight_mode = enabled
+
+        def perform_task(self, task_data):
+            if self.failures_remaining > 0:
+                self.failures_remaining -= 1
+                raise TimeoutError("Simulated timeout from DemoTargetAgent")
+
+            return {
+                "ok": True,
+                "task": task_data,
+                "lightweight_mode": self.lightweight_mode,
+            }
+
+    target = DemoTargetAgent()
+
+    print("\n* * * * * Phase 1: failure_normalization * * * * *\n")
+    normalized = agent.failure_normalization(
+        error=TimeoutError("Connection timed out while calling upstream"),
+        context={"route": "demo_route", "agent": target.name, "task_id": "demo-001"},
+    )
+    printer.pretty("Normalized failure", normalized, "success")
+
+    print("\n* * * * * Phase 2: recovery success within retries * * * * *\n")
+    target.failures_remaining = 1
+    recovery = agent.recovery(
+        target_agent=target,
+        task_data={"operation": "compute", "payload": {"x": 7, "y": 5}},
+        normalized_failure=normalized,
+        context={
+            "route": "demo_route",
+            "agent": target.name,
+            "task_id": "demo-002",
+            "sla": {"max_recovery_seconds": 15},
+        },
+    )
+    printer.pretty("Recovery result", recovery, "success" if recovery.get("status") == "recovered" else "error")
+
+    print("\n* * * * * Phase 3: end-to-end perform_task with SLA + escalation fields * * * * *\n")
+    target.failures_remaining = 3
+    full = agent.perform_task(
+        {
+            "target_agent": target,
+            "task_data": {"operation": "sync", "payload": {"record": 42}},
+            "error": TimeoutError("Network timeout during sync"),
+            "context": {
+                "route": "sync_route",
+                "agent": target.name,
+                "task_id": "demo-003",
+                "sla": {"latency_budget_ms": 4000},
+            },
+        }
+    )
+    printer.pretty("perform_task", full, "success" if full.get("status") in {"ok", "failed"} else "error")
+
+    assert "strategy_distribution" in recovery
+    assert "sla" in recovery
+    assert full.get("recovery_result", {}).get("sla") is not None
+
+    print("\n=== All tests completed successfully! ===\n")

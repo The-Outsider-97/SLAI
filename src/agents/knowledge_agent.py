@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 """
 Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence)
@@ -28,7 +28,7 @@ from transformers import AutoTokenizer
 from heapq import nlargest
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
-from sentence_transformers import SentenceTransformer
+# from sentence_transformers import SentenceTransformer
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.base_agent import BaseAgent
@@ -100,7 +100,7 @@ class KnowledgeAgent(BaseAgent):
         self.ontology_manager = OntologyManager()
         self.cache_lock = threading.Lock()
 
-        self.sbert_model: Optional[SentenceTransformer] = None
+        # self.sbert_model: Optional[SentenceTransformer] = None
         self.doc_embeddings: Dict[str, np.ndarray] = {}
         self.persist_file = persist_file
         self._initialize_sbert_model()
@@ -149,6 +149,13 @@ class KnowledgeAgent(BaseAgent):
     def _initialize_sbert_model(self):
         """Initializes the SentenceTransformer model with robust error handling."""
         try:
+            from sentence_transformers import SentenceTransformer # type: ignore
+        except Exception as import_error:
+            logger.warning("SentenceTransformer import unavailable: %s", import_error)
+            self.sbert_model = None
+            return
+
+        try:
             # Get model path from config with fallback
             model_path = self.embedding_model or "sentence-transformers/all-MiniLM-L6-v2"
             
@@ -171,7 +178,7 @@ class KnowledgeAgent(BaseAgent):
                 cache_folder="src/agents/knowledge/models/cache"
             )
             logger.info(f"SBERT model loaded successfully. Embedding dimension: {self.sbert_model.get_sentence_embedding_dimension()}")
-            
+
         except Exception as e:
             logger.error(f"SBERT initialization failed: {str(e)}")
             logger.info("Attempting fallback to default model")
@@ -405,7 +412,7 @@ class KnowledgeAgent(BaseAgent):
     def fetch_web_content(self, url: str) -> str:
         """Fetch web content from URL"""
         try:
-            import requests
+            import requests # type: ignore
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             return response.text

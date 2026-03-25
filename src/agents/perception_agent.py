@@ -1,4 +1,4 @@
-__version__ = "1.8.0"
+__version__ = "2.0.0"
 
 """
 Perception Agent:
@@ -9,585 +9,1379 @@ Perception Agent:
 - Gradient infrastructure
 """
 
-import torch
-import torch.nn as nn
+from datetime import timedelta
+import random
 import math
 import yaml
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from pathlib import Path
 from collections import OrderedDict
+from typing import Dict, Any, Optional, List, Tuple, Union
 
+from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
 from src.agents.base_agent import BaseAgent
 from src.agents.perception.utils.common import Parameter, TensorOps
-from logs.logger import get_logger
+from src.agents.perception.modules.transformer import Transformer
+from src.agents.perception.encoders.text_encoder import TextEncoder
+from src.agents.perception.encoders.vision_encoder import VisionEncoder
+from src.agents.perception.encoders.audio_encoder import AudioEncoder
+from src.agents.perception.decoders.text_decoder import TextDecoder
+from src.agents.perception.decoders.vision_decoder import VisionDecoder
+from src.agents.perception.decoders.audio_decoder import AudioDecoder
+from src.agents.perception.modules.tokenizer import Tokenizer
+from src.agents.perception.utils.taskheads import ClassificationHead, RegressionHead, Seq2SeqHead
+from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Perception Agent")
+printer = PrettyPrinter
 
-LOCAL_CONFIG_PATH = "src/agents/perception/configs/perception_config.yaml"
-
-class PerceptionAgent(BaseAgent):
-    def __init__(self,
-                 shared_memory,
-                 agent_factory,
-                 config=None,
-                 args=(), kwargs={}):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config)
-        from src.agents.perception.modules.tokenizer import Tokenizer, load_config
-        from src.agents.perception.modules.transformer import Transformer, Generator, load_config
-        from src.agents.perception.encoders.vision_encoder import VisionEncoder, load_config
-        from src.agents.perception.encoders.audio_encoder import AudioEncoder, load_config
-        from src.agents.perception.encoders.text_encoder import TextEncoder, load_config
+class PerceptionAgent(BaseAgent, nn.Module):
+    def __init__(self, shared_memory, agent_factory, config=None):
+        BaseAgent.__init__(self, shared_memory, agent_factory, config=config)
+        nn.Module.__init__(self)
 
         self.perceptive_agent = []
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
-        self.tokenizer = Tokenizer(config=load_config(LOCAL_CONFIG_PATH))
-        self.transformer = Transformer(config=load_config(LOCAL_CONFIG_PATH))
-        self.vision_encoder = VisionEncoder(config=load_config(LOCAL_CONFIG_PATH))
-        self.audio_encoder = AudioEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
-        self.text_encoder = TextEncoder(config=load_config(LOCAL_CONFIG_PATH), device= 'cpu')
+        self._init_configs()
+        self._init_components()
+        self._init_shared_memory_keys()
+        #self.optimizer = self._configure_optimizer()
 
-        # Add decoders
-        self.decoders = nn.ModuleDict({
-            'vision': VisionDecoder(config=load_config(LOCAL_CONFIG_PATH)),
-            'audio': AudioDecoder(config=load_config(LOCAL_CONFIG_PATH))
-            # 'text': TextDecoder(config=load_config(LOCAL_CONFIG_PATH)) # <-- add this in v.1.9.0
+        #self.global_projection_param = Parameter(torch.randn(1, device=self.device) * 0.01, name="global_projection_param")
+        assert self.text_encoder.embed_dim == self.embed_dim, "Text encoder dim mismatch!"
+        assert self.audio_encoder.embed_dim == self.embed_dim, "Audio encoder dim mismatch!"
+        assert self.vision_encoder.embed_dim == self.embed_dim, "Vision encoder dim mismatch!"
+
+        logger.info(f"PerceptionAgent initialized on device: {self.device}")
+
+    def _init_configs(self):
+        """Load global and perception-specific configurations."""
+        self.config = load_global_config()
+        self.perception_config = get_config_section('perception_agent')
+
+        self.device = self.perception_config.get('device', 'cpu')
+        self.embed_dim = self.perception_config.get('embed_dim', 512)
+        self.masking_ratio = self.perception_config.get('masking_ratio', 0.15)
+        self.encoder_type  = self.perception_config.get('encoder_type ', 'transformer')
+        self.contrastive_temp = self.perception_config.get('contrastive_temperature', 0.07)
+        
+        # Optimizer related configs
+        self.learning_rate = self.perception_config.get('learning_rate', 1e-4)
+        self.weight_decay = self.perception_config.get('weight_decay', 1e-2)
+        self.adam_betas = tuple(self.perception_config.get('adam_betas', [0.9, 0.999]))
+        self.adam_eps = self.perception_config.get('adam_eps', 1e-8)
+        self.training = self.perception_config.get('training', True)
+
+        # Temporal Coherence
+        self.loss_type = self.perception_config.get('loss_type')
+        self.max_scale = self.perception_config.get('max_scale')
+        self.temperature = self.perception_config.get('temperature')
+        self.mse_weight = self.perception_config.get('mse_weight')
+        self.contrastive_weight = self.perception_config.get('contrastive_weight')
+
+    def _init_components(self):
+        """Initialize encoders, decoders, tokenizer, memory, and projection heads."""
+        self.tokenizer = Tokenizer() # Uses its own config loading
+
+        # Modality Encoders
+        self.text_encoder = TextEncoder().to(self.device)
+        self.vision_encoder = VisionEncoder().to(self.device)
+        self.audio_encoder = AudioEncoder().to(self.device)
+
+        # Audio encoder with transformer configured to return hidden states
+        self.audio_encoder = AudioEncoder().to(self.device)
+        if hasattr(self.audio_encoder, 'transformer'):
+            self.audio_encoder.transformer.return_hidden = True  # Force hidden state output
+
+        # Full decoders for generation tasks would be more complex
+        self.text_prediction_head = nn.Linear(self.embed_dim, self.tokenizer.get_vocab_size()).to(self.device)
+
+        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
+        self.vision_prediction_head = nn.Linear(self.embed_dim, vision_patch_dim).to(self.device)
+
+        audio_patch_dim = self.audio_encoder.in_channels * (self.audio_encoder.patch_size ** 2) # If patch-based
+        self.audio_prediction_head = nn.Linear(self.embed_dim, audio_patch_dim).to(self.device)
+
+        # Full decoders for generation tasks (optional, can be loaded on demand)
+        self.text_generator = TextDecoder(encoder=self.text_encoder).to(self.device)
+        self.vision_generator = VisionDecoder().to(self.device) # Assumes VisionDecoder can init without encoder
+        self.audio_generator = AudioDecoder().to(self.device)   # Assumes AudioDecoder can init without encoder
+
+        self.global_projection_param = Parameter(torch.randn(self.embed_dim, self.embed_dim), requires_grad=True)
+
+        # Projection heads for contrastive learning (to a common dimension)
+        self.contrastive_projection_dim = self.perception_config.get('contrastive_projection_dim', 256)
+        self.text_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
+        self.vision_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
+        self.audio_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
+
+        # Use each encoder's actual embed_dim for prediction heads
+        self.text_prediction_head = nn.Linear(
+            self.text_encoder.embed_dim,  # Use text encoder's dim
+            self.tokenizer.get_vocab_size()
+        ).to(self.device)
+
+        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
+        self.vision_prediction_head = nn.Linear(
+            self.vision_encoder.embed_dim,  # Use vision encoder's dim
+            vision_patch_dim
+        ).to(self.device)
+
+        audio_patch_dim = self.audio_encoder.in_channels * self.audio_encoder.patch_size
+        self.audio_prediction_head = nn.Linear(
+            self.audio_encoder.embed_dim,  # Use audio encoder's dim
+            audio_patch_dim
+        ).to(self.device)
+
+        # Initialize mask tokens for each modality
+        self.mask_tokens = nn.ParameterDict({
+            'text': Parameter(torch.zeros(1, self.embed_dim)),
+            'vision': Parameter(torch.zeros(1, self.embed_dim)),
+            'audio': Parameter(torch.zeros(1, self.embed_dim))
         })
+        for key in self.mask_tokens:
+            nn.init.normal_(self.mask_tokens[key], mean=0.0, std=0.02)
 
-        # Reconstruction losses
-        self.recon_loss = nn.ModuleDict({
-            'vision': nn.MSELoss(),
-            'audio': nn.L1Loss()  # Better for waveforms
-            # 'text': nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id) # <-- add this in v.1.9.0
-        })
-                     
-        self.modalities = config.get('perception', {}).get('modalities', ['text', 'vision', 'audio'])
-        self.encoders = OrderedDict()
-        if 'vision' in self.modalities:
-            self.encoders['vision'] = self.vision_encoder
-        if 'text' in self.modalities:
-            self.encoders['text'] = self.text_encoder
-        if 'audio' in self.modalities:
-            self.encoders['audio'] = self.audio_encoder
-
-        self.fusion = MultimodalFusion(
-            embed_dim=512,  # Should match transformer's embed_dim
-            modalities=self.modalities,
-            dropout_rate=config.get('task_heads', {}).get('multimodal', {}).get('dropout_rate', 0.1)
-        )
-        # Projection layer (adjust dimensions as needed)
-        self.projection = Parameter(torch.randn(512, 512))
-        self.generator = Generator(
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            vocab_size=self.tokenizer.vocab_size,
-            hidden_dim=512  # From transformer's embed_dim in config
-        )
-
-        self.params = self._collect_parameters()
-
-        logger.info(f"Perception Agent has succesfully initialized with:\n")
-        logger.info(f"\n- {self.vision_encoder}\n- {self.text_encoder}\n- {self.audio_encoder}")
-
-    def compute_loss(self, inputs, labels):
-        # Text reconstruction loss
-        text_logits = self._cache['text_logits']
-        loss_text = self.text_loss(
-            text_logits.view(-1, self.tokenizer.vocab_size),
-            labels['text'].view(-1)
-        )
-        
-        # Vision/audio losses from before
-        total_loss = loss_text + loss_vision + loss_audio
-        return total_loss
-
-    def convert_audio_weights(self, weights):
-        """Convert custom audio weights to HF-style for all layers"""
-        new_w = {}
-        for layer in range(6):
-            for k, v in weights.items():
-                if f'transformer_encoder_{layer}_attn_q_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.query.weight'] = v
-                elif f'transformer_encoder_{layer}_attn_k_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.key.weight'] = v
-                elif f'transformer_encoder_{layer}_attn_v_proj' in k: new_w[f'encoder.layer.{layer}.attention.self.value.weight'] = v
-                elif f'transformer_encoder_{layer}_attn_out_proj' in k: new_w[f'encoder.layer.{layer}.attention.output.dense.weight'] = v
-                elif f'transformer_encoder_{layer}_ffn_w1' in k: new_w[f'encoder.layer.{layer}.intermediate.dense.weight'] = v
-                elif f'transformer_encoder_{layer}_ffn_w2' in k: new_w[f'encoder.layer.{layer}.output.dense.weight'] = v
-                elif f'transformer_encoder_{layer}_norm1' in k: new_w[f'encoder.layer.{layer}.attention.output.LayerNorm.weight'] = v
-                elif f'transformer_encoder_{layer}_norm2' in k: new_w[f'encoder.layer.{layer}.output.LayerNorm.weight'] = v
-        return new_w
-
-    def load_pretrained(self, modality, weights):
-        if modality in self.encoders:
-            self.encoders[modality].load_pretrained(weights)
-        elif modality == 'multimodal':
-            self._load_bert_style(weights)
-        elif modality == 'clip':
-            self._load_clip_style(weights)
-        else:
-            self.logger.warning(f"No encoder found for modality: {modality}")
-
-    def _load_bert_style(self, weights):
-        if 'vision' in self.encoders and 'visual' in weights:
-            self.encoders['vision'].load_pretrained(weights['visual'])
-    
-        if 'text' in self.encoders and 'textual' in weights:
-            self.encoders['text'].load_pretrained(weights['textual'])
-    
-        if 'audio' in self.encoders and 'audial' in weights:
-            self.encoders['audio'].load_pretrained(weights['audial'])
-    
-        if 'fusion' in weights and hasattr(self.fusion, 'load_pretrained'):
-            self.fusion.load_pretrained(weights['fusion'])
-    
-        if 'projection' in weights:
-            self.projection.data = weights['projection']
-
-    def _load_clip_style(self, weights):
-        """Handle vision-language pretrained weights"""
-        # CLIP-style loading
-        self.encoders['vision'].load_pretrained(weights['visual'])
-        self.encoders['text'].load_pretrained(weights['textual'])
-        
-        # Load fusion weights if available
-        if 'fusion' in weights:
-            self.fusion.load_pretrained(weights['fusion'])
-        
-        # Projection layer alignment
-        if 'proj' in weights:
-            self.projection.data = weights['proj']
-
-    def _collect_parameters(self):
-        params = []
-        # Collect encoder parameters
-        for encoder in self.encoders.values():
-            params.extend(encoder.parameters())
-        # Collect fusion parameters
-        params.extend(self.fusion.parameters())
-        # Collect projection parameter
-        params.append(self.projection)
-        return params
-
-    def forward(self, inputs):
-        embeddings = {}
-        for modality, encoder in self.encoders.items():
-            if modality in inputs:
-                # Tokenize text input before processing
-                if modality == 'text':
-                    # Tokenize the text
-                    tokenized = self.tokenizer(inputs[modality])
-                    # Extract input_ids tensor
-                    input_ids = tokenized['input_ids']
-                    embeddings[modality] = encoder.forward(input_ids)
-                elif modality == 'vision':
-                    vision_output = encoder.forward(inputs[modality])
-                    embeddings[modality] = vision_output
-                elif modality == 'audio':
-                    audio_output = encoder.forward(inputs[modality])
-                    embeddings[modality] = audio_output
-                else:
-                    embeddings[modality] = encoder.forward(inputs[modality])
-        fused = self.fusion.forward(embeddings)
-        self._cache = {'fused': fused}
-        if self.generator:
-            prompt = self.config.get('generation_prompt', "Default prompt")
-            if self.config.get('enable_generation', False):
-                generated_text, log_prob = self.generator.beam_search_generate(
-                    prompt=prompt,
-                    max_length=self.config.get('gen_max_length', 50),
-                    beam_width=self.config.get('beam_width', 5),
-                    temperature=self.config.get('temperature', 1.0),
-                    top_k=self.config.get('top_k', 0),
-                    top_p=self.config.get('top_p', 0.0),
-                    repetition_penalty=self.config.get('repetition_penalty', 1.2)
-                )
-            else:
-                generated_text = self.generator.generate(
-                    prompt=prompt,
-                    max_length=self.config.get('gen_max_length', 50),
-                    temperature=self.config.get('temperature', 1.0),
-                    top_k=self.config.get('top_k', 0),
-                    top_p=self.config.get('top_p', 0.0)
-                )
-            self._cache['generated_text'] = generated_text
-    
-        # Add reconstruction
-        losses = {}
-        if 'vision' in embeddings:
-            recon_vision = self.decoders['vision'](embeddings['vision'])
-            losses['vision'] = self.recon_loss['vision'](recon_vision, inputs['vision'])
-
-        if 'audio' in embeddings:
-            recon_audio = self.decoders['audio'](embeddings['audio'])
-            losses['audio'] = self.recon_loss['audio'](recon_audio, inputs['audio'])
-
-        #if 'text' in embeddings:  # <-- add this in v.1.9.0
-        #    recon_text = self.decoders['text'](embeddings['text'])
-        #    losses['text'] = self.recon_loss['text'](recon_text, inputs['text'])
-
-        return fused, losses  # Return both fused embeddings and losses
-        #return torch.matmul(TensorOps.layer_norm(fused), self.projection.data)
-
-    #def backward(self, dout):
-    #    # Backward through projection layer
-    #    d_fused = torch.matmul(dout, self.projection.data.T)
-    #    self.projection.grad += torch.matmul(
-    #        TensorOps.layer_norm(self._cache['fused']).T,
-    #        dout
-    #    )
-        
-    #    # Backward through multimodal fusion
-    #    d_embeddings = self.fusion.backward(d_fused)
-        
-    #    # Backward through each encoder
-    #    for modality, encoder in self.encoders.items():
-    #        encoder.backward(d_embeddings[modality])
-        
-    #    return None  # Final gradients stored in parameters
-
-    def get_generated_output(self):
-        return self._cache.get('generated_text', None)
-
-    def align_with_slailm(self, slailm_instance):
-        """Create bidirectional gradient pathways between perception and LLM"""
-        self.adapter = SLAILMAdapter(
-            self.config['projection_dim'],
-            slailm_instance.embed_dim
-        )
-        
-        # Create shared parameter registry
-        self.shared_params = {
-            'cross_attn': Parameter(TensorOps.he_init((slailm_instance.embed_dim, self.config['projection_dim'])))
+        # Reference position embeddings from encoders
+        self.position_embeddings = {
+            'text': self.text_encoder.position_embeddings,
+            'vision': self.vision_encoder.position_embed,
+            'audio': self.audio_encoder.position_embed
         }
 
-    def zero_grad(self):
-        for param in self.params:
-            param.grad.fill(0)
+        self.multi_modal_projector = nn.ModuleDict({
+            'text': nn.Linear(self.text_encoder.embed_dim, self.embed_dim),
+            'vision': nn.Linear(self.vision_encoder.embed_dim, self.embed_dim),
+            'audio': nn.Linear(self.audio_encoder.embed_dim, self.embed_dim)
+        }).to(self.device)
 
-    def step(self, learning_rate=1e-3):
-        for param in self.params:
-            param.data -= learning_rate * param.grad
-        self.track_param_metrics()
+        # Move components to device
+        self.mask_tokens = self.mask_tokens.to(self.device)
 
-    def save_params(self, path):
-        weights = {f"param_{i}": param.data for i, param in enumerate(self.params)}
-        torch.savez(path, **weights)
+        # Optimizer
+        self.optimizer = self._configure_optimizer()
 
-    def load_params(self, path):
-        weights = torch.load(path)
-        for i, param in enumerate(self.params):
-            key = f"param_{i}"
-            if key in weights:
-                param.data[:] = weights[key]
+    def _configure_optimizer(self):
+        """Configures the optimizer for training."""
+        params_to_optimize = list(self.text_encoder.parameters()) + \
+                             list(self.vision_encoder.parameters()) + \
+                             list(self.audio_encoder.parameters()) + \
+                             list(self.text_prediction_head.parameters()) + \
+                             list(self.vision_prediction_head.parameters()) + \
+                             list(self.audio_prediction_head.parameters()) + \
+                             list(self.text_contrastive_proj.parameters()) + \
+                             list(self.vision_contrastive_proj.parameters()) + \
+                             list(self.audio_contrastive_proj.parameters()) + \
+                             list(self.text_generator.parameters()) + \
+                             list(self.vision_generator.parameters()) + \
+                             list(self.audio_generator.parameters()) + \
+                             [self.global_projection_param]
 
-    def track_param_metrics(self):
-        norms = [torch.linalg.norm(p.data) for p in self.params]
-        grads = [torch.linalg.norm(p.grad) for p in self.params]
-        self.performance_metrics['param_norms'].append(float(torch.mean(norms)))
-        self.performance_metrics['grad_norms'].append(float(torch.mean(grads)))
+        return torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, params_to_optimize),
+            lr=self.learning_rate,
+            betas=self.adam_betas,
+            eps=self.adam_eps,
+            weight_decay=self.weight_decay
+        )
 
-    class PretrainingTasks:
-        """Multimodal pretraining objectives for perception agent"""
-        def __init__(self, agent):
-            self.agent = agent
-            self.masking_ratio = 0.15  # Default masking ratio
+    def _init_shared_memory_keys(self):
+        """Initialize standardized keys for shared memory access"""
+        self.sm_keys = {
+            'weights_cache': f"perception:weights:{self.name}",
+            'model_snapshot': f"perception:snapshot:{self.name}",
+            'embeddings': f"perception:embeddings:{self.name}",
+            'training_state': f"perception:training:{self.name}"
+        }
 
-        def masked_modality_modeling(self, inputs):
-            """
-            Joint masked reconstruction across multiple modalities
-            Args:
-                inputs: Dict of modality tensors {
-                    'vision': (batch, channels, H, W),
-                    'text': (batch, seq_len),
-                    'audio': (batch, samples)
-                }
-            Returns:
-                dict: Reconstruction losses per modality
-            """
-            losses = {}
-            
-            # Vision masking
-            if 'vision' in inputs:
-                masked_vision, mask_vision = self._apply_masking(inputs['vision'], mode='patch')
-                rec_vision = self.agent.encoders['vision'].forward(masked_vision)
-                losses['vision'] = self._calc_reconstruction_loss(rec_vision, inputs['vision'], mask_vision)
-
-            # Text masking
-            if 'text' in inputs:
-                masked_text, mask_text = self._apply_masking(inputs['text'], mode='token')
-                rec_text = self.agent.encoders['text'].forward(masked_text)
-                losses['text'] = self._calc_reconstruction_loss(rec_text, inputs['text'], mask_text)
-
-            # Audio masking
-            if 'audio' in inputs:
-                masked_audio, mask_audio = self._apply_masking(inputs['audio'], mode='frame')
-                rec_audio = self.agent.encoders['audio'].forward(masked_audio)
-                losses['audio'] = self._calc_reconstruction_loss(rec_audio, inputs['audio'], mask_audio)
-
-            return losses
-
-        def crossmodal_matching(self, embeddings):
-            """
-            Verify alignment between modality embeddings using contrastive learning
-            Args:
-                embeddings: Dict of modality embeddings {
-                    'vision': (batch, embed_dim),
-                    'text': (batch, embed_dim),
-                    'audio': (batch, embed_dim)
-                }
-            Returns:
-                dict: Matching accuracy and loss metrics
-            """
-            metrics = {}
-            
-            # Vision-text alignment
-            if 'vision' in embeddings and 'text' in embeddings:
-                metrics['vision_text'] = self._calc_crossmodal_similarity(
-                    embeddings['vision'], 
-                    embeddings['text']
-                )
-
-            # Audio-text alignment
-            if 'audio' in embeddings and 'text' in embeddings:
-                metrics['audio_text'] = self._calc_crossmodal_similarity(
-                    embeddings['audio'],
-                    embeddings['text']
-                )
-
-            return metrics
-
-        def temporal_consistency(self, sequences):
-            """
-            Enforce temporal coherence in sequential data (video/audio)
-            Args:
-                sequences: Dict of temporal sequences {
-                    'video': (batch, frames, H, W, C),
-                    'audio': (batch, seq_len, features)
-                }
-            Returns:
-                dict: Temporal coherence losses
-            """
-            losses = {}
-            
-            # Video temporal consistency
-            if 'video' in sequences:
-                frame_embeddings = [self.agent.encoders['vision'].forward(f) 
-                                  for f in sequences['video']]
-                losses['video'] = self._calc_temporal_loss(frame_embeddings)
-
-            # Audio temporal consistency
-            if 'audio' in sequences:
-                audio_embeddings = [self.agent.encoders['audio'].forward(a) 
-                                  for a in sequences['audio']]
-                losses['audio'] = self._calc_temporal_loss(audio_embeddings)
-
-            return losses
-
-        # Helper methods placeholder
-        def _apply_masking(self, data, mode):
-            """Apply modality-specific masking pattern"""
-            mask = torch.rand(*data.shape) < self.masking_ratio
-            masked = data.copy()
-            masked[mask] = 0
-            return masked, mask
-
-        def _calc_reconstruction_loss(self, reconstructed, original, mask):
-            """Calculate reconstruction loss with masking"""
-            diff = (reconstructed - original) * mask
-            return torch.mean(diff ** 2)
-
-        def _calc_crossmodal_similarity(self, emb1, emb2):
-            """Compute contrastive similarity between modalities"""
-            # Cosine similarity
-            norm1 = torch.linalg.norm(emb1, axis=1, keepdims=True)
-            norm2 = torch.linalg.norm(emb2, axis=1, keepdims=True)
-            similarity = torch.sum(emb1 * emb2, axis=1) / (norm1 * norm2 + 1e-8)
-            loss = 1 - similarity.mean()
-            return {"similarity": similarity.mean(), "contrastive_loss": loss}
-
-        def _calc_temporal_loss(self, sequence_embeddings):
-            """Calculate temporal coherence loss"""
-            deltas = []
-            for i in range(1, len(sequence_embeddings)):
-                delta = torch.mean((sequence_embeddings[i] - sequence_embeddings[i-1]) ** 2)
-                deltas.append(delta)
-            return torch.mean(deltas)
+    # --- Masking Helpers ---
+    def _apply_masking_text(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Language Modeling."""
+        mask_token_id = self.tokenizer.token_to_id(self.tokenizer.mask_token)
+        rand = torch.rand(input_ids.shape, device=self.device)
+        # Where to mask (bernoulli trial for each token)
+        mask_arr = (rand < self.masking_ratio)
         
-        def update_projection(self, rewards, lr):
-            if isinstance(rewards, list):
-                rewards = torch.Tensor(rewards)
-            grad = rewards.mean()  # Simplified reward-based scaling
-            self.projection.grad += grad * torch.sign(self.projection.data)
-            self.projection.data -= lr * self.projection.grad
+        # Ensure we don't mask special tokens like [CLS], [SEP], [PAD]
+        pad_token_id = self.tokenizer.token_to_id(self.tokenizer.pad_token)
+        cls_token_id = self.tokenizer.token_to_id(self.tokenizer.cls_token)
+        sep_token_id = self.tokenizer.token_to_id(self.tokenizer.sep_token)
 
-class CrossModalAttention:
-    def __init__(self, embed_dim):
-        self.query = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.key = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
-        self.value = Parameter(TensorOps.he_init((embed_dim, embed_dim), embed_dim))
+        special_tokens_mask = (input_ids == pad_token_id) | \
+                              (input_ids == cls_token_id) | \
+                              (input_ids == sep_token_id)
+        mask_arr &= ~special_tokens_mask # Don't mask special tokens
 
-    def parameters(self):
-        return [self.query, self.key, self.value]
+        masked_input_ids = input_ids.clone()
+        masked_input_ids[mask_arr] = mask_token_id
+        return masked_input_ids, mask_arr
 
-    def forward(self, modality1, modality2):
-        q = torch.matmul(modality1, self.query.data)
-        k = torch.matmul(modality2, self.key.data)
-        v = torch.matmul(modality2, self.value.data)
+    def _apply_masking_vision(self, patches: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Patch Modeling. Patches shape: (B, NumPatches, PatchDim)."""
+        batch_size, num_patches, _ = patches.shape
+        mask = torch.rand(
+            batch_size,
+            num_patches,
+            device=self.device
+        ) < self.masking_ratio
+        masked_patches = patches.clone()
+        masked_patches[mask] = 0
+        return masked_patches, mask
+
+    def _apply_masking_audio(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Applies masking for Masked Audio Modeling (e.g., on spectrogram patches or features)."""
+        batch_size, num_frames, _ = features.shape
+        mask = torch.rand(batch_size, num_frames, device=self.device) < self.masking_ratio
+        masked_features = features.clone()
+        masked_features[mask] = 0
+        return masked_features, mask
+
+    # --- Loss Calculation Helpers ---
+    def _calc_reconstruction_loss_text(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Calculates MLM loss. Predictions: (B, SeqLen, VocabSize), Targets: (B, SeqLen), Mask: (B, SeqLen)"""
+        predictions_masked = predictions[mask] # Select logits for masked tokens
+        targets_masked = targets[mask]       # Select target token IDs for masked tokens
+        if predictions_masked.numel() == 0: # No tokens were masked
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        loss = F.cross_entropy(predictions_masked.reshape(-1, predictions.size(-1)), targets_masked.reshape(-1))
+        return loss
+
+    def _calc_reconstruction_loss_vision_audio(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Calculates reconstruction loss for vision/audio. Predictions/Targets/Mask: (B, NumPatches/Frames, FeatureDim)"""
+        if mask.sum() == 0 : # No elements masked
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        expanded_mask = mask.unsqueeze(-1).expand_as(targets)
+        loss = F.mse_loss(predictions[expanded_mask], targets[expanded_mask])
+        return loss
         
-        attn_scores = torch.matmul(q, k.T) / math.sqrt(self.query.data.shape[-1])
-        attn_probs = self._softmax(attn_scores)
-        return torch.matmul(attn_probs, v)
+    def _calc_contrastive_loss(self, emb1: torch.Tensor, emb2: torch.Tensor) -> torch.Tensor:
+        """Calculates InfoNCE contrastive loss. emb1, emb2: (B, ProjDim)"""
+        emb1 = F.normalize(emb1, p=2, dim=-1)
+        emb2 = F.normalize(emb2, p=2, dim=-1)
 
-    def _softmax(self, x):
-        max_x = torch.max(x, axis=-1, keepdims=True)
-        exp_x = torch.exp(x - max_x)
-        return exp_x / exp_x.sum(axis=-1, keepdims=True)
+        # logits: (B, B)
+        logits = torch.matmul(emb1, emb2.t()) / self.contrastive_temp
+        labels = torch.arange(logits.size(0), device=self.device) # Positive pairs are on the diagonal
+        loss = F.cross_entropy(logits, labels)
+        return loss
 
-class MultimodalMetrics:
-    @staticmethod
-    def modality_importance_score(embeddings):
+    def _calc_temporal_coherence_loss(self, sequence_embeddings: torch.Tensor) -> torch.Tensor:
+        """Calculates temporal coherence loss. sequence_embeddings: (B, SeqLen, EmbedDim)"""
+        if sequence_embeddings.size(1) < 2:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        # Difference between consecutive frame embeddings
+        diffs = sequence_embeddings[:, 1:, :] - sequence_embeddings[:, :-1, :]
+        loss = torch.mean(diffs.pow(2)) # MSE of differences
+        return loss
+
+    # --- Pretraining Steps ---
+    def _pretrain_masked_modality(
+        self,
+        modality: str,
+        inputs: Dict[str, torch.Tensor],
+        mask_ratio: float = 0.15,
+        return_reconstructions: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
-        Compute L2 norm-based importance score per modality.
-        Returns dict of normalized scores.
+        Performs masked modality pretraining (MLM, MPM, MAM) using modality-specific
+        encoders and simple prediction heads.
         """
-        norms = {k: torch.linalg.norm(v, axis=-1).mean() for k, v in embeddings.items()}
-        total = sum(norms.values())
-        return {k: v / total for k, v in norms.items()}
+        valid_modalities = ['vision', 'audio', 'text']
+        if modality not in valid_modalities:
+            raise ValueError(f"Invalid modality '{modality}'. Must be one of {valid_modalities}")
 
-    @staticmethod
-    def crossmodal_consistency(features):
-        """
-        Compute pairwise cosine similarity between all modality embeddings.
-        Returns a matrix of pairwise consistency scores.
-        """
-        keys = list(features.keys())
-        matrix = {}
-        for i in range(len(keys)):
-            for j in range(i+1, len(keys)):
-                a = features[keys[i]]
-                b = features[keys[j]]
-                sim = torch.sum(a * b, axis=-1) / (torch.linalg.norm(a, axis=-1) * torch.linalg.norm(b, axis=-1) + 1e-8)
-                matrix[f'{keys[i]}-{keys[j]}'] = torch.mean(sim)
-        return matrix
+        device = self.device
+        training = self.training # Agent's training state
 
-    @staticmethod
-    def embedding_stability(embeddings):
-        """
-        Track change in embedding norms over batch.
-        Could be used to detect saturation or vanishing dynamics.
-        """
-        stability = {}
-        for k, v in embeddings.items():
-            norm_diff = torch.abs(torch.diff(torch.linalg.norm(v, axis=-1))).mean()
-            stability[k] = norm_diff
-        return stability
-
-class MultimodalFusion:
-    """Weighted feature fusion module using modality-specific importance with optional dropout and masking"""
-    def __init__(self, embed_dim, modalities, dropout_rate=0.1, masking_prob=0.15):
-        self.embed_dim = embed_dim
-        self.modalities = modalities
-        self.modal_weights = OrderedDict()
-        self._shapes = {}
-        self.gating_weights = Parameter(torch.ones(len(self.modalities)))  # Dynamic
-        self.dropout_rate = dropout_rate
-        self.masking_prob = masking_prob
-        self.training = True
-
-    def parameters(self):
-        return list(self.modal_weights.values()) + [self.gating_weights]
-
-    def forward(self, embeddings):
-        self._cached_inputs = embeddings
-        self._mask_flags = {}
+        # Get modality-specific components
+        encoder = {
+            'text': self.text_encoder,
+            'vision': self.vision_encoder,
+            'audio': self.audio_encoder
+        }[modality]
     
-        pooled = []
-        alphas = []
+        prediction_head = {
+            'text': self.text_prediction_head,
+            'vision': self.vision_prediction_head,
+            'audio': self.audio_prediction_head
+        }[modality]
     
-        # Dropout + Gating
-        for idx, (modality, tensor) in enumerate(embeddings.items()):
-            if modality not in self.modal_weights:
-                self.modal_weights[modality] = Parameter(torch.Tensor([1.0]))
+        raw_input_key = self._get_input_key_for_modality(modality)
+        raw_input = inputs[raw_input_key].to(device)
+        style_id = inputs.get('style_id')
+        if style_id is not None:
+            style_id = style_id.to(device)
+            
+        reconstruction_loss = torch.tensor(0.0, device=device, requires_grad=training)
+        reconstructions_dict = {}
     
-            # Drop modality
-            if self.training and torch.rand() < self.masking_prob:
-                self._mask_flags[modality] = True
-                tensor = torch.zeros_like(tensor)
+        if modality in ["audio", "vision"] and encoder.encoder_type != "transformer":
+            return 0.0
+
+        with torch.set_grad_enabled(training):
+            if modality == 'text':
+                masked_input_ids, target_mask_indices = self._apply_masking_text(raw_input)
+                encoder_output = encoder(masked_input_ids, style_id=style_id, output_type="full_sequence")
+                predictions_logits = prediction_head(encoder_output) # (B, S, VocabSize)
+ 
+                if target_mask_indices.sum() > 0:
+                    # Select logits and labels for masked positions
+                    masked_predictions_logits = predictions_logits[target_mask_indices] # (NumMasked, VocabSize)
+                    masked_target_labels = raw_input[target_mask_indices] # (NumMasked)
+                    
+                    reconstruction_loss = F.cross_entropy(
+                        masked_predictions_logits,
+                        masked_target_labels
+                    )
+                
+                if return_reconstructions:
+                    reconstructions_dict = {
+                        'original_ids': raw_input.detach(),
+                        'masked_input_ids': masked_input_ids.detach(),
+                        'reconstructed_logits': predictions_logits.detach(),
+                        'mask_indices': target_mask_indices.detach()
+                    }
+    
+            elif modality == 'vision' or modality == 'audio':
+
+                if modality == 'vision':
+                    # raw_input: (B, C, H, W)
+                    raw_patches = encoder.extract_patches(raw_input) # (B, NumPatches, RawPatchDim)
+                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumPatches, EmbedDim)
+                    pos_embed_full = encoder.position_embed # (1, BaseNumPatches+1, EmbedDim) or (1, MaxPosEmbed, EmbedDim)
+                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim)
+                    mask_token_for_modality = self.mask_tokens['vision'] # (1, EmbedDim)
+                else: # modality == 'audio'
+                    # raw_input: (B, C, T_audio) or (B, T_audio)
+                    raw_patches = encoder.extract_patches(raw_input) # (B, NumFrames, RawFrameDim)
+                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumFrames, EmbedDim)
+                    pos_embed_full = encoder.position_embed # (1, MaxPosEmbed, EmbedDim)
+                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim) - Assuming audio encoder also has it
+                    mask_token_for_modality = self.mask_tokens['audio'] # (1, EmbedDim)
+    
+                batch_size, num_patches_or_frames, _ = initial_patch_embeddings.shape
+                
+                # Create mask for actual patches/frames
+                target_mask_indices = torch.rand(batch_size, num_patches_or_frames, device=device) < mask_ratio
+                
+                masked_initial_embeddings = initial_patch_embeddings.clone()
+                # Efficiently apply mask token using torch.where or direct assignment
+                # Ensure mask_token_for_modality is correctly broadcasted/expanded
+                expanded_mask_fill = mask_token_for_modality.expand(batch_size, num_patches_or_frames, -1)
+                masked_initial_embeddings = torch.where(target_mask_indices.unsqueeze(-1), 
+                                                        expanded_mask_fill, 
+                                                        masked_initial_embeddings)
+    
+                # Add CLS token
+                cls_tokens_expanded = cls_token_emb.expand(batch_size, -1, -1)
+                transformer_input_embeddings = torch.cat([cls_tokens_expanded, masked_initial_embeddings], dim=1) # (B, NumPatches+1, EmbedDim)
+                
+                current_seq_len = transformer_input_embeddings.size(1)
+                
+                # Add positional embeddings (handle potential size mismatch carefully)
+                # Encoders should ideally handle dynamic PE sizing or use PE up to max_position_embeddings
+                if pos_embed_full.size(1) < current_seq_len:
+                    # Fallback: Use available part and warn. Proper fix is PE interpolation or larger PE table.
+                    logger.warning(f"Positional embedding table size ({pos_embed_full.size(1)}) is smaller than "
+                                   f"current sequence length ({current_seq_len}) for modality {modality}. Truncating/Padding PE.")
+                    pe_to_add = torch.zeros_like(transformer_input_embeddings)
+                    len_to_copy = min(pos_embed_full.size(1), current_seq_len)
+                    pe_to_add[:, :len_to_copy, :] = pos_embed_full[:, :len_to_copy, :]
+                else:
+                    pe_to_add = pos_embed_full[:, :current_seq_len, :]
+                
+                transformer_input_with_pe = transformer_input_embeddings + pe_to_add
+                
+                # Pass through the encoder's transformer component
+                encoder_transformer_output = encoder.transformer(transformer_input_with_pe, style_id=style_id) # (B, NumPatches+1, EmbedDim)
+                
+                if target_mask_indices.sum() > 0:
+                    output_at_masked_positions = encoder_transformer_output[:, 1:, :][target_mask_indices] # (TotalNumMasked, EmbedDim)
+                    
+                    # Predict raw patches/frames from these outputs
+                    predictions_raw = prediction_head(output_at_masked_positions) # (TotalNumMasked, RawPatchDim)
+                    
+                    # Targets are the original raw patches/frames at masked positions
+                    target_raw_values = raw_patches[target_mask_indices] # (TotalNumMasked, RawPatchDim)
+                    
+                    reconstruction_loss = F.mse_loss(predictions_raw, target_raw_values)
+                
+                if return_reconstructions:
+                    reconstructions_dict = {
+                        'original_raw_patches_or_frames': raw_patches.detach(),
+                        'masked_input_embeddings_to_transformer': masked_initial_embeddings.detach(), # These are EmbedDim
+                        'reconstructed_raw_predictions_at_mask': predictions_raw.detach() if target_mask_indices.sum() > 0 else torch.empty(0),
+                        'mask_indices': target_mask_indices.detach()
+                    }
+            
+            # Ensure loss requires grad if in training and it turned out to be 0 (e.g. no tokens masked)
+            if training and not reconstruction_loss.requires_grad and reconstruction_loss.item() == 0.0:
+                reconstruction_loss = reconstruction_loss.clone().requires_grad_(True)
+                
+            if return_reconstructions:
+                return reconstruction_loss, reconstructions_dict
+            
+            return reconstruction_loss
+
+    def _pretrain_contrastive(self, data_mod1: Dict, data_mod2: Dict, mod1_type: str, mod2_type: str) -> torch.Tensor:
+        """Performs cross-modal contrastive learning."""
+        encoders = {'text': self.text_encoder, 'vision': self.vision_encoder, 'audio': self.audio_encoder}
+        projections = {'text': self.text_contrastive_proj, 
+                       'vision': self.vision_contrastive_proj, 
+                       'audio': self.audio_contrastive_proj}
+
+        # Extract input data for each modality
+        input1 = data_mod1[self._get_input_key_for_modality(mod1_type)].to(self.device)
+        input2 = data_mod2[self._get_input_key_for_modality(mod2_type)].to(self.device)
+
+        style_id1 = data_mod1.get('style_id')
+        style_id2 = data_mod2.get('style_id')
+
+        # Encode features
+        emb1_full = encoders[mod1_type](input1, style_id=style_id1)
+        emb2_full = encoders[mod2_type](input2, style_id=style_id2)
+
+        emb1 = emb1_full[:, 0, :] if emb1_full.ndim == 3 else emb1_full # (B, EmbedDim)
+        emb2 = emb2_full[:, 0, :] if emb2_full.ndim == 3 else emb2_full # (B, EmbedDim)
+
+        # Project to common contrastive space
+        proj_emb1 = projections[mod1_type](emb1)
+        proj_emb2 = projections[mod2_type](emb2)
+        
+        return self._calc_contrastive_loss(proj_emb1, proj_emb2)
+
+    def _get_input_key_for_modality(self, modality_type: str) -> str:
+        if modality_type == 'text': return 'input_ids'
+        if modality_type == 'vision': return 'pixel_values'
+        if modality_type == 'audio': return 'audio_values'
+        raise ValueError(f"Unknown modality type: {modality_type}")
+
+    def _pretrain_temporal_coherence(self, sequence_data: torch.Tensor, modality: str) -> torch.Tensor:
+        """
+        Enhanced temporal coherence learning with configurable loss types,
+        multi-scale coherence, and efficient batched processing.
+
+        """
+        encoders = {'vision': self.vision_encoder, 'audio': self.audio_encoder}
+        if modality not in encoders:
+            raise ValueError(f"Temporal coherence not supported for modality: {modality}")
+        
+        batch_size, num_frames = sequence_data.shape[:2]
+        
+        # Handle short sequences
+        if num_frames < 2:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # Efficient batched encoding - (B*T, ...) -> (B*T, D) -> (B, T, D)
+        flat_sequence = sequence_data.view(-1, *sequence_data.shape[2:])
+        encoded_frames = encoders[modality](flat_sequence)  # (B*T, ...)
+        
+        # Handle different encoder output types
+        if encoded_frames.dim() == 3:  # Sequence output (B*T, S, D)
+            frame_embeddings = encoded_frames[:, 0, :]  # Use CLS token
+        else:  # Pooled output (B*T, D)
+            frame_embeddings = encoded_frames
+        
+        embeddings = frame_embeddings.view(batch_size, num_frames, -1)  # (B, T, D)
+        
+        total_loss = torch.tensor(0.0, device=self.device)
+        
+        # Multi-scale MSE loss (captures both short and long-term coherence)
+        if self.loss_type in ['mse', 'hybrid']:
+            mse_loss = torch.tensor(0.0, device=self.device)
+            valid_scale_count = 0
+            
+            for scale in range(1, min(self.max_scale + 1, num_frames)):
+                if num_frames - scale < 1:
+                    continue
+                    
+                # Calculate differences at current temporal scale
+                emb1 = embeddings[:, :-scale, :]
+                emb2 = embeddings[:, scale:, :]
+                diffs = emb2 - emb1
+                
+                # Accumulate MSE loss
+                scale_loss = torch.mean(diffs.pow(2))
+                mse_loss += scale_loss
+                valid_scale_count += 1
+            
+            if valid_scale_count > 0:
+                mse_loss /= valid_scale_count
+                total_loss += self.mse_weight * mse_loss
+        
+        # Contrastive loss (distinguishes adjacent vs distant frames)
+        if self.loss_type in ['contrastive', 'hybrid']:
+            # Only use consecutive pairs for anchor-positive
+            anchors = embeddings[:, :-1, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
+            positives = embeddings[:, 1:, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
+            
+            # Generate negatives - same sequence but distant frames
+            all_negatives = []
+            for i in range(batch_size):
+                # Get random distant frames from same sequence
+                time_indices = torch.randint(0, num_frames, (num_frames - 1,))
+                distant_frames = embeddings[i, time_indices, :]
+                all_negatives.append(distant_frames)
+            
+            negatives = torch.cat(all_negatives, dim=0)  # (B*(T-1), D)
+            
+            # Normalize embeddings
+            anchors_norm = F.normalize(anchors, dim=-1)
+            positives_norm = F.normalize(positives, dim=-1)
+            negatives_norm = F.normalize(negatives, dim=-1)
+            
+            # Calculate similarities
+            pos_sim = torch.sum(anchors_norm * positives_norm, dim=-1) / self.temperature
+            neg_sim = torch.sum(anchors_norm[:, None] * negatives_norm[None, :], dim=-1) / self.temperature
+            
+            # Contrastive loss (InfoNCE)
+            logits = torch.cat([pos_sim[:, None], neg_sim], dim=1)
+            labels = torch.zeros(logits.size(0), dtype=torch.long, device=self.device)
+            contrastive_loss = F.cross_entropy(logits, labels)
+            
+            total_loss += self.contrastive_weight * contrastive_loss
+        
+        return total_loss
+
+    def _pretraining_step(self, task_data: Dict) -> Dict[str, torch.Tensor]:
+        """Orchestrates a single pretraining step based on the objective."""
+        if self.shared_memory.get(self.sm_keys['training_state']):
+            logger.info("Training paused - another agent is currently training")
+            return {'status': 'paused'}
+            
+        try:
+            # Set training lock
+            self.shared_memory.put(self.sm_keys['training_state'], True)
+
+            self.train() # Set agent to training mode
+            self.optimizer.zero_grad()
+            
+            objective = task_data['objective']
+            total_loss = torch.tensor(0.0, device=self.device)
+
+            if objective == 'mlm': # Masked Language Modeling
+                loss = self._pretrain_masked_modality(task_data['text_data'], 'text')
+                total_loss = total_loss + loss
+            elif objective == 'mpm': # Masked Patch Modeling
+                loss = self._pretrain_masked_modality(task_data['vision_data'], 'vision')
+                total_loss = total_loss + loss
+            elif objective == 'mam': # Masked Audio Modeling
+                loss = self._pretrain_masked_modality(task_data['audio_data'], 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_text_image':
+                loss = self._pretrain_contrastive(task_data['text_data'], task_data['vision_data'], 'text', 'vision')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_text_audio':
+                loss = self._pretrain_contrastive(task_data['text_data'], task_data['audio_data'], 'text', 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'contrastive_vision_audio':
+                loss = self._pretrain_contrastive(task_data['vision_data'], task_data['audio_data'], 'vision', 'audio')
+                total_loss = total_loss + loss
+            elif objective == 'temporal_vision': # Temporal coherence for video
+                loss = self._pretrain_temporal_coherence(task_data['video_data']['frame_sequence'], 'vision') # video_data.frame_sequence: (B, NumFrames, C, H, W)
+                total_loss = total_loss + loss
+            elif objective == 'temporal_audio': # Temporal coherence for audio
+                loss = self._pretrain_temporal_coherence(task_data['audio_sequence_data']['segment_sequence'], 'audio') # audio_sequence_data.segment_sequence: (B, NumSegments, C, T_segment)
+                total_loss = total_loss + loss
             else:
-                self._mask_flags[modality] = False
+                logger.warning(f"Unknown pretraining objective: {objective}")
+                return {'loss': total_loss, 'status': 'unknown_objective'}
+
+            if total_loss.requires_grad: # Ensure loss requires grad before backward
+                total_loss.backward()
+                self.optimizer.step()
+            
+            return {'loss': total_loss.item(), 'status': 'success'}
+
+        finally:
+            # Release training lock
+            self.shared_memory.put(self.sm_keys['training_state'], False)
+
+    def train(self, mode: bool = True):
+        """
+        Match nn.Module.train signature so internal calls like self.eval()
+        (which invokes self.train(False)) keep working.
+        """
+        super().train(mode)
+        for module in [
+            self.text_encoder,
+            self.vision_encoder,
+            self.audio_encoder,
+            self.text_generator,
+            self.vision_generator,
+            self.audio_generator,
+            self.text_prediction_head,
+            self.vision_prediction_head,
+            self.audio_prediction_head,
+            self.text_contrastive_proj,
+            self.vision_contrastive_proj,
+            self.audio_contrastive_proj,
+            self.multi_modal_projector,
+        ]:
+            if isinstance(module, torch.nn.Module):
+                module.train(mode)
+        return self
+
+    def _apply_agent_state_dict(self, model_state_dict: Dict[str, Any]) -> None:
+        """
+        Load either:
+        1) a full flattened PerceptionAgent state_dict
+        2) a legacy nested component dict {text_encoder: ..., ...}
+        """
+        if not isinstance(model_state_dict, dict):
+            raise TypeError("model_state_dict must be a dictionary")
+
+        nested_keys = {"text_encoder", "vision_encoder", "audio_encoder", "text_decoder", "vision_decoder", "audio_decoder"}
+        if nested_keys.intersection(model_state_dict.keys()):
+            if "text_encoder" in model_state_dict:
+                self.text_encoder.load_state_dict(model_state_dict["text_encoder"])
+            if "vision_encoder" in model_state_dict:
+                self.vision_encoder.load_state_dict(model_state_dict["vision_encoder"])
+            if "audio_encoder" in model_state_dict:
+                self.audio_encoder.load_state_dict(model_state_dict["audio_encoder"])
+            if "text_decoder" in model_state_dict:
+                self.text_generator.load_state_dict(model_state_dict["text_decoder"])
+            if "vision_decoder" in model_state_dict:
+                self.vision_generator.load_state_dict(model_state_dict["vision_decoder"])
+            if "audio_decoder" in model_state_dict:
+                self.audio_generator.load_state_dict(model_state_dict["audio_decoder"])
+            return
+
+        self.load_state_dict(model_state_dict)
+
+    def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:
+        self.train()
+        self.optimizer.zero_grad()
+
+        downstream_task = task_data['downstream_task'] # e.g., 'image_classification', 'text_regression'
+        labels = task_data['labels'].to(self.device)
+        
+        embeddings = None
+        if 'text_data' in task_data:
+            input_ids = task_data['text_data']['input_ids'].to(self.device)
+            embeddings = self.text_encoder(input_ids, style_id=task_data['text_data'].get('style_id'))
+        elif 'vision_data' in task_data:
+            pixel_values = task_data['vision_data']['pixel_values'].to(self.device)
+            embeddings = self.vision_encoder(pixel_values, style_id=task_data['vision_data'].get('style_id'))
+        elif 'audio_data' in task_data:
+            waveform = task_data['audio_data']['waveform'].to(self.device)
+            embeddings = self.audio_encoder(waveform, style_id=task_data['audio_data'].get('style_id'))
+        # Add handling for multimodal fine-tuning if necessary, by concatenating/fusing embeddings
+        
+        if embeddings is None:
+            return {'loss': 0, 'status': 'no_input_data'}
+
+        # Use CLS token or mean pooled output for sequence tasks
+        if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
+            pooled_embeddings = embeddings[:, 0, :] # Assuming CLS token
+        else: # (B, EmbedDim)
+            pooled_embeddings = embeddings
+
+        # Get task head
+        num_classes = task_data.get('num_classes') # Required for classification
+        task_head = self.transformer.select_taskhead(
+            downstream_task, 
+            input_dim=self.embed_dim,
+            num_classes=num_classes
+        )
+        
+        logits_or_values = task_head(pooled_embeddings)
+
+        loss = None
+        if "classification" in downstream_task.lower():
+            loss = F.cross_entropy(logits_or_values, labels)
+        elif "regression" in downstream_task.lower():
+            loss = F.mse_loss(logits_or_values.squeeze(), labels.float()) # Ensure labels are float for MSE
+        else:
+            return {'loss': 0, 'status': f'unsupported_task_type:{downstream_task}'}
+        
+        if loss is not None and loss.requires_grad:
+            loss.backward()
+            self.optimizer.step()
+            return {'loss': loss.item(), 'status': 'success', 'predictions': logits_or_values.detach()}
+        return {'loss': 0, 'status': 'loss_not_computed', 'predictions': logits_or_values.detach()}
+
+    def _inference_step(self, task_data: Dict) -> Dict[str, Any]:
+        self.eval() # Set agent to evaluation mode
+        with torch.no_grad():
+            modality = task_data['modality']
+            input_data = task_data['input_data']
+            downstream_task = task_data.get('downstream_task', None) # Optional: for task-specific heads
+
+            embeddings = None
+            style_id = input_data.get('style_id')
+
+            if modality == 'text':
+                input_ids = input_data['input_ids'].to(self.device)
+                embeddings = self.text_encoder(input_ids, style_id=style_id)
+            elif modality == 'vision':
+                pixel_values = input_data['pixel_values'].to(self.device)
+                embeddings = self.vision_encoder(pixel_values, style_id=style_id)
+            elif modality == 'audio':
+                waveform = input_data['waveform'].to(self.device)
+                embeddings = self.audio_encoder(waveform, style_id=style_id)
+            elif modality == 'multimodal': # Example for multimodal inference
+                text_emb = self.text_encoder(input_data['text']['input_ids'].to(self.device), style_id=input_data['text'].get('style_id'))[:,0,:]
+                vis_emb = self.vision_encoder(input_data['vision']['pixel_values'].to(self.device), style_id=input_data['vision'].get('style_id'))[:,0,:]
+                # Simple concatenation for fusion, more sophisticated fusion can be added
+                embeddings = torch.cat((text_emb, vis_emb), dim=-1) 
+
+            else:
+                return {'output': None, 'status': f'unknown_modality:{modality}'}
+
+            if downstream_task:
+                if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
+                    pooled_embeddings = embeddings[:, 0, :] # CLS token
+                else: # (B, EmbedDim)
+                    pooled_embeddings = embeddings
+                
+                # Adjust input_dim for multimodal concatenated embeddings
+                current_embed_dim = embeddings.size(-1) if modality == 'multimodal' else self.embed_dim
+
+                task_head = self._get_task_head(downstream_task, input_dim=current_embed_dim, num_classes=task_data.get('num_classes'))
+                output = task_head(pooled_embeddings)
+            else: # Return raw embeddings or pass through a generator
+                if task_data.get('generate', False): # For generative tasks like text generation
+                    if modality == 'text' and 'memory_for_decoder' in input_data: # Assuming memory comes from another encoder
+                        memory = input_data['memory_for_decoder'].to(self.device)
+                        output = self.text_generator.inference(memory=memory, style_id=style_id)
+                    # Add similar generation for vision/audio if applicable
+                    else:
+                        output = embeddings # Fallback to embeddings if generation setup is incomplete
+                else:
+                    output = embeddings
+            
+            return {'output': output.cpu(), 'status': 'success'}
+
+    # --- Main perform_task method ---
+    def perform_task(self, task_data: Dict) -> Dict[str, Any]:
+        """
+        Main entry point for the PerceptionAgent.
+        Dispatches to pretraining, fine-tuning, or inference based on task_data.
+        """
+        # Try loading state from shared memory before execution
+        if task_data.get('use_cached_state', False):
+            if self.load_state_from_shared_memory():
+                logger.info("Using model state from shared memory")
+
+            task_type = task_data.get('task_type')
+            if task_type == 'pretrain':
+                return self._pretraining_step(task_data)
+            elif task_type == 'finetune':
+                return self._finetune_step(task_data)
+            elif task_type == 'inference':
+                return self._inference_step(task_data)
+            else:
+                logger.error(f"Unsupported task_type: {task_type}")
+                return {'status': 'error', 'message': f"Unsupported task_type: {task_type}"}
+
+        # Save state after critical operations
+        if task_data.get('save_state_after', False):
+            self.save_state_to_shared_memory()
+            
+        return result
+
+    def update_projection(self, rewards: Union[List[float], torch.Tensor], lr: float):
+        """
+        Updates the global_projection_param using a custom rule.
+        This is separate from the main optimizer.
+        """
+        if not isinstance(rewards, torch.Tensor):
+            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float3T)
+        
+        # Ensure global_projection_param requires grad for this update logic
+        if not self.global_projection_param.requires_grad:
+            self.global_projection_param.requires_grad_(True)
+
+        # Simplified reward-based scaling for the gradient
+        # The gradient here is a pseudo-gradient based on rewards
+        pseudo_grad = rewards.mean() * torch.sign(self.global_projection_param)
+        
+        if self.global_projection_param.grad is None:
+            self.global_projection_param.grad = pseudo_grad
+        else:
+            self.global_projection_param.grad.data.add_(pseudo_grad) # Accumulate pseudo-gradient
+
+        # Apply update (manual SGD step for this parameter)
+        with torch.no_grad():
+            self.global_projection_param.sub_(lr * self.global_projection_param.grad.data)
+        
+        # Zero out the pseudo-gradient after update
+        if self.global_projection_param.grad is not None:
+            self.global_projection_param.grad.detach_() # Detach from computation graph
+            self.global_projection_param.grad.zero_()
+        
+        logger.debug(f"Updated global_projection_param: {self.global_projection_param.item()}")
+
+    def load_pretrained_weights(self, checkpoint_path: Union[str, Path], source_format: str = "custom_audio"):
+        """Loads pretrained weights, handling different source formats."""
+        logger.info(f"Loading pretrained weights from: {checkpoint_path} (format: {source_format})")
+
+        # First check shared memory cache
+        cache_key = f"{self.sm_keys['weights_cache']}:{source_format}:{checkpoint_path}"
+        cached_weights = self.shared_memory.get(cache_key)
     
-            pooled_mod = tensor.mean(axis=1)  # (B, D)
+        path = Path(checkpoint_path)
+        if not path.exists():
+            logger.warning(f"Checkpoint file not found: {checkpoint_path}. Creating new checkpoint.")
+            checkpoint_dir = path.parent
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            weights_data = {
+                'model_state_dict': {
+                    'text_encoder': self.text_encoder.state_dict(),
+                    'vision_encoder': self.vision_encoder.state_dict(),
+                    'audio_encoder': self.audio_encoder.state_dict(),
+                    #'transformer': self.transformer.state_dict(),
+                    'text_decoder': self.text_generator.state_dict(),
+                    'vision_decoder': self.vision_generator.state_dict(),
+                    'audio_decoder': self.audio_generator.state_dict(),
+                },
+                'optimizer_state_dict': self.optimizer.state_dict() if hasattr(self, 'optimizer') else {}
+            }
+            torch.save(weights_data, path)
+            logger.info(f"New checkpoint created at: {checkpoint_path}")
+            return weights_data
+        if path.is_dir():
+            logger.error(f"Checkpoint path is a directory, not a file: {checkpoint_path}")
+            return
+
+        if not Path(checkpoint_path).exists():
+            logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            return
+        if cached_weights:
+            logger.info(f"Using cached weights from shared memory: {cache_key}")
+            weights_data = cached_weights
+        else:
+            # Load weights if not cached
+            weights_data = torch.load(checkpoint_path, map_location=self.device)
+            # Store loaded weights in shared memory
+            self.shared_memory.put(cache_key, weights_data, ttl=timedelta(days=7))
+            logger.info(f"Cached weights in shared memory: {cache_key}")
+        
+        if source_format == "custom_audio":
+            converted_weights = self._convert_custom_audio_weights(weights_data)
+            self.audio_encoder.load_pretrained(converted_weights)
+            # Potentially load for audio_generator too if structure is similar
+            # self.audio_generator.load_pretrained(weights)
+        elif source_format == "vision_language_model":
+            vision_weights, text_weights = self._convert_vision_language_weights(weights_data)
+            self.vision_encoder.load_pretrained(vision_weights)
+            self.text_encoder.load_pretrained_embeddings(text_weights.get('token_embeddings.weight')) # Example
+            # self.text_encoder.transformer.load_pretrained(weights) if text transformer weights are separate
+        elif source_format == "text_encoder_only":
+            self.text_encoder.load_pretrained_embeddings(weights_data.get('token_embeddings.weight'))
+            # Potentially load transformer part of text_encoder
+            # self.text_encoder.transformer.load_pretrained(weights_data.get('transformer_weights', {}))
+        elif source_format == "perception_agent_checkpoint": # Loading a full agent checkpoint
+            self._apply_agent_state_dict(weights_data['model_state_dict'])
+            self.optimizer.load_state_dict(weights_data['optimizer_state_dict'])
+            logger.info("Loaded full PerceptionAgent checkpoint.")
+        else:
+            logger.warning(f"Unsupported pretrained weight format: {source_format}")
+
+    def _convert_custom_audio_weights(self, custom_weights: Dict) -> Dict:
+        """Converts custom audio model weights to a format expected by AudioEncoder/Transformer.
+        
+        Handles common architectures:
+        - Wav2Vec 2.0
+        - HuBERT
+        - Speech2Vec
+        - Custom CNN-RNN hybrids
+        
+        Conversion strategies:
+        1. Direct key mapping for standard architectures
+        2. Tensor reshaping for dimension mismatches
+        3. Layer skipping for incompatible components
+        """
+        hf_style_weights = {}
+        config = self.perception_config.get('weight_conversion', {})
+        skip_mismatched = config.get('skip_mismatched', True)
+        reshape_mode = config.get('reshape_mode', 'auto')
+        
+        # Architecture detection
+        arch = None
+        if any(k.startswith('w2v2.') for k in custom_weights):
+            arch = 'wav2vec2'
+        elif any(k.startswith('hubert.') for k in custom_weights):
+            arch = 'hubert'
+        elif any('cnn' in k and 'rnn' in k for k in custom_weights):
+            arch = 'cnn_rnn'
+
+        # Mapping tables for known architectures
+        mapping_tables = {
+            'wav2vec2': {
+                'w2v2.encoder.pos_conv.0.weight': 'position_embed',
+                'w2v2.feature_extractor.conv_layers.0.conv.weight': 'conv_layers.0.weight',
+                'w2v2.post_extract_proj.weight': 'projection.weight',
+                'w2v2.mask_emb': 'mask_tokens.audio',
+                'w2v2.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight',
+                'w2v2.encoder.layers.{}.self_attn.out_proj.weight': 'transformer.layers.{}.attention.out_proj.weight',
+                'w2v2.encoder.layers.{}.fc1.weight': 'transformer.layers.{}.ff.0.weight'
+            },
+            'hubert': {
+                'hubert.encoder.pos_conv.0.weight': 'position_embed',
+                'hubert.feature_projection.projection.weight': 'projection.weight',
+                'hubert.mask_emb': 'mask_tokens.audio',
+                'hubert.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight'
+            },
+            'cnn_rnn': {
+                'cnn.conv1.weight': 'conv_layers.0.weight',
+                'rnn.rnn.weight_ih_l0': 'recurrent_layer.weight_ih',
+                'rnn.rnn.weight_hh_l0': 'recurrent_layer.weight_hh',
+                'projection_layer.weight': 'projection.weight'
+            }
+        }
+        
+        # Handle unknown architectures with pattern matching
+        if not arch:
+            logger.warning("Custom audio architecture not recognized - using heuristic mapping")
+            mapping_tables['unknown'] = {
+                r'conv(\d+)\.weight': 'conv_layers.\\1.weight',
+                r'pos_?emb': 'position_embed',
+                r'proj': 'projection',
+                r'transformer\.layer_(\d+)\.attention': 'transformer.layers.\\1.attention',
+                r'mask_?token': 'mask_tokens.audio'
+            }
+            arch = 'unknown'
+        
+        # Conversion process
+        for custom_name, tensor in custom_weights.items():
+            matched = False
+            target_name = None
+            
+            # Try known mappings first
+            for pattern, target_pattern in mapping_tables[arch].items():
+                if arch in ['wav2vec2', 'hubert']:
+                    # Handle layer-indexed patterns
+                    if '{}' in pattern:
+                        for layer_idx in range(self.audio_encoder.transformer.num_layers):
+                            if pattern.format(layer_idx) in custom_name:
+                                target_name = target_pattern.format(layer_idx)
+                                matched = True
+                                break
+                    elif pattern in custom_name:
+                        target_name = target_pattern
+                        matched = True
+                elif arch == 'cnn_rnn':
+                    # Direct mapping
+                    if pattern in custom_name:
+                        target_name = target_pattern
+                        matched = True
+                else:  # Heuristic matching
+                    import re
+                    match = re.match(pattern, custom_name)
+                    if match:
+                        target_name = re.sub(pattern, target_pattern, custom_name)
+                        matched = True
+            
+            # Skip unmapped parameters
+            if not matched:
+                if config.get('log_skipped_weights', False):
+                    logger.debug(f"Skipping unmapped audio weight: {custom_name}")
+                continue
+            
+            # Check tensor compatibility
+            current_shape = tensor.shape
+            try:
+                target_param = self.audio_encoder.get_parameter(target_name)
+                target_shape = target_param.shape
+            except AttributeError:
+                logger.warning(f"Target parameter {target_name} not found in model")
+                continue
+            
+            # Reshape tensors if needed
+            if current_shape != target_shape:
+                if reshape_mode == 'skip':
+                    logger.info(f"Skipping {custom_name} due to shape mismatch "
+                               f"({current_shape} vs {target_shape})")
+                    continue
+                    
+                tensor = self._reshape_tensor(tensor, target_shape, 
+                                             mode=reshape_mode,
+                                             custom_name=custom_name,
+                                             target_name=target_name)
+            
+            hf_style_weights[target_name] = tensor
+        
+        logger.info(f"Converted {len(hf_style_weights)}/{len(custom_weights)} "
+                   f"audio weights ({arch} format)")
+        return hf_style_weights
     
-            # Apply dropout
-            if self.training and self.dropout_rate > 0:
-                # dropout_mask = (torch.rand(*pooled_mod.shape) > self.dropout_rate).astype(torch.float32)
-                dropout_mask = (torch.rand(*pooled_mod.shape, device=pooled_mod.device) > self.dropout_rate).float()
-                pooled_mod *= dropout_mask
+    def _reshape_tensor(self, tensor: torch.Tensor, target_shape: Tuple[int], 
+                       mode: str = 'auto', **kwargs) -> torch.Tensor:
+        """Reshapes tensors using various strategies"""
+        if mode == 'auto':
+            if tensor.dim() == 2 and target_shape[0] == target_shape[1]:    # Automatic reshaping heuristics
+                if tensor.shape[0] == target_shape[1] and tensor.shape[1] == target_shape[0]:    # Handle square matrix transpose
+                    return tensor.t()
+            elif tensor.numel() == math.prod(target_shape):
+                return tensor.view(target_shape)
+        
+        elif mode == 'pad':
+            # Zero-padding strategy
+            new_tensor = torch.zeros(target_shape, dtype=tensor.dtype, device=tensor.device)
+            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(tensor.shape, target_shape))
+            new_tensor[slices] = tensor[slices]
+            return new_tensor
+        
+        elif mode == 'crop':
+            # Cropping strategy
+            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(target_shape, tensor.shape))
+            return tensor[slices].clone()
+        
+        logger.warning(f"Could not reshape {kwargs.get('custom_name')} from "
+                      f"{tensor.shape} to {target_shape} using {mode} mode")
+        return tensor
+
+    def _convert_vision_language_weights(self, custom_weights: Dict) -> Tuple[Dict, Dict]:
+        """Separates and converts vision-language weights for VisionEncoder and TextEncoder.
+        
+        Supports models:
+        - CLIP
+        - ALIGN
+        - FLAVA
+        - ALBEF
+        - Custom dual-encoder architectures
+        
+        Handles:
+        - Component separation (vision/text)
+        - Cross-attention redistribution
+        - Modality-specific projection layers
+        """
+        vision_weights = {}
+        text_weights = {}
+        config = self.perception_config.get('weight_conversion', {})
+        fusion_handling = config.get('fusion_handling', 'distribute')
+        
+        # Architecture detection
+        arch = None
+        if any(k.startswith('visual.') or k.startswith('text.') for k in custom_weights):
+            arch = 'clip_style'
+        elif any('image_encoder' in k and 'text_encoder' in k for k in custom_weights):
+            arch = 'dual_encoder'
+        elif any('cross_attention' in k for k in custom_weights):
+            arch = 'fusion_model'
+        
+        # Key classification patterns
+        vision_patterns = [
+            'visual.', 'image_encoder.', 'vision.', 
+            'conv', 'resblocks', 'patch_embed', 'pos_embed',
+            'img_', 'spatial.', 'pixel_'
+        ]
+        text_patterns = [
+            'text.', 'token_embed', 'positional_embedding',
+            'transformer.text.', 'word_embed', 'txt_',
+            'language_encoder', 'bert.'
+        ]
+        fusion_patterns = [
+            'cross_attention', 'fusion', 'multihead_attn',
+            'modality_combine', 'concat'
+        ]
+        
+        # Special handling for known architectures
+        if arch == 'clip_style':
+            # CLIP-style explicit naming
+            for k, v in custom_weights.items():
+                if k.startswith('visual.'):
+                    vision_weights[k.replace('visual.', '')] = v
+                elif k.startswith('text.'):
+                    text_weights[k.replace('text.', '')] = v
+                elif 'positional_embedding' in k:
+                    if 'visual.positional_embedding' in k:
+                        vision_weights['position_embed'] = v
+                    else:
+                        text_weights['position_embeddings'] = v
+        
+        else:
+            # Generic heuristic-based separation
+            for custom_name, tensor in custom_weights.items():
+                # Classify as vision, text, or fusion
+                is_vision = any(p in custom_name for p in vision_patterns)
+                is_text = any(p in custom_name for p in text_patterns)
+                is_fusion = any(p in custom_name for p in fusion_patterns)
+                
+                # Fusion component handling
+                if is_fusion:
+                    if fusion_handling == 'distribute':
+                        # Distribute fusion components proportionally
+                        if is_vision or ('image' in custom_name.lower()):
+                            vision_weights[custom_name] = tensor
+                        elif is_text or ('text' in custom_name.lower()):
+                            text_weights[custom_name] = tensor
+                        else:
+                            # Split evenly between modalities
+                            vision_weights[custom_name] = tensor[:tensor.shape[0]//2]
+                            text_weights[custom_name] = tensor[tensor.shape[0]//2:]
+                    elif fusion_handling == 'discard':
+                        logger.info(f"Discarding fusion weight: {custom_name}")
+                        continue
+                    elif fusion_handling == 'vision':
+                        vision_weights[custom_name] = tensor
+                    elif fusion_handling == 'text':
+                        text_weights[custom_name] = tensor
+                
+                # Direct classification
+                elif is_vision:
+                    vision_weights[custom_name] = tensor
+                elif is_text:
+                    text_weights[custom_name] = tensor
+                else:
+                    logger.warning(f"Unclassified weight: {custom_name} - assigning to both")
+                    vision_weights[custom_name] = tensor
+                    text_weights[custom_name] = tensor.clone()
+        
+        # Post-processing for each modality
+        vision_weights = self._post_process_vision_weights(vision_weights)
+        text_weights = self._post_process_text_weights(text_weights)
+        
+        logger.info(f"Converted weights: {len(vision_weights)} vision, "
+                   f"{len(text_weights)} text, {arch} format")
+        return vision_weights, text_weights
     
-            weight = self.modal_weights[modality].data
-            pooled.append(weight * pooled_mod)
-            alphas.append(weight)
+    def _post_process_vision_weights(self, weights: Dict) -> Dict:
+        """Applies vision-specific weight transformations"""
+        processed = {}
+        for k, v in weights.items():
+            # Handle different position embedding formats
+            if 'pos_embed' in k and v.dim() == 2:
+                processed[k] = v.unsqueeze(0)  # Add batch dimension
+            
+            # Adapt convolutional weights
+            elif 'conv' in k and v.dim() == 4:
+                # Convert from (out, in, h, w) to (out, in, h, w)
+                if self.vision_encoder.encoder_type == 'transformer' and 'patch_embed' not in k:
+                    # No transformation needed
+                    processed[k] = v
+                else:
+                    # Permute dimensions if needed
+                    processed[k] = v.permute(2, 3, 1, 0) if self.config.get('channels_last') else v
+            
+            # Handle projection layers
+            elif 'proj' in k and v.dim() == 2:
+                target_shape = self.vision_encoder.projection.shape
+                if v.shape != target_shape:
+                    if v.shape[1] == target_shape[1]:
+                        processed[k] = v[:target_shape[0]]
+                    else:
+                        logger.warning(f"Projection shape mismatch: {v.shape} vs {target_shape}")
+            
+            else:
+                processed[k] = v
+        
+        return processed
     
-        # Combine
-        fused = sum(pooled) / max(len(pooled), 1)
-        self._alphas = {mod: alpha for mod, alpha in zip(embeddings.keys(), alphas)}
-        return fused
+    def _post_process_text_weights(self, weights: Dict) -> Dict:
+        """Applies text-specific weight transformations"""
+        processed = {}
+        vocab_size = self.tokenizer.get_vocab_size()
+        
+        for k, v in weights.items():
+            # Handle embedding layers
+            if 'embed' in k:
+                # Adapt to our vocabulary size
+                if v.shape[0] > vocab_size:
+                    processed[k] = v[:vocab_size]
+                elif v.shape[0] < vocab_size:
+                    # Pad with random initialization
+                    new_emb = torch.randn(vocab_size, v.shape[1])
+                    new_emb[:v.shape[0]] = v
+                    processed[k] = new_emb
+                else:
+                    processed[k] = v
+            
+            # Handle position embeddings
+            elif 'position' in k and v.dim() == 1:
+                processed[k] = v.unsqueeze(0)  # Add sequence dimension
+            
+            else:
+                processed[k] = v
+        
+        return processed
 
-    def backward(self, d_fused):
-        grads = {}
-        for modality, input_tensor in self._cached_inputs.items():
-            B, T, D = input_tensor.shape
-            # Corrected repeat operation
-            grad = d_fused[:, None, :].repeat(1, T, 1) * self.modal_weights[modality].data
-            grads[modality] = grad
+    def extract_performance_metrics(self, result: Any) -> dict:
+        """Extracts performance metrics from the result of perform_task."""
 
-            if not self._mask_flags.get(modality, False):
-                pooled_input = input_tensor.mean(axis=1)
-                d_alpha = torch.sum(pooled_input * d_fused) / len(self._cached_inputs)
-                self.modal_weights[modality].grad += d_alpha
-        return grads
+        metrics = {}
+        if isinstance(result, dict):
+            if 'loss' in result:
+                metrics['loss'] = result['loss']
+            if 'status' in result and result['status'] == 'success':
+                metrics['task_successful'] = 1.0
+            else:
+                metrics['task_successful'] = 0.0
 
-    def parameters(self):
-        return list(self.modal_weights.values()) + [self.gating_weights]
+        return metrics
 
-class SLAILMAdapter:
-    def __init__(self, perception_dim, llm_dim):
-        self.projection = Parameter(TensorOps.he_init((perception_dim, llm_dim), perception_dim))
-        self.layer_norm = Parameter(torch.ones(llm_dim))
-        self._cache = {}
+    def save_state_to_shared_memory(self):
+        """Save current model state to shared memory"""
+        snapshot = {
+            'model_state_dict': {
+                'text_encoder': self.text_encoder.state_dict(),
+                'vision_encoder': self.vision_encoder.state_dict(),
+                'audio_encoder': self.audio_encoder.state_dict(),
+                #'transformer': self.transformer.state_dict(),
+                'text_decoder': self.text_generator.state_dict(),
+                'vision_decoder': self.vision_generator.state_dict(),
+                'audio_decoder': self.audio_generator.state_dict(),
+            },
+            'optimizer_state': self.optimizer.state_dict(),
+            'config': self.perception_config
+        }
+        self.shared_memory.put(
+            self.sm_keys['model_snapshot'], 
+            snapshot,
+            ttl=timedelta(days=1))
+        logger.info(f"Saved model snapshot to shared memory")
 
-    def parameters(self):
-        return [self.projection, self.layer_norm]
+    def load_state_from_shared_memory(self):
+        """Load model state from shared memory"""
+        snapshot = self.shared_memory.get(self.sm_keys['model_snapshot'])
+        if snapshot:
+            self._apply_agent_state_dict(snapshot['model_state_dict'])
+            self.optimizer.load_state_dict(snapshot['optimizer_state'])
+            logger.info(f"Loaded model state from shared memory")
+            return True
+        return False
 
-    def set_cache(self, multimodal_emb, projected):
-        self._cache['multimodal_emb'] = multimodal_emb
-        self._cache['projected'] = projected
+    def cache_embeddings(self, modality: str, inputs: torch.Tensor, embeddings: torch.Tensor):
+        """Cache computed embeddings in shared memory"""
+        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        self.shared_memory.put(key, embeddings.detach().cpu())
+        logger.debug(f"Cached embeddings: {key}")
 
-    def forward(self, multimodal_emb):
-        projected = torch.matmul(multimodal_emb, self.projection.data)
-        self.set_cache(multimodal_emb, projected)
-        return TensorOps.layer_norm(projected) * self.layer_norm.data
+    def get_cached_embeddings(self, modality: str, inputs: torch.Tensor):
+        """Retrieve cached embeddings if available"""
+        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        return self.shared_memory.get(key)
+
 
 if __name__ == "__main__":
-    print("\n=== Running Perception Agent ===\n")
+    """
+    End-to-end smoke test harness for PerceptionAgent.
 
-    config =  {}
-    shared_memory = {}
-    agent_factory = None
-    perception_dim = 512
-    llm_dim = 768
+    This block intentionally runs multiple critical paths and reports granular pass/fail
+    outcomes so architecture regressions are visible immediately.
+    """
+    print("\n=== PerceptionAgent integration smoke test ===")
+    printer.status("TEST", "Starting Task Coordinator tests", "info")
+    from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
 
-    perceptive = PerceptionAgent(shared_memory, agent_factory, config)
-    attention = CrossModalAttention(embed_dim=512)
-    metrics = MultimodalMetrics()
-    fusion = MultimodalFusion(embed_dim=512, modalities=['text'], dropout_rate=0.1, masking_prob=0.15)
-    adapter = SLAILMAdapter(perception_dim, llm_dim)
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+    perception_config = get_config_section('perception_agent')
+    agent_type="Perception"
 
-    print(perceptive)
-    print(attention)
-    print(metrics)
-    print(fusion)
-    print(adapter)
-    print("\n=== Successfully Ran Perception Agent ===\n")
+    agent = PerceptionAgent(
+        shared_memory=shared_memory,
+        agent_factory=agent_factory,
+        config=perception_config
+    )
+    print(agent)
+    print("\n* * * * * Phase 2 * * * * *\n")
+    def _run_test(name, fn):
+        try:
+            result = fn()
+            print(f"[PASS] {name}")
+            return True, result
+        except Exception as exc:
+            print(f"[FAIL] {name}: {type(exc).__name__}: {exc}")
+            return False, None
+
+    torch.manual_seed(7)
+    random.seed(7)
+
+    # 1) Agent initialization
+    init_ok, agent_obj = _run_test(
+        "initialize agent",
+        lambda: PerceptionAgent(shared_memory=shared_memory, agent_factory=agent_factory)
+    )
+    if init_ok:
+        agent = agent_obj
+        device = getattr(agent, "device", "cpu")
+    else:
+        print("Aborting remaining tests because initialization failed.")
+        raise SystemExit(1)
+
+    # 2) Build representative multimodal batch
+    def _build_dummy_batch():
+        batch_size = 2
+        text_len = 32
+        img_size = int(getattr(agent.vision_encoder, "img_size", 224))
+        audio_len = int(getattr(agent.audio_encoder, "audio_length", 16000))
+        vocab_size = int(getattr(agent, "tokenizer").get_vocab_size())
+
+        return {
+            "text": {
+                "input_ids": torch.randint(0, vocab_size, (batch_size, text_len), dtype=torch.long, device=device),
+                "attention_mask": torch.ones(batch_size, text_len, dtype=torch.long, device=device),
+            },
+            "vision": {
+                "pixel_values": torch.randn(batch_size, 3, img_size, img_size, device=device),
+            },
+            "audio": {
+                "waveform": torch.randn(batch_size, 1, audio_len, device=device),
+            },
+            "style_id": torch.zeros(batch_size, dtype=torch.long, device=device),
+        }
+
+    data_ok, batch = _run_test("build dummy multimodal batch", _build_dummy_batch)
+
+    # 3) Encoder forward passes
+    if data_ok:
+        _run_test(
+            "text encoder forward",
+            lambda: agent.text_encoder(batch["text"]["input_ids"], style_id=batch["style_id"])
+        )
+        _run_test(
+            "vision encoder forward",
+            lambda: agent.vision_encoder(batch["vision"]["pixel_values"], style_id=batch["style_id"])
+        )
+        _run_test(
+            "audio encoder forward",
+            lambda: agent.audio_encoder(batch["audio"]["waveform"], style_id=batch["style_id"])
+        )
+
+    # 4) Inference step tests by modality
+    if data_ok:
+        _run_test(
+            "inference:text",
+            lambda: agent._inference_step({
+                "modality": "text",
+                "input_data": {
+                    "input_ids": batch["text"]["input_ids"],
+                    "style_id": batch["style_id"]
+                }
+            })
+        )
+        _run_test(
+            "inference:vision",
+            lambda: agent._inference_step({
+                "modality": "vision",
+                "input_data": {
+                    "pixel_values": batch["vision"]["pixel_values"],
+                    "style_id": batch["style_id"]
+                }
+            })
+        )
+        _run_test(
+            "inference:audio",
+            lambda: agent._inference_step({
+                "modality": "audio",
+                "input_data": {
+                    "waveform": batch["audio"]["waveform"],
+                    "style_id": batch["style_id"]
+                }
+            })
+        )
+
+    # 5) Shared-memory checkpoint roundtrip
+    _run_test("save state to shared memory", lambda: agent.save_state_to_shared_memory())
+    _run_test("load state from shared memory", lambda: agent.load_state_from_shared_memory())
+
+    print("=== PerceptionAgent smoke test completed ===\n")

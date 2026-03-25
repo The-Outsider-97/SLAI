@@ -82,7 +82,7 @@ class RewardModel:
         return self.regression_model.predict([features])[0]
 
     def retrain_model(self, training_data: List[Dict]):
-        """Retrain with human feedback data"""
+        """Retrain with human feedback data."""
         try:
             from sklearn.linear_model import LinearRegression
             from sklearn.preprocessing import StandardScaler
@@ -90,16 +90,37 @@ class RewardModel:
             logger.error("scikit-learn not available for retraining")
             return
 
+        if not isinstance(training_data, list):
+            logger.warning("Invalid training data type: %s", type(training_data).__name__)
+            return
+
         # Prepare training data
         X, y = [], []
+        dropped_samples = 0
         for sample in training_data:
-            if "model_scores" in sample and "human_rating" in sample:
-                try:
-                    features = [sample["model_scores"][k] for k in self.feature_names]
-                    X.append(features)
-                    y.append(sample["human_rating"])
-                except KeyError:
-                    continue
+            if not isinstance(sample, dict):
+                dropped_samples += 1
+                continue
+
+            model_scores = sample.get("model_scores")
+            human_rating = sample.get("human_rating")
+
+            if not isinstance(model_scores, dict) or human_rating is None:
+                dropped_samples += 1
+                continue
+
+            try:
+                features = [float(model_scores[k]) for k in self.feature_names]
+                target = float(human_rating)
+            except (KeyError, TypeError, ValueError):
+                dropped_samples += 1
+                continue
+
+            X.append(features)
+            y.append(target)
+
+        if dropped_samples:
+            logger.info("Dropped %d invalid feedback samples during retraining", dropped_samples)
 
         if len(X) < 10:
             logger.warning(f"Insufficient training data: {len(X)} samples")
@@ -147,6 +168,7 @@ class RewardModel:
     def evaluate(self, text: str, context: Dict = None) -> Dict[str, float]:
         """Evaluate text against all security reward components"""
         scores = {}
+        attention_bonus = 0.0
 
         # Calculate rule-based scores
         for name, rule in self.rule_based.items():
@@ -177,7 +199,7 @@ class RewardModel:
 
             # Add to composite score
             attention_factor = 0.1  # 10% weight to attention quality
-            composite += scores["attention_quality"] * attention_factor
+            attention_bonus = scores["attention_quality"] * attention_factor
 
         # Apply context-aware weighting
         ctx_type = context.get("operation") if context else "default"
@@ -191,6 +213,7 @@ class RewardModel:
         composite = sum(scores[name] * self.rule_weights.get(name, 0) 
                      for name in self.rule_based)
         composite += scores["learned"] * self.rule_weights.get("learned", 0)
+        composite += attention_bonus
         scores["composite"] = composite
 
         return scores

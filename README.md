@@ -1,9 +1,9 @@
-![Startup](frontend/assets/startup.png)
+![Startup](component/assets/startup.png)
 ---
 
 
 
-[//]: <![Flow Diagram](frontend/assets/flow_diagram.png)>
+[//]: <![Flow Diagram](component/assets/flow_diagram.png)>
 ## What is SLAI?
 
 SLAI is a modular, distributed AI assistant framework composed of autonomous agents. It decomposes complex tasks into specialized processes handled by modular agents. Each agent is specialized (e.g., perception, planning, reasoning) and collectively they:

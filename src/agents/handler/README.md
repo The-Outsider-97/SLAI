@@ -5,6 +5,10 @@ The `src/agents/handler/` package provides lightweight operational guardrails fo
 
 - **`HandlerMemory`** for checkpointing and telemetry buffering.
 - **`HandlerPolicy`** for retries and circuit-breaker control.
+- **`AdaptiveRetryPolicy`** for fingerprint-aware retry budgets.
+- **`ProbabilisticStrategySelector`** for data-informed strategy routing.
+- **`SLARecoveryPolicy`** for budget-aware retry constraints.
+- **`EscalationManager`** for typed handoff payloads.
 - **`HandlerError`** for structured, severity-aware error reporting.
 - **YAML-driven configuration** loaded through `utils/config_loader.py`.
 
@@ -19,6 +23,10 @@ src/agents/handler/
 ├── __init__.py
 ├── handler_memory.py
 ├── handler_policy.py
+├── adaptive_retry_policy.py
+├── strategy_selector.py
+├── sla_policy.py
+├── escalation_manager.py
 ├── configs/
 │   └── handler_config.yaml
 └── utils/
