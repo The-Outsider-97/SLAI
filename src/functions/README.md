@@ -17,6 +17,7 @@ graph TD
     M --> S[search.py]
     D[dropdown.py] --> UI[UI adapters]
     SB[sidebar.py] --> UI
+    L[loader.py] --> UI
     A --> API[Auth API / App Services]
     S --> SEARCH[Search API / App Services]
     M --> STORE[(Portable JSON Store)]
