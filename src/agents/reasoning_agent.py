@@ -1506,3 +1506,86 @@ class ReasoningAgent(BaseAgent):
         except Exception as e:
             self.log_step(f"Reasoning failed: {str(e)}", "error")
             return None
+
+
+if __name__ == "__main__":
+    import queue
+    import time
+    import random
+    from src.agents.collaborative.shared_memory import SharedMemory
+    from src.agents.agent_factory import AgentFactory
+
+    print("\n=== Running Reasoning Agent Demo ===\n")
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+    agent = ReasoningAgent(shared_memory=shared_memory, agent_factory=agent_factory)
+    print(agent)
+
+    # Add some initial facts
+    agent.add_fact(("Apple", "is", "fruit"), confidence=0.9)
+    agent.add_fact(("Fruit", "is", "healthy"), confidence=0.8)
+    print(f"Knowledge base size: {len(agent.knowledge_base)}")
+
+    # ------------------------------------------------------------
+    # Phase 2: Notification Handling (non-blocking)
+    # ------------------------------------------------------------
+    print("\n* * * * * Phase 2: Notification Handling * * * * *")
+    input_queue = queue.Queue()
+    output_queue = queue.Queue()
+    termination_queue = queue.Queue()
+    termination_queue.put("STOP")   # Tell the loop to exit immediately
+
+    # process_notifications will see the STOP signal and return
+    result = agent.process_notifications(input_queue, output_queue, termination_queue)
+    print("process_notifications returned:", result)
+    print("Phase 2 completed.\n")
+
+    # ------------------------------------------------------------
+    # Phase 3: Rule Addition (and demonstration of inference)
+    # ------------------------------------------------------------
+    print("\n* * * * * Phase 3: Rule Addition and Inference * * * * *")
+
+    # Define a simple transitive rule: if X is Y and Y is Z then X is Z
+    def transitive_rule_custom(kb):
+        new_facts = {}
+        for (a, p1, b), conf1 in kb.items():
+            for (c, p2, d), conf2 in kb.items():
+                if p1 == 'is' and p2 == 'is' and b == c:
+                    new_facts[(a, 'is', d)] = min(conf1, conf2)
+        return new_facts
+
+    agent.add_rule(transitive_rule_custom, rule_name="transitivity", weight=0.9)
+    print(f"Rules added: {len(agent.rules)}")
+
+    # Manually apply the rule to see what it would infer
+    inferred = transitive_rule_custom(agent.knowledge_base)
+    print("Inferred facts by rule:", inferred)
+
+    # Add one of the inferred facts to the knowledge base (optional)
+    if inferred:
+        fact, conf = next(iter(inferred.items()))
+        agent.add_fact(fact, confidence=conf)
+        print(f"Added inferred fact: {fact} with confidence {conf:.2f}")
+
+    print("Phase 3 completed.\n")
+
+    # ------------------------------------------------------------
+    # Phase 4: Opportunity Detection
+    # ------------------------------------------------------------
+    print("\n* * * * * Phase 4: Opportunity Detection * * * * *")
+
+    # Create a realistic state dictionary
+    state = {
+        "available_resources": {"cpu": 80, "memory": 64, "storage": 500},
+        "required_resources": {"cpu": 40, "memory": 32, "storage": 200},
+        "deadline": 100,
+        "completion_estimate": 60
+    }
+    task = "Optimize system performance"
+    opportunities = agent.detect_opportunity_factors(task, state)
+
+    print(f"Detected {len(opportunities)} opportunities:")
+    for opp in opportunities:
+        print(f"  - {opp['type']}: {opp['description']} (potential: {opp['potential']})")
+
+    print("\n=== Successfully ran the Reasoning Agent Demo ===\n")
