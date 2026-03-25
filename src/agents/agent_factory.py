@@ -1,15 +1,17 @@
 import importlib
 import inspect
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from . import __version__ 
 
 from .base.utils.main_config_loader import load_global_config
 from .factory.agent_meta_data import AgentMetaData, AgentRegistry
-from .factory.metrics_adapter import MetricsAdapter
 from .factory.reasoner import BasicZeroReasoner
 from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
+
+if TYPE_CHECKING:
+    from .factory.metrics_adapter import MetricsAdapter
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter
@@ -48,7 +50,8 @@ class AgentFactory:
         if config:
             self.global_config.update(config)
 
-        self.metrics_adapter = MetricsAdapter()
+        self._metrics_adapter: Optional["MetricsAdapter"] = None
+        self.metrics_adapter_status: str = "not_initialized"
         self.registry = AgentRegistry()
 
         self.active_agents: Dict[str, BaseAgent] = {}
@@ -62,6 +65,21 @@ class AgentFactory:
             ))
 
         logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
+
+    def _get_metrics_adapter(self) -> "MetricsAdapter":
+        if self._metrics_adapter is not None:
+            return self._metrics_adapter
+        try:
+            metrics_adapter_module = importlib.import_module("src.agents.factory.metrics_adapter")
+            metrics_adapter_cls = getattr(metrics_adapter_module, "MetricsAdapter")
+            self._metrics_adapter = metrics_adapter_cls()
+            self.metrics_adapter_status = "initialized"
+            return self._metrics_adapter
+        except Exception as exc:
+            self.metrics_adapter_status = f"failed ({type(exc).__name__}: {exc})"
+            raise RuntimeError(
+                f"Failed to initialize MetricsAdapter from src.agents.factory.metrics_adapter: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def discover_agents(self):
         agents_module = importlib.import_module(__package__)
@@ -242,9 +260,9 @@ class AgentFactory:
         This affects the configuration of subsequently created agents.
         """
         logger.info("Running adaptation cycle based on new metrics...")
-        
+
         # 1. Process metrics to get adjustments
-        adjustments = self.metrics_adapter.process_metrics(metrics, agent_types)
+        adjustments = self._get_metrics_adapter().process_metrics(metrics, agent_types)
         printer.pretty("Generated Adjustments", adjustments, "info")
 
         # 2. Apply adjustments to the factory's global configuration
