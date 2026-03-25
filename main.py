@@ -5,7 +5,7 @@ import subprocess
 
 from pathlib import Path
 
-from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import (
     QColor,
     QFont,
@@ -19,7 +19,23 @@ from PyQt5.QtGui import (
     QRegion,
     QTransform
 )
-from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QWidget, QGraphicsDropShadowEffect
+from PyQt5.QtWidgets import (
+    QApplication,
+    QLabel,
+    QPushButton,
+    QWidget,
+    QGraphicsDropShadowEffect,
+    QFrame,
+    QVBoxLayout,
+    QDialog,
+    QLineEdit,
+    QMessageBox,
+    QHBoxLayout,
+)
+
+from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
+from src.functions.auth import AuthService
+from src.functions.search import SearchEngine
 
 
 SL_YELLOW = QColor("#eacb00")
@@ -72,6 +88,88 @@ class SearchIcon(QWidget):
         painter.drawEllipse(QPointF(11, 11), 8, 8)
         painter.drawLine(QPointF(21, 21), QPointF(16.65, 16.65))
 
+class LoginDialog(QDialog):
+    def __init__(self, auth_service: AuthService, parent=None):
+        super().__init__(parent)
+        self.auth_service = auth_service
+        self.setWindowTitle("Login")
+        self.setModal(True)
+        self.setFixedSize(380, 230)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #12161a; color: white; }
+            QLabel { color: white; font-family: Georgia; }
+            QLineEdit {
+                background: #0e1012;
+                border: 1px solid #5c5c5c;
+                border-radius: 6px;
+                color: white;
+                padding: 6px;
+            }
+            QPushButton {
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-family: Georgia;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Log in to SLAI Hub")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #eacb00;")
+        layout.addWidget(title)
+
+        self.username_input = QLineEdit(self)
+        self.username_input.setPlaceholderText("Username")
+        self.password_input = QLineEdit(self)
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.username_input)
+        layout.addWidget(self.password_input)
+
+        button_row = QHBoxLayout()
+        login_btn = QPushButton("Log in")
+        signup_btn = QPushButton("Sign up")
+        forgot_btn = QPushButton("Forgot password?")
+        login_btn.clicked.connect(self._login)
+        signup_btn.clicked.connect(self._signup)
+        forgot_btn.clicked.connect(self._forgot_password)
+        button_row.addWidget(login_btn)
+        button_row.addWidget(signup_btn)
+        button_row.addWidget(forgot_btn)
+        layout.addLayout(button_row)
+
+    def _login(self):
+        username = self.username_input.text().strip()
+        password = self.password_input.text()
+        if not username or not password:
+            QMessageBox.warning(self, "Missing fields", "Please enter username and password.")
+            return
+        try:
+            token = self.auth_service.log_in(username, password)
+            QMessageBox.information(self, "Success", f"Logged in.\nToken ends at: {token.expires_at.isoformat()}")
+            self.accept()
+        except Exception as exc:
+            QMessageBox.warning(self, "Login failed", str(exc))
+
+    def _signup(self):
+        username = self.username_input.text().strip()
+        password = self.password_input.text()
+        if not username or not password:
+            QMessageBox.warning(self, "Missing fields", "Please enter username and password.")
+            return
+        try:
+            self.auth_service.sign_up(username, password)
+            QMessageBox.information(self, "Account created", "Sign up successful. You can now log in.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Sign up failed", str(exc))
+
+    def _forgot_password(self):
+        QMessageBox.information(
+            self,
+            "Forgot password",
+            "Password reset flow can be connected here.\nFor now, please sign up with a new account.",
+        )
 
 class LoginButton(QPushButton):
     def __init__(self, parent=None):
@@ -287,6 +385,25 @@ class HubWindow(QWidget):
         self.current_rotation = 0.0
         self.app_cards: list[AppCard] =[]
         self.child_window = None
+        self.auth_service = AuthService()
+        self.search_engine = SearchEngine(fields=["title", "description"])
+        self.search_engine.index_documents(
+            [
+                {"title": "MusAI", "description": "AI-powered music assistant."},
+                {"title": "BuildUp", "description": "Project execution and planning workspace."},
+                {"title": "Documaster", "description": "Smart document analysis and extraction."},
+                {"title": "SignalSentry", "description": "Monitoring and alert intelligence app."},
+            ]
+        )
+        self.dropdown_menu_model = DropdownMenu(
+            [
+                DropdownOption("Home", "home"),
+                DropdownOption("Products", "products"),
+                DropdownOption("Pricing", "pricing"),
+                DropdownOption("Contact", "contact"),
+            ],
+            animation=AnimationConfig(duration_ms=220, preset="smooth"),
+        )
 
         self._create_starfield()
         self._build_ui()
@@ -337,6 +454,55 @@ class HubWindow(QWidget):
         
         self.search = SearchIcon(self)
         self.login_btn = LoginButton(self)
+        self.search_bar = QLineEdit(self)
+        self.search_bar.hide()
+        self.search_bar.setPlaceholderText("Search products...")
+        self.search_bar.returnPressed.connect(self._run_search)
+        self.search_bar.setStyleSheet(
+            """
+            QLineEdit {
+                background: #0e1012;
+                border: 2px solid #ffffff;
+                border-radius: 10px;
+                color: #ffffff;
+                font-family: Georgia;
+                font-size: 16px;
+                padding: 6px 10px;
+            }
+            """
+        )
+        self.search_expand_anim = QPropertyAnimation(self.search_bar, b"geometry", self)
+        self.search_expand_anim.setDuration(240)
+        self.search_expand_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.search_open = False
+
+        self.dropdown_panel = QFrame(self)
+        self.dropdown_panel.setFrameShape(QFrame.StyledPanel)
+        self.dropdown_panel.hide()
+        self.dropdown_panel.setStyleSheet(
+            f"QFrame {{ background: #13171b; border: 1px solid #3f454c; border-radius: 10px; {self.dropdown_menu_model.transition_style()} }}"
+        )
+        self.dropdown_layout = QVBoxLayout(self.dropdown_panel)
+        self.dropdown_layout.setContentsMargins(12, 10, 12, 10)
+        self.dropdown_layout.setSpacing(8)
+        for option in self.dropdown_menu_model.options:
+            btn = QPushButton(option.label, self.dropdown_panel)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    color: white;
+                    background: transparent;
+                    text-align: left;
+                    font-family: Georgia;
+                    padding: 6px 4px;
+                    border: none;
+                }
+                QPushButton:hover { color: #eacb00; }
+                """
+            )
+            btn.clicked.connect(lambda _checked=False, v=option.value: self._select_dropdown(v))
+            self.dropdown_layout.addWidget(btn)
 
         self.hero = QLabel(self)
         self.hero.setText(
@@ -391,11 +557,72 @@ class HubWindow(QWidget):
 
         # Force UI overlays to front
         self.hamburger.raise_()
+        self.dropdown_panel.raise_()
         self.logo_label.raise_()
         self.search.raise_()
+        self.search_bar.raise_()
         self.login_btn.raise_()
         self.hero.raise_()
         self.desc_label.raise_()
+
+        self.hamburger.mousePressEvent = self._toggle_dropdown_event
+        self.search.mousePressEvent = self._toggle_search_event
+        self.login_btn.clicked.connect(self._open_login_dialog)
+
+    def _toggle_dropdown_event(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        is_open = self.dropdown_menu_model.toggle()
+        self.dropdown_panel.setVisible(is_open)
+
+    def _select_dropdown(self, value: str):
+        selected = self.dropdown_menu_model.select(value)
+        self.dropdown_panel.hide()
+        QMessageBox.information(self, "Menu", f"Selected: {selected.title()}")
+
+    def _open_login_dialog(self):
+        dialog = LoginDialog(self.auth_service, self)
+        dialog.exec_()
+
+    def _toggle_search_event(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        icon_x = self.search.x()
+        icon_y = self.search.y() - 2
+        if not self.search_open:
+            self.search_bar.show()
+            self.search.setVisible(False)
+            self.search_expand_anim.stop()
+            self.search_expand_anim.setStartValue(QRect(icon_x, icon_y, 26, 30))
+            self.search_expand_anim.setEndValue(QRect(icon_x - 260, icon_y, 286, 36))
+            self.search_expand_anim.start()
+            self.search_open = True
+            self.search_bar.setFocus()
+        else:
+            self.search_expand_anim.stop()
+            self.search_expand_anim.setStartValue(self.search_bar.geometry())
+            self.search_expand_anim.setEndValue(QRect(icon_x, icon_y, 26, 30))
+            self.search_expand_anim.finished.connect(self._finish_search_close)
+            self.search_expand_anim.start()
+
+    def _finish_search_close(self):
+        self.search_expand_anim.finished.disconnect(self._finish_search_close)
+        self.search_bar.hide()
+        self.search.setVisible(True)
+        self.search_open = False
+
+    def _run_search(self):
+        query = self.search_bar.text().strip()
+        if not query:
+            return
+        results = self.search_engine.search(query, limit=3)
+        if not results:
+            QMessageBox.information(self, "Search", "No results found.")
+            return
+        msg = "\n".join(
+            [f"- {result.item.get('title', 'Untitled')} ({result.score:.2f})" for result in results]
+        )
+        QMessageBox.information(self, "Search results", msg)
 
     def _on_app_hover_changed(self, app_name: str, is_hovered: bool) -> None:
         if is_hovered:
@@ -427,21 +654,20 @@ class HubWindow(QWidget):
         self.desc_label.show()
 
     def _on_app_clicked(self, app_name: str) -> None:
-        if app_name != "SignalSentry":
+        if app_name not in {"SignalSentry", "ContentOps Autopublisher"}:
             return
 
         try:
-            from component.signal_sentry import SignalSentryWindow
-        except Exception as exc:
-            print(f"Failed to import SignalSentry window: {exc}")
-            return
-
-        try:
-            self.child_window = SignalSentryWindow()
+            if app_name == "SignalSentry":
+                from component.signal_sentry import SignalSentryWindow
+                self.child_window = SignalSentryWindow()
+            else:
+                from component.autopublisher import AutopublisherWindow
+                self.child_window = AutopublisherWindow()
             self.child_window.show()
             self.close()
         except Exception as exc:
-            print(f"Failed to launch SignalSentry: {exc}")
+            print(f"Failed to launch {app_name}: {exc}")
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()
@@ -458,10 +684,13 @@ class HubWindow(QWidget):
     def _position_top_bar(self) -> None:
         center_y = 49
         self.hamburger.move(40, center_y - 12)
+        self.dropdown_panel.setGeometry(35, center_y + 18, 210, 190)
         self.logo_label.adjustSize()
         self.logo_label.move(101, center_y - self.logo_label.height() // 2)
         self.login_btn.move(self.width() - 40 - 110, center_y - 19)
         self.search.move(self.login_btn.x() - 25 - 26, center_y - 13)
+        if self.search_open:
+            self.search_bar.setGeometry(self.search.x() - 260, self.search.y() - 2, 286, 36)
 
     def _position_hero(self) -> None:
         self.hero.adjustSize()
