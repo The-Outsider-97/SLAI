@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
 
@@ -35,6 +35,8 @@ class MetricsAdapter:
         self.safety_bounds = self.meta_config.get("safety_bounds", {"default": 1.0})
 
         self._init_control_parameters()
+        self._torch_module: Optional[Any] = None
+        self._torch_import_error: Optional[Exception] = None
 
     def _init_control_parameters(self):
         self.Kp = self.pid_params["Kp"]
@@ -89,7 +91,28 @@ class MetricsAdapter:
         max_disparity = max(values) - min(values)
         return (max_disparity - target) / (1.0 + max_disparity)
 
-    def process_metrics(self, metrics: Dict[str, Any], agent_types: List[str]) -> Dict[str, torch.Tensor]:
+    def _get_torch(self) -> Any:
+        if self._torch_module is not None:
+            return self._torch_module
+        if self._torch_import_error is not None:
+            raise RuntimeError("torch is unavailable for MetricsAdapter operations") from self._torch_import_error
+        try:
+            import torch  # type: ignore
+        except Exception as exc:
+            self._torch_import_error = exc
+            raise RuntimeError("torch import failed during MetricsAdapter execution") from exc
+        self._torch_module = torch
+        return torch
+
+    def _to_scalar(self, value: Any) -> float:
+        torch = self._torch_module
+        if torch is not None and isinstance(value, torch.Tensor):
+            return float(value.item())
+        if hasattr(value, "item") and callable(value.item):
+            return float(value.item())
+        return float(value)
+
+    def process_metrics(self, metrics: Dict[str, Any], agent_types: List[str]) -> Dict[str, Any]:
         self.metric_history.append(metrics)
         delta = self._calculate_metric_deltas()
 
@@ -100,16 +123,18 @@ class MetricsAdapter:
 
         return self._apply_safety_bounds(adjustments, agent_types)
 
-    def _apply_safety_bounds(self, adjustments: Dict[str, torch.Tensor], agent_types: List[str]):
+    def _apply_safety_bounds(self, adjustments: Dict[str, Any], agent_types: List[str]):
+        torch = self._get_torch()
         for agent_type in agent_types:
             bound = self.safety_bounds.get(agent_type, self.safety_bounds.get("default", 1.0))
             for key, value in adjustments.items():
-                value_f = value.item() if isinstance(value, torch.Tensor) else value
+                value_f = self._to_scalar(value)
                 if abs(value_f) > bound:
                     adjustments[key] = torch.tensor(bound * (1 if value_f > 0 else -1), dtype=torch.float32)
         return adjustments
 
-    def _pid_control(self, metric_type: str, error: float, delta: float) -> Dict[str, torch.Tensor]:
+    def _pid_control(self, metric_type: str, error: float, delta: float) -> Dict[str, Any]:
+        torch = self._get_torch()
         self.integral[metric_type] += error
         derivative = error - self.prev_error[metric_type]
 
@@ -119,15 +144,16 @@ class MetricsAdapter:
         self.prev_error[metric_type] = error
         return {f"{metric_type}_adjustment": adjustment_tensor}
 
-    def update_factory_config(self, factory: "AgentFactory", adjustments: Dict[str, torch.Tensor]):
+    def update_factory_config(self, factory: "AgentFactory", adjustments: Dict[str, Any]):
+        torch = self._get_torch()
         for metadata in factory.registry.agents.values():
             performance_adj = adjustments.get("performance_adjustment", torch.tensor(0.0))
-            performance_adj = performance_adj.item() if isinstance(performance_adj, torch.Tensor) else performance_adj
+            performance_adj = self._to_scalar(performance_adj)
 
             if hasattr(metadata, "exploration_rate"):
                 metadata.exploration_rate = min(metadata.exploration_rate * (1 + performance_adj), 1.0)
 
             fairness_adj = adjustments.get("fairness_adjustment", torch.tensor(0.0))
-            fairness_adj = fairness_adj.item() if isinstance(fairness_adj, torch.Tensor) else fairness_adj
+            fairness_adj = self._to_scalar(fairness_adj)
             if hasattr(metadata, "risk_threshold"):
                 metadata.risk_threshold *= (1 - fairness_adj)
