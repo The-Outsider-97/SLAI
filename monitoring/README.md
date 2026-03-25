@@ -1,52 +1,33 @@
 # SLAI Monitoring Subsystem
 
-This folder now provides a cohesive, production-style monitoring layer used by both automation and the SLAI Hub UI.
+This folder provides a cohesive, production‑ready monitoring layer used by both automation scripts and the SLAI Hub UI.
 
-## Architecture Overview
+## Architecture
 
-The subsystem is split into focused modules:
+The subsystem is split into four focused modules:
 
-1. `metrics_collector.py`
-   - Collects structured runtime snapshots.
-   - Captures CPU (total/per-core/load), memory, disk, process, and network telemetry.
-   - Returns typed snapshots (`MetricSnapshot`) with UTC timestamps.
+1. **`metrics_collector.py`**  
+   Collects structured system metrics (CPU, memory, disk, network, processes) with fallback when `psutil` is missing.  
+   Returns a `MetricSnapshot` dataclass.
 
-2. `drift_detection.py`
-   - Runs KS-test drift checks through `DriftDetector`.
-   - Validates threshold and input data (including empty/invalid values).
-   - Returns a structured `DriftResult` containing statistic, p-value, threshold, drift flag, sample counts, and notes.
+2. **`drift_detection.py`**  
+   Implements a Kolmogorov‑Smirnov test for data drift.  
+   Returns a `DriftResult` dataclass with statistic, p‑value, drift flag, and notes.
 
-3. `health_check.py`
-   - Executes multi-service health probes with `HealthChecker`.
-   - Supports both TCP and HTTP checks.
-   - Handles failures and timeouts gracefully and returns aggregate `HealthReport` summaries.
+3. **`health_check.py`**  
+   Performs TCP and HTTP health checks on a list of services.  
+   Returns a `HealthReport` containing per‑service results and overall status.
 
-4. `alert_manager.py`
-   - Central alert decision layer (`AlertManager`) for metrics, drift, and health events.
-   - Supports threshold-based triggering and deduplication cooldowns.
-   - Separates transport logic via `EmailAlertTransport`.
-   - Keeps legacy helper function compatibility where practical.
+4. **`alert_manager.py`**  
+   Evaluates metrics, drift, and health results against thresholds, applies deduplication cooldowns, and dispatches alerts via email (or other transports).  
+   Separates alert logic from delivery.
 
-## How the SLAI Hub popup uses this layer
+## Public API
 
-`main.py` includes a **System Monitoring** dialog in the hamburger menu. That popup:
+All public classes and functions are exported in `__init__.py`.
 
-- Calls `MetricsCollector.collect_snapshot()` for current host telemetry.
-- Calls `HealthChecker.run_checks()` for local TCP/HTTP endpoint status.
-- Calls `DriftDetector.detect()` to surface drift diagnostics in a consistent format.
-- Renders the monitoring state in a SLAI-styled dialog, keeping the monitoring UX integrated into Hub.
-
-## Configuration / Setup Notes
-
-- `psutil` and `scipy` are required for full metrics + drift capabilities.
-- Email delivery requires explicit SMTP configuration through `EmailAlertTransport` (host/port/auth/from-address).
-- No credentials are hardcoded; secure values should be injected from environment-specific config.
-
-## Compatibility Notes
-
-- Legacy helper functions were preserved:
-  - `collect_system_metrics()`
-  - `detect_data_drift()`
-  - `service_health_check()`
-  - `send_alert()`
-- New class-based APIs are recommended for all new integrations.
+### Metrics Collection
+```python
+collector = MetricsCollector(disk_path="/")
+snapshot = collector.collect_snapshot()
+print(snapshot.to_pretty_string())
