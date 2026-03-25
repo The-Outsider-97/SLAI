@@ -70,6 +70,12 @@ class AgentRegistry:
                 if lowered.endswith(".collaborative_agent"):
                     logger.debug("Skipping %s to avoid recursive collaboration manager bootstrap.", module_name)
                     continue
+                if not lowered.endswith("_agent"):
+                    logger.debug("Skipping non-plugin module %s during discovery.", module_name)
+                    continue
+                if lowered.endswith(".base_agent"):
+                    logger.debug("Skipping base class module %s during discovery.", module_name)
+                    continue
                 if "agent" in lowered:
                     self._load_agent_module(module_name)
             self._discovered_packages.add(agents_package)
@@ -93,8 +99,17 @@ class AgentRegistry:
                     continue
                 if inspect.isabstract(obj) or not issubclass(obj, BaseAgent):
                     continue
+                if obj is BaseAgent or not name.endswith("Agent"):
+                    continue
 
                 caps = list(getattr(obj, "capabilities", []))
+                if not caps:
+                    logger.debug(
+                        "Skipping class %s from %s: no capabilities declared (likely helper/base).",
+                        name,
+                        module_name,
+                    )
+                    continue
                 meta = {
                     "class": obj,
                     "instance": None,
@@ -117,7 +132,8 @@ class AgentRegistry:
         agent_class = meta.get("class")
         required_attrs = ["execute", "capabilities"]
         if not agent_class or not all(hasattr(agent_class, attr) for attr in required_attrs):
-            raise ValueError(f"Agent {name} missing required attributes")
+            logger.debug("Skipping agent candidate %s: missing required registry attrs.", name)
+            return
 
         self._agents[name] = meta
         logger.info(f"Registered agent: {name} with capabilities: {meta['capabilities']}")
