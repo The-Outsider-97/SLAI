@@ -28,7 +28,7 @@ registry:
   health_check_interval: 300  # seconds-
   agent_discovery:
     default_package: "src.agents"
-    excluded_modules: ["browser_agent"]
+    excluded_modules: []
 
 shared_memory:
   max_memory_mb: 100
