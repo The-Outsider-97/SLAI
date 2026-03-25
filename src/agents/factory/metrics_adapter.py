@@ -1,8 +1,6 @@
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import torch
-
 from src.agents.factory.utils.config_loader import get_config_section, load_global_config
 from logs.logger import PrettyPrinter, get_logger
 
