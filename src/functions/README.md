@@ -178,7 +178,44 @@ from src.functions import (
     Sidebar,
 )
 ```
+## 6) `loader.py`
 
+A thread‑safe loader manager that estimates time remaining for long‑running tasks.
+
+### Features
+
+- **Progress tracking**: supports both step‑based (total steps) and continuous (0‑1) progress.
+- **ETA estimation**: calculates remaining time based on progress rate; uses exponential smoothing for stability.
+- **Callback hooks**: `on_update` and `on_complete` for UI integration.
+- **Thread‑safe**: internal locks allow safe use across threads.
+- **Context manager**: `LoaderContext` for automatic start/complete.
+
+### Basic Usage
+
+```python
+from src.functions.loader import Loader, LoaderContext
+
+# Step‑based
+loader = Loader(total_steps=100, on_update=lambda state: print(f"{state.progress:.0%} - {state.message}"))
+loader.start("Loading data...")
+for i in range(100):
+    time.sleep(0.05)
+    loader.update(steps_done=i+1, message=f"Step {i+1}/100")
+loader.complete("Done!")
+
+# Continuous progress (e.g., from a file download)
+loader2 = Loader(on_update=lambda s: print(f"ETA: {s.eta:.1f}s"))
+loader2.start("Downloading...")
+for p in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]:
+    time.sleep(1)
+    loader2.update(progress=p, message=f"{p*100:.0f}%")
+loader2.complete("Download finished")
+
+# Using context manager
+with LoaderContext(Loader(total_steps=50), "Processing"):
+    for i in range(50):
+        loader.update(steps_done=i+1)   # automatically ends when block exits
+```
 ---
 
 ## End-to-End Example
