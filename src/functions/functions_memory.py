@@ -9,12 +9,12 @@ Includes:
 
 from __future__ import annotations
 
+import portalocker # type: ignore
 import secrets
 import hashlib
 import hmac
 import json
 import os
-import portalocker
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -154,27 +154,18 @@ class PortableStore:
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self.lock_timeout = lock_timeout
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._thread_lock = RLock()   # For thread safety within the same process
+        self._thread_lock = RLock()
+        # Use portalocker.Lock which supports timeout
+        self._lock = portalocker.Lock(self.lock_path, timeout=self.lock_timeout)
 
     def _acquire_lock(self) -> None:
-        """Acquire an exclusive lock on the lock file."""
-        # Use portalocker with a timeout
-        self.lock_fd = open(self.lock_path, 'w')
-        portalocker.lock(self.lock_fd, portalocker.LOCK_EX, timeout=self.lock_timeout)
+        self._lock.acquire()
 
     def _release_lock(self) -> None:
-        """Release the lock and close the lock file."""
-        if hasattr(self, 'lock_fd'):
-            portalocker.unlock(self.lock_fd)
-            self.lock_fd.close()
-            try:
-                self.lock_path.unlink()
-            except OSError:
-                pass
+        self._lock.release()
 
     def save(self, payload: Dict[str, object]) -> None:
-        """Write payload atomically with a temporary file."""
-        with self._thread_lock:   # Ensure thread safety within the process
+        with self._thread_lock:
             self._acquire_lock()
             try:
                 temp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -189,7 +180,6 @@ class PortableStore:
                 self._release_lock()
 
     def load(self) -> Dict[str, object]:
-        """Load payload with a shared lock."""
         if not self.path.exists():
             return {}
         with self._thread_lock:
