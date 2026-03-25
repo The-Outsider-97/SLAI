@@ -108,6 +108,10 @@ class DropdownMenu:
         self.is_open = not self.is_open
         return self.is_open
 
+    def close(self) -> None:
+        """Close the dropdown menu (sets is_open to False)."""
+        self.is_open = False
+
     def select(self, value: str) -> str:
         self._validate_selected_value(value)
         self.selected_value = value
