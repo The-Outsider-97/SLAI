@@ -17,6 +17,7 @@ The `src/agents/reasoning/` package contains the symbolic + probabilistic reason
 ```text
 src/agents/reasoning/
 ├── __init__.py
+├── orchestrator.py
 ├── rule_engine.py
 ├── probabilistic_models.py
 ├── hybrid_probabilistic_models.py
@@ -61,6 +62,11 @@ flowchart LR
 ---
 
 ## Core Components
+
+### `orchestrator.py`
+- Central coordination layer used by `ReasoningAgent`.
+- Owns safe fact/rule mutation, persistence, and cross-component orchestration.
+- Keeps façade logic thin and enforces deterministic lifecycle behavior.
 
 ### `rule_engine.py`
 - Loads configuration, knowledge base, lexicon, and dependency/pragmatic rule data.
