@@ -92,25 +92,3 @@ flowchart LR
 ---
 
 ## Validation Pipeline (high level)
-
-```mermaid
-flowchart TD
-    A[Rules + New Facts] --> B[Detect Circular Rules]
-    A --> C[Check Rule Soundness]
-    A --> D[Detect Fact Conflicts]
-    A --> E[Check Redundancies]
-    B --> F[Aggregate Validation Report]
-    C --> F
-    D --> F
-    E --> F
-    F --> G[Knowledge Base Consistency Check]
-    G --> H[Persist in ReasoningMemory]
-```
-
----
-
-## Notes
-
-- Configuration is centralized through `configs/reasoning_config.yaml` and `utils/config_loader.py`.
-- Static network definitions under `networks/` provide reusable graph templates for probabilistic experiments/inference.
-- Templates under `templates/` provide semantic and structural weighting priors.
