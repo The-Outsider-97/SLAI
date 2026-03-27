@@ -1,11 +1,64 @@
 # `src/functions` — Reusable Application Function Layer
 
-The `src/functions` package provides portable, framework-agnostic building blocks for common app capabilities:
+`src/functions` provides portable, framework-agnostic building blocks for common application capabilities:
 
-1. **Stronger authentication** (with refresh-token rotation and revocation)
-2. **Smarter search** (with pluggable analyzers)
-3. **Interactive dropdown state** (with easing presets/interpolation strategies)
-4. **Hideable/collapsible sidebar state** (with richer animation helpers)
+1. Authentication with lockout, refresh-token rotation, and revocation
+2. Search with pluggable analyzers, BM25-style ranking, fuzzy matching, and caching
+3. UI state helpers for dropdowns, sidebars, and loading overlays
+4. Rate limiting with in-memory and Redis-backed token buckets
+5. Email delivery with SMTP, async queueing, and simple templating
+6. File storage with local filesystem and S3 backends
+
+---
+
+## Package Exports
+
+```python
+from src.functions import (
+    # Auth
+    AuthService,
+    AuthSession,
+    AuthToken,
+    RefreshToken,
+    UserRecord,
+
+    # Search
+    SearchEngine,
+    SearchResult,
+    BasicAnalyzer,
+    StemAnalyzer,
+    StopwordAnalyzer,
+    InvertedIndex,
+    BM25Scorer,
+    SearchAnalyzer,
+
+    # UI helpers
+    DropdownMenu,
+    DropdownOption,
+    AnimationConfig,
+    EASING_PRESETS,
+    INTERPOLATION_STRATEGIES,
+    Sidebar,
+    SidebarAnimation,
+    SidebarSection,
+    Loader,
+    LoaderContext,
+
+    # Shared primitives
+    CredentialPolicy,
+    PasswordHasher,
+    PortableStore,
+    TTLCache,
+
+    # Service helpers
+    RateLimiter,
+    EmailService,
+    SMTPBackend,
+    Storage,
+    LocalStorage,
+    S3Storage,
+)
+```
 
 ---
 
@@ -13,41 +66,43 @@ The `src/functions` package provides portable, framework-agnostic building block
 
 ```mermaid
 graph TD
-    M[functions_memory.py] --> A[auth.py]
-    M --> S[search.py]
-    D[dropdown.py] --> UI[UI adapters]
+    FM[functions_memory.py] --> AUTH[auth.py]
+    FM --> SEARCH[search.py]
+    SEARCH --> IDX[inverted_index.py]
+    DD[dropdown.py] --> UI[UI adapters]
     SB[sidebar.py] --> UI
-    L[loader.py] --> UI
-    A --> API[Auth API / App Services]
-    S --> SEARCH[Search API / App Services]
-    M --> STORE[(Portable JSON Store)]
+    LD[loader.py] --> UI
+    RL[ratelimiter.py] --> API[APIs / service layer]
+    EM[email.py] --> SMTP[SMTP backend]
+    ST[storage.py] --> FS[Local filesystem]
+    ST --> S3[S3 backend]
 ```
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant AS as AuthService
-    participant RT as Refresh Store
     participant REV as Revocation List
+    participant RC as Refresh Cache
 
     C->>AS: log_in_with_refresh(username, password)
-    AS-->>C: access + refresh token
+    AS-->>C: access + refresh tokens
 
     C->>AS: rotate_refresh_token(old_refresh)
     AS->>REV: revoke old refresh hash
-    AS->>RT: invalidate old refresh
-    AS-->>C: new access + new refresh
+    AS->>RC: invalidate old refresh token
+    AS-->>C: new access + new refresh tokens
 ```
 
 ```mermaid
 graph LR
     Q[Query] --> AN[Analyzer]
-    AN --> IDX[Inverted Index Match]
-    AN --> BM[BM25-like Lexical Score]
-    AN --> FZ[Fuzzy Bonus]
-    BM --> R[Ranked Results]
-    FZ --> R
-    R --> C[TTL Query Cache]
+    AN --> IX[InvertedIndex]
+    IX --> BM[BM25 scorer]
+    IX --> FZ[Fuzzy bonus]
+    BM --> RR[Ranked SearchResult]
+    FZ --> RR
+    RR --> CACHE[TTLCache]
 ```
 
 ---
@@ -56,209 +111,387 @@ graph LR
 
 ## 1) `functions_memory.py`
 
-Core primitives shared by auth/search:
+Shared memory and security primitives used by other modules.
 
-- `CredentialPolicy`: password complexity gates.
-- `PasswordHasher`: `scrypt` hashing + constant-time verification.
-- `TTLCache`: thread-safe TTL+LRU cache.
-- `PortableStore`: atomic JSON persistence for portability.
+### Main components
+
+- `CredentialPolicy`: configurable password-complexity validation
+- `PasswordHasher`: `scrypt` hashing with constant-time verification
+- `TTLCache`: thread-safe TTL + LRU cache
+- `PortableStore`: atomic JSON persistence with file locking
+
+### Typical uses
+
+- enforce password requirements before signup
+- cache short-lived search or token metadata
+- persist lightweight local state without introducing a database
 
 ---
 
 ## 2) `auth.py`
 
+Authentication service with lockout protection, access tokens, refresh-token rotation, and token revocation.
+
 ### Main types
-- `AuthToken`: short-lived access token.
-- `RefreshToken`: long-lived refresh token.
-- `AuthSession`: access+refresh pair.
-- `UserRecord`: user credential/lockout metadata.
+
+- `AuthToken`: short-lived access token
+- `RefreshToken`: long-lived refresh token
+- `AuthSession`: access + refresh token pair
+- `UserRecord`: stored user credential and lockout metadata
 
 ### Key capabilities
 
-- Sign-up with policy checks (`CredentialPolicy`).
-- Login hardening:
-  - failed-attempt counters,
-  - temporary lockout windows.
-- Access token validation.
-- **Refresh token rotation** via `rotate_refresh_token(...)`:
-  - invalidates old refresh token,
-  - adds old token hash to revocation list,
-  - mints new access+refresh pair.
-- **Revocation list** support via hashed token keys:
-  - `revoke_token(...)`
-  - `get_revocation_list(...)`
-  - revoked tokens fail validation checks.
+- password policy validation through `CredentialPolicy`
+- password hashing through `PasswordHasher`
+- configurable failed-attempt tracking and temporary account lockout
+- access-token validation via `is_token_valid(...)`
+- refresh-token validation via `is_refresh_token_valid(...)`
+- refresh-token rotation via `rotate_refresh_token(...)`
+- token revocation via `revoke_token(...)` and `log_out(...)`
+- local persistence of users and revoked token hashes through `PortableStore`
 
-### Auth flow details
+### Example
 
-```mermaid
-graph TD
-    SU[sign_up] --> P[CredentialPolicy.validate]
-    P --> H[PasswordHasher.hash_password]
-    H --> PS[PortableStore.save]
+```python
+from src.functions import AuthService
 
-    LI[log_in_with_refresh] --> V[PasswordHasher.verify_password]
-    V -->|ok| MS[mint session]
-    V -->|fail| L[lockout counter update]
-    MS --> AC[access cache]
-    MS --> RC[refresh cache]
+service = AuthService()
 
-    RR[rotate_refresh_token] --> RV[revocation set add]
-    RV --> RI[invalidate old refresh]
-    RI --> NM[mint new session]
+user_id = service.sign_up("alex", "MyStrongP@ssw0rd!")
+session = service.log_in_with_refresh("alex", "MyStrongP@ssw0rd!")
+
+assert service.is_token_valid(session.access.token)
+assert service.is_refresh_token_valid(session.refresh.token)
+
+rotated = service.rotate_refresh_token(session.refresh.token)
+assert service.is_token_valid(rotated.access.token)
 ```
 
 ---
 
 ## 3) `search.py`
 
-### Pluggable analyzers
+Search utilities built on a persistent in-memory inverted index, BM25-style scoring, fuzzy matching, and TTL caching.
 
-- `SearchAnalyzer` (Protocol): analyzer interface.
-- `BasicAnalyzer`: normalization/tokenization baseline.
-- `StemAnalyzer`: lightweight suffix stemming.
-- `LanguageAwareAnalyzer(language="en"|"es"|"nl")`: stopword-aware tokenization.
+### Available analyzers
 
-### Ranking strategy
+- `BasicAnalyzer`: lowercases and tokenizes on non-alphanumeric characters
+- `StemAnalyzer`: applies light suffix stripping
+- `StopwordAnalyzer(language="en" | "es" | "nl")`: removes stopwords from a JSON file or built-in fallback sets
+- `SearchAnalyzer`: protocol exported from `utils.inverted_index`
 
-1. Build per-query in-memory index.
-2. BM25-like lexical scoring.
-3. Fuzzy similarity bonus for misspellings.
-4. Return ranked `SearchResult` entries.
-5. Cache results with analyzer-aware cache keys.
+### Ranking model
+
+1. tokenize the query with the configured analyzer
+2. fetch candidate documents from the inverted index
+3. compute BM25-style lexical scores
+4. add fuzzy-match bonus for approximate token matches
+5. return ranked `SearchResult` objects
+6. cache results with `TTLCache`
+
+### Important usage note
+
+`SearchEngine.search(...)` searches the engine's current index. Index documents first with `index_documents(...)` or incrementally with `add_document(...)`.
+
+### Example
+
+```python
+from src.functions import SearchEngine, StopwordAnalyzer
+
+items = [
+    {"title": "Running Shoes", "description": "Shoes for runners"},
+    {"title": "Trail Shoe", "description": "Outdoor running comfort"},
+]
+
+engine = SearchEngine(
+    fields=["title", "description"],
+    analyzer=StopwordAnalyzer(language="en"),
+)
+engine.index_documents(items)
+
+results = engine.search("runnng shoe")
+for result in results:
+    print(result.score, result.item)
+```
 
 ---
 
 ## 4) `dropdown.py`
 
-### Animation upgrades
+Reusable dropdown state model with animation presets and interpolation helpers.
 
-- Easing presets (`EASING_PRESETS`): `smooth`, `snappy`, `gentle`, `spring`.
-- Interpolation strategies (`INTERPOLATION_STRATEGIES`):
-  - `linear`
-  - `ease_in`
-  - `ease_out`
-  - `ease_in_out`
+### Main types
 
-### UI helper APIs
+- `DropdownOption`
+- `AnimationConfig`
+- `DropdownMenu`
 
-- `transition_style()` → CSS transition string.
-- `animation_frames(steps, strategy=...)` → deterministic keyframe values.
+### Highlights
+
+- easing presets exposed through `EASING_PRESETS`
+- interpolation helpers exposed through `INTERPOLATION_STRATEGIES`
+- `toggle()` for open/close state
+- `animation_frames(steps, strategy=...)` for deterministic animation values
+- `transition_style()` returns an empty string because Qt/QSS transitions are expected to be handled in the UI layer
+
+### Example
+
+```python
+from src.functions import DropdownMenu, DropdownOption
+
+menu = DropdownMenu(
+    options=[
+        DropdownOption("Dashboard", "dashboard"),
+        DropdownOption("Settings", "settings"),
+    ],
+    default_value="dashboard",
+)
+
+menu.toggle()
+frames = menu.animation_frames(steps=8, strategy="ease_in_out")
+```
 
 ---
 
 ## 5) `sidebar.py`
 
-`Sidebar` reuses the shared animation model:
+Sidebar state helpers that reuse the same easing and interpolation model as the dropdown helpers.
 
-- supports `SidebarAnimation(preset=...)`
-- supports `visibility_keyframes(steps, strategy=...)`
-- supports hide/show + per-section expand/collapse
+### Main types
 
-This keeps animation behavior consistent across dropdown/sidebar components.
+- `SidebarSection`
+- `SidebarAnimation`
+- `Sidebar`
+
+### Highlights
+
+- hide/show/toggle sidebar visibility
+- expand/collapse individual sections
+- `visibility_keyframes(...)` for deterministic animation keyframes
+- consistent easing presets shared with `dropdown.py`
+
+### Example
+
+```python
+from src.functions import Sidebar
+
+sidebar = Sidebar(sections=["Dashboard", "Search", "Settings"])
+sidebar.toggle_visibility()
+sidebar.toggle_section("Search")
+frames = sidebar.visibility_keyframes(steps=10, strategy="ease_out")
+```
 
 ---
 
-## Import Examples
-
-```python
-from src.functions import (
-    # Auth
-    AuthService,
-    AuthSession,
-
-    # Search
-    SearchEngine,
-    BasicAnalyzer,
-    StemAnalyzer,
-    LanguageAwareAnalyzer,
-
-    # UI
-    DropdownMenu,
-    DropdownOption,
-    Sidebar,
-)
-```
 ## 6) `loader.py`
 
-A thread‑safe loader manager that estimates time remaining for long‑running tasks.
+Thread-safe loader state manager with ETA estimation for long-running operations.
 
-### Features
+### Main types
 
-- **Progress tracking**: supports both step‑based (total steps) and continuous (0‑1) progress.
-- **ETA estimation**: calculates remaining time based on progress rate; uses exponential smoothing for stability.
-- **Callback hooks**: `on_update` and `on_complete` for UI integration.
-- **Thread‑safe**: internal locks allow safe use across threads.
-- **Context manager**: `LoaderContext` for automatic start/complete.
+- `LoaderState`
+- `Loader`
+- `LoaderContext`
 
-### Basic Usage
+### Highlights
+
+- supports step-based progress (`total_steps=...`)
+- supports continuous progress (`progress` values from `0.0` to `1.0`)
+- computes estimated remaining time
+- smooths ETA when `total_steps` is not known
+- integrates with UI callbacks using `on_update` and `on_complete`
+
+### Example
 
 ```python
-from src.functions.loader import Loader, LoaderContext
+import time
+from src.functions import Loader, LoaderContext
 
-# Step‑based
-loader = Loader(total_steps=100, on_update=lambda state: print(f"{state.progress:.0%} - {state.message}"))
+loader = Loader(total_steps=5, on_update=lambda state: print(state.progress, state.message, state.eta))
 loader.start("Loading data...")
-for i in range(100):
-    time.sleep(0.05)
-    loader.update(steps_done=i+1, message=f"Step {i+1}/100")
+for i in range(5):
+    time.sleep(0.1)
+    loader.update(steps_done=i + 1, message=f"Step {i + 1}/5")
 loader.complete("Done!")
 
-# Continuous progress (e.g., from a file download)
-loader2 = Loader(on_update=lambda s: print(f"ETA: {s.eta:.1f}s"))
-loader2.start("Downloading...")
-for p in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]:
-    time.sleep(1)
-    loader2.update(progress=p, message=f"{p*100:.0f}%")
-loader2.complete("Download finished")
-
-# Using context manager
-with LoaderContext(Loader(total_steps=50), "Processing"):
-    for i in range(50):
-        loader.update(steps_done=i+1)   # automatically ends when block exits
+with LoaderContext(Loader(total_steps=3), "Processing") as managed_loader:
+    for i in range(3):
+        managed_loader.update(steps_done=i + 1, message=f"Chunk {i + 1}/3")
 ```
+
 ---
 
-## End-to-End Example
+## 7) `ratelimiter.py`
+
+Token-bucket rate limiter with in-memory and Redis-backed stores.
+
+### Main components
+
+- `RateLimiter`
+- `InMemoryStore`
+- `RedisStore`
+- internal `_TokenBucket` and `_RedisTokenBucket` implementations
+
+### Highlights
+
+- per-key rate limiting (`user`, `IP`, or any arbitrary string key)
+- in-memory backend for single-process deployments
+- Redis backend for distributed deployments
+- convenience helpers: `allow(...)` and `check(...)`
+
+### Example
+
+```python
+from src.functions import RateLimiter
+
+limiter = RateLimiter.from_config(backend="memory")
+
+if limiter.allow("user:123"):
+    print("allowed")
+else:
+    print("blocked")
+
+limiter.check("user:123")
+```
+
+---
+
+## 8) `email.py`
+
+Email abstraction with SMTP delivery, optional async queueing, and simple `string.Template`-based HTML templating.
+
+### Main types
+
+- `EmailBackend`
+- `SMTPBackend`
+- `EmailService`
+
+### Highlights
+
+- SMTP delivery with optional TLS
+- plain-text + HTML multipart email support
+- optional async worker thread for queued sends
+- template rendering with `template_dir` and `context`
+- `from_config(...)` helper for SMTP-backed setup
+
+### Example
+
+```python
+from src.functions import EmailService
+
+mailer = EmailService.from_config(async_send=False)
+mailer.send(
+    to="user@example.com",
+    subject="Welcome",
+    body_html="<h1>Hello</h1><p>Your account is ready.</p>",
+    body_text="Hello\n\nYour account is ready.",
+)
+```
+
+---
+
+## 9) `storage.py`
+
+Pluggable file-storage abstraction with local filesystem and S3 backends.
+
+### Main types
+
+- `StorageBackend` (abstract interface in `storage_backend.py`)
+- `LocalStorage`
+- `S3Storage`
+- `Storage`
+
+### Highlights
+
+- local file uploads, downloads, deletes, and URL generation
+- path traversal protection in `LocalStorage`
+- optional S3 support via `boto3`
+- `Storage.from_config()` helper for backend selection
+- optional unique filename generation to avoid collisions
+
+### Important usage note
+
+Do **not** instantiate `StorageBackend` directly. It is abstract. Use `LocalStorage`, `S3Storage`, or `Storage.from_config()`.
+
+### Example
+
+```python
+from io import BytesIO
+from src.functions import Storage, LocalStorage
+
+backend = LocalStorage(base_path="data/storage", base_url=None)
+storage = Storage(backend=backend, generate_unique_filename=True)
+
+saved_path = storage.upload(BytesIO(b"hello world"), filename="hello.txt", subpath="docs")
+content = storage.download(saved_path.replace(str(backend.base_path) + "/", ""))
+print(content)
+```
+
+For configuration-driven setup:
+
+```python
+from src.functions import Storage
+
+storage = Storage.from_config()
+```
+
+---
+
+## Quick Start
 
 ```python
 from src.functions import (
     AuthService,
     SearchEngine,
-    LanguageAwareAnalyzer,
+    StopwordAnalyzer,
     DropdownMenu,
     DropdownOption,
     Sidebar,
+    Loader,
+    RateLimiter,
+    Storage,
 )
 
-# 1) Strong auth + refresh rotation
+# Auth
 service = AuthService()
-service.sign_up("alex", "MyStrongP@ssw0rd!")
-session = service.log_in_with_refresh("alex", "MyStrongP@ssw0rd!")
-rotated = service.rotate_refresh_token(session.refresh.token)
-assert service.is_token_valid(rotated.access.token)
 
-# 2) Search with pluggable analyzer
-items = [
+# Search
+engine = SearchEngine(fields=["title", "description"], analyzer=StopwordAnalyzer("en"))
+engine.index_documents([
     {"title": "Running Shoes", "description": "Shoes for runners"},
     {"title": "Trail Shoe", "description": "Outdoor running comfort"},
-]
-engine = SearchEngine(fields=["title", "description"], analyzer=LanguageAwareAnalyzer("en"))
-results = engine.search(items, "runnng shoe")
+])
+results = engine.search("running shoe")
 
-# 3) Dropdown animation strategies
-drop = DropdownMenu(options=[DropdownOption("A", "a"), DropdownOption("B", "b")])
-frames = drop.animation_frames(steps=12, strategy="ease_in_out")
+# UI state
+menu = DropdownMenu([DropdownOption("A", "a"), DropdownOption("B", "b")])
+sidebar = Sidebar(["Home", "Search", "Settings"])
+loader = Loader(total_steps=10)
 
-# 4) Sidebar interpolation
-sidebar = Sidebar(sections=["Dashboard", "Search", "Settings"])
-sidebar_frames = sidebar.visibility_keyframes(steps=12, strategy="ease_out")
+# Rate limiting
+limiter = RateLimiter.from_config(backend="memory")
+
+# Storage
+storage = Storage.from_config()
 ```
+
+---
+
+## Optional Dependencies
+
+Depending on which modules you use, you may need additional packages:
+
+- `portalocker` for `PortableStore`
+- `boto3` for `S3Storage`
+- `redis` client library for Redis-backed rate limiting
+- `PyYAML` for config loading
 
 ---
 
 ## Production Notes
 
-- `PortableStore` is ideal for local/dev. For high-scale production, replace with DB-backed repositories.
-- In multi-instance deployments, token/query cache should move to shared cache infrastructure.
-- Analyzer system is designed to be extended with domain-specific NLP analyzers.
+- `PortableStore` is well suited to local development and lightweight deployments; use a database or managed persistence layer for larger systems.
+- Move auth/query caches to shared infrastructure in multi-instance deployments.
+- Use Redis-backed rate limiting for horizontally scaled services.
+- Keep SMTP credentials and auth peppers outside source control.
+- Prefer `Storage.from_config()` or a concrete backend instance over direct use of the abstract `StorageBackend` base class.
