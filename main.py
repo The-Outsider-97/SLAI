@@ -2,6 +2,7 @@ import json
 import math
 import sys
 import subprocess
+import io
 
 from pathlib import Path
 from datetime import datetime
@@ -38,7 +39,11 @@ from PyQt5.QtWidgets import (
 
 from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
 from src.functions.auth import AuthService
+from src.functions.email import EmailService
+from src.functions.ratelimiter import RateLimiter
+from src.functions.storage import LocalStorage, Storage
 from src.functions.search import SearchEngine
+from component.utils.user_menu import UserMenuController
 from monitoring.metrics_collector import MetricsCollector
 from monitoring.health_check import HealthChecker
 from monitoring.drift_detection import DriftDetector
@@ -95,9 +100,19 @@ class SearchIcon(QWidget):
         painter.drawLine(QPointF(21, 21), QPointF(16.65, 16.65))
 
 class LoginDialog(QDialog):
-    def __init__(self, auth_service: AuthService, parent=None):
+    login_succeeded = pyqtSignal(str, object)
+
+    def __init__(
+        self,
+        auth_service: AuthService,
+        rate_limiter: RateLimiter,
+        email_service: EmailService | None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.auth_service = auth_service
+        self.rate_limiter = rate_limiter
+        self.email_service = email_service
         self.setWindowTitle("Login")
         self.setModal(True)
         self.setFixedSize(380, 230)
@@ -151,9 +166,18 @@ class LoginDialog(QDialog):
         if not username or not password:
             QMessageBox.warning(self, "Missing fields", "Please enter username and password.")
             return
+        rate_key = f"login:{username.lower()}" if username else "login:anonymous"
+        if not self.rate_limiter.allow(rate_key):
+            QMessageBox.warning(
+                self,
+                "Too many attempts",
+                "Too many login attempts. Please wait a moment and try again.",
+            )
+            return
         try:
             token = self.auth_service.log_in(username, password)
             QMessageBox.information(self, "Success", f"Logged in.\nToken ends at: {token.expires_at.isoformat()}")
+            self.login_succeeded.emit(username, token)
             self.accept()
         except Exception as exc:
             QMessageBox.warning(self, "Login failed", str(exc))
@@ -171,11 +195,41 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "Sign up failed", str(exc))
 
     def _forgot_password(self):
-        QMessageBox.information(
-            self,
-            "Forgot password",
-            "Password reset flow can be connected here.\nFor now, please sign up with a new account.",
+        username = self.username_input.text().strip()
+        if not username:
+            QMessageBox.information(self, "Forgot password", "Enter your username/email first.")
+            return
+        if self.email_service is None:
+            QMessageBox.warning(
+                self,
+                "Email unavailable",
+                "Email service is not configured yet. Please contact support.",
+            )
+            return
+        destination = username if "@" in username else f"{username}@example.local"
+        body_html = (
+            "<h3>SLAI account recovery</h3>"
+            f"<p>We received a password help request for <b>{username}</b>.</p>"
+            "<p>If this was you, contact support or use sign up to recreate your local profile.</p>"
         )
+        body_text = (
+            f"SLAI account recovery request for {username}. "
+            "If this was you, contact support or recreate your local profile."
+        )
+        try:
+            self.email_service.send(
+                to=destination,
+                subject="SLAI account recovery request",
+                body_html=body_html,
+                body_text=body_text,
+            )
+            QMessageBox.information(
+                self,
+                "Recovery email queued",
+                f"A recovery help email was queued for {destination}.",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Email failed", str(exc))
 
 class LoginButton(QPushButton):
     def __init__(self, parent=None):
@@ -479,6 +533,12 @@ class HubWindow(QWidget):
         self.app_cards: list[AppCard] =[]
         self.child_window = None
         self.auth_service = AuthService()
+        self.rate_limiter = RateLimiter.from_config(backend="memory")
+        self.email_service = self._build_email_service()
+        self.storage = self._build_storage()
+        self.current_username: str | None = None
+        self.current_token = None
+        self.user_profile_asset_path: str | None = None
         self.search_engine = SearchEngine(fields=["title", "description"])
         self.search_engine.index_documents(
             [
@@ -506,6 +566,21 @@ class HubWindow(QWidget):
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._animate)
         self.anim_timer.start(16)
+
+    def _build_email_service(self) -> EmailService | None:
+        try:
+            return EmailService.from_config(async_send=True)
+        except Exception as exc:
+            print(f"Email service disabled: {exc}")
+            return None
+
+    def _build_storage(self) -> Storage:
+        try:
+            return Storage.from_config()
+        except Exception as exc:
+            print(f"Storage config unavailable, using local storage fallback: {exc}")
+            fallback_backend = LocalStorage(base_path="data/storage")
+            return Storage(fallback_backend, generate_unique_filename=False)
 
     def _load_descriptions(self) -> None:
         self.app_descriptions = {}
@@ -549,6 +624,8 @@ class HubWindow(QWidget):
         
         self.search = SearchIcon(self)
         self.login_btn = LoginButton(self)
+        self.user_menu = UserMenuController(self)
+        self.user_menu.button.hide()
         self.search_bar = QLineEdit(self)
         self.search_bar.hide()
         self.search_bar.setPlaceholderText("Search products...")
@@ -670,12 +747,16 @@ class HubWindow(QWidget):
         self.search.raise_()
         self.search_bar.raise_()
         self.login_btn.raise_()
+        self.user_menu.button.raise_()
         self.hero.raise_()
         self.desc_label.raise_()
 
         self.hamburger.mousePressEvent = self._toggle_dropdown_event
         self.search.mousePressEvent = self._toggle_search_event
         self.login_btn.clicked.connect(self._open_login_dialog)
+        self.user_menu.logout_requested.connect(self._logout_current_user)
+        self.user_menu.profile_requested.connect(self._show_profile_placeholder)
+        self.user_menu.settings_requested.connect(self._show_settings_placeholder)
         QApplication.instance().installEventFilter(self)
 
     def _toggle_dropdown_event(self, event):
@@ -700,8 +781,66 @@ class HubWindow(QWidget):
         self.monitoring_dialog.exec_()
 
     def _open_login_dialog(self):
-        dialog = LoginDialog(self.auth_service, self)
+        dialog = LoginDialog(
+            auth_service=self.auth_service,
+            rate_limiter=self.rate_limiter,
+            email_service=self.email_service,
+            parent=self,
+        )
+        dialog.login_succeeded.connect(self._on_login_succeeded)
         dialog.exec_()
+
+    def _on_login_succeeded(self, username: str, token) -> None:
+        self.current_username = username
+        self.current_token = token
+        self._set_authenticated_ui(True)
+        self._persist_user_profile(username)
+
+    def _set_authenticated_ui(self, is_authenticated: bool) -> None:
+        self.login_btn.setVisible(not is_authenticated)
+        self.user_menu.button.setVisible(is_authenticated)
+        if is_authenticated and self.current_username:
+            self.user_menu.set_user(self.current_username)
+        else:
+            self.user_menu.clear_user()
+        self._position_top_bar()
+
+    def _persist_user_profile(self, username: str) -> None:
+        profile_payload = {
+            "username": username,
+            "last_login": datetime.utcnow().isoformat(),
+        }
+        safe_username = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in username)
+        profile_bytes = io.BytesIO(json.dumps(profile_payload, indent=2).encode("utf-8"))
+        try:
+            stored_path = self.storage.upload(
+                file_obj=profile_bytes,
+                filename="profile.json",
+                subpath=f"user_profiles/{safe_username}",
+                metadata={"username": username},
+            )
+            self.user_profile_asset_path = stored_path
+        except Exception as exc:
+            print(f"Failed to persist profile data for {username}: {exc}")
+
+    def _logout_current_user(self) -> None:
+        if self.current_token is not None:
+            try:
+                self.auth_service.log_out(self.current_token.token)
+            except Exception as exc:
+                print(f"Logout token revoke failed: {exc}")
+        self.current_username = None
+        self.current_token = None
+        self.user_profile_asset_path = None
+        self._set_authenticated_ui(False)
+
+    def _show_profile_placeholder(self) -> None:
+        username = self.current_username or "Unknown user"
+        detail = f"Stored profile: {self.user_profile_asset_path}" if self.user_profile_asset_path else "No profile persisted yet."
+        QMessageBox.information(self, "Profile", f"User: {username}\n{detail}")
+
+    def _show_settings_placeholder(self) -> None:
+        QMessageBox.information(self, "Settings", "Account settings screen can be connected here.")
 
     def _toggle_search_event(self, event):
         if event.button() != Qt.LeftButton:
@@ -819,6 +958,13 @@ class HubWindow(QWidget):
                 icon_rect = QRect(self.search.mapToGlobal(QPoint(0, 0)), self.search.size())
                 if not search_rect.contains(click_pos) and not icon_rect.contains(click_pos):
                     self._close_search_bar()
+            if self.user_menu.button.isVisible():
+                user_btn_rect = QRect(
+                    self.user_menu.button.mapToGlobal(QPoint(0, 0)),
+                    self.user_menu.button.size(),
+                )
+                if not user_btn_rect.contains(click_pos):
+                    self.user_menu.hide_menu()
         return super().eventFilter(obj, event)
 
     def wheelEvent(self, event) -> None:
@@ -837,7 +983,9 @@ class HubWindow(QWidget):
         self.logo_label.adjustSize()
         self.logo_label.move(101, center_y - self.logo_label.height() // 2)
         self.login_btn.move(self.width() - 40 - 110, center_y - 19)
-        self.search.move(self.login_btn.x() - 25 - 26, center_y - 13)
+        self.user_menu.button.move(self.width() - 40 - 160, center_y - 19)
+        active_btn = self.user_menu.button if self.user_menu.button.isVisible() else self.login_btn
+        self.search.move(active_btn.x() - 25 - 26, center_y - 13)
         if self.search_open:
             self.search_bar.setGeometry(self.search.x() - 260, self.search.y() - 2, 286, 36)
 
@@ -912,6 +1060,11 @@ class HubWindow(QWidget):
         self.current_rotation += (self.target_rotation - self.current_rotation) * 0.08
         self._position_cards()
         self.update()
+
+    def closeEvent(self, event) -> None:
+        if self.email_service is not None:
+            self.email_service.shutdown()
+        super().closeEvent(event)
 
     def _draw_mountains(self, painter: QPainter) -> None:
         y_base = self.height()
