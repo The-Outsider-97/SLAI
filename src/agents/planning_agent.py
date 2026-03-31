@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 """
 Planning Agent with Alternative Method Search Strategies
@@ -29,7 +29,7 @@ import heapq
 import random
 
 from datetime import datetime
-from typing import List, Dict, Optional, Callable, Tuple, Set
+from typing import Any as TypingAny, List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
@@ -57,7 +57,7 @@ logger = get_logger("Planning Agent")
 printer = PrettyPrinter
 
 CostProfile = Tuple[float, float]
-StateTuple = Tuple[Tuple[str, Any], ...]
+StateTuple = Tuple[Tuple[str, TypingAny], ...]
 
 class PlanningAgent(BaseAgent):
     """Enhanced planner with alternative search strategies"""
@@ -93,6 +93,7 @@ class PlanningAgent(BaseAgent):
         self.safety_planner = SafetyPlanning()
         self.resource_monitor = ResourceMonitor()
         self.executor = PlanningExecutor()
+        self.executor.agent = self
         self.probabilistic_planner = ProbabilisticPlanner()
         self.safety_planner.resource_monitor = self.resource_monitor
 
@@ -298,14 +299,18 @@ class PlanningAgent(BaseAgent):
             if not subtask_instance.check_preconditions(simulated_world_state):
                 logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
                 # Backtracking would happen here: try another method for task_to_decompose
-                return None # Abort this decomposition path
+                # Try alternative methods instead of failing hard on first method
+                fully_decomposed_plan = []
+                break
 
             decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
 
             if decomposed_subplan is None:
                 logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
                 # Backtracking point: Try a different method for task_to_decompose if possible
-                return None # Indicate failure for this decomposition path
+                # Try alternative methods instead of failing hard on first method
+                fully_decomposed_plan = []
+                break
 
             fully_decomposed_plan.extend(decomposed_subplan)
 
@@ -316,8 +321,38 @@ class PlanningAgent(BaseAgent):
                     primitive_task.apply_effects(simulated_world_state)
 
         # If loop completes, the decomposition for this method was successful
-        logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}. Current state: {current_state}")
-        return fully_decomposed_plan
+        if fully_decomposed_plan:
+            logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}. Current state: {current_state}")
+            return fully_decomposed_plan
+
+        # Fallback: try remaining methods ordered by predicted success
+        alternative_methods = [idx for idx, _ in sorted(scores, key=lambda item: item[1], reverse=True) if idx != method_index_to_try]
+        for alt_idx in alternative_methods:
+            task_to_decompose.selected_method = alt_idx
+            alt_subtasks = library_task.get_subtasks(alt_idx)
+            if not alt_subtasks:
+                continue
+            alt_plan = []
+            alt_state = current_state.copy()
+            ok = True
+            for alt_subtask_template in alt_subtasks:
+                alt_subtask = alt_subtask_template.copy()
+                alt_subtask.parent = task_to_decompose
+                if not alt_subtask.check_preconditions(alt_state):
+                    ok = False
+                    break
+                nested = self.decompose_task(alt_subtask, alt_state)
+                if not nested:
+                    ok = False
+                    break
+                alt_plan.extend(nested)
+                for primitive_task in nested:
+                    if primitive_task.task_type == TaskType.PRIMITIVE:
+                        primitive_task.apply_effects(alt_state)
+            if ok and alt_plan:
+                return alt_plan
+
+        return None
 
     def _find_alternative_methods(self, task: Task) -> List[int]:
         """
@@ -397,7 +432,7 @@ class PlanningAgent(BaseAgent):
         for method_idx in alternative_method_indices:
             task_copy = failed_task.copy()
             task_copy.selected_method = method_idx
-            new_plan = self.decompose_task(task_copy)
+            new_plan = self.decompose_task(task_copy, self.world_state)
             
             # Validate plan and check safety
             if new_plan and self._validate_plan(new_plan) and self.safety_planner.safety_check(new_plan):
@@ -577,7 +612,7 @@ class PlanningAgent(BaseAgent):
             tasks=scheduled_tasks,
             agents=self._get_available_agents(),
             risk_assessor=self.shared_memory.get('risk_assessor'),
-            state=self.world_state
+            state={'tasks': scheduled_tasks, **(self.world_state if isinstance(self.world_state, dict) else {})}
         )
 
         if not schedule:
@@ -611,9 +646,9 @@ class PlanningAgent(BaseAgent):
             "estimated_completion": max_completion_time,
             "schedule": schedule
         }
-    
-        self.current_plan = plan
-        return self.current_plan # plan_list
+
+        # keep scheduler-annotated executable tasks
+        return self.current_plan
     
     def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
         """Generate expected state after each task execution"""
