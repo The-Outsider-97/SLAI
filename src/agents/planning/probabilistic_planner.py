@@ -95,13 +95,14 @@ class ProbabilisticPlanner:
         'task_name', 'probability', 'preconditions', and 'effect' keys.
         """
         if isinstance(action, dict):
+            success_prob = float(action.get("probability", 1.0))
+            success_prob = min(1.0, max(0.0, success_prob))
             action = ProbabilisticAction(
                 name=action.get("task_name", "unnamed"),
-                probability=action.get("probability", 1.0),
                 preconditions=action.get("preconditions", lambda s: True),
                 outcomes=[
-                    (action.get("probability", 1.0), action.get("effect", lambda s: s)),
-                    (max(0.0, 1.0 - action.get("probability", 1.0)), lambda s: s),
+                    (success_prob, action.get("effect", lambda s: s)),
+                    (1.0 - success_prob, lambda s: s),
                 ],
             )
         with self._lock:
@@ -159,6 +160,7 @@ class ProbabilisticPlanner:
         Execute value iteration to compute optimal value function and policy.
         """
         printer.status("PPDDL", "Starting Value Iteration", "info")
+        self._q_cache.clear()
         reachable_states = self._get_reachable_states(initial_state, goal_state)
 
         for iteration in range(self.max_iterations):
@@ -182,6 +184,8 @@ class ProbabilisticPlanner:
             if max_delta < self.convergence_threshold:
                 logger.info(f"Value function converged after {iteration + 1} iterations")
                 break
+            # Q values depend on V(s) and must be recomputed every iteration.
+            self._q_cache.clear()
         else:
             logger.warning(f"Value iteration did not converge after {self.max_iterations} iterations")
 
