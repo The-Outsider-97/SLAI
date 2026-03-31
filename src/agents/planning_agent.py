@@ -1,4 +1,4 @@
-__version__ = "2.1.0"
+__version__ = "2.0.0"
 
 """
 Planning Agent with Alternative Method Search Strategies
@@ -43,6 +43,7 @@ from src.agents.planning.task_scheduler import DeadlineAwareScheduler
 from src.agents.planning.probabilistic_planner import ProbabilisticPlanner
 from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
 from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
+from src.agents.planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
 try:
     from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
 except Exception:
@@ -96,6 +97,8 @@ class PlanningAgent(BaseAgent):
         self.executor.agent = self
         self.probabilistic_planner = ProbabilisticPlanner()
         self.safety_planner.resource_monitor = self.resource_monitor
+        local_cfg = self.planning_config.get("local_planning", {})
+        self.local_arbitrator = LocalBehaviorArbitrator()
 
         self.resource_monitor.gpu_limit = self.planning_config.get('gpu_limit', 1.0)  # Default 1.0 if not configured
         self.resource_monitor.ram_limit = self.planning_config.get('ram_limit', 16.0)  # Default 16GB if not configured
@@ -104,6 +107,8 @@ class PlanningAgent(BaseAgent):
         self.execution_interrupted = False
         self._node_cache = {}
         self.adaptive_context = {}
+        if "execution_history" not in self.shared_memory.base_state:
+            self.shared_memory.base_state["execution_history"] = []
 
         logger.info(f"PlanningAgent succesfully initialized")
 
@@ -389,31 +394,31 @@ class PlanningAgent(BaseAgent):
         return [int(method_id) for method_id in candidate_methods 
                 if method_id != str(task.selected_method)]
 
-    def _update_method_stats(self, task: Task, success: bool, cost: float):
-        """Updates statistics for the selected decomposition method."""
-        if task.task_type != TaskType.ABSTRACT or task.parent is None:
-             # Only update stats for methods chosen for a parent abstract task
-             # Or potentially update based on overall plan success if task is the root goal.
-            return
+#    def _update_method_stats(self, task: Task, success: bool, cost: float):
+#        """Updates statistics for the selected decomposition method."""
+#        if task.task_type != TaskType.ABSTRACT or task.parent is None:
+#             # Only update stats for methods chosen for a parent abstract task
+#             # Or potentially update based on overall plan success if task is the root goal.
+#            return
 
-        # Find the parent and the method index used to generate this task instance
-        # This requires careful tracking during decomposition or execution feedback.
-        parent_task = task.parent
-        method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
+#        # Find the parent and the method index used to generate this task instance
+#        # This requires careful tracking during decomposition or execution feedback.
+#        parent_task = task.parent
+#        method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
 
-        key = (parent_task.name, method_idx)
-        stats = self.method_stats[key]
-        stats['total'] += 1
-        if success:
-            stats['success'] += 1
+#        key = (parent_task.name, method_idx)
+#        stats = self.method_stats[key]
+#        stats['total'] += 1
+#        if success:
+#            stats['success'] += 1
 
-        # Update average cost using Welford's online algorithm or simpler moving average
-        # Simple moving average:
-        current_total_cost = stats['avg_cost'] * (stats['total'] -1) # Get previous total cost
-        new_avg_cost = (current_total_cost + cost) / stats['total']
-        stats['avg_cost'] = new_avg_cost
+#        # Update average cost using Welford's online algorithm or simpler moving average
+#        # Simple moving average:
+#        current_total_cost = stats['avg_cost'] * (stats['total'] -1) # Get previous total cost
+#        new_avg_cost = (current_total_cost + cost) / stats['total']
+#        stats['avg_cost'] = new_avg_cost
 
-        logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
+#        logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
 
     def replan(self, failed_task: Task) -> Optional[List[Task]]:
         """Enhanced replanning with alternative method selection"""
@@ -477,12 +482,12 @@ class PlanningAgent(BaseAgent):
         
         return True
 
-    def copy(self):
-        new_task = Task(name=self.name, type=self.type)
-        # Copy other attributes like preconditions, effects, etc.
-        new_task.preconditions = self.preconditions.copy()
-        new_task.effects = self.effects.copy()
-        return new_task
+#    def copy(self):
+#        new_task = Task(name=self.name, type=self.type)
+#        # Copy other attributes like preconditions, effects, etc.
+#        new_task.preconditions = self.preconditions.copy()
+#        new_task.effects = self.effects.copy()
+#        return new_task
 
     def _convert_to_schedule_format(self, plan):
         """Map plan tasks to scheduler format"""
@@ -596,7 +601,10 @@ class PlanningAgent(BaseAgent):
         # Wrap single task in a list if needed
         if isinstance(plan, Task):
             plan = [plan]
-        
+        if not plan:
+            logger.error("Task decomposition produced no executable plan")
+            return None
+
         # Integrated safety check
         try:
             self.safety_planner.current_plan = plan
@@ -640,14 +648,14 @@ class PlanningAgent(BaseAgent):
             if end_times:
                 max_completion_time = max(end_times)
 
-        # Return a structured dictionary instead of just the plan list
-        plan_list = {
-            "plan_steps": plan,
-            "estimated_completion": max_completion_time,
-            "schedule": schedule
-        }
-
-        # keep scheduler-annotated executable tasks
+        self.shared_memory.set(
+            "planning:last_plan_metadata",
+            {
+                "goal": goal_task.name,
+                "estimated_completion": max_completion_time,
+                "schedule": schedule,
+            },
+        )
         return self.current_plan
     
     def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
@@ -656,7 +664,7 @@ class PlanningAgent(BaseAgent):
         sim_state = self.world_state.copy()
         
         for task in plan:
-            if task.type == TaskType.PRIMITIVE:
+            if task.task_type == TaskType.PRIMITIVE:
                 # Apply task effects to simulated state
                 for effect in task.effects:
                     effect(sim_state)
@@ -672,12 +680,12 @@ class PlanningAgent(BaseAgent):
         for candidate in candidates:
             if self.safety_planner.safety_check([candidate]):
                 logger.info("Safety-compliant alternative found")
-                return candidate
+                return [candidate]
                 
         logger.error("No safe alternatives available")
         return None
 
-    def _execute_policy(self, policy: Policy, goal_task: Task) -> Dict[str, any]:
+    def _execute_policy(self, policy: Dict[WorldState, TypingAny], goal_task: Task) -> Dict[str, TypingAny]:
         """Execute probabilistic policy from PPDDL planner"""
         current_state = self.get_current_state_tuple()
         execution_path = []
@@ -727,108 +735,129 @@ class PlanningAgent(BaseAgent):
             'execution_path': execution_path,
             'final_state': self.world_state
         }
+    def _read_local_planning_context(self) -> LocalPlanningContext:
+        payload = self.shared_memory.get("planning:local_context", default={}) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return LocalPlanningContext(
+            obstacle_distance_m=payload.get("obstacle_distance_m"),
+            obstacle_bearing_deg=payload.get("obstacle_bearing_deg"),
+            clearance_left_m=payload.get("clearance_left_m"),
+            clearance_right_m=payload.get("clearance_right_m"),
+            reverse_clearance_m=payload.get("reverse_clearance_m"),
+            current_speed_mps=float(payload.get("current_speed_mps", 0.0)),
+            desired_speed_mps=float(payload.get("desired_speed_mps", 0.0)),
+            horizon_seconds=float(payload.get("horizon_seconds", 2.0)),
+            metadata=payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), dict) else {},
+        )
 
-    def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, any]:
+    def _build_reactive_override_task(self, decision, context: LocalPlanningContext) -> Task:
+        command = decision.command.copy()
+        command["reason"] = decision.reason
+        return Task(
+            name=self.local_arbitrator.build_reactive_task_name(decision),
+            task_type=TaskType.PRIMITIVE,
+            priority=100,
+            risk_score=0.0,
+            context={"action": command, "local_context": context.metadata},
+            preconditions=[lambda _state: True],
+            effects=[],
+            duration=max(1.0, min(5.0, context.horizon_seconds)),
+        )
+
+    def _apply_local_arbitration(self, plan: List[Task]) -> List[Task]:
+        context = self._read_local_planning_context()
+        decision = self.local_arbitrator.decide(context)
+        self.shared_memory.set(
+            "planning:last_local_decision",
+            {
+                "behavior": decision.behavior.value,
+                "reason": decision.reason,
+                "priority": decision.priority,
+            },
+        )
+        if not decision.is_override:
+            return plan
+        reactive_task = self._build_reactive_override_task(decision, context)
+        if self.local_arbitrator.should_trigger_short_horizon_replan(decision, context):
+            logger.warning("Applying local safety override '%s' before nominal plan", decision.behavior.value)
+            return [reactive_task] + plan
+        return plan
+
+    def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, TypingAny]:
         try:
+            effective_plan = self._apply_local_arbitration(plan or [])
             execution_metrics = {
-                'success_count': 0,
-                'failure_count': 0,
-                'total_cost': 0.0,
-                'resource_usage': defaultdict(float)
+                "success_count": 0,
+                "failure_count": 0,
+                "total_cost": 0.0,
+                "resource_usage": defaultdict(float),
             }
 
-
-            # Start execution monitoring
-            self.executor.start_monitoring(plan, self.expected_state_projections)
+            self.executor.start_monitoring(effective_plan, self.expected_state_projections)
             self.execution_interrupted = False
-            
-            # Track plan start
-            plan_meta = self.metrics.track_plan_start(plan)
-            
+            plan_meta = self.metrics.track_plan_start(effective_plan)
+
             try:
-                for task in plan:
+                for task in effective_plan:
                     if self.execution_interrupted:
                         logger.warning("Execution interrupted by monitor")
                         break
-                        
+                    start_time = time.time()
+                    end_time = start_time
                     try:
-                        task.status = TaskStatus.EXECUTING    # Update task status
-                        
-                        # Pre-execution safety check
+                        task.status = TaskStatus.EXECUTING
                         self.safety_planner._validate_equipment_constraints(task)
                         self.safety_planner._validate_temporal_constraints(task)
-                        
-                        # Execute task
-                        start_time = time.time()
-                        outcome = self._execute_action(task)
-                        self.heuristic_selector.heuristics["CBR"].record_outcome(
-                            task, self.world_state, method_used, outcome)
                         self._execute_action(task)
                         end_time = time.time()
-                        
-                        # Update execution times
                         task.start_time = start_time
                         task.end_time = end_time
-                        task.status = TaskStatus.COMPLETED
-
-                        self.safety_planner.update_allocations(task)    # Update resource allocations
-                        
-                        # Update metrics
-                        execution_metrics['success_count'] += 1
-                        execution_metrics['total_cost'] += task.cost
+                        task.status = TaskStatus.SUCCESS
+                        execution_metrics["success_count"] += 1
+                        execution_metrics["total_cost"] += float(getattr(task, "cost", 0.0))
                         self._update_resource_metrics(execution_metrics, task)
-                        
-                        # Add to execution history
-                        self.shared_memory.base_state['execution_history'].append({
-                            'task': task.name,
-                            'start_time': start_time,
-                            'end_time': end_time,
-                            'status': 'success',
-                            'state_snapshot': self.world_state.copy()
-                        })
-                        
+                        self.shared_memory.base_state["execution_history"].append(
+                            {
+                                "task": task.name,
+                                "start_time": start_time,
+                                "end_time": end_time,
+                                "status": "success",
+                                "state_snapshot": self.world_state.copy(),
+                            }
+                        )
                     except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
                         logger.warning(f"Execution safety violation: {str(e)}")
-                        execution_metrics['failure_count'] += 1
+                        execution_metrics["failure_count"] += 1
                         task.status = TaskStatus.FAILED
-                        
-                        # Attempt recovery
+                        self.shared_memory.base_state["execution_history"].append(
+                            {
+                                "task": task.name,
+                                "start_time": start_time,
+                                "end_time": end_time,
+                                "status": "failed",
+                                "error": str(e),
+                                "state_snapshot": self.world_state.copy(),
+                            }
+                        )
                         recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
                         if recovery_plan:
                             recovery_result = self.execute_plan(recovery_plan, goal_task)
-                            if recovery_result.get('status') == 'SUCCESS':
-                                execution_metrics['success_count'] += 1
+                            if recovery_result.get("status") == TaskStatus.SUCCESS.name:
+                                execution_metrics["success_count"] += 1
                             else:
-                                execution_metrics['failure_count'] += 1
-
-                        self.shared_memory.base_state['execution_history'].append({
-                            'task': task.name,
-                            'start_time': start_time if 'start_time' in locals() else None,
-                            'end_time': end_time if 'end_time' in locals() else None,
-                            'status': 'failed',
-                            'error': str(e),
-                            'state_snapshot': self.world_state.copy()
-                        })
-                        
+                                execution_metrics["failure_count"] += 1
             finally:
-                self.executor.stop_monitoring()    # Stop monitoring regardless of outcome
-                
-            # Determine final status
-            final_status = TaskStatus.SUCCESS if execution_metrics['failure_count'] == 0 else TaskStatus.FAILED
+                self.executor.stop_monitoring()
 
-            self.metrics.track_plan_completion(plan_meta, final_status)    # Track plan completion
-            
-            # Record execution metrics
+            final_status = TaskStatus.SUCCESS if execution_metrics["failure_count"] == 0 else TaskStatus.FAILED
+            self.metrics.track_plan_completion(plan_meta, final_status)
             self.metrics.record_execution_metrics(
-                success_count=execution_metrics['success_count'],
-                failure_count=execution_metrics['failure_count'],
-                resource_usage=execution_metrics['resource_usage']
+                success_count=execution_metrics["success_count"],
+                failure_count=execution_metrics["failure_count"],
+                resource_usage=execution_metrics["resource_usage"],
             )
-            execution_summary = {
-                "status": final_status.name,
-                "world_state": self.world_state,
-                "metrics": execution_metrics
-            }
+            execution_summary = {"status": final_status.name, "world_state": self.world_state, "metrics": execution_metrics}
             self._log_performance(execution_summary)
             return execution_summary
     
@@ -864,14 +893,14 @@ class PlanningAgent(BaseAgent):
         else:
             logger.error("Recovery planning failed")
 
-    def _create_recovery_plan(self, failed_task: Task) -> List[Task]:
+    def _create_recovery_plan(self, failed_task: Task) -> Optional[List[Task]]:
         """Create targeted recovery plan for a specific task failure"""
         # 1. Attempt alternative methods
         alternatives = self._find_alternative_methods(failed_task)
         for method_idx in alternatives:
             new_task = failed_task.copy()
             new_task.selected_method = method_idx
-            recovery_plan = self.decompose_task(new_task)
+            recovery_plan = self.decompose_task(new_task, self.world_state)
             if recovery_plan and self._validate_plan(recovery_plan):
                 return recovery_plan
         
@@ -886,22 +915,17 @@ class PlanningAgent(BaseAgent):
 
     def _create_precondition_repair_plan(self, task: Task) -> Optional[List[Task]]:
         """Generate plan to satisfy missing preconditions"""
-        # ... implementation of precondition repair ...
-        # This would use task's precondition gap analysis
-        # and method from the task library to satisfy conditions
-        
-    def adjust_for_resource_violation(self, resource: str, usage: float, limit: float):
-        """Adjust plan based on resource violation"""
-        # 1. Check if we can redistribute tasks
-        if self._redistribute_resource_load(resource):
-            return
-            
-        # 2. Scale back resource-intensive tasks
-        self._scale_back_resource_usage(resource, usage, limit)
-        
-        # 3. If still over, trigger replan
-        if self._check_resource_overload(resource):
-            self.replan_from_execution_failure(None, f"resource_violation_{resource}")
+        missing = []
+        for precond in task.preconditions:
+            try:
+                if not precond(self.world_state):
+                    missing.append(getattr(precond, "__name__", "anonymous_precondition"))
+            except Exception:
+                missing.append(getattr(precond, "__name__", "anonymous_precondition"))
+        if not missing:
+            return []
+        logger.warning("No automated repair available for failed preconditions: %s", missing)
+        return None
 
     def adjust_for_temporal_violation(self, task: Task, time_delta: float):
         """Adjust plan based on temporal violation"""
@@ -1001,8 +1025,8 @@ class PlanningAgent(BaseAgent):
         success = all(t.status == TaskStatus.SUCCESS for t in children)
         self._update_method_stats(parent, success)
 
-    def _update_method_stats(self, task: Task, success: bool, cost: float):
-        """Update Bayesian statistics after execution"""
+    def _update_method_stats(self, task: Task, success: bool, cost: float = 0.0):
+        """Update Bayesian statistics after execution."""
         if task.task_type != TaskType.ABSTRACT or task.parent is None:
             return
 
@@ -1015,6 +1039,9 @@ class PlanningAgent(BaseAgent):
         self.method_stats[key]['total'] += 1
         if success:
             self.method_stats[key]['success'] += 1
+        if stats['total'] > 0:
+            existing_total_cost = stats.get('avg_cost', 0.0) * (stats['total'] - 1)
+            stats['avg_cost'] = (existing_total_cost + float(cost)) / stats['total']
 
     def _execute_action(self, task: Task):
         """Execute task with resource locking"""
@@ -1027,8 +1054,10 @@ class PlanningAgent(BaseAgent):
         self.resource_monitor.acquire_resources(task.resource_requirements)
         
         try:
-            # Execute task
-            super()._execute_action(task)
+            action_payload = (task.context or {}).get("action") if isinstance(task.context, dict) else None
+            if isinstance(action_payload, dict):
+                self.shared_memory.set("planning:last_action_command", {"task": task.name, **action_payload})
+            task.apply_effects(self.world_state)
         finally:
             # Release resources
             self.resource_monitor.release_resources(task.resource_requirements)
