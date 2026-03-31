@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "metadata": {
+    "created": "2025-03-31T10:00:00Z",
+    "description": "Historical planning data for training heuristics",
+    "source": "planning_system"
+  },
+  "tasks": [
+    {
+      "id": "task_001",
+      "name": "navigation",
+      "goal_state": {
+        "position": "target",
+        "battery": ">30"
+      },
+      "selected_method": "A*",
+      "priority": 0.7,
+      "parent": {
+        "name": "root",
+        "parent": null
+      },
+      "outcome": "success",
+      "timestamp": "2025-03-30T08:00:00Z"
+    },
+    {
+      "id": "task_002",
+      "name": "navigation",
+      "goal_state": {
+        "position": "target",
+        "battery": ">30"
+      },
+      "selected_method": "RRT",
+      "priority": 0.7,
+      "parent": {
+        "name": "root",
+        "parent": null
+      },
+      "outcome": "failure",
+      "timestamp": "2025-03-30T08:05:00Z"
+    },
+    {
+      "id": "task_003",
+      "name": "object_manipulation",
+      "goal_state": {
+        "gripper_state": "closed",
+        "force": "<5N"
+      },
+      "selected_method": "force_control",
+      "priority": 0.9,
+      "parent": {
+        "name": "root",
+        "parent": null
+      },
+      "outcome": "success",
+      "timestamp": "2025-03-30T08:10:00Z"
+    },
+    {
+      "id": "task_004",
+      "name": "navigation",
+      "goal_state": {
+        "position": "target"
+      },
+      "selected_method": "A*",
+      "priority": 0.8,
+      "parent": null,
+      "outcome": "success",
+      "timestamp": "2025-03-30T08:15:00Z"
+    }
+  ],
+  "method_stats": {
+    "navigation:A*": {
+      "success": 45,
+      "total": 50,
+      "last_updated": "2025-03-30T08:00:00Z"
+    },
+    "navigation:RRT": {
+      "success": 38,
+      "total": 50,
+      "last_updated": "2025-03-30T08:05:00Z"
+    },
+    "object_manipulation:force_control": {
+      "success": 32,
+      "total": 40,
+      "last_updated": "2025-03-30T08:10:00Z"
+    }
+  },
+  "world_states": [
+    {
+      "position": "start",
+      "battery": 100.0,
+      "cpu_available": 80.0,
+      "memory_available": 2048.0
+    },
+    {
+      "position": "start",
+      "battery": 100.0,
+      "cpu_available": 60.0,
+      "memory_available": 1024.0
+    },
+    {
+      "gripper_state": "open",
+      "force": 0.0,
+      "cpu_available": 65.0,
+      "memory_available": 1024.0
+    },
+    {
+      "position": "start",
+      "cpu_available": 70.0,
+      "memory_available": 2048.0
+    }
+  ]
+}

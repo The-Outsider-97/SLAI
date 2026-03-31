@@ -1,0 +1,207 @@
+gpu_limit: 1000
+ram_limit: 128
+trained: False
+random_state: 42
+planning_db_path: "templates/planning_db.json"
+heuristic_model_path: "src/agents/planning/models/"
+monitor_snapshot: "src/agents/planning/checkpoints/monitor_snapshot.json"
+
+safety_margins:
+  resource_buffers:
+    gpu: 0.15           # 15% of available GPUs must remain unallocated
+    ram: 0.2            # 20% of total RAM must remain free
+    specialized_hardware: ["emergency_gpu"]  # Reserved hardware units
+  temporal:
+    min_task_duration: 30  # Minimum allowed task duration in seconds
+    max_concurrent: 5      # Max simultaneous tasks per agent
+    time_buffer: 120       # Minimum gap between dependent tasks (seconds)
+
+service_discovery:
+  skip_localhost_http: True
+  mode: "static"  # Options: static|consul|k8s
+  static_nodes: ["localhost"] # OR add "node1", "node2", "gpu-node1"
+  consul_url: "http://localhost:5000"
+  k8s_api: "https://kubernetes.default.svc"
+  k8s_token: ""
+  node_port: 9100  # Port for node metrics API
+
+decomposition:
+  min_chunk_size: 100      # Minimum data elements per horizontal split
+  max_parallel_chunks: 8   # Maximum concurrent data chunks
+  min_ram_per_chunk: 4     # GB RAM guaranteed per data chunk
+  stage_time_buffer: 60    # Buffer between stage deadlines (seconds)
+  vertical_stages:
+    ABSTRACT:  # Match TaskType.ABSTRACT
+      - name: "default_stage"
+        gpu: 0
+        ram: 8
+    processing_pipeline:
+      - name: "preprocessing"
+        gpu: 0
+        ram: 8
+      - name: "core_processing"
+        gpu: 1
+        ram: 16
+        specialized_hw: ["tensor_core"]
+      - name: "postprocessing"
+        gpu: 0
+        ram: 4
+
+task_scheduler:
+  risk_threshold: 0.7
+  base_duration_per_requirement: 5.0  # Time per capability requirement
+  efficiency_attribute: "efficiency"  # Key in agent's details for efficiency
+  retry_policy:
+    max_retries: 3
+    max_attempts: 3
+    backoff_factor: 1.5
+    delay: 10
+
+heuristic_selector:
+  heuristic_priority: ["RL", "GB", "DT", "UA", "CBR"]
+  min_rl_sequence_length: 3
+  max_dt_depth: 5
+  min_cases_for_cbr: 10
+  speed_threshold: 0.1  # seconds
+  accuracy_weight: 0.7
+  speed_weight: 0.3
+  time_budget: 0.5
+  performance_log_path: "heuristic_performance.log"
+  cbr_task_types: ["troubleshooting", "support", "repair"]
+
+global_heuristic:
+  max_depth: 8
+  min_samples_split: 15
+  class_weight: "balanced"
+  trained: False
+  random_state: 42
+  planning_db_path: "templates/planning_db.json"
+  heuristic_model_path: "src/agents/planning/models/"
+
+decision_tree_heuristic:
+  min_impurity_decrease: 0.01
+  ccp_alpha: 0.02
+  feature_config:
+    use_temporal_features: true
+    use_priority_weighting: true
+    use_method_complexity: false
+  validation:
+    test_size: 0.25
+    max_training_samples: 10000
+
+gradient_boosting_heuristic:
+  n_estimators: 200
+  learning_rate: 0.05
+  subsample: 0.8
+  early_stopping_rounds: 20
+  validation_fraction: 0.2
+  feature_config:
+    use_priority: true
+    use_resource_check: true
+    recent_success_window: 10
+
+reinforcement_learning_heuristic:
+  hidden_size: 64
+  learning_rate: 0.01
+  initial_exploration: 0.3
+  min_exploration: 0.05
+  exploration_decay: 0.995
+  discount_factor: 0.99
+  feature_config:
+    use_priority: true
+    use_resource_check: true
+    use_temporal_features: true
+
+uncertainty_aware_heuristic:
+  uncertainty_threshold: 0.15
+  model_type: "BNN" # GP or BNN
+  feature_config: {}
+  bnn_config: {}
+
+case_based_reasoning_heuristic:
+  similarity_threshold: 0.7
+  max_cases: 1000
+  min_similar_cases: 3
+  feature_weights: {}
+  adaptation_rules: {}
+  feature_config: {}
+
+planning_memory:
+  checkpoints_dir: "src/agents/planning/checkpoints/"
+  max_checkpoints: 100                 # Maximum stored planning states
+  history_window: 1000                 # Execution history items to retain
+  retention_days: 30                    # Auto-delete checkpoints older than this
+  compression: false                   # Enable checkpoint compression
+  auto_save_interval: 300              # Seconds between auto-saves (0=disabled)
+
+planning_metrics:
+  enable_timing: true          # Whether to require timing data
+  default_task_cost: 1.0       # Fallback cost for tasks without cost attribute
+  default_task_duration: 0.5   # Fallback duration (seconds) when timing data missing
+  use_length_fallback: true    # Use plan length * duration when no timing data
+  metrics_weights:
+    success: 0.5               # Weight for success rate in efficiency score
+    cost: 0.3                  # Weight for cost efficiency
+    time: 0.2                  # Weight for time efficiency
+
+planning_monitor:
+  metrics_window: 100          # Number of plans to retain for trend analysis
+  method_analysis_depth: 10    # Track top N most used methods
+  anomaly_thresholds:
+    success_rate: 0.65         # Minimum acceptable success rate
+    cpu_peak: 85.0             # Max CPU% before alert
+    memory_peak: 4096          # Max MB before alert
+  check_intervals:
+    plan_execution: 5          # Check metrics every N plans
+    resource_scan: 300         # Full system scan every N seconds
+
+planning_types:
+  default_constraints: []
+  type_checks: enabled
+  validation_level: strict
+  cost: 1.0
+
+planning_executor:
+  check_interval: 0.5
+  divergence_threshold: 2
+  state_checks_enabled: true
+  precondition_checks_enabled: true
+  precondition_lookahead: 3
+  snapshot_interval: 3.0              # Seconds between state checks
+  max_deviation_threshold: 0.25        # 25% state deviation tolerance
+  max_tolerable_deviations: 3          # Max deviations before replan
+  precondition_lookahead: 3            # Tasks ahead to check preconditions
+  resource_ranges:                     # For numeric comparison tolerance
+    cpu: 1.0
+    battery: 100.0
+    temperature: 50.0
+
+probabilistic_planner:
+  gamma: 0.99
+  convergence_threshold: 0.0001
+  max_iterations: 1000
+
+safety_planning: {}
+
+cluster_monitoring:
+  skip_localhost_http: True
+  node_query_timeout: 2    # Seconds to wait for node response
+  update_interval: 5       # Seconds between resource updates
+  discovery_poll_interval: 300  # Seconds between node discovery scans
+  load_thresholds:
+    cpu: 0.85              # CPU usage alert threshold
+    memory: 0.9            # Memory usage alert threshold
+    temperature: 70        # GPU temperature threshold (°C)
+
+learning_retraining_scheduler:
+  risk_threshold: 0.4
+  base_duration_per_requirement: 300  # 5 minutes per requirement
+  efficiency_attribute: "efficiency"
+  max_concurrent_training: 3
+
+meta_controller:
+  check_interval_seconds: 60
+  performance_window: 50
+  min_analysis_samples: 10
+  cooldown_period_seconds: 300
+  retraining_thresholds: {}

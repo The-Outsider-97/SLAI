@@ -1,0 +1,37 @@
+{
+  "class_name": "AcademicPlanningError",
+  "type": "CustomExceptionClass",
+  "module": "planning_types",
+  "inherits_from": ["Exception"],
+  "docstring": "Custom exception for type violations and planning semantics.",
+  "detailed_description": "AcademicPlanningError is a specialized exception class derived from Python's base Exception. It is designed to signal errors that are specific to the rules, constraints, and semantic interpretations within the academic planning framework defined in the associated codebase. This allows for more precise error handling and distinguishes planning-specific issues from general runtime errors.",
+  "purpose_and_role": [
+    "To provide a distinct error type for violations of the custom type system (as seen in the 'Any' class).",
+    "To indicate failures in constraint validation (e.g., type constraints, predicate constraints).",
+    "To signal semantic errors in planning operations, such as type mismatches in operations like addition within the 'Any' class or issues during serialization/deserialization of custom types.",
+    "To enable targeted error catching for issues originating from the planning logic, facilitating robust error management and debugging."
+  ],
+  "key_characteristics": [
+    "Inherits all standard behaviors from the Python `Exception` class.",
+    "Does not introduce new attributes or methods; it serves as a specific marker for a category of errors.",
+    "Crucial for maintaining the integrity and 'academic rigor' of the type system and operations defined in classes like 'Any'."
+  ],
+  "usage_in_provided_code": {
+    "raised_by_class": "Any",
+    "methods_raising_exception": [
+      {
+        "method": "_validate",
+        "condition": "If a provided constraint is of an invalid type (not a type, callable, or recognized string tag)."
+      },
+      {
+        "method": "from_json",
+        "condition": "If a constraint specified in the JSON data cannot be reconstructed (e.g., an unknown constraint name)."
+      },
+      {
+        "method": "__add__",
+        "condition": "If an attempt is made to add an 'Any' instance with another 'Any' instance of an incompatible type."
+      }
+    ]
+  },
+  "serialization_note": "This JSON describes the AcademicPlanningError class itself. The class is a standard Python exception and is not designed to be serialized into JSON in the same way instances of the 'Any' class are (via to_json/from_json methods)."
+}
