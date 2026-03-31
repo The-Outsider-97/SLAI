@@ -148,6 +148,9 @@ class DeadlineAwareScheduler(TaskScheduler):
 
         # Task validation
         valid_task_ids = set()
+        declared_task_ids = {
+            t.get("id") for t in tasks if isinstance(t, dict) and isinstance(t.get("id"), str)
+        }
         for idx, task in enumerate(tasks):
             task_id = task.get("id", f"Unidentified task at index {idx}")
             task_errors = []
@@ -199,7 +202,7 @@ class DeadlineAwareScheduler(TaskScheduler):
                     for dep in task["dependencies"]:
                         if not isinstance(dep, str):
                             task_errors.append("Dependency must be string")
-                        elif dep not in valid_task_ids:
+                        elif dep not in declared_task_ids:
                             task_warnings.append(f"Unknown dependency: {dep}")
 
             if task_errors:
@@ -390,7 +393,11 @@ class DeadlineAwareScheduler(TaskScheduler):
         Uses a simple load‑based assignment order (topological order if dependencies exist).
         """
         schedule = {}
-        agent_loads = {aid: 0.0 for aid in agents}
+        now = time.time()
+        agent_loads = {
+            aid: max(now, float(details.get("current_load", 0.0))) if isinstance(details, dict) else now
+            for aid, details in agents.items()
+        }
         dependency_graph = self._build_dependency_graph(state)
 
         task_order = self._order_by_dependencies(candidate_map, dependency_graph)
@@ -406,7 +413,8 @@ class DeadlineAwareScheduler(TaskScheduler):
             best_adjusted = -np.inf
             for agent_id, score in candidates:
                 current_load = agent_loads.get(agent_id, 0.0)
-                load_penalty = np.exp(current_load)  # exponential load penalty
+                queue_delay = max(0.0, current_load - now)
+                load_penalty = np.exp(min(10.0, queue_delay / 60.0))  # cap exponent to avoid overflow
                 adjusted = score / load_penalty
                 if adjusted > best_adjusted:
                     best_adjusted = adjusted
@@ -495,11 +503,12 @@ class DeadlineAwareScheduler(TaskScheduler):
         efficiency = max(agent_details.get(self.efficiency_attribute, 1.0), 0.1)
         duration = base_duration / efficiency
 
+        start_time = max(time.time(), current_load)
         return {
             "task_id": task_id,
             "agent_id": agent_id,
-            "start_time": current_load,
-            "end_time": current_load + duration,
+            "start_time": start_time,
+            "end_time": start_time + duration,
             "risk_score": task.get("risk_assessment", {}).get("risk_score", 0.5),
         }
 
