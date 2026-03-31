@@ -240,8 +240,12 @@ class PlanningExecutor:
         # Find the currently executing task
         current_idx = self._get_current_task_index()
         if current_idx is None:
-            # No executing task; maybe not started yet or finished
-            return
+            current_idx = next(
+                (i for i, task in enumerate(self.plan) if task.status == TaskStatus.PENDING),
+                None,
+            )
+            if current_idx is None:
+                return
 
         # Determine tasks to check up to lookahead
         end_idx = min(current_idx + self.precondition_lookahead, len(self.plan))
