@@ -438,6 +438,7 @@ class HubWindow(QWidget):
         self.app_launch_loader = create_loading_controller()
         self.app_launch_loader.on_update = self.loading_overlay.on_loader_update
         self.loading_overlay.raise_()
+        self._app_launch_in_progress = False
 
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._animate)
@@ -837,8 +838,11 @@ class HubWindow(QWidget):
     def _on_app_clicked(self, app_name: str) -> None:
         if app_name not in {"SignalSentry", "ContentOps Autopublisher"}:
             return
+        if self._app_launch_in_progress:
+            return
 
         try:
+            self._app_launch_in_progress = True
             start_loading(self.app_launch_loader, f"Launching {app_name}…")
             update_loading(self.app_launch_loader, progress=0.35, message=f"Initializing {app_name} window…")
             if app_name == "SignalSentry":
@@ -854,6 +858,8 @@ class HubWindow(QWidget):
         except Exception as exc:
             complete_loading(self.app_launch_loader, "Launch failed")
             print(f"Failed to launch {app_name}: {exc}")
+        finally:
+            self._app_launch_in_progress = False
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()
