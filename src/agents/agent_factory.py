@@ -6,6 +6,7 @@ from . import __version__
 
 from .base.utils.main_config_loader import load_global_config
 from .factory.agent_meta_data import AgentMetaData, AgentRegistry
+from .factory.out_of_process_agent import OutOfProcessAgentProxy
 from .factory.reasoner import BasicZeroReasoner
 from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
@@ -52,8 +53,20 @@ class AgentFactory:
         "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
+        "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
     }
-
+    _out_of_process_fallback_agents = {
+        "adaptive",
+        "alignment",
+        "evaluation",
+        "knowledge",
+        "language",
+        "learning",
+        "perception",
+        "planning",
+        "reasoning",
+        "safety",
+    }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
@@ -202,7 +215,25 @@ class AgentFactory:
             # Dynamically import the module and get the class
             module = importlib.import_module(metadata.module_path)
             agent_class = getattr(module, metadata.class_name)
-        except (ImportError, AttributeError) as e:
+        except Exception as e:
+            message = f"{type(e).__name__}: {e}"
+            lowered = message.lower()
+            is_native_dll_failure = "winerror 1114" in lowered or "c10.dll" in lowered
+            if is_native_dll_failure and agent_type in self._out_of_process_fallback_agents:
+                logger.warning(
+                    "Agent '%s' failed in-process due to native dependency load issue; "
+                    "switching to out-of-process proxy. Error: %s",
+                    agent_type,
+                    message,
+                )
+                proxy = OutOfProcessAgentProxy(
+                    agent_type=agent_type,
+                    module_path=metadata.module_path,
+                    class_name=metadata.class_name,
+                    init_error=message,
+                )
+                self.active_agents[agent_type] = proxy
+                return proxy
             self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
             logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
             raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
