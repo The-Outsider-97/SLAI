@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
+import sys, os
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -37,12 +37,18 @@ class OutOfProcessAgentProxy:
             "kwargs": kwargs,
         }
         try:
+            child_env = os.environ.copy()
+            # Ensure worker stdio uses UTF-8 to avoid Windows cp1252/charmap crashes
+            # when dependencies/loggers emit non-ASCII symbols (e.g. ℹ).
+            child_env.setdefault("PYTHONIOENCODING", "utf-8")
+            child_env.setdefault("PYTHONUTF8", "1")
             completed = subprocess.run(
-                [sys.executable, "-m", "src.agents.factory.remote_agent_worker"],
+                [sys.executable, "-m", "src.agents.factory.remote_worker"],
                 input=json.dumps(payload),
                 text=True,
                 capture_output=True,
                 check=False,
+                env=child_env,
             )
         except Exception as exc:
             logger.warning(
