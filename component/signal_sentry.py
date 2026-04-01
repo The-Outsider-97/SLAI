@@ -5,8 +5,11 @@ Composition-only module: styles and business logic are sourced from dedicated la
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import subprocess
 import sys
+
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
 
 from PyQt5.QtCore import Qt
@@ -33,7 +36,9 @@ from PyQt5.QtWidgets import (
 
 from component.styles.main_style import metric_card_style
 from component.styles.signal_sentry_style import SIGNAL_SENTRY_STYLE
+from component.utils.loading_overlay import LoadingOverlay
 from component.utils.main_utils import fmt_pct, utc_timestamp_label
+from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
 from src.agents.agent_factory import AgentFactory
 from src.agents.collaborative.shared_memory import SharedMemory
 from src.agents.collaborative_agent import CollaborativeAgent
@@ -189,6 +194,12 @@ class SignalSentryWindow(QMainWindow):
         self.tabs.addTab(self.feedback_tab, "Feedback & Tuning")
 
         self._refresh_all_views()
+        self.loading_overlay = LoadingOverlay(self.centralWidget())
+        self.loading_overlay.sync_geometry()
+        self.loading_controller = create_loading_controller()
+        self.loading_controller.on_update = self.loading_overlay.on_loader_update
+
+        self._refresh_all_views()
 
         # if _BACKEND_IMPORT_ERROR is not None:
         #     QMessageBox.warning(
@@ -265,11 +276,17 @@ class SignalSentryWindow(QMainWindow):
         left.addWidget(self.watchlist_state_label)
 
         button_wrap = QHBoxLayout()
+        home_btn = QPushButton("Home")
+        home_btn.clicked.connect(self._return_home)
+        back_btn = QPushButton("Back")
+        back_btn.clicked.connect(self._return_home)
         export_btn = QPushButton("Export weekly brief")
         export_btn.clicked.connect(self._mock_export)
         self.scan_btn = QPushButton("Run scan now")
         self.scan_btn.setProperty("class", "primary")
         self.scan_btn.clicked.connect(self._run_scan)
+        button_wrap.addWidget(home_btn)
+        button_wrap.addWidget(back_btn)
         button_wrap.addWidget(export_btn)
         button_wrap.addWidget(self.scan_btn)
 
@@ -561,9 +578,13 @@ class SignalSentryWindow(QMainWindow):
             self.agent_status.addItem(f"{agent} Agent: {state}")
 
     def _run_scan(self) -> None:
+        start_loading(self.loading_controller, "Running SignalSentry scan…")
+        update_loading(self.loading_controller, progress=0.2, message="Preparing workflow agents…")
         self._ensure_planning_task_registered()
+        update_loading(self.loading_controller, progress=0.45, message="Collecting signals…")
         pipeline = self._ensure_pipeline_result(force=True)
         if pipeline is None:
+            complete_loading(self.loading_controller, "Scan failed")
             QMessageBox.critical(
                 self,
                 "Scan failed",
@@ -571,10 +592,12 @@ class SignalSentryWindow(QMainWindow):
             )
             return
         self.last_pipeline_result = pipeline
+        update_loading(self.loading_controller, progress=0.85, message="Refreshing dashboard…")
         if self.last_pipeline_result.digest_signals:
             self.signals = self.last_pipeline_result.digest_signals + self.last_pipeline_result.archived_signals
         self.run_state_label.setText(f"Last run: {utc_timestamp_label()}")
         self._refresh_all_views()
+        complete_loading(self.loading_controller, "Scan complete")
         QMessageBox.information(
             self,
             "Scan complete",
@@ -619,6 +642,11 @@ class SignalSentryWindow(QMainWindow):
         self.feedback_events.append(FeedbackEvent(signal_id=signal_id, verdict=verdict))
         self._refresh_feedback()
 
+    def _return_home(self) -> None:
+        main_path = Path(__file__).resolve().parents[1] / "main.py"
+        subprocess.Popen([sys.executable, str(main_path)])
+        self.close()
+
     def _ensure_pipeline_result(self, force: bool = False) -> PipelineResult | None:
         if self.last_pipeline_result is not None and not force:
             return self.last_pipeline_result
@@ -631,6 +659,10 @@ class SignalSentryWindow(QMainWindow):
             self.digest_summary.setText(f"Pipeline error: {exc}")
             return None
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.sync_geometry()
 
 
 def launch_signal_sentry() -> None:
