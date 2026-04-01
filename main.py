@@ -43,8 +43,10 @@ from src.functions.email import EmailService
 from src.functions.ratelimiter import RateLimiter
 from src.functions.storage import LocalStorage, Storage
 from src.functions.search import SearchEngine
+from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
 from component.utils.user_menu import UserMenuController
 from component.utils.auth_dialog import AuthDialog
+from component.utils.loading_overlay import LoadingOverlay
 from monitoring.metrics_collector import MetricsCollector
 from monitoring.health_check import HealthChecker
 from monitoring.drift_detection import DriftDetector
@@ -432,6 +434,10 @@ class HubWindow(QWidget):
 
         self._create_starfield()
         self._build_ui()
+        self.loading_overlay = LoadingOverlay(self)
+        self.app_launch_loader = create_loading_controller()
+        self.app_launch_loader.on_update = self.loading_overlay.on_loader_update
+        self.loading_overlay.raise_()
 
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._animate)
@@ -833,21 +839,27 @@ class HubWindow(QWidget):
             return
 
         try:
+            start_loading(self.app_launch_loader, f"Launching {app_name}…")
+            update_loading(self.app_launch_loader, progress=0.35, message=f"Initializing {app_name} window…")
             if app_name == "SignalSentry":
                 from component.signal_sentry import SignalSentryWindow
                 self.child_window = SignalSentryWindow()
             else:
                 from component.autopublisher import AutopublisherWindow
                 self.child_window = AutopublisherWindow()
+            update_loading(self.app_launch_loader, progress=0.85, message=f"Opening {app_name}…")
             self.child_window.show()
+            complete_loading(self.app_launch_loader, f"{app_name} ready")
             self.close()
         except Exception as exc:
+            complete_loading(self.app_launch_loader, "Launch failed")
             print(f"Failed to launch {app_name}: {exc}")
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()
         self._position_hero()
         self._position_cards()
+        self.loading_overlay.sync_geometry()
         if self.dropdown_open and not self.dropdown_anim.state():
             self.dropdown_panel.setGeometry(self._dropdown_open_rect())
 
