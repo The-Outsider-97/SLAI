@@ -6,11 +6,11 @@ common weight initialisation methods (He, Xavier, etc.) for use in neural networ
 """
 
 import math
-from typing import Any, Dict, Optional, Type
-
 import torch
 import torch.nn as nn
+
 from torch import Tensor
+from typing import Dict, Optional, Type
 
 # -------------------------------------------------------------------------
 # Activation function registry
@@ -22,8 +22,8 @@ _ACTIVATION_REGISTRY: Dict[str, Type[nn.Module]] = {
     "sigmoid": nn.Sigmoid,
     "tanh": nn.Tanh,
     "softmax": nn.Softmax,
-    "linear": nn.Identity,          # no activation
-    "swish": nn.SiLU,               # SiLU = Swish
+    "linear": nn.Identity,
+    "swish": nn.SiLU,          # SiLU = Swish
     "gelu": nn.GELU,
     "mish": nn.Mish,
 }
@@ -48,6 +48,29 @@ def get_activation(name: str, **kwargs) -> nn.Module:
     if name_lower not in _ACTIVATION_REGISTRY:
         raise ValueError(f"Unknown activation: {name}. Supported: {list(_ACTIVATION_REGISTRY.keys())}")
     return _ACTIVATION_REGISTRY[name_lower](**kwargs)
+
+
+# -------------------------------------------------------------------------
+# Activation functions as callables (for use in TensorOps)
+# -------------------------------------------------------------------------
+def gelu_tensor(x: Tensor) -> Tensor:
+    """Gaussian Error Linear Unit."""
+    return torch.nn.functional.gelu(x)
+
+
+def swish_tensor(x: Tensor) -> Tensor:
+    """Swish (SiLU) activation."""
+    return x * torch.sigmoid(x)
+
+
+def mish_tensor(x: Tensor) -> Tensor:
+    """Mish activation: x * tanh(softplus(x))."""
+    return x * torch.tanh(torch.nn.functional.softplus(x))
+
+
+def sigmoid_tensor(x: Tensor) -> Tensor:
+    """Sigmoid activation."""
+    return torch.sigmoid(x)
 
 
 # -------------------------------------------------------------------------
@@ -125,16 +148,15 @@ def xavier_normal(shape: tuple, gain: float = 1.0, device: str = "cpu") -> Tenso
 
 
 # -------------------------------------------------------------------------
-# (Optional) Legacy activation classes – kept for backward compatibility
+# Legacy classes for compatibility
 # -------------------------------------------------------------------------
 class Activation(nn.Module):
     """Base class for activation functions (for compatibility with old code)."""
-
     def forward(self, z: Tensor) -> Tensor:
         raise NotImplementedError
 
 
-# If you need to keep the old class names (ReLU, etc.), you can alias them:
+# Alias old names
 ReLU = nn.ReLU
 LeakyReLU = nn.LeakyReLU
 ELU = nn.ELU
@@ -148,9 +170,6 @@ GELU = nn.GELU
 Mish = nn.Mish
 
 
-# -------------------------------------------------------------------------
-# Test / demo
-# -------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Testing activation engine...")
     x = torch.randn(2, 3)
