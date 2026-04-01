@@ -5,9 +5,9 @@ import time
 
 from typing import Dict, Any, List, Optional
 
-from src.agents.base_agent import BaseAgent
 from abc import ABC, abstractmethod
 
+from src.agents.base_agent import BaseAgent
 from src.agents.collaborative.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
@@ -23,6 +23,8 @@ class AgentRegistry:
     - Versioned registrations
     """
     _module_failures: Dict[str, str] = {}
+    _torch_runtime_checked: bool = False
+    _torch_available: bool = True
 
     def __init__(self, shared_memory: Optional[Any] = None, auto_discover: bool = True):
         self.config = load_global_config()
@@ -37,6 +39,19 @@ class AgentRegistry:
         self.excluded_modules = agent_discovery_config.get('excluded_modules', [])
         self._discovered_packages = set()
         self._agent_init_failures: Dict[str, str] = {}
+        self._torch_sensitive_modules = {
+            "src.agents.adaptive_agent",
+            "src.agents.alignment_agent",
+            "src.agents.evaluation_agent",
+            "src.agents.knowledge_agent",
+            "src.agents.language_agent",
+            "src.agents.learning_agent",
+            "src.agents.perception_agent",
+            "src.agents.planning_agent",
+            "src.agents.qnn_agent",
+            "src.agents.reasoning_agent",
+            "src.agents.safety_agent",
+        }
         
         
         # Initialize with dynamic discovery from config
@@ -77,11 +92,35 @@ class AgentRegistry:
                     logger.debug("Skipping base class module %s during discovery.", module_name)
                     continue
                 if "agent" in lowered:
+                    if self._should_skip_torch_sensitive_module(module_name):
+                        continue
                     self._load_agent_module(module_name)
             self._discovered_packages.add(agents_package)
         except ImportError as e:
             logger.error(f"Failed to import agents package: {e}")
             raise
+
+    def _should_skip_torch_sensitive_module(self, module_name: str) -> bool:
+        if module_name not in self._torch_sensitive_modules:
+            return False
+        if not self._torch_runtime_checked:
+            self._torch_runtime_checked = True
+            try:
+                importlib.import_module("torch")
+                self._torch_available = True
+            except Exception as exc:
+                self._torch_available = False
+                logger.warning(
+                    "Torch runtime unavailable during collaborative discovery; "
+                    "skipping torch-sensitive modules. Cause: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        if self._torch_available:
+            return False
+        logger.debug("Skipping %s because torch runtime is unavailable.", module_name)
+        self._module_failures[module_name] = "Skipped: torch runtime unavailable"
+        return True
 
     def _load_agent_module(self, module_name: str) -> None:
         """Internal method to load and validate agent modules"""
