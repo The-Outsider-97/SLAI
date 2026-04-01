@@ -77,7 +77,13 @@ class Loader:
         """Start the loader."""
         with self._lock:
             if self._state.is_running:
-                logger.warning("Loader already started, ignoring start()")
+                # Treat duplicate starts as message refreshes; this keeps UI
+                # interactions idempotent and avoids warning spam under rapid
+                # user clicks/racey event handlers.
+                if message:
+                    self._state.message = message
+                    self._notify_update()
+                logger.debug("Loader already started; refreshed message")
                 return
             self._state.start_time = time.time()
             self._state.is_running = True
@@ -106,7 +112,7 @@ class Loader:
         """
         with self._lock:
             if not self._state.is_running:
-                logger.warning("Loader not started, ignoring update")
+                logger.debug("Loader not started, ignoring update")
                 return
 
             now = time.time()
@@ -151,7 +157,7 @@ class Loader:
         """Mark the loader as complete."""
         with self._lock:
             if not self._state.is_running:
-                logger.warning("Loader not started, ignoring complete()")
+                logger.debug("Loader not started, ignoring complete()")
                 return
             self._state.is_running = False
             self._state.progress = 1.0
