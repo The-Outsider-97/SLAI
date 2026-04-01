@@ -44,6 +44,7 @@ from src.functions.ratelimiter import RateLimiter
 from src.functions.storage import LocalStorage, Storage
 from src.functions.search import SearchEngine
 from component.utils.user_menu import UserMenuController
+from component.utils.auth_dialog import AuthDialog
 from monitoring.metrics_collector import MetricsCollector
 from monitoring.health_check import HealthChecker
 from monitoring.drift_detection import DriftDetector
@@ -98,138 +99,6 @@ class SearchIcon(QWidget):
         painter.setPen(pen)
         painter.drawEllipse(QPointF(11, 11), 8, 8)
         painter.drawLine(QPointF(21, 21), QPointF(16.65, 16.65))
-
-class LoginDialog(QDialog):
-    login_succeeded = pyqtSignal(str, object)
-
-    def __init__(
-        self,
-        auth_service: AuthService,
-        rate_limiter: RateLimiter,
-        email_service: EmailService | None,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.auth_service = auth_service
-        self.rate_limiter = rate_limiter
-        self.email_service = email_service
-        self.setWindowTitle("Login")
-        self.setModal(True)
-        self.setFixedSize(380, 230)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #12161a; color: white; }
-            QLabel { color: white; font-family: Georgia; }
-            QLineEdit {
-                background: #0e1012;
-                border: 1px solid #5c5c5c;
-                border-radius: 6px;
-                color: white;
-                padding: 6px;
-            }
-            QPushButton {
-                border-radius: 8px;
-                padding: 6px 10px;
-                font-family: Georgia;
-            }
-            """
-        )
-
-        layout = QVBoxLayout(self)
-        title = QLabel("Log in to SLAI Hub")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #eacb00;")
-        layout.addWidget(title)
-
-        self.username_input = QLineEdit(self)
-        self.username_input.setPlaceholderText("Username")
-        self.password_input = QLineEdit(self)
-        self.password_input.setPlaceholderText("Password")
-        self.password_input.setEchoMode(QLineEdit.Password)
-        layout.addWidget(self.username_input)
-        layout.addWidget(self.password_input)
-
-        button_row = QHBoxLayout()
-        login_btn = QPushButton("Log in")
-        signup_btn = QPushButton("Sign up")
-        forgot_btn = QPushButton("Forgot password?")
-        login_btn.clicked.connect(self._login)
-        signup_btn.clicked.connect(self._signup)
-        forgot_btn.clicked.connect(self._forgot_password)
-        button_row.addWidget(login_btn)
-        button_row.addWidget(signup_btn)
-        button_row.addWidget(forgot_btn)
-        layout.addLayout(button_row)
-
-    def _login(self):
-        username = self.username_input.text().strip()
-        password = self.password_input.text()
-        if not username or not password:
-            QMessageBox.warning(self, "Missing fields", "Please enter username and password.")
-            return
-        rate_key = f"login:{username.lower()}" if username else "login:anonymous"
-        if not self.rate_limiter.allow(rate_key):
-            QMessageBox.warning(
-                self,
-                "Too many attempts",
-                "Too many login attempts. Please wait a moment and try again.",
-            )
-            return
-        try:
-            token = self.auth_service.log_in(username, password)
-            QMessageBox.information(self, "Success", f"Logged in.\nToken ends at: {token.expires_at.isoformat()}")
-            self.login_succeeded.emit(username, token)
-            self.accept()
-        except Exception as exc:
-            QMessageBox.warning(self, "Login failed", str(exc))
-
-    def _signup(self):
-        username = self.username_input.text().strip()
-        password = self.password_input.text()
-        if not username or not password:
-            QMessageBox.warning(self, "Missing fields", "Please enter username and password.")
-            return
-        try:
-            self.auth_service.sign_up(username, password)
-            QMessageBox.information(self, "Account created", "Sign up successful. You can now log in.")
-        except Exception as exc:
-            QMessageBox.warning(self, "Sign up failed", str(exc))
-
-    def _forgot_password(self):
-        username = self.username_input.text().strip()
-        if not username:
-            QMessageBox.information(self, "Forgot password", "Enter your username/email first.")
-            return
-        if self.email_service is None:
-            QMessageBox.warning(
-                self,
-                "Email unavailable",
-                "Email service is not configured yet. Please contact support.",
-            )
-            return
-        destination = username if "@" in username else f"{username}@example.local"
-        body_html = (
-            "<h3>SLAI account recovery</h3>"
-            f"<p>We received a password help request for <b>{username}</b>.</p>"
-            "<p>If this was you, contact support or use sign up to recreate your local profile.</p>"
-        )
-        body_text = (
-            f"SLAI account recovery request for {username}. "
-            "If this was you, contact support or recreate your local profile."
-        )
-        try:
-            self.email_service.send(
-                to=destination,
-                subject="SLAI account recovery request",
-                body_html=body_html,
-                body_text=body_text,
-            )
-            QMessageBox.information(
-                self,
-                "Recovery email queued",
-                f"A recovery help email was queued for {destination}.",
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Email failed", str(exc))
 
 class LoginButton(QPushButton):
     def __init__(self, parent=None):
@@ -538,6 +407,7 @@ class HubWindow(QWidget):
         self.storage = self._build_storage()
         self.current_username: str | None = None
         self.current_token = None
+        self.reauth_in_progress = False
         self.user_profile_asset_path: str | None = None
         self.search_engine = SearchEngine(fields=["title", "description"])
         self.search_engine.index_documents(
@@ -781,18 +651,20 @@ class HubWindow(QWidget):
         self.monitoring_dialog.exec_()
 
     def _open_login_dialog(self):
-        dialog = LoginDialog(
+        dialog = AuthDialog(
             auth_service=self.auth_service,
             rate_limiter=self.rate_limiter,
             email_service=self.email_service,
+            storage=self.storage,
             parent=self,
         )
-        dialog.login_succeeded.connect(self._on_login_succeeded)
+        dialog.authentication_succeeded.connect(self._on_login_succeeded)
         dialog.exec_()
 
     def _on_login_succeeded(self, username: str, token) -> None:
         self.current_username = username
         self.current_token = token
+        self.reauth_in_progress = False
         self._set_authenticated_ui(True)
         self._persist_user_profile(username)
 
@@ -831,8 +703,44 @@ class HubWindow(QWidget):
                 print(f"Logout token revoke failed: {exc}")
         self.current_username = None
         self.current_token = None
+        self.reauth_in_progress = False
         self.user_profile_asset_path = None
         self._set_authenticated_ui(False)
+
+    def _open_reauth_dialog(self) -> None:
+        if not self.current_username or self.reauth_in_progress:
+            return
+        self.reauth_in_progress = True
+        self._set_authenticated_ui(False)
+        dialog = AuthDialog(
+            auth_service=self.auth_service,
+            rate_limiter=self.rate_limiter,
+            email_service=self.email_service,
+            storage=self.storage,
+            parent=self,
+            username_hint=self.current_username,
+            mode="reauth",
+        )
+        dialog.authentication_succeeded.connect(self._on_login_succeeded)
+        dialog.authentication_cancelled.connect(self._handle_reauth_cancelled)
+        dialog.exec_()
+
+    def _handle_reauth_cancelled(self) -> None:
+        self.current_username = None
+        self.current_token = None
+        self.reauth_in_progress = False
+        self._set_authenticated_ui(False)
+
+    def _record_authenticated_activity(self) -> None:
+        if not self.current_username or self.reauth_in_progress:
+            return
+        try:
+            if self.auth_service.requires_reverification(self.current_username):
+                self._open_reauth_dialog()
+                return
+            self.auth_service.record_activity(self.current_username)
+        except Exception as exc:
+            print(f"Failed to track auth activity: {exc}")
 
     def _show_profile_placeholder(self) -> None:
         username = self.current_username or "Unknown user"
@@ -944,6 +852,8 @@ class HubWindow(QWidget):
             self.dropdown_panel.setGeometry(self._dropdown_open_rect())
 
     def eventFilter(self, obj, event):
+        if event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress):
+            self._record_authenticated_activity()
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             click_pos = event.globalPos()
             if self.dropdown_open:
