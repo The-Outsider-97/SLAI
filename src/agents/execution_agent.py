@@ -295,9 +295,12 @@ class ExecutionAgent(BaseAgent):
         last_error: Optional[Exception] = None
         action_name = "unknown"
         working_context = context
+        blocked_actions: set[str] = set()
 
         for attempt in range(self.max_step_retries + 1):
             try:
+                if blocked_actions:
+                    working_context["disallowed_actions"] = sorted(blocked_actions)
                 selected_action = self._select_action(working_context)
                 action_name = selected_action.get("name", "idle")
                 self._validate_action(action_name, working_context)
@@ -314,6 +317,7 @@ class ExecutionAgent(BaseAgent):
             except (ActionFailureError, InvalidContextError) as exc:
                 last_error = exc
                 recovered, new_context = self.recovery.handle_failure(action_name, exc, working_context)
+                blocked_actions.update(new_context.get("disallowed_actions", []))
                 if not recovered:
                     break
                 working_context = new_context
@@ -323,6 +327,7 @@ class ExecutionAgent(BaseAgent):
             except Exception as exc:
                 last_error = ActionFailureError(action_name, f"Unexpected error: {exc}")
                 recovered, new_context = self.recovery.handle_failure(action_name, last_error, working_context)
+                blocked_actions.update(new_context.get("disallowed_actions", []))
                 if not recovered:
                     break
                 working_context = new_context
