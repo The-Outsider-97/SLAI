@@ -63,6 +63,9 @@ class ActionSelector:
             context = self.context or {"energy": 10.0}
             logger.debug("Using default/empty context for selection")
 
+        if context.get("force_idle"):
+            return self._create_fallback_action(context)
+
         if not actions:
             logger.warning("No actions provided; returning fallback idle")
             return self._create_fallback_action(context)
@@ -208,15 +211,19 @@ class ActionSelector:
     # ------------------------ Helper Methods ----------------------------
     def _filter_valid_actions(self, actions: List[Dict], context: Dict) -> List[Dict]:
         """Return only actions whose preconditions are satisfied."""
+        disallowed = set(context.get("disallowed_actions", []))
         valid = []
         for action in actions:
             name = action.get("name")
+            if name in disallowed:
+                continue
             preconditions = self.action_registry.get(name, {}).get("preconditions", [])
             if not preconditions:
                 preconditions = action.get("preconditions", [])
             if self._check_preconditions(preconditions, context):
                 valid.append(action)
         return valid
+
 
     @staticmethod
     def _check_preconditions(preconditions: List[str], context: Dict) -> bool:

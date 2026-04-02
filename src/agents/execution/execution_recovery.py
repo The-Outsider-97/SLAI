@@ -250,6 +250,17 @@ class ExecutionRecovery:
             modified["allow_partial_path"] = True
             modified["movement_timeout_multiplier"] = 1.5
 
+        if "unreachable" in message:
+            success, restored = self._backtrack_to_checkpoint(["pre_movement", "pre_action"], context)
+            if success and self._movement_preconditions_changed(context, restored):
+                restored["recovery_mode"] = True
+                return True, restored
+            modified.setdefault("disallowed_actions", [])
+            if action_name not in modified["disallowed_actions"]:
+                modified["disallowed_actions"].append(action_name)
+            modified["recovery_reason"] = "unreachable_target"
+            return False, modified
+
         if "blocked" in message or "obstacle" in message:
             success, restored = self._backtrack_to_checkpoint(["pre_movement", "pre_action"], context)
             if success:
@@ -263,6 +274,11 @@ class ExecutionRecovery:
                 return True, restored
 
         return True, modified
+
+    @staticmethod
+    def _movement_preconditions_changed(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+        keys = ("current_position", "destination", "map_data", "obstacles", "dynamic_objects")
+        return any(before.get(key) != after.get(key) for key in keys)
 
     def _handle_pick_failure(self, action_name: str, error: Exception, context: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         printer.status("RECOVERY", "Pick failure recovery", "warning")

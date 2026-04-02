@@ -24,6 +24,9 @@ class ExecutionValidator:
         self.validation_mode = self.validator_config.get("default_mode", "preflight")
         self.validation_level = self.validator_config.get("default_level", "strict")
         self.max_object_distance = float(self.validator_config.get("max_object_distance", 5.0))
+        self.max_navigation_distance = self.validator_config.get("max_navigation_distance")
+        if self.max_navigation_distance is not None:
+            self.max_navigation_distance = float(self.max_navigation_distance)
         self.min_energy_threshold = float(self.validator_config.get("min_energy_threshold", 2.0))
         self.position_tolerance = float(self.validator_config.get("position_tolerance", 0.5))
         self.validation_cache_ttl = int(self.validator_config.get("validation_cache_ttl", 60))
@@ -35,6 +38,7 @@ class ExecutionValidator:
 
         self.thresholds = {
             "max_distance": self.max_object_distance,
+            "max_navigation_distance": self.max_navigation_distance,
             "min_energy": self.min_energy_threshold,
             "position_tolerance": self.position_tolerance,
         }
@@ -205,7 +209,18 @@ class ExecutionValidator:
                     report["valid"] = False
                 else:
                     distance = self._calculate_distance(current_pos, target_pos)
-                    if distance > self.thresholds["max_distance"]:
+                    if action_name == "move_to":
+                        if self.max_navigation_distance is not None and distance > self.max_navigation_distance:
+                            report["errors"].append(
+                                str(UnreachableTargetError(action_name, target_pos, current_pos))
+                            )
+                            report["valid"] = False
+                        if not self._is_position_in_map(target_pos, context.get("map_data")):
+                            report["errors"].append(
+                                str(UnreachableTargetError(action_name, target_pos, current_pos))
+                            )
+                            report["valid"] = False
+                    elif distance > self.thresholds["max_distance"]:
                         report["errors"].append(
                             str(UnreachableTargetError(action_name, target_pos, current_pos))
                         )
@@ -255,6 +270,21 @@ class ExecutionValidator:
                 report["warnings"].append(f"World model validation skipped: {exc}")
 
         return report
+
+    def _is_position_in_map(self, position: Tuple[float, float], map_data: Any) -> bool:
+        if map_data is None:
+            return True
+        if (
+            not isinstance(map_data, list)
+            or not map_data
+            or not isinstance(map_data[0], list)
+            or not map_data[0]
+        ):
+            return False
+        rows = len(map_data)
+        cols = len(map_data[0])
+        x, y = position[0], position[1]
+        return 0.0 <= float(x) < float(rows) and 0.0 <= float(y) < float(cols)
 
     def _simulate_postconditions(self, action: Any, context: Dict[str, Any]) -> Dict[str, Any]:
         new_context = copy.deepcopy(context)
