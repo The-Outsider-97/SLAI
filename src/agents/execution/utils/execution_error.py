@@ -26,6 +26,16 @@ class ExecutionErrorType(Enum):
     STALE_CHECKPOINT = "Outdated or Invalid Checkpoint Access"
     COOKIE_MISMATCH = "Execution Cookie Verification Failed"
 
+class SoftInterrupt(Exception):
+    """Raised to gracefully interrupt an action without treating it as a hard failure."""
+    def __init__(self, reason: str = "external_interrupt", data: Optional[Dict[str, Any]] = None):
+        self.reason = reason
+        self.data = data or {}
+        super().__init__(f"SoftInterrupt: {reason}")
+
+    def __str__(self) -> str:
+        return f"SoftInterrupt(reason={self.reason}, data={self.data})"
+
 class ExecutionError(Exception):
     def __init__(self,
                  error_type: ExecutionErrorType,
