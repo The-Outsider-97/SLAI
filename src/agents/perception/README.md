@@ -1,62 +1,70 @@
-# PerceptionAgent — Multimodal Encoder & Fusion Layer
+# Perception Package
 
-## Overview
-PerceptionAgent is the sensory-computational module within SLAI, designed to process and unify visual, textual, and auditory data into a shared multimodal embedding. It supports pretraining, dropout masking, and full backpropagation, making it ideal for tasks requiring comprehensive environmental awareness or LLM integration.
+The `src/agents/perception/` package provides the multimodal perception stack for SLAI. It includes:
 
----
+- **Encoders** to convert text, image, and audio inputs into latent representations.
+- **Core modules** (transformer, attention, feedforward, tokenizer) used by both encoders and decoders.
+- **Decoders** to reconstruct or generate outputs from latent representations.
+- **Utilities and memory helpers** for config loading, task heads, and checkpoint-friendly execution.
 
-## Architecture
-- VisionEncoder: Converts images into patch-based transformer embeddings.
-- TextEncoder: Embeds tokenized sequences with positional encoding.
-- AudioEncoder: Processes waveforms into transformer-consumable audio frames.
-- MultimodalFusion: Dynamically fuses encoder outputs using weighted gating, dropout, and optional cross-attention.
-- Projection Layer: Projects fused embeddings to a compact latent space.
-- SLAILMAdapter (optional): Aligns perception output with a large language model embedding space.
+## Directory layout
 
----
+```text
+src/agents/perception/
+├── README.md
+├── configs/
+│   └── perception_config.yaml
+├── modules/
+│   ├── attention.py
+│   ├── feedforward.py
+│   ├── tokenizer.py
+│   └── transformer.py
+├── encoders/
+│   ├── audio_encoder.py
+│   ├── text_encoder.py
+│   └── vision_encoder.py
+├── decoders/
+│   ├── audio_decoder.py
+│   ├── text_decoder.py
+│   └── vision_decoder.py
+├── utils/
+│   ├── common.py
+│   ├── config_loader.py
+│   └── taskheads.py
+├── data_loader.py
+└── perception_memory.py
+```
 
-## Workflow
-1. Input data is processed by its respective encoder.
-2. Each encoder returns a tensor of shape (batch, seq_len, embed_dim).
-3. MultimodalFusion averages, weights, and masks embeddings, returning a unified (batch, embed_dim) vector.
-4. Projection layer compresses it to (batch, projection_dim).
-5. Final output can be used for:
-   - Pretraining objectives
-   - Downstream task prediction
-   - Feeding into SLAILM for reasoning
+## End-to-end data flow
 
----
-
-## Pretraining Objectives
-- Masked Modality Modeling — Randomly masks patches/tokens/frames and reconstructs them.
-- Crossmodal Matching — Contrastive learning for embedding alignment across modalities.
-- Temporal Consistency — Ensures coherence across frames/audio sequences over time.
-
----
+Use this as the primary reference for how data moves through perception during training/inference.
 
 ```mermaid
-graph TD  
-  A[perception_agent.py] --> B[modules/transformer.py]  
-  A --> C[encoders/audio_encoder.py]  
-  C --> B  
-  B --> D[modules/attention.py]  
+flowchart LR
+    A[Multimodal Inputs\nText / Image / Audio]
+    B[Encoders\ntext_encoder.py\nvision_encoder.py\naudio_encoder.py]
+    C[Shared Transformer Primitives\nmodules/attention.py\nmodules/feedforward.py\nmodules/transformer.py]
+    D[Latent Embeddings<br/>B x L x D or B x D]
+    E[Task Heads / Downstream Agent]
+    F[Decoders\ntext_decoder.py\nvision_decoder.py\naudio_decoder.py]
+    G[Generated/Reconstructed Outputs]
 
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    D --> F
+    F --> G
 ```
 
-## API Usage
-```python
-  agent = PerceptionAgent(config, shared_memory, agent_factory)
-  output = agent.forward(batch_inputs)
-  agent.backward(gradients)
-  agent.step()
+## Component guides
 
-  losses = agent.pretrainer.masked_modality_modeling(batch_inputs)
-  similarity = agent.pretrainer.crossmodal_matching(embeddings)
-```
+- See [`encoders/README.md`](./encoders/README.md) for modality-specific encoding behavior.
+- See [`modules/README.md`](./modules/README.md) for transformer internals and shared primitives.
+- See [`decoders/README.md`](./decoders/README.md) for reconstruction and generation flows.
 
----
+## Practical notes
 
-## Compatibility
-- Plug-and-play with SLAILM via .align_with_slailm(llm)
-- Fully differentiable and backprop-capable
-- Works with pretrained vision, text, audio weights (ViT, GPT2, wav2vec-style)
+- The implementation is strongly config-driven through `utils/config_loader.py` and `configs/perception_config.yaml`.
+- Several classes support multiple backend variants (e.g., transformer/CNN/MFCC) with runtime fallback behavior.
+- `PerceptionMemory` is integrated in core components for optional checkpointing and intermediate cache support.
