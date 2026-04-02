@@ -509,6 +509,16 @@ class TaskCoordinator:
             return False
 
         return any(visit(node) for node in list(graph.keys()))
+    
+    def clear_all_tasks(self) -> None:
+        """Remove all active and historical tasks, resetting the coordinator."""
+        with self._memory.lock:  # or use self.memory.lock if available
+            self.tasks.clear()
+            self.task_history.clear()
+            self.completed_tasks.clear()
+            self.task_dependencies.clear()
+            self.task_dependents.clear()
+            self._save_state()
 
 
 if __name__ == "__main__":
