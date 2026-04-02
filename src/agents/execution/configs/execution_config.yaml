@@ -1,4 +1,3 @@
-
 max_retries: 3
 
 base_action: {}
@@ -16,12 +15,33 @@ move_to_action:
   path_update_interval: 2.0
 
 pick_object_action:
-  grasp_time: 1.0       # Base grasp duration
-  min_distance: 0.5     # Max distance for picking
-  base_success_rate: 0.9 # Base success probability
-  energy_cost: 0.2      # Base energy consumption
-  max_weight: 5.0       # Maximum object weight
-  max_size: 1.0         # Maximum object size
+  grasp_time: 1.0
+  min_distance: 0.5
+  base_success_rate: 0.95
+  energy_cost: 0.2
+  max_weight: 5.0
+  max_size: 1.0
+  arm_prepick_joint:
+    joint_id: 2
+    angle: 0.5
+    speed: 0.5
+  arm_pick_joint:
+    joint_id: 2
+    angle: 0.0
+    speed: 0.5
+
+place_object_action:
+  place_time: 1.5
+  min_distance: 0.5
+  energy_cost: 0.1
+  arm_preplace_joint:
+    joint_id: 2
+    angle: 0.3
+    speed: 0.5
+  arm_release_joint:
+    joint_id: 2
+    angle: 0.0
+    speed: 0.5
 
 action_selector:
   strategy: "hybrid"
@@ -33,14 +53,24 @@ action_selector:
 task_coordinator:
   default_timeout: 300
   max_retries: 3
+  state_ttl: 2592000
+  history_limit: 1000
+  deadlock_timeout: 300
 
 execution_manager:
   energy_level: 100.0
 
 execution_recovery:
-  max_failure_history: 100
+  max_failure_history: 250
   recovery_idle_time: 5.0
   sensitive_keys: ["password", "token"]
+  failure_loop_threshold: 3
+  recent_window_seconds: 900
+  base_retry_delay: 0.25
+  max_retry_delay: 1.5
+  checkpoint_ttl: 3600
+  checkpoint_max_age: 1800
+  history_cache_ttl: 86400
 
 execution_validator:
   default_mode: "preflight"
@@ -48,6 +78,8 @@ execution_validator:
   max_object_distance: 5.0
   min_energy_threshold: 2.0
   position_tolerance: 0.5
+  validation_cache_ttl: 60
+  max_consecutive_same_action: 3
 
 execution_memory:
   cache_dir: "src/agents/execution/cache/"
@@ -58,6 +90,9 @@ execution_memory:
   compression: "lz4"
   compression_threshold: 1024
   cleanup_interval: 3600
+  export_compression: "lz4"
+  default_cookie_ttl: 2592000   # 30 days
+  max_checkpoints: 1000
 
 execution_error:
   forensic_hash_algorithm: "sha256"
