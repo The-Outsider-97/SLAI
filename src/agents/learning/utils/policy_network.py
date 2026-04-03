@@ -6,33 +6,27 @@ probabilities (for discrete actions) or action parameters (for continuous).
 It can be used with any RL algorithm that expects a policy network.
 """
 
-import os
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import numpy as np
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from src.agents.base.utils.activation_engine import get_activation
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger
+from .config_loader import load_global_config, get_config_section
+from ...base.utils.activation_engine import get_activation
+from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("PolicyNetwork")
+logger = get_logger("Policy Network")
+printer = PrettyPrinter
 
+TensorLike = Union[torch.Tensor, Sequence[float]]
 
 class PolicyNetwork(nn.Module):
-    """
-    Feed‑forward policy network.
-
-    Architecture:
-        input_dim -> [hidden layers] -> output_dim
-
-    Activation for hidden layers is configurable, output activation is also configurable
-    (e.g., softmax for discrete, tanh for continuous, linear for means/params).
-
-    The network can be saved and loaded via `state_dict`.
-    """
+    """Configurable feed-forward policy network for discrete or deterministic continuous actions."""
 
     def __init__(
         self,
@@ -43,228 +37,357 @@ class PolicyNetwork(nn.Module):
         output_activation: str = "softmax",
         use_batch_norm: bool = False,
         dropout_rate: float = 0.0,
+        l1_lambda: float = 0.0,
+        l2_lambda: float = 0.0,
+        weight_init: str = "auto",
     ):
-        """
-        Initialize the policy network.
-
-        Args:
-            input_dim: Dimension of the state space.
-            output_dim: Dimension of the action space (number of discrete actions
-                        or number of continuous action parameters).
-            hidden_sizes: List of hidden layer sizes. If None, uses [128, 64].
-            hidden_activation: Name of activation for hidden layers.
-            output_activation: Name of activation for output layer.
-            use_batch_norm: If True, adds BatchNorm after each hidden layer (except output).
-            dropout_rate: Dropout probability (0 = disabled).
-        """
         super().__init__()
 
-        if hidden_sizes is None:
-            hidden_sizes = [128, 64]
-
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.hidden_sizes = hidden_sizes
-        self.hidden_activation_name = hidden_activation
-        self.output_activation_name = output_activation
-        self.use_batch_norm = use_batch_norm
-        self.dropout_rate = dropout_rate
-
-        # Build layers
-        layers = []
-        prev_dim = input_dim
-        for hdim in hidden_sizes:
-            layers.append(nn.Linear(prev_dim, hdim))
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hdim))
-            layers.append(get_activation(hidden_activation))
-            if dropout_rate > 0:
-                layers.append(nn.Dropout(dropout_rate))
-            prev_dim = hdim
-
-        # Output layer
-        layers.append(nn.Linear(prev_dim, output_dim))
-
-        # Output activation (applied separately, not as a layer to allow conditional use)
-        self.layers = nn.Sequential(*layers)
-        if output_activation == "softmax":
-            self.output_activation = nn.Softmax(dim=-1)
-        else:
-            self.output_activation = get_activation(output_activation)
-
-        # Initialize weights (Xavier for all linear layers)
-        self._init_weights()
-
-        logger.info(
-            f"PolicyNetwork initialised: input={input_dim}, output={output_dim}, "
-            f"hidden={hidden_sizes}, hidden_act={hidden_activation}, "
-            f"output_act={output_activation}, batch_norm={use_batch_norm}, dropout={dropout_rate}"
+        hidden_sizes = [128, 64] if hidden_sizes is None else list(hidden_sizes)
+        self._validate_configuration(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_sizes=hidden_sizes,
+            dropout_rate=dropout_rate,
+            l1_lambda=l1_lambda,
+            l2_lambda=l2_lambda,
         )
 
-    def _init_weights(self):
-        """Initialize weights using Xavier uniform for linear layers."""
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.hidden_sizes = hidden_sizes
+        self.hidden_activation_name = hidden_activation.lower()
+        self.output_activation_name = output_activation.lower()
+        self.use_batch_norm = bool(use_batch_norm)
+        self.dropout_rate = float(dropout_rate)
+        self.l1_lambda = float(l1_lambda)
+        self.l2_lambda = float(l2_lambda)
+        self.weight_init = weight_init.lower()
+
+        layers: List[nn.Module] = []
+        prev_dim = self.input_dim
+        for hdim in self.hidden_sizes:
+            layers.append(nn.Linear(prev_dim, hdim))
+            if self.use_batch_norm:
+                layers.append(nn.BatchNorm1d(hdim))
+            layers.append(get_activation(self.hidden_activation_name))
+            if self.dropout_rate > 0.0:
+                layers.append(nn.Dropout(self.dropout_rate))
+            prev_dim = hdim
+
+        self.backbone = nn.Sequential(*layers)
+        self.output_layer = nn.Linear(prev_dim, self.output_dim)
+        self.output_activation = self._build_output_activation(self.output_activation_name)
+
+        self._init_weights()
+        logger.info(
+            "PolicyNetwork initialised: input=%s output=%s hidden=%s hidden_act=%s output_act=%s batch_norm=%s dropout=%.4f",
+            self.input_dim,
+            self.output_dim,
+            self.hidden_sizes,
+            self.hidden_activation_name,
+            self.output_activation_name,
+            self.use_batch_norm,
+            self.dropout_rate,
+        )
+
+    @staticmethod
+    def _validate_configuration(
+        input_dim: int,
+        output_dim: int,
+        hidden_sizes: Sequence[int],
+        dropout_rate: float,
+        l1_lambda: float,
+        l2_lambda: float,
+    ) -> None:
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("input_dim and output_dim must both be positive integers.")
+        if any(h <= 0 for h in hidden_sizes):
+            raise ValueError("All hidden layer sizes must be positive integers.")
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError("dropout_rate must be in the range [0, 1).")
+        if l1_lambda < 0.0 or l2_lambda < 0.0:
+            raise ValueError("Regularisation coefficients must be non-negative.")
+
+    @staticmethod
+    def _build_output_activation(name: str) -> nn.Module:
+        if name in {"linear", "identity", "none"}:
+            return nn.Identity()
+        if name == "softmax":
+            return nn.Softmax(dim=-1)
+        return get_activation(name)
+
+    def _init_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
+                if self.weight_init == "auto":
+                    if self.hidden_activation_name in {"relu", "leaky_relu"}:
+                        nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+                    else:
+                        nn.init.xavier_uniform_(module.weight)
+                elif self.weight_init == "kaiming":
+                    nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+                elif self.weight_init == "xavier":
+                    nn.init.xavier_uniform_(module.weight)
+                else:
+                    raise ValueError("weight_init must be one of: auto, kaiming, xavier")
+
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass.
+    def _prepare_input(self, x: TensorLike) -> Tuple[torch.Tensor, bool]:
+        if not torch.is_tensor(x):
+            x = torch.as_tensor(x, dtype=self.output_layer.weight.dtype, device=self.output_layer.weight.device)
+        else:
+            x = x.to(device=self.output_layer.weight.device, dtype=self.output_layer.weight.dtype)
 
-        Args:
-            x: Input tensor of shape (batch_size, input_dim).
+        squeezed = False
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+            squeezed = True
+        if x.ndim != 2 or x.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"Expected input of shape (batch, {self.input_dim}) or ({self.input_dim},), got {tuple(x.shape)}"
+            )
+        return x, squeezed
 
-        Returns:
-            Output tensor of shape (batch_size, output_dim), after output activation.
-        """
-        x = self.layers(x)
-        return self.output_activation(x)
+    def _forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
+        current = x
+        for module in self.backbone:
+            if isinstance(module, nn.BatchNorm1d) and current.shape[0] == 1 and self.training:
+                current = F.batch_norm(
+                    current,
+                    module.running_mean,
+                    module.running_var,
+                    module.weight,
+                    module.bias,
+                    training=False,
+                    momentum=module.momentum,
+                    eps=module.eps,
+                )
+            else:
+                current = module(current)
+        return current
+
+    def forward_features(self, x: TensorLike) -> torch.Tensor:
+        x, _ = self._prepare_input(x)
+        return self._forward_backbone(x)
+
+    def forward_logits(self, x: TensorLike) -> torch.Tensor:
+        features = self.forward_features(x)
+        return self.output_layer(features)
+
+    def forward(self, x: TensorLike) -> torch.Tensor:
+        prepared, squeezed = self._prepare_input(x)
+        logits = self.output_layer(self._forward_backbone(prepared))
+        outputs = self.output_activation(logits)
+        return outputs.squeeze(0) if squeezed else outputs
+
+    def predict(self, x: TensorLike) -> torch.Tensor:
+        return self.forward(x)
+
+    def regularization_penalty(self) -> torch.Tensor:
+        device = self.output_layer.weight.device
+        penalty = torch.zeros((), device=device)
+        if self.l1_lambda > 0.0:
+            penalty = penalty + self.l1_lambda * sum(param.abs().sum() for param in self.parameters())
+        if self.l2_lambda > 0.0:
+            penalty = penalty + self.l2_lambda * sum(param.pow(2).sum() for param in self.parameters())
+        return penalty
+
+    def distribution(self, x: TensorLike) -> Categorical:
+        if self.output_activation_name != "softmax":
+            raise RuntimeError("distribution() is only available when output_activation='softmax'.")
+        return Categorical(logits=self.forward_logits(x))
+
+    def sample_action(self, x: TensorLike, deterministic: bool = False) -> torch.Tensor:
+        if self.output_activation_name == "softmax":
+            dist = self.distribution(x)
+            return dist.probs.argmax(dim=-1) if deterministic else dist.sample()
+        outputs = self.forward(x)
+        return outputs if deterministic else outputs
+
+    def log_prob(self, x: TensorLike, actions: torch.Tensor) -> torch.Tensor:
+        dist = self.distribution(x)
+        actions = actions.to(device=dist.probs.device)
+        return dist.log_prob(actions)
+
+    def entropy(self, x: TensorLike) -> torch.Tensor:
+        return self.distribution(x).entropy()
+
+    def save(self, path: Union[str, Path]) -> None:
+        torch.save(self.state_dict(), Path(path))
+
+    def load(self, path: Union[str, Path], map_location: Optional[Union[str, torch.device]] = None, strict: bool = True) -> None:
+        state_dict = torch.load(Path(path), map_location=map_location)
+        self.load_state_dict(state_dict, strict=strict)
 
 
 class NoveltyDetector(nn.Module):
-    """
-    Simple neural network for estimating state novelty using a predictor‑target architecture.
+    """Predictor-target novelty detector in the style of random-network distillation."""
 
-    Given an input state, it predicts a feature vector and compares it to a target
-    feature vector. The difference (L2 norm) is used as a novelty score.
-    """
-
-    def __init__(self, input_dim: int, feature_dim: int = 32, learning_rate: float = 1e-3):
-        """
-        Initialize the novelty detector.
-
-        Args:
-            input_dim: Dimension of the input state.
-            feature_dim: Size of the feature representation.
-            learning_rate: Learning rate for the predictor network.
-        """
+    def __init__(
+        self,
+        input_dim: int,
+        feature_dim: int = 32,
+        learning_rate: float = 1e-3,
+        hidden_sizes: Optional[List[int]] = None,
+        activation: str = "relu",
+        gradient_clip_norm: Optional[float] = None,
+    ):
         super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(input_dim, feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim),
-        )
-        self.target = nn.Sequential(
-            nn.Linear(input_dim, feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim),
-        )
-        # Freeze target network
-        for param in self.target.parameters():
-            param.requires_grad = False
+        if input_dim <= 0 or feature_dim <= 0:
+            raise ValueError("input_dim and feature_dim must be positive integers.")
+
+        self.input_dim = int(input_dim)
+        self.feature_dim = int(feature_dim)
+        self.hidden_sizes = list(hidden_sizes) if hidden_sizes is not None else [feature_dim]
+        self.activation_name = activation.lower()
+        self.gradient_clip_norm = gradient_clip_norm
+
+        self.predictor = self._build_mlp(trainable=True)
+        self.target = self._build_mlp(trainable=False)
+        self.target.eval()
         self.optimizer = optim.Adam(self.predictor.parameters(), lr=learning_rate)
+        self.loss_fn = nn.MSELoss()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compute novelty score.
+    def _build_mlp(self, trainable: bool) -> nn.Sequential:
+        dims = [self.input_dim, *self.hidden_sizes, self.feature_dim]
+        layers: List[nn.Module] = []
+        for in_dim, out_dim in zip(dims[:-2], dims[1:-1]):
+            layers.append(nn.Linear(in_dim, out_dim))
+            layers.append(get_activation(self.activation_name))
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+        network = nn.Sequential(*layers)
+        if not trainable:
+            for param in network.parameters():
+                param.requires_grad = False
+        return network
 
-        Args:
-            x: Input tensor of shape (batch_size, input_dim).
+    def _prepare_input(self, x: TensorLike) -> torch.Tensor:
+        if not torch.is_tensor(x):
+            x = torch.as_tensor(x, dtype=self.predictor[0].weight.dtype, device=self.predictor[0].weight.device)
+        else:
+            x = x.to(device=self.predictor[0].weight.device, dtype=self.predictor[0].weight.dtype)
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        if x.ndim != 2 or x.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"Expected input of shape (batch, {self.input_dim}) or ({self.input_dim},), got {tuple(x.shape)}"
+            )
+        return x
 
-        Returns:
-            Novelty score tensor of shape (batch_size,).
-        """
+    def forward(self, x: TensorLike) -> torch.Tensor:
+        x = self._prepare_input(x)
         with torch.no_grad():
             target_feat = self.target(x)
         pred_feat = self.predictor(x)
-        return torch.norm(pred_feat - target_feat, dim=1)
+        return torch.norm(pred_feat - target_feat, dim=-1)
 
-    def update_target(self, tau: float = 0.01):
-        """
-        Soft update the target network using the predictor weights.
+    def compute_features(self, x: TensorLike) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self._prepare_input(x)
+        with torch.no_grad():
+            target_feat = self.target(x)
+        pred_feat = self.predictor(x)
+        return pred_feat, target_feat
 
-        Args:
-            tau: Mixing factor (0 = no update, 1 = full copy).
-        """
+    @torch.no_grad()
+    def update_target(self, tau: float = 0.01) -> None:
+        if not 0.0 <= tau <= 1.0:
+            raise ValueError("tau must be in the range [0, 1].")
         for t_param, p_param in zip(self.target.parameters(), self.predictor.parameters()):
-            t_param.data.copy_(tau * p_param.data + (1.0 - tau) * t_param.data)
+            t_param.mul_(1.0 - tau).add_(p_param, alpha=tau)
 
-    def train_step(self, x: torch.Tensor) -> float:
-        """
-        Perform one training step on the predictor network.
-
-        Args:
-            x: Input batch.
-
-        Returns:
-            Loss value (MSE between predictor and target).
-        """
+    def train_step(self, x: TensorLike) -> float:
+        x = self._prepare_input(x)
         self.predictor.train()
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         pred = self.predictor(x)
         with torch.no_grad():
             target = self.target(x)
-        loss = nn.MSELoss()(pred, target)
+        loss = self.loss_fn(pred, target)
+        if not torch.isfinite(loss):
+            raise RuntimeError("NoveltyDetector loss became non-finite.")
         loss.backward()
+        if self.gradient_clip_norm is not None:
+            nn.utils.clip_grad_norm_(self.predictor.parameters(), self.gradient_clip_norm)
         self.optimizer.step()
-        return loss.item()
+        return float(loss.item())
 
 
 # -------------------------------------------------------------------------
-# Factory for creating policy networks from configuration
+# Factories
 # -------------------------------------------------------------------------
 def create_policy_network(
-    input_dim: int, output_dim: int, config: Optional[Dict[str, Any]] = None
+    input_dim: int,
+    output_dim: int,
+    config: Optional[Dict[str, Any]] = None,
 ) -> PolicyNetwork:
-    """
-    Create a PolicyNetwork instance using configuration from the global YAML.
-
-    The configuration is expected under the key 'policy_network'. If not provided,
-    defaults are used.
-
-    Args:
-        input_dim: State dimension.
-        output_dim: Action dimension.
-        config: Optional override config; if None, loads from global config.
-
-    Returns:
-        Configured PolicyNetwork.
-    """
+    """Create a PolicyNetwork from config, preserving backward compatibility."""
     if config is None:
         full_config = load_global_config()
         config = get_config_section("policy_network")
         if not config:
-            # Fallback to 'neural_network' section for backward compatibility
             config = full_config.get("neural_network", {})
-
-    hidden_sizes = config.get("hidden_layer_sizes", [128, 64])
-    hidden_activation = config.get("hidden_activation", "relu")
-    output_activation = config.get("output_activation", "softmax")
-    use_batch_norm = config.get("use_batch_norm", False)
-    dropout_rate = config.get("dropout_rate", 0.0)
 
     return PolicyNetwork(
         input_dim=input_dim,
         output_dim=output_dim,
-        hidden_sizes=hidden_sizes,
-        hidden_activation=hidden_activation,
-        output_activation=output_activation,
-        use_batch_norm=use_batch_norm,
-        dropout_rate=dropout_rate,
+        hidden_sizes=config.get("hidden_layer_sizes", config.get("layer_dims", [input_dim, 128, 64, output_dim])[1:-1]),
+        hidden_activation=config.get("hidden_activation", "relu"),
+        output_activation=config.get("output_activation", "softmax"),
+        use_batch_norm=config.get("use_batch_norm", False),
+        dropout_rate=config.get("dropout_rate", 0.0),
+        l1_lambda=config.get("l1_lambda", 0.0),
+        l2_lambda=config.get("l2_lambda", 0.0),
+        weight_init=config.get("weight_init", "auto"),
     )
 
 
-# -------------------------------------------------------------------------
-# Test / example
-# -------------------------------------------------------------------------
+def create_policy_optimizer(
+    model: nn.Module,
+    config: Optional[Dict[str, Any]] = None,
+) -> optim.Optimizer:
+    """Create an optimiser for a policy network using the policy config section."""
+    if config is None:
+        config = get_config_section("policy_network")
+
+    optimizer_config = config.get("optimizer_config", {})
+    optimizer_type = str(optimizer_config.get("type", "adam")).lower()
+    learning_rate = float(optimizer_config.get("learning_rate", 1e-3))
+    weight_decay = float(optimizer_config.get("weight_decay", config.get("l2_lambda", 0.0)))
+
+    if optimizer_type == "sgd":
+        return optim.SGD(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if optimizer_type == "momentum":
+        momentum_beta = float(optimizer_config.get("momentum_beta", 0.9))
+        return optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum_beta, weight_decay=weight_decay)
+    if optimizer_type == "adam":
+        return optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(
+                float(optimizer_config.get("adam_beta1", 0.9)),
+                float(optimizer_config.get("adam_beta2", 0.999)),
+            ),
+            eps=float(optimizer_config.get("adam_epsilon", 1e-8)),
+            weight_decay=weight_decay,
+        )
+    raise ValueError(f"Unsupported policy optimizer type: {optimizer_type}")
+
+
 if __name__ == "__main__":
     print("Testing PolicyNetwork...")
-    # Create a small network
     net = PolicyNetwork(input_dim=4, output_dim=2)
     dummy = torch.randn(10, 4)
     out = net(dummy)
-    print(f"Output shape: {out.shape} (should be [10,2])")
-    if net.output_activation_name == "softmax":
-        print(f"Softmax sum: {out.sum(dim=1)} (should be ~1.0)")
+    print(f"Output shape: {out.shape} (should be [10, 2])")
+    print(f"Softmax row sums: {out.sum(dim=1)}")
 
-    # Test novelty detector
     nd = NoveltyDetector(input_dim=4, feature_dim=8)
     x = torch.randn(5, 4)
     novelty = nd(x)
     print(f"Novelty scores shape: {novelty.shape}")
     loss = nd.train_step(x)
     print(f"Train loss: {loss:.4f}")
-
     print("All tests passed.")
