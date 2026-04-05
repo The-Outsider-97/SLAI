@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 import inspect
 import re
@@ -86,6 +86,7 @@ class BaseAgent(abc.ABC):
                 lambda: deque(maxlen=self._get_metric_buffer_size())
             )
         }
+        self._performance_metrics = None
         self._lazy_components = OrderedDict()
 
         self.retraining_thresholds = {} # Populated by subclasses based on their specific metrics
@@ -126,7 +127,18 @@ class BaseAgent(abc.ABC):
 
     @property
     def performance_metrics(self):
-        return self.lazy_property('performance_metrics')
+        """Lazy‑load or return the stored performance metrics dict."""
+        if self._performance_metrics is None:
+            # Create the default structure (defaultdict of deques)
+            self._performance_metrics = defaultdict(
+                lambda: deque(maxlen=self._get_metric_buffer_size())
+            )
+        return self._performance_metrics
+    
+    @performance_metrics.setter
+    def performance_metrics(self, value):
+        """Allow subclasses to replace the entire metrics dictionary."""
+        self._performance_metrics = value
 
     def lazy_property(self, name):
         """Get or create a lazy-initialized component"""
