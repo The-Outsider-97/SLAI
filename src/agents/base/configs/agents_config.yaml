@@ -170,6 +170,11 @@ learning_agent:
     architecture_history_size: 10
     maml_adaptation_steps: 10
     task_embedding_dim: 256
+    task_ids: ["dqn", "maml", "rsi", "rl"]
+    batch_size: 32
+    max_episode_steps: 128
+    max_eval_episodes: 3
+    recovery_trigger_threshold: 3
     deferred_init:
         max_network_size: 256
         max_task_pool: 50
@@ -186,9 +191,9 @@ perception_agent:
     adam_eps: 0.0000001
     loss_type: 'hybrid'  # mse, contrastive, or hybrid
     max_scale: 3
-    temperature: 0.07
-    mse_weight: 0.5      # for hybrid loss
-    contrastive_weight: 0.5  # for hybrid loss
+    temperature: 0.1
+    mse_weight: 1.0     # for hybrid loss
+    contrastive_weight: 1.0  # for hybrid loss
 
 planning_agent: {}
 
