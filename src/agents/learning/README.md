@@ -1,6 +1,12 @@
 # Learning Module
 
-This module contains the reinforcement and meta-learning stack used by SLAI to select, train, and adapt learning agents (DQN, MAML, RSI, and classical RL variants).
+The Learning module provides SLAI's adaptive decision stack. It combines reinforcement learning, meta-learning, self-improvement loops, prioritized replay, and orchestration logic to select and train the right strategy for each task context.
+
+## Goals
+
+- Provide a **single orchestration layer** for multiple learning strategies (`dqn`, `maml`, `rsi`, `rl`).
+- Maintain **safe adaptation** through thresholds, recovery, and trend-aware selection.
+- Support **lifelong learning** with memory replay, checkpointing, and subsystem-level utilities.
 
 ## Directory structure
 
@@ -8,7 +14,6 @@ This module contains the reinforcement and meta-learning stack used by SLAI to s
 learning/
 ├── __init__.py
 ├── dqn.py
-├── learning_calculations.py
 ├── learning_factory.py
 ├── learning_memory.py
 ├── maml_rl.py
@@ -16,87 +21,70 @@ learning/
 ├── rsi.py
 ├── slaienv.py
 ├── strategy_selector.py
+├── README.md
 ├── configs/
-│   └── learning_config.yaml
+│   ├── learning_config.yaml
 └── utils/
     ├── __init__.py
     ├── config_loader.py
     ├── error_calls.py
+    ├── learning_calculations.py
     ├── multi_task_learner.py
     ├── neural_network.py
     ├── policy_network.py
     ├── recovery_system.py
     ├── rl_engine.py
-    └── state_processor.py
+    ├── state_processor.py
+    └── README.md
 ```
 
-## Main components
+## Core subsystem map
 
-- `LearningFactory` (`learning_factory.py`)
-  - Initializes and coordinates core learners (`DQNAgent`, `MAMLAgent`, `RSIAgent`, `RLAgent`).
-  - Selects an agent based on task metadata and recent performance/checkpoint quality.
-  - Maintains temporary/permanent agent pools and evolution-related parameters.
+| Subsystem | Primary file(s) | Responsibility |
+|---|---|---|
+| Orchestration | `learning_factory.py`, `strategy_selector.py` | Builds strategy set and chooses the best learner given state/task signals. |
+| Agents | `dqn.py`, `maml_rl.py`, `rsi.py`, `rl_agent.py` | Implements strategy-specific learning and acting behavior. |
+| Experience memory | `learning_memory.py` | Prioritized replay with SumTree-backed sampling and priority updates. |
+| Runtime environment | `slaienv.py` | Unified interface between policy logic and environment transitions. |
+| Shared utilities | `utils/` | State processing, policy/network construction, optimization helpers, recovery/error handling. |
 
-- `LearningMemory` + `SumTree` (`learning_memory.py`)
-  - Prioritized experience replay with proportional sampling.
-  - Supports priority updates, tagging, and checkpoint-triggered persistence.
-
-- `DQNAgent` (`dqn.py`)
-  - Value-based deep RL agent.
-  - Includes training/evolution helpers (e.g., `EvolutionaryTrainer`, unified wrappers).
-
-- `MAMLAgent` (`maml_rl.py`)
-  - Meta-learning oriented agent for rapid adaptation across tasks.
-  - Includes decentralized fleet support.
-
-- `RSIAgent` (`rsi.py`)
-  - Self-improvement oriented learner with replay/plasticity-oriented controls.
-
-- `RLAgent` and extensions (`rl_agent.py`)
-  - Base RL implementation with advanced variants (`AdvancedQLearning`, encoder/transformer wrappers).
-
-- Utility submodules (`utils/`)
-  - State preprocessing, policy/value network building blocks, optimizers, error types, recovery helpers, and multi-task learning support.
-
-## Learning orchestration flow
+## Learning lifecycle
 
 ```mermaid
 flowchart TD
-    A[Environment] --> B[LearningFactory]
-    B --> C[Initialize dqn/maml/rsi/rl agents]
-    C --> D[Collect task metadata]
-    D --> E[select_agent]
-    E --> F{Best strategy}
-    F -->|novel task| G[MAMLAgent]
-    F -->|large state/action complexity| H[DQNAgent]
-    F -->|stagnation/self-improvement| I[RSIAgent]
-    F -->|lightweight baseline| J[RLAgent]
-    G --> K[Train / act]
-    H --> K
-    I --> K
-    J --> K
-    K --> L[Store transitions in LearningMemory]
-    L --> M[Sample prioritized experiences]
-    M --> N[Update selected learner]
-    N --> D
+    A[Input state/task context] --> B[LearningFactory + StrategySelector]
+    B --> C{Selected strategy}
+    C -->|dqn| D[DQNAgent]
+    C -->|maml| E[MAMLAgent]
+    C -->|rsi| F[RSIAgent]
+    C -->|rl| G[RLAgent]
+    D --> H[Train / Infer]
+    E --> H
+    F --> H
+    G --> H
+    H --> I[Store transition in LearningMemory]
+    I --> J[Prioritized replay sampling]
+    J --> K[Agent updates + metric tracking]
+    K --> B
 ```
 
-## Memory replay model
+## Configuration model
 
-```mermaid
-flowchart LR
-    A[Transition + priority] --> B[LearningMemory.add]
-    B --> C[SumTree.add]
-    C --> D[Priority mass tree]
-    D --> E[sample_proportional, batch]
-    E --> F[indices + samples + IS weights]
-    F --> G[Learner update step]
-    G --> H[update_priorities]
-    H --> D
-```
+The learning subsystem uses a single runtime configuration file: `configs/learning_config.yaml`.
 
-## Practical integration points
+This file is now structured to stay detailed and operational while preserving top-level section names expected by runtime loaders (for example: `learning_agent`, `dqn`, `maml`, `rsi`, `rl`, `strategy_selector`, `evolutionary`, and utility configs).
 
-- Use `learning_factory.py` when you need one entry point to initialize/select across multiple learning paradigms.
-- Use `learning_memory.py` independently when a module only needs prioritized replay.
-- Use utilities in `utils/` for custom learners that still need shared state processing, networks, and recovery/error handling.
+### Recommended usage
+
+- Add new knobs directly to `learning_config.yaml` under the relevant top-level section.
+- Preserve section names consumed by `get_config_section(...)` calls to avoid runtime regressions.
+- Keep naming aligned with established patterns (`*_threshold`, `*_history_size`, `*_frequency`, `*_rate`).
+
+## Consistency guidelines
+
+When introducing a new learner or utility:
+
+1. Register/route it through the orchestration layer (`learning_factory.py`, `strategy_selector.py`).
+2. Add related defaults in `configs/learning_config.yaml`.
+3. Document operational knobs and failure modes in `utils/UTILS_OVERVIEW.md`.
+4. Keep naming aligned with existing keys (`*_threshold`, `*_history_size`, `*_frequency`, `*_rate`).
