@@ -1,53 +1,101 @@
-
-import time, os
-import yaml, json
+import time
+import os
+import json
+import yaml
+import signal
+import traceback
+import multiprocessing
 
 from collections import defaultdict
-from typing import Dict, Union, Callable, Optional, List, Tuple
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
+from typing import Dict, Optional, List, Tuple, Any
+from functools import partial
 
+from src.agents.knowledge.utils.knowledge_errors import RuleTimeoutError
 from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Rule Engine")
 printer = PrettyPrinter
 
+
+# -----------------------------------------------------------------------------
+# Worker function – runs in a separate process (must be at module level for pickling)
+# -----------------------------------------------------------------------------
+def _run_rule_code(rule_code: str, knowledge_base: Dict[Tuple[str, str, str], float]) -> Dict:
+    """
+    Execute rule code in a restricted environment.
+    Returns inferred facts dict.
+    """
+    safe_globals = {
+        '__builtins__': {
+            'abs': abs, 'all': all, 'any': any, 'bool': bool,
+            'dict': dict, 'enumerate': enumerate, 'float': float,
+            'int': int, 'len': len, 'list': list, 'max': max,
+            'min': min, 'range': range, 'round': round, 'set': set,
+            'str': str, 'sum': sum, 'tuple': tuple, 'zip': zip,
+            'True': True, 'False': False, 'None': None,
+        },
+        'kb': knowledge_base,
+    }
+    local_ns = {'inferred': {}}
+    exec(rule_code, safe_globals, local_ns)
+    result = local_ns.get('inferred', {})
+    if not isinstance(result, dict):
+        raise TypeError(f"Rule returned {type(result)}, expected dict")
+    return result
+
+
+# -----------------------------------------------------------------------------
+# Rule Engine - Production Ready (no daemonic nesting)
+# -----------------------------------------------------------------------------
 class RuleEngine:
-    def __init__(self):
-        self.config = load_global_config()
-        self.enabled = self.config.get('enabled')
-
-        self.rule_config = get_config_section('rule_engine')
-        self.verbose_logging = self.rule_config.get('verbose_logging')
-        self.auto_discover = self.rule_config.get('auto_discover')
-        self.min_rule_confidence = self.rule_config.get('min_rule_confidence')
-        self.slow_rule_threshold = self.rule_config.get('slow_rule_threshold')
-        self.rule_sources = self.rule_config.get('rule_sources')
-        self.save_inferred = self.rule_config.get('save_inferred')
-        self.rules_dir = self.rule_config.get('rules_dir')
-        self.max_facts_per_rule = self.rule_config.get('max_facts_per_rule')
-
-        if 'slow_rule_threshold' not in self.rule_config:
-            self.rule_config['slow_rule_threshold'] = 0.5  # Default 500ms
-        self.sector_rules = defaultdict(list)
-        self.rules = []
-        self.category_rules = defaultdict(list)
-        self.sector_rules = {
-            "civic": [],
-            "medical": [],
-            "economic": [],
-            "scientific": [],
-            "philosophical": [],
-            "technological": []
-        }
-        self.load_all_sectors()
 
     SECTORS = {"civic", "medical", "economic", "scientific", "philosophical", "technological"}
 
+    def __init__(self):
+        self.config = load_global_config()
+        self.enabled = self.config.get('enabled', True)
+
+        self.rule_config = get_config_section('rule_engine')
+        self.verbose_logging = self.rule_config.get('verbose_logging', False)
+        self.auto_discover = self.rule_config.get('auto_discover', True)
+        self.min_rule_confidence = self.rule_config.get('min_rule_confidence', 0.6)
+        self.slow_rule_threshold = self.rule_config.get('slow_rule_threshold', 0.5)
+        self.rule_timeout = self.rule_config.get('rule_timeout_seconds', 1.0)
+        self.max_concurrent_rules = self.rule_config.get('max_concurrent_rules', 4)
+        self.rule_sources = self.rule_config.get('rule_sources', [])
+        self.save_inferred = self.rule_config.get('save_inferred', False)
+        self.rules_dir = self.rule_config.get('rules_dir', 'src/agents/knowledge/templates/')
+        self.max_facts_per_rule = self.rule_config.get('max_facts_per_rule', 10)
+
+        # Internal data structures
+        self.rules: List[Dict] = []
+        self.sector_rules: Dict[str, List[Dict]] = defaultdict(list)
+        self.category_rules: Dict[str, List[Dict]] = defaultdict(list)
+
+        # Failure tracking
+        self.rule_failure_counts: Dict[str, int] = defaultdict(int)
+        self.rule_timeout_counts: Dict[str, int] = defaultdict(int)
+        self.rule_last_error: Dict[str, str] = {}
+
+        # Process pool (non‑daemonic workers)
+        self._executor = None
+
+        # Load rules
+        self.load_all_sectors()
+
+    def _get_executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(max_workers=self.max_concurrent_rules)
+        return self._executor
+
     def load_all_sectors(self):
-        """
-        Loads all sector rules from the templates folder based on file naming conventions.
-        E.g. civic_rules.json → sector 'civic'
-        """
+        """Loads all sector rules from JSON files in rules_dir."""
+        if not os.path.isdir(self.rules_dir):
+            logger.warning(f"[RuleEngine] Rules directory not found: {self.rules_dir}")
+            return
+
         loaded_count = 0
         for filename in os.listdir(self.rules_dir):
             if filename.endswith("_rules.json"):
@@ -63,7 +111,8 @@ class RuleEngine:
         if loaded_count == 0:
             logger.warning("[RuleEngine] No sector rule files loaded.")
 
-    def load_rules_from_json(self, path):
+    def load_rules_from_json(self, path: str):
+        """Load rules from a JSON file and add them to the engine."""
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             rules = json.load(f)
 
@@ -75,7 +124,7 @@ class RuleEngine:
                 else:
                     logger.warning(f"Skipping rule with missing implementation: {rule_def.get('name', 'Unnamed')}")
                     continue
-    
+
             name = rule_def["name"]
             code = rule_def["implementation"]
             weight = rule_def.get("weight", 1.0)
@@ -86,16 +135,9 @@ class RuleEngine:
                 "type": rule_def.get("type", "heuristic")
             }
 
-            def make_func(code_str):
-                def rule(kb):
-                    inferred = {}
-                    exec(code_str, {}, {"kb": kb, "inferred": inferred})
-                    return inferred
-                return rule
-
             self.add_rule(
                 name=name,
-                rule_func=make_func(code),
+                rule_code=code,
                 weight=weight,
                 tags=tags,
                 metadata=metadata
@@ -103,57 +145,127 @@ class RuleEngine:
 
     def add_rule(self,
                  name: str,
-                 rule_func: Callable[[dict], Dict[str, float]],
+                 rule_code: str,
                  weight: float = 1.0,
                  tags: Optional[List[str]] = None,
-                 metadata: Optional[Dict] = None
-                 ):
-        # Validate inputs
+                 metadata: Optional[Dict] = None):
+        """Add a rule to the engine. rule_code is a string containing Python code."""
         if weight <= 0:
             raise ValueError("Weight must be positive")
-        if not callable(rule_func):
-            raise TypeError("rule_func must be callable")
-        
+        if not isinstance(rule_code, str):
+            raise TypeError("rule_code must be a string")
+
         rule = {
             "name": name,
-            "func": rule_func,
+            "code": rule_code,
             "weight": weight,
             "tags": tags or [],
             "meta": metadata or {}
         }
         self.rules.append(rule)
-        logger.debug(f"Added rule: {name} with weight {weight} and tags {tags}")
 
+        # Index by tags (sectors, categories)
         for tag in rule["tags"]:
-            if (sector := tag.lower()) in self.SECTORS:
-                self.sector_rules[sector].append(rule)
-            self.category_rules[tag].append(rule)
+            tag_lower = tag.lower()
+            if tag_lower in self.SECTORS:
+                self.sector_rules[tag_lower].append(rule)
+            self.category_rules[tag_lower].append(rule)
 
-    def get_rules_by_category(self, category: str) -> list:
-        """Return rules matching a specific category/tag"""
-        return self.category_rules.get(category, [])
+        logger.debug(f"Added rule: {name} with weight {weight}")
+
+    def get_rules_by_category(self, category: str) -> List[Dict]:
+        return self.category_rules.get(category.lower(), [])
 
     def smart_apply(self, knowledge_base: dict, verbose=False) -> dict:
-        """Applies rules from the most relevant sector or all if no specific match."""
+        """Applies rules from the most relevant sector, or all if none matches."""
         printer.status("ENGINE", "Applying rules", "info")
-
         sector = self.infer_sector(knowledge_base)
-        rules_to_use = []
-        
+
         if sector != "general" and sector in self.sector_rules and self.sector_rules[sector]:
             logger.info(f"[RuleEngine] Smart Apply: Using sector-specific rules for: {sector}")
             rules_to_use = self.sector_rules[sector]
         else:
-            logger.info(f"[RuleEngine] Smart Apply: No specific sector match or no rules for sector '{sector}'. Applying all general rules.")
-            rules_to_use = self.rules # Fallback to all rules
+            logger.info(f"[RuleEngine] Smart Apply: No specific sector match. Applying all rules.")
+            rules_to_use = self.rules
 
-        original_rules = self.rules
-        self.rules = rules_to_use
-        result = self.apply(knowledge_base, verbose)
-        self.rules = original_rules # Restore original rules
-        return result
+        return self._apply_rules(rules_to_use, knowledge_base, verbose)
+
+    def apply(self, knowledge_base: dict, verbose=False) -> dict:
+        """Apply all rules in the engine."""
+        return self._apply_rules(self.rules, knowledge_base, verbose)
+
+    def apply_by_sector(self, knowledge_base: dict, sector: str, verbose=False) -> dict:
+        """Apply rules belonging to a specific sector."""
+        printer.status("ENGINE", "Applying by sectors", "info")
+        rules = self.sector_rules.get(sector.lower(), [])
+        return self._apply_rules(rules, knowledge_base, verbose, sector_tag=sector)
+
+    def _apply_rules(self,
+                     rules: List[Dict],
+                     knowledge_base: dict,
+                     verbose: bool = False,
+                     sector_tag: Optional[str] = None) -> dict:
+        """
+        Execute a list of rules with sandboxing, timeouts, and failure tracking.
+        Returns inferred facts dict (and optionally traces if verbose).
+        """
+        inferred = {}
+        traces = []
+        executor = self._get_executor()
+
+        # Submit all rules in parallel (but still enforce per‑rule timeout)
+        futures = []
+        for rule in rules:
+            future = executor.submit(_run_rule_code, rule["code"], knowledge_base)
+            futures.append((rule, future, time.perf_counter()))
+
+        for rule, future, start_time in futures:
+            try:
+                results = future.result(timeout=self.rule_timeout)
+                exec_time = time.perf_counter() - start_time
+                if exec_time > self.slow_rule_threshold:
+                    logger.debug(f"Slow rule {rule['name']}: {exec_time:.2f}s")
+
+                # Apply weight and confidence threshold
+                for fact, conf in results.items():
+                    weighted_conf = conf * rule["weight"]
+                    if weighted_conf < self.min_rule_confidence:
+                        continue
+                    if fact not in inferred or weighted_conf > inferred[fact]:
+                        inferred[fact] = weighted_conf
+                        if verbose or self.verbose_logging:
+                            traces.append({
+                                "fact": fact,
+                                "confidence": weighted_conf,
+                                "rule": rule["name"],
+                                "source": rule["meta"].get("source", "unknown"),
+                                "sector": sector_tag
+                            })
+
+                # Reset failure counter on success
+                self.rule_failure_counts[rule["name"]] = 0
+
+            except FutureTimeoutError:
+                self.rule_timeout_counts[rule["name"]] += 1
+                self.rule_failure_counts[rule["name"]] += 1
+                self.rule_last_error[rule["name"]] = f"Timeout after {self.rule_timeout}s"
+                logger.warning(f"[RuleEngine] Rule {rule['name']} timed out after {self.rule_timeout}s")
+                # Cancel the future if still running (best effort)
+                future.cancel()
+
+            except Exception as e:
+                self.rule_failure_counts[rule["name"]] += 1
+                self.rule_last_error[rule["name"]] = f"{type(e).__name__}: {e}"
+                logger.warning(f"[RuleEngine] Rule {rule['name']} failed: {e}\n{traceback.format_exc()}")
+
+        # Limit total inferred facts
+        if self.max_facts_per_rule > 0 and len(inferred) > self.max_facts_per_rule:
+            inferred = dict(sorted(inferred.items(), key=lambda x: x[1], reverse=True)[:self.max_facts_per_rule])
+
+        return (inferred, traces) if verbose else inferred
 
     def infer_sector(self, knowledge_base: dict) -> str:
+        """Determine the most likely sector based on keywords in the knowledge base."""
         printer.status("ENGINE", "Inferring sectors", "info")
 
         keywords = {
@@ -164,85 +276,25 @@ class RuleEngine:
             "philosophical": {"ethics", "metaphysics", "ontology", "logic", "thought", "consciousness"},
             "technological": {"ai", "robot", "algorithm", "neural", "software", "agents", "data", "code"}
         }
-        # Consider predicates and objects as well for better sector inference
-        all_terms_in_kb = set()
+
+        all_terms = set()
         for s, p, o in knowledge_base.keys():
-            all_terms_in_kb.add(str(s).lower())
-            all_terms_in_kb.add(str(p).lower())
-            all_terms_in_kb.add(str(o).lower())
+            all_terms.add(str(s).lower())
+            all_terms.add(str(p).lower())
+            all_terms.add(str(o).lower())
 
         sector_scores = defaultdict(int)
         for sector, terms in keywords.items():
             for term in terms:
-                if term in all_terms_in_kb:
-                    sector_scores[sector] +=1
-        
+                if term in all_terms:
+                    sector_scores[sector] += 1
+
         if not sector_scores:
             return "general"
-            
         return max(sector_scores, key=sector_scores.get)
 
-    def apply(self, knowledge_base: dict, verbose=False) -> dict:
-        inferred = {}
-        traces = []
-
-        for rule in self.rules:
-            start_time = time.perf_counter()
-            exec_time = time.perf_counter() - start_time
-            if exec_time > self.slow_rule_threshold:
-                logger.debug(f"Slow rule {rule['name']}: {exec_time:.2f}s")
-            try:
-                results = rule["func"](knowledge_base)
-                exec_time = time.perf_counter() - start_time
-                if exec_time > self.slow_rule_threshold:
-                    logger.debug(f"Slow rule {rule['name']}: {exec_time:.2f}s")
-                for fact, conf in results.items():
-                    weighted_conf = conf * rule["weight"]
-                    if fact not in knowledge_base or weighted_conf > knowledge_base.get(fact, 0):
-                        inferred[fact] = weighted_conf
-                        if verbose or self.verbose_logging:
-                            traces.append({
-                                "fact": fact,
-                                "confidence": weighted_conf,
-                                "rule": rule["name"],
-                                "source": rule["meta"].get("source", "unknown")
-                            })
-            except Exception as e:
-                logger.warning(f"[RuleEngine] Rule {rule['name']} failed: {e}")
-
-        return (inferred, traces) if verbose else inferred
-
-    def apply_by_sector(self, knowledge_base: dict, sector: str, verbose=False) -> dict:
-        printer.status("ENGINE", "Applying by sectors", "info")
-
-        inferred = {}
-        traces = []
-
-        rules = self.sector_rules.get(sector.lower(), [])
-        for rule in rules:
-            try:
-                results = rule["func"](knowledge_base)
-                for fact, conf in results.items():
-                    weighted_conf = conf * rule["weight"]
-                    if fact not in knowledge_base or weighted_conf > knowledge_base.get(fact, 0):
-                        inferred[fact] = weighted_conf
-                        if verbose or self.verbose_logging:
-                            traces.append({
-                                "fact": fact,
-                                "confidence": weighted_conf,
-                                "rule": rule["name"],
-                                "source": rule["meta"].get("source", "unknown"),
-                                "sector": sector
-                            })
-            except Exception as e:
-                logger.warning(f"[RuleEngine] [{sector}] Rule {rule['name']} failed: {e}")
-
-        return (inferred, traces) if verbose else inferred
-
-    def _should_log(self, verbose: bool) -> bool:
-        return verbose or self.verbose_logging
-
-    def save_rules(self, path):
+    def save_rules(self, path: str):
+        """Export rule metadata (not code) to JSON for inspection."""
         with open(path, "w") as f:
             json.dump([{
                 "name": r["name"],
@@ -251,17 +303,27 @@ class RuleEngine:
                 "meta": r["meta"]
             } for r in self.rules], f, indent=2)
 
-    def _human_mortality_rule_impl(self, kb: dict, rule_weight: float) -> Dict[Tuple[str,str,str], float]:
-        """If (X is_a Human), then infer (X is_mortal True)."""
-        inferred_facts = {}
-        for (s, p, o), conf in kb.items():
-            if p == "is_a" and o == "Human":
-                new_fact = (s, "is_mortal", "True") # Represent boolean as string for consistency
-                new_confidence = conf * rule_weight
-                if new_confidence > inferred_facts.get(new_fact, -1.0) and new_confidence > self.min_rule_confidence:
-                   inferred_facts[new_fact] = new_confidence
-        return inferred_facts
+    def get_failure_stats(self) -> Dict[str, Any]:
+        """Return failure and timeout statistics for all rules."""
+        return {
+            "failures": dict(self.rule_failure_counts),
+            "timeouts": dict(self.rule_timeout_counts),
+            "last_errors": self.rule_last_error
+        }
 
+    def close(self):
+        """Shut down the process pool."""
+        if self._executor:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    def __del__(self):
+        self.close()
+
+
+# -----------------------------------------------------------------------------
+# Backward compatibility
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n=== Running Rule Engine ===\n")
     printer.status("Init", "Rule Engine initialized", "success")
@@ -270,15 +332,15 @@ if __name__ == "__main__":
     print(f"{engine}")
 
     print("\n* * * * * Phase 2 - Rules * * * * *\n")
-    knowledge_base={
+    knowledge_base = {
         ("AI", "is_a", "Technology"): 1.0,
         ("Socrates", "is_a", "Human"): 0.95,
     }
-    verbose=False
-    smart = engine.smart_apply(knowledge_base=knowledge_base, verbose=False)
-    sectors = engine.apply_by_sector(knowledge_base=knowledge_base, sector="technology", verbose=False)
+    smart_result = engine.smart_apply(knowledge_base=knowledge_base, verbose=False)
+    sector_result = engine.apply_by_sector(knowledge_base=knowledge_base, sector="technology", verbose=False)
 
-    printer.pretty("APPLY", smart, "success" if smart else "error")
-    printer.pretty("SECTOR", sectors, "success" if sectors else "error")
+    printer.pretty("APPLY", smart_result, "success" if smart_result else "error")
+    printer.pretty("SECTOR", sector_result, "success" if sector_result else "error")
 
     print("\n=== Successfully ran the Rule Engine ===\n")
+    engine.close()
