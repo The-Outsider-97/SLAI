@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Market Health Indicators</title>
+    <link rel="stylesheet" href="frontend/css/styles.css" />
+    <meta http-equiv="refresh" content="300"><!-- Auto-refresh meta tag -->
+</head> 
+<body>
+    <header class="app-header">
+        <div class="header-left">
+            <button id="menuButton" class="icon-button" aria-label="Menu">
+                &#9776; </button>
+            <div id="dropdownMenu" class="dropdown-content">
+                <a href="/index">Home Page</a>
+                <a href="/predictions">Price Predictions</a>
+                <a href="/signals">Institutional & Insider Signals</a>
+                <a href="/diagnostics">System Diagnostics</a>
+                <a href="/learning">Learning System Insights</a>
+                <a href="/portfolio">Portfolio Metrics</a>
+                <a href="/trends">Cultural Trends</a>
+                <a href="/dataQuality">Data Quality</a>
+            </div>
+        </div>
+        <div class="header-center">
+            <span class="app-title">Market Health Indicators</span> </div>
+        <div class="header-right">
+            <button id="themeToggleButton" class="icon-button" aria-label="Toggle theme">
+                ☀️ </button>
+        </div>
+    </header>
+
+    <section id="compliance" class="data-section">
+        <h2>Regulatory Disclosures</h2>
+        <div class="risk-warning">
+            <p>This system is regulated by FINRA (CRD# 58372) and SEC (CIK# 0001961765)</p>
+        </div>
+        <div id="compliance-disclosures">
+            <p>Loading compliance information...</p>
+        </div>
+    </section>
+
+    <script src="frontend/js/dropdown.js"></script>
+<script src="frontend/js/predictor.js"></script>
+<script src="frontend/js/themeToggle.js"></script>
+<script>
+    // Auto-refresh data every 300 seconds
+    const refreshData = () => {
+        console.log("Refreshing dashboard data...");
+        
+        // Refresh all data sections
+        document.querySelectorAll('.data-section').forEach(section => {
+            const event = new Event('refresh');
+            section.dispatchEvent(event);
+        });
+    };
+
+    // Initial load
+    document.addEventListener('DOMContentLoaded', () => {
+        // Set up auto-refresh timer
+        setInterval(refreshData, 300000);
+        
+        // Create refresh event listeners
+        document.querySelectorAll('.data-section').forEach(section => {
+            section.addEventListener('refresh', () => {
+                const sectionId = section.id;
+                fetch(`/api/${sectionId.replace('-', '/')}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log(`Refreshed ${sectionId} data:`, data);
+                        // Here you would update the DOM with new data
+                        // Example: updateTable(sectionId, data);
+                    })
+                    .catch(error => {
+                        console.error(`Error refreshing ${sectionId}:`, error);
+                    });
+            });
+        });
+        
+        // Trigger initial refresh
+        refreshData();
+    });
+</script>
+</body>
+</html>

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Price Predictions and Market Data</title>
+    <link rel="stylesheet" href="frontend/css/styles.css" />
+    <meta http-equiv="refresh" content="300"><!-- Auto-refresh meta tag -->
+</head> 
+<body>
+    <header class="app-header">
+        <div class="header-left">
+            <button id="menuButton" class="icon-button" aria-label="Menu">
+                &#9776; </button>
+            <div id="dropdownMenu" class="dropdown-content">
+                <a href="/index">Home Page</a>
+                <a href="/signals">Institutional & Insider Signals</a>
+                <a href="/indicators">Market Health Indicators</a>
+                <a href="/diagnostics">System Diagnostics</a>
+                <a href="/learning">Learning System Insights</a>
+                <a href="/portfolio">Portfolio Metrics</a>
+                <a href="/trends">Cultural Trends</a>
+                <a href="/dataQuality">Data Quality</a>
+            </div>
+        </div>
+        <div class="header-center">
+            <span class="app-title">Price Predictions and Market Data</span> </div>
+        <div class="header-right">
+            <button id="themeToggleButton" class="icon-button" aria-label="Toggle theme">
+                ☀️ </button>
+        </div>
+    </header>
+
+<section id="compliance" class="data-section">
+    <h2>Regulatory Disclosures</h2>
+    <div class="risk-warning">
+        <p>This system is regulated by FINRA (CRD# 58372) and SEC (CIK# 0001961765)</p>
+    </div>
+    <div id="compliance-disclosures">
+        <p>Loading compliance information...</p>
+    </div>
+</section>
+
+    <section id="predictionsData" class="data-section">
+        <h2>Price Predictions</h2>
+        <p>This table shows live price predictions based on the adaptive learning model. Predictions have inherent uncertainty.</p>
+        <div class="table-scroll-container"></div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Stocks</th>
+                    <th>Ticker Symbol</th>
+                    <th>Price ($)</th>
+                    <th>MarketCap</th>
+                    <th>24h Volume</th>
+                    <th>1h Prediction</th>
+                    <th>24h Prediction</th>
+                    <th>1w Prediction</th>
+                    <th>ELR Component</th>
+                    <th>Sentiment Impact</th>
+                    <th>Uncertainty</th>
+                    <th>p_value</th>
+                    <th>Critical Value</th>
+                    <th>Confidence</th>
+                    <th>Lower Bound</th>
+                    <th>Upper Bound</th>
+                </tr>
+            </thead>
+            <tbody id="prediction-data">
+                <tr><td colspan="16">Loading Tables...</td></tr>
+            </tbody>
+        </table>
+        </div>
+    </section>
+
+<section><h2>Line Graph</h2>
+    <!--Section for the line graph |  1h, 12h, 24h, 1w, 1m, 6m, 1y, 5y, 10y, all  |-->
+    <label for="stockSelector">Select Stock:</label>
+    <select id="stockSelector">  -- Choose a stock --  </select>
+    <canvas id="stockLineChart" width="600" height="300"></canvas>
+</section>
+
+<section class="data-section explanation-section">
+    <h2>Understanding the Prediction Table</h2>
+
+    <section>
+        <h3>1h, 24h, 1w Prediction</h3>
+        <p>
+            These values represent the model's forecast for the stock price at different future time horizons (1 hour, 24 hours, and 1 week).
+            Currently, as seen in <code>app.py</code> (<code>get_predictions_api</code> endpoint), these predictions are derived from the
+            <code>finance_agent_instance.adaptive_learner.robust_predict()</code> method. The <code>robust_predict</code> method in
+            <code>adaptive_learning.py</code> provides a single 'prediction' value.
+            In the current implementation, this single prediction value (<code>pred_value</code>) is used for all three time horizons (1h, 24h, 1w).
+            This suggests the model, in its current state as exposed to the API, primarily generates a short-term forecast that is then presented across these intervals.
+            A more advanced system might have distinct models or post-processing steps for each time horizon.
+        </p>
+        <p>
+            The core prediction comes from an ensemble of models and a meta-model within the <code>AdaptiveLearningSystem</code>.
+            The ensemble models (<code>self.ensemble_models</code>) are simple neural networks. Their outputs are combined using learned
+            <code>prediction_weights</code>. This weighted ensemble prediction (<code>base_pred</code>) is then refined by a meta-model
+            (<code>self.meta_model</code>, an LSTM) that also contributes to uncertainty estimation. The final displayed 'prediction' is a
+            weighted average of the base ensemble prediction and the meta-model's prediction.
+        </p>
+    </section>
+
+    <section>
+        <h3>ELR Component (Adaptive Learning Rate)</h3>
+        <p>
+            The "ELR Component" refers to the adaptive learning rate used by the <code>AdaptiveLearningSystem</code>.
+            In <code>app.py</code>, this is fetched from <code>diagnostics.get('adaptive_learning_rate', 0.0)</code>,
+            which in turn gets this value from <code>adaptive_learner.get_diagnostics()</code>.
+        </p>
+        <p>
+            Looking at <code>adaptive_learning.py</code> (<code>update</code> method), the learning rate is dynamically adjusted:
+            <code>self.learning_rate = max(1e-5, self.learning_rate * self.lr_decay / (1 + recent_vol))</code>.
+            This means the learning rate (<code>self.learning_rate</code>) is influenced by its previous value, a decay factor (<code>self.lr_decay</code>),
+            and the recent volatility of prediction errors (<code>recent_vol</code>). A higher recent error volatility tends to decrease the learning rate,
+            making the system more cautious in its updates. The "ELR Component" likely reflects this dynamically adjusted learning rate.
+        </p>
+    </section>
+
+    <section>
+        <h3>Sentiment Impact</h3>
+        <p>
+            This value quantifies the influence of current market sentiment on the stock's outlook.
+            In <code>app.py</code> (<code>get_predictions_api</code>), it's fetched using
+            <code>finance_agent_instance.trend_analyzer.get_latest_sentiment(symbol)</code>.
+        </p>
+        <p>
+            The <code>CulturalTrendAnalyzer</code> (in <code>cultural_trend_analyzer.py</code>) calculates sentiment via its
+            <code>sentiment_scraper</code> (<code>PublicSentimentScraper</code>). The <code>get_latest_sentiment</code> method
+            returns <code>self.last_sentiment.get(symbol, 0.0)</code>, which is updated in the <code>refresh_sentiment</code> method.
+            This suggests that sentiment scores are scraped or calculated (e.g., from news, social media) for a given symbol
+            and stored. The "Sentiment Impact" value directly reflects this most recently calculated sentiment score,
+            typically ranging from -1 (very negative) to +1 (very positive).
+        </p>
+    </section>
+
+    <section>
+        <h3>Uncertainty</h3>
+        <p>
+            This metric quantifies the model's uncertainty about its prediction.
+            In <code>app.py</code> (<code>get_predictions_api</code>), it's calculated as
+            <code>(1 - confidence_val) * current_price * 0.05</code>.
+            Here, <code>confidence_val</code> comes from <code>prediction_output['confidence']</code> which is from
+            <code>adaptive_learner.robust_predict()</code>.
+        </p>
+        <p>
+            The <code>robust_predict</code> method in <code>adaptive_learning.py</code> calculates confidence as
+            <code>float(np.exp(-combined_std))</code>, where <code>combined_std</code> is the combined standard deviation
+            from two sources:
+            <ol>
+                <li><code>meta_std</code>: Standard deviation of predictions from Monte Carlo dropout passes on the meta-model.</li>
+                <li><code>hist_vol</code>: Standard deviation of recent prediction errors (<code>self.error_history</code>).</li>
+            </ol>
+            The <code>combined_std</code> is <code>np.sqrt(meta_std**2 + hist_vol**2)</code>.
+            A higher <code>combined_std</code> leads to lower confidence.
+            The UI's "Uncertainty" then scales this (1 - confidence) by the current price and a fixed factor (0.05),
+            representing a price range of uncertainty.
+        </p>
+    </section>
+
+    <section>
+        <h3>p-value</h3>
+        <p>
+            The p-value is a statistical measure often used in hypothesis testing. In this context, it likely relates to the
+            significance of the model's prediction or the factors influencing it.
+            In <code>app.py</code> (<code>get_predictions_api</code>), it's fetched from
+            <code>diagnostics.get('p_value', 0.05)</code>, where <code>diagnostics</code> comes from
+            <code>finance_agent_instance.adaptive_learner.get_diagnostics()</code>.
+        </p>
+        <p>
+            However, the <code>AdaptiveLearningSystem.get_diagnostics()</code> method in <code>adaptive_learning.py</code>
+            <strong>does not currently return a 'p_value'</strong>. It returns:
+            <code>'current_weights', 'learning_rate', 'recent_error', 'error_volatility', 'drift_detected', 'model_diversity'</code>.
+            The value <code>0.05</code> in the API is a default fallback.
+            For this to be a meaningful value from the model, the <code>get_diagnostics</code> method (or another relevant method in <code>AdaptiveLearningSystem</code>)
+            would need to be updated to calculate and return a p-value, possibly related to concept drift detection (e.g., the p-value from the t-test in <code>_detect_drift</code>)
+            or the statistical significance of prediction model parameters/features.
+        </p>
+    </section>
+
+    <section>
+        <h3>Critical Value</h3>
+        <p>
+            The critical value is typically used in conjunction with a test statistic (like a t-statistic or z-score)
+            and a p-value in hypothesis testing to determine statistical significance.
+            In <code>app.py</code> (<code>get_predictions_api</code>), this is hardcoded as <code>"1.96"</code>.
+        </p>
+        <p>
+            A critical value of 1.96 corresponds to a 95% confidence level in a two-tailed test using a normal distribution
+            (e.g., for constructing a 95% confidence interval).
+            While commonly used, its relevance here depends on the (currently missing) specific statistical test being
+            referenced by the "p-value". If the "p-value" were from a test comparing a model coefficient to zero,
+            and the test statistic exceeded 1.96 (in absolute value), then the p-value would typically be less than 0.05,
+            indicating significance.
+        </p>
+    </section>
+
+    <section>
+        <h3>Confidence</h3>
+        <p>
+            This value represents the model's confidence in its prediction.
+            In <code>app.py</code> (<code>get_predictions_api</code>), this is directly from
+            <code>prediction_output['confidence']</code>, which is sourced from
+            <code>finance_agent_instance.adaptive_learner.robust_predict()</code>.
+        </p>
+        <p>
+            As explained in the "Uncertainty" section, the <code>robust_predict</code> method in <code>adaptive_learning.py</code>
+            calculates confidence as <code>float(np.exp(-combined_std))</code>.
+            <code>combined_std</code> is derived from the meta-model's prediction variance (via Monte Carlo dropout) and
+            the historical volatility of prediction errors.
+            A lower combined standard deviation (less spread in MC predictions and lower historical error volatility)
+            results in a confidence value closer to 1.0 (higher confidence). Conversely, higher variability leads to
+            confidence closer to 0.0.
+        </p>
+    </section>
+
+    <section>
+        <h3>Lower and Upper Bounds</h3>
+        <p>
+            These values define a confidence interval around the predicted price.
+            In <code>app.py</code> (<code>get_predictions_api</code>), they are calculated as:
+            <ul>
+                <li>Lower Bound: <code>pred_value - ( (1 - confidence_val) * current_price * 0.05 )</code></li>
+                <li>Upper Bound: <code>pred_value + ( (1 - confidence_val) * current_price * 0.05 )</code></li>
+            </ul>
+            This is essentially <code>Predicted Price ± Uncertainty_Value_From_UI</code>.
+        </p>
+        <p>
+            The term <code>( (1 - confidence_val) * current_price * 0.05 )</code> is the "Uncertainty" value shown in the UI.
+            The confidence interval is constructed by taking the point prediction (<code>pred_value</code>) and adding/subtracting
+            this calculated uncertainty margin. This interval provides a range within which the actual price is expected
+            to fall, based on the model's current confidence level. A higher confidence (lower uncertainty term)
+            will result in a narrower interval.
+        </p>
+        <p>
+            Alternatively, a more statistically grounded confidence interval could be derived directly from the
+            <code>combined_std</code> in <code>AdaptiveLearningSystem.robust_predict()</code>, for example:
+            <code>Predicted Price ± (Critical_Value * combined_std_scaled_to_price)</code>. The current UI calculation
+            is a more direct transformation of its own "Uncertainty" metric.
+        </p>
+    </section>
+</section>
+
+<div id="explanationModal" class="modal">
+    <div class="modal-content">
+        <span class="close-button" onclick="closeModal()">×</span> <!-- Added close button -->
+        <h2>Prediction Explanation</h2>
+        <pre id="explanation-content"></pre>
+    </div>
+</div>
+
+
+<script src="frontend/js/dropdown.js"></script>
+<script src="frontend/js/predictor.js"></script>
+<script src="frontend/js/themeToggle.js"></script>
+<script src="frontend/js/linegraph.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    // Auto-refresh data every 300 seconds
+    const refreshData = () => {
+        console.log("Refreshing dashboard data...");
+        
+        // Refresh all data sections
+        document.querySelectorAll('.data-section').forEach(section => {
+            const event = new Event('refresh');
+            section.dispatchEvent(event);
+        });
+    };
+
+    // Initial load
+    document.addEventListener('DOMContentLoaded', () => {
+        // Set up auto-refresh timer
+        setInterval(refreshData, 300000);
+        
+        // Create refresh event listeners
+        document.querySelectorAll('.data-section').forEach(section => {
+            section.addEventListener('refresh', () => {
+                const sectionId = section.id;
+                fetch(`/api/${sectionId.replace('-', '/')}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log(`Refreshed ${sectionId} data:`, data);
+                        // Here you would update the DOM with new data
+                        // Example: updateTable(sectionId, data);
+                    })
+                    .catch(error => {
+                        console.error(`Error refreshing ${sectionId}:`, error);
+                    });
+            });
+        });
+        
+        // Trigger initial refresh
+        refreshData();
+    });
+</script>
+</body>
+</html>

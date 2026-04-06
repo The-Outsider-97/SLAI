@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Portfolio & Financial Goals</title>
+    <link rel="stylesheet" href="frontend/css/styles.css" />
+    <!-- Auto-refresh can be enabled by uncommenting the line below -->
+    <!-- <meta http-equiv="refresh" content="30"> -->
+</head>
+<body id="portfolio-details-page">
+    <header class="app-header">
+        <div class="header-left">
+            <button id="menuButton" class="icon-button" aria-label="Menu">
+                ☰ <!-- Hamburger Icon -->
+            </button>
+            <div id="dropdownMenu" class="dropdown-content">
+                <a href="/">Price Predictions</a>
+                <a href="/portfolio">Portfolio Details</a>
+                <a href="/signals">Institutional & Insider Signals</a>
+                <a href="/indicators">Market Health Indicators</a>
+                <a href="/diagnostics">System Diagnostics</a>
+                <a href="/learning">Learning System Insights</a>
+                <a href="/trends">Cultural Trends</a>
+                <a href="/dataQuality">Data Quality</a>
+            </div>
+        </div>
+        <div class="header-center">
+            <span class="app-title">Agent Portfolio & Financial Goals</span>
+        </div>
+        <div class="header-right">
+            <button id="themeToggleButton" class="icon-button" aria-label="Toggle theme">
+                ☀️ <!-- Sun Icon -->
+            </button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div id="market-status-banner" class="market-status-banner">
+            <!-- Market status will be filled by JavaScript -->
+            <div class="market-closed">Market Status: Loading...</div>
+        </div>
+
+        <section id="portfolio-summary" class="data-section">
+            <h2>Portfolio Summary</h2>
+            <p><strong>Current Total Portfolio Value (incl. Unrealized P&L):</strong> <span id="current-portfolio-value">[Loading...]</span></p>
+            <p><strong>Cash Balance (Available Capital):</strong> <span id="cash-balance">[Loading...]</span></p>
+            <p><strong>Total Unrealized P&L (Open Positions):</strong> <span id="total-unrealized-pnl">[Loading...]</span></p>
+            <p><strong>Realized Monthly P&L (Closed Trades):</strong> <span id="monthly-pnl">[Loading...]</span> (Target: <span id="monthly-pnl-target">[Loading...]</span>)</p>
+            <p><strong>Current Drawdown:</strong> <span id="current-drawdown">[Loading...]</span> (Limit: <span id="max-drawdown-limit">[Loading...]</span>)</p>
+            <p><strong>Peak Portfolio Value This Month:</strong> <span id="monthly-peak-value">[Loading...]</span></p>
+        </section>
+
+        <section id="financial-goals" class="data-section">
+            <h2>Financial Goals Status</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Goal</th>
+                        <th>Details</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="financial-goals-status">
+                    <tr><td colspan="3">Loading financial goals status...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="open-positions" class="data-section">
+            <h2>Open Positions</h2>
+            <div class="table-scroll-container"> <!-- Ensure this class is styled for scrolling if table is wide -->
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Direction</th>
+                            <th>Entry Price ($)</th>
+                            <th>Current Price ($)</th>
+                            <th>Initial Size ($)</th>
+                            <th>Shares</th>
+                            <th>Unrealized P&L ($)</th>
+                            <th>Timestamp (Opened)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="open-positions-data">
+                        <tr><td colspan="7">No open positions or loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="trading-parameters" class="data-section">
+            <h2>Current Trading Parameters</h2>
+            <p><strong>Default Symbol for General Analysis:</strong> <span id="default-symbol">[Loading...]</span></p>
+            <p><strong>Latest Price of Default Symbol (for LA state):</strong> <span id="latest-price-default-symbol">[Loading...]</span></p>
+            <p><strong>Daily Profit Target:</strong> <span id="daily-profit-target">[Loading...]</span></p>
+            <p><strong>Current Risk Factor:</strong> <span id="current-risk-factor">[Loading...]</span></p>
+            <p><strong>Market Regime:</strong> <span id="market-regime">[Loading...]</span></p>
+            <p><strong>Last Daily Maintenance:</strong> <span id="last-daily-maintenance">[Loading...]</span></p>
+        </section>
+        
+        <section id="compliance" class="data-section">
+            <h2>Regulatory Disclosures</h2>
+            <div class="risk-warning">
+                <p>This system is regulated by FINRA (CRD# 58372) and SEC (CIK# 0001961765)</p>
+            </div>
+            <div id="compliance-disclosures">
+                <p>Loading compliance information...</p>
+            </div>
+        </section>
+
+    </div>
+
+    <script src="frontend/js/dropdown.js"></script>
+    <script src="frontend/js/predictor.js"></script> 
+    <script src="frontend/js/themeToggle.js"></script>
+    <script>
+        // Ensure this script block is after predictor.js is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            if (typeof initTheme === 'function') initTheme();
+            if (typeof initDropdown === 'function') initDropdown();
+            
+            const path = window.location.pathname;
+
+            // Specifically for portfolio.html
+            if (path.endsWith('/portfolio') || path.endsWith('/portfolio.html')) {
+                if (typeof fetchAndDisplayPortfolioPageData === 'function') {
+                    fetchAndDisplayPortfolioPageData(); // Initial load
+                    setInterval(fetchAndDisplayPortfolioPageData, 30000); // Refresh every 30 seconds
+                } else {
+                    console.error("fetchAndDisplayPortfolioPageData function not found in predictor.js");
+                }
+            } 
+            // Common elements for all pages (if predictor.js is included everywhere)
+            if (typeof fetchComplianceDisclosures === 'function') {
+                fetchComplianceDisclosures();
+            }
+            if (typeof updateMarketStatus === 'function') {
+                updateMarketStatus();
+                setInterval(updateMarketStatus, 60000); // Refresh market status every 60 seconds
+            }
+        });
+    </script>
+</body>
+</html>

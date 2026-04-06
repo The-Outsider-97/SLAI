@@ -1,0 +1,482 @@
+/* Header Styles */
+.app-header {
+    display: flex;
+    justify-content: space-between; /* Pushes left/right to edges, center stays centered */
+    align-items: center;
+    padding: 10px 20px;
+    background-color: #f8f9fa; /* Light background */
+    border-bottom: 1px solid #dee2e6; /* Subtle border */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1); /* Smooth shadow */
+    position: sticky; /* Makes the header stick to the top */
+    top: 0;
+    z-index: 1000; /* Ensures header stays on top */
+    height: 60px; /* Fixed height */
+    box-sizing: border-box; /* Include padding and border in height */
+}
+
+.header-left, .header-center, .header-right {
+    display: flex;
+    align-items: center;
+}
+
+.header-center {
+    /* Let the center take up remaining space but also be centered */
+    flex-grow: 1;
+    justify-content: center;
+    text-align: center; /* Ensure text is centered if it wraps */
+}
+
+.header-left {
+    position: relative; /* For positioning the dropdown */
+}
+
+.container {
+    width: 90%;
+    margin: auto;
+    overflow: hidden;
+    padding: 0 20px;
+}
+header {
+    background: #50b3a2;
+    padding-top: 30px;
+    min-height: 50px;
+    border-bottom: #e8491d 3px solid;
+}
+header a {
+    text-decoration: none;
+    text-transform: uppercase;
+    font-size: 13px;
+}
+header ul {
+    padding: 0;
+    list-style: none;
+}
+header li {
+    display: inline;
+    padding: 0 20px 0 20px;
+}
+header #branding {
+    float: left;
+}
+header #branding h1 {
+    margin: 0;
+}
+header nav {
+    float: right;
+    margin-top: 10px;
+}
+header .highlight, header .current a {
+    color: #e8491d;
+    font-weight: bold;
+}
+header a:hover {
+    color: #ffffff;
+    font-weight: bold;
+}
+
+
+.app-title {
+    font-size: 1.2em;
+    font-weight: bold;
+    color: #333;
+}
+
+.icon-button {
+    background: none;
+    border: none;
+    font-size: 24px; /* Adjust icon size */
+    cursor: pointer;
+    padding: 5px;
+    margin: 0 5px;
+    color: #5f6368; /* Google-like icon color */
+}
+
+.icon-button:hover {
+    background-color: rgba(60, 64, 67, 0.08); /* Subtle hover effect */
+    border-radius: 50%;
+}
+
+/* Dropdown Menu Styles */
+.dropdown-content {
+    display: none; /* Hidden by default */
+    position: absolute;
+    background-color: white;
+    min-width: 160px;
+    box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.2);
+    z-index: 1;
+    border-radius: 4px;
+    top: 100%; /* Position below the button */
+    left: 0;
+}
+
+.dropdown-content a {
+    color: black;
+    padding: 12px 16px;
+    text-decoration: none;
+    display: block;
+}
+
+.dropdown-content a:hover {
+    background-color: #f1f1f1;
+}
+
+.show { /* Class added by JS to show the dropdown */
+    display: block;
+}
+
+/* Adjust body padding to prevent content from hiding under the sticky header */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0; /* Remove default margin */
+    padding: 0;
+    /* padding-top: 80px; Add padding equal to header height + some space */
+    padding-left: 20px; /* Restore side padding */
+    padding-right: 20px;
+    /* padding-bottom: 20px; */
+    transition: background-color 0.3s, color 0.3s; /* Smooth theme transition */
+}
+
+/* Dark Theme Styles */
+body.dark-theme {
+    background-color: #202124; /* Dark background */
+    color: #e8eaed; /* Light text */
+}
+
+body.dark-theme .app-header {
+    background-color: #202124; /* Dark header background */
+    border-bottom: 1px solid #5f6368; /* Darker border */
+}
+
+body.dark-theme .app-title {
+    color: #e8eaed; /* Light title */
+}
+
+body.dark-theme .icon-button {
+    color: #bdc1c6; /* Lighter icon color */
+}
+body.dark-theme .icon-button:hover {
+     background-color: rgba(232, 234, 237, 0.08); /* Subtle dark hover */
+}
+
+body.dark-theme .dropdown-content {
+    background-color: #3c4043; /* Dark dropdown */
+    box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.5); /* Darker shadow */
+}
+
+body.dark-theme .dropdown-content a {
+    color: #e8eaed; /* Light link text */
+}
+
+body.dark-theme .dropdown-content a:hover {
+    background-color: #5f6368; /* Darker hover */
+}
+
+/* Adjust other elements for dark theme if needed */
+body.dark-theme textarea {
+    background-color: #303134;
+    color: #e8eaed;
+    border: 1px solid #5f6368;
+}
+
+body.dark-theme button { /* Basic button styling for dark mode */
+     background-color: #8ab4f8;
+     color: #202124;
+     border: none;
+}
+body.dark-theme button:hover:not(.icon-button) {
+     background-color: #aecbfa;
+}
+body.dark-theme button:disabled {
+    background-color: #5f6368;
+    color: #9aa0a6;
+}
+
+body.dark-theme .section h2 {
+    border-bottom-color: #5f6368;
+}
+body.dark-theme .tag {
+    background-color: #303134;
+    color: #e8eaed;
+    border: 1px solid #5f6368;
+}
+body.dark-theme #results p {
+    color: #e8eaed; /* Ensure paragraph text is light */
+}
+body.dark-theme ul {
+    color: #e8eaed; /* Ensure list text is light */
+}
+body.dark-theme li {
+    color: #e8eaed;
+}
+body.dark-theme strong {
+    color: #e8eaed;
+}
+textarea {
+    width: 100%;
+    height: 100px;
+    margin-bottom: 10px;
+}
+button {
+    padding: 10px 20px;
+    font-size: 13px;
+}
+.section {
+    margin-top: 20px;
+}
+.section h2 {
+    margin-bottom: 5px;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 3px;
+}
+.tag {
+    display: inline-block;
+    background-color: #f0f0f0;
+    border-radius: 5px;
+    padding: 3px 8px;
+    margin: 2px;
+}
+
+table {
+    width: 100%;
+    margin-bottom: 20px;
+    border-collapse: collapse;
+}
+th, td {
+    padding: 10px;
+    border: #ccc 1px solid;
+    text-align: left;
+}
+
+.data-section {
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+ul {
+    list-style-type: disc;
+    margin-left: 20px;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin-bottom: 20px;
+}
+th, td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+th {
+    background-color: #f2f2f2;
+}
+.dark-theme th{
+    background-color: #383838;
+}
+
+#predictionsData {
+    width: 100%;
+    position: relative;
+}
+
+#predictionsData table {
+    min-width: 1600px;
+    table-layout: fixed;
+    border-collapse: collapse;
+    width: 100%;
+}
+
+#predictionsData table th,
+#predictionsData table td {
+    width: 150px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    padding: 8px;
+    border: 1px solid #ddd;
+    background: inherit;
+    z-index: 1;
+}
+
+/* Sticky first three columns */
+#predictionsData table th:nth-child(1),
+#predictionsData table td:nth-child(1) {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    background: inherit;
+}
+
+#predictionsData table th:nth-child(2),
+#predictionsData table td:nth-child(2) {
+    position: sticky;
+    left: 150px;
+    z-index: 5;
+    background: inherit;
+}
+
+#predictionsData table th:nth-child(3),
+#predictionsData table td:nth-child(3) {
+    position: sticky;
+    left: 300px;
+    z-index: 5;
+    background: inherit;
+}
+
+/* Make only the table body horizontally scrollable */
+#predictionsData .table-scroll-container {
+    overflow-x: auto;
+    width: calc(100% - 450px); /* leaves space for the fixed 3 columns */
+    margin-left: 450px; /* pushes the scrollable part right */
+}
+
+.modal {
+    display: none; /* Hidden by default */
+    position: fixed; /* Stay in place */
+    z-index: 1000; /* Sit on top */
+    left: 0;
+    top: 0;
+    width: 100%; /* Full width */
+    height: 100%; /* Full height */
+    overflow: auto; /* Enable scroll if needed */
+    background-color: rgb(0,0,0); /* Fallback color */
+    background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+    padding-top: 60px;
+}
+
+.modal-content {
+    background-color: var(--background-color); /* Use theme background */
+    color: var(--text-color); /* Use theme text color */
+    margin: 5% auto; /* 5% from the top and centered */
+    padding: 20px;
+    border: 1px solid var(--border-color, #888); /* Use theme border or default */
+    width: 80%; /* Could be more or less, depending on screen size */
+    max-width: 700px;
+    border-radius: 8px;
+    position: relative;
+}
+
+.close-button {
+    color: var(--accent-color, #aaa);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    position: absolute;
+    top: 10px;
+    right: 20px;
+}
+
+.close-button:hover,
+.close-button:focus {
+    color: var(--text-color); /* Change color on hover based on theme */
+    text-decoration: none;
+    cursor: pointer;
+}
+
+#explanation-content {
+    white-space: pre-wrap; /* Ensures JSON formatting is respected */
+    word-wrap: break-word;
+    max-height: 70vh;
+    overflow-y: auto;
+    background-color: var(--table-header-bg); /* Slightly different background for pre */
+    padding: 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+}
+
+.explanation-section h3 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    color: var(--header-color); /* Use a theme color for subheadings */
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 5px;
+}
+.explanation-section p {
+    margin-bottom: 15px;
+    line-height: 1.6;
+}
+.explanation-section ol li {
+    margin-bottom: 8px;
+}
+
+.notification {
+    transition: opacity 0.3s ease;
+}
+
+.notification.error {
+    background-color: #ff6b6b;
+}
+
+.notification.info {
+    background-color: #4ecdc4;
+}
+
+#market-status-banner {
+    padding: 10px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+.market-open-banner {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.market-closed-banner {
+    background-color: #F44336;
+    color: white;
+}
+
+.profit {
+    color: green;
+}
+.loss {
+    color: red;
+}
+
+/* Specific styling for portfolio.html if needed */
+#portfolio-details-page .data-section {
+    margin-bottom: 25px;
+    padding: 15px; /* Slightly less padding than index page sections if desired */
+}
+#portfolio-details-page h2 {
+    color: #337ab7; /* A distinct color for titles on this page */
+    border-bottom: 2px solid #337ab7;
+    padding-bottom: 8px;
+    margin-bottom: 15px;
+}
+
+#portfolio-details-page table {
+    margin-top: 10px;
+}
+
+#portfolio-details-page p {
+    line-height: 1.6;
+    margin-bottom: 8px;
+}
+#portfolio-details-page p strong {
+    margin-right: 5px;
+}
+
+/* Style for the market status banner */
+#market-status-banner {
+    padding: 10px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 1.2em;
+    margin-bottom: 20px; /* Space below banner */
+    border-radius: 4px;
+}
+
+.market-open-banner {
+    background-color: #4CAF50; /* Green */
+    color: white;
+}
+
+.market-closed-banner {
+    background-color: #F44336; /* Red */
+    color: white;
+}
