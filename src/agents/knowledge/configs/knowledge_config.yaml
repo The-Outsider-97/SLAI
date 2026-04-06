@@ -73,7 +73,7 @@ perform_action:                # Global toggle for action execution
     - "internal-service.net"
   enable_sandbox: True            # Restrict shell/database access
   log_level: "detailed"           # Options: minimal, detailed, debug
-  confirmation_required: false    # Require human approval for高危actions
+  confirmation_required: false    # Require human approval for high-risk actions
 
 knowledge_cache:
   stopwords: "src/agents/language/templates/stopwords.json"
@@ -113,6 +113,18 @@ knowledge_monitor:
   crossref_checking: True        # Enable DOI validation via CrossRef API
   plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
   auto_archive_outdated: false  # Automatically archive outdated sources
+
+runtime_health:
+  degraded_after_seconds: 30
+  unhealthy_after_seconds: 120
+  enable_periodic_checks: true
+  check_interval_seconds: 60
+
+runtime_metrics:
+  enabled: true
+  export_format: "prometheus"      # prometheus|json
+  namespace: "knowledge"
+  include_process_metrics: false
 
 auto_sync:
   interval: 3600  # Seconds between syncs
