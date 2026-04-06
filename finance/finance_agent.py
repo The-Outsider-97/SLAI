@@ -15,17 +15,16 @@ from scipy.stats import norm
 from datetime import datetime, timedelta, time as dt_time
 from datetime import datetime
 
-from finance_test.config_loader import load_global_config, get_config_section
-from finance_test.database import save_prediction, log_audit_event
-from finance_test.env.stock_trading_env import StockTradingEnv
-from finance_test.core.market_data_handler import MarketDataHandler
-from finance_test.core.data_quality_monitor import DataQualityMonitor
-from finance_test.core.adaptive_learning import AdaptiveLearningSystem
-from finance_test.core.cultural_trend_analyzer import CulturalTrendAnalyzer
-from finance_test.core.investor_tracker import InvestorTracker
-from finance_test.core.finance_memory import FinanceMemory 
-from finance_test.core.batch_manager import BatchManager
-from finance_test.core.backtester import Backtester
+from finance.core.utils.config_loader import load_global_config, get_config_section
+from financet.database import save_prediction, log_audit_event
+from finance.core.stock_trading_env import StockTradingEnv
+from finance.core.market_data_handler import MarketDataHandler
+from finance.core.utils.data_quality_monitor import DataQualityMonitor
+from finance.core.adaptive_learning import AdaptiveLearningSystem
+from finance.core.cultural_trend_analyzer import CulturalTrendAnalyzer
+from finance.core.investor_tracker import InvestorTracker
+from finance.core.finance_memory import FinanceMemory 
+from financet.core.backtester import Backtester
 from src.agents.planning.planning_types import Task, TaskType, Any
 from src.agents.knowledge.knowledge_cache import KnowledgeCache
 from src.agents.collaborative.shared_memory import SharedMemory
@@ -34,11 +33,6 @@ from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Finance Agent")
 printer = PrettyPrinter
-
-# Stubbing database functions if not fully set up, as per original code context
-save_prediction = lambda *args, **kwargs: logger.info(f"DB save_prediction stubbed. Args: {args}, Kwargs: {kwargs}")
-log_audit_event = lambda *args, **kwargs: logger.info(f"DB log_audit_event stubbed. Args: {args}, Kwargs: {kwargs}")
-
 
 class CircuitBreaker:
     def __init__(self):
