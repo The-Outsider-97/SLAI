@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 """
 Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence)
@@ -39,6 +39,7 @@ from src.agents.knowledge.knowledge_cache import KnowledgeCache
 from src.agents.knowledge.perform_action import PerformAction
 from src.agents.knowledge.ontology_manager import OntologyManager
 from src.agents.knowledge.governor import Governor
+from src.agents.knowledge.knowledge_orchestrator import KnowledgeOrchestrator
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Knowledge Agent")
@@ -116,8 +117,9 @@ class KnowledgeAgent(BaseAgent):
         self.sorted_vocab = []
         self.content_hashes = set()
         self.expanded_terms_cache = {}
-        
-        self.governor = self._initialize_governance()
+
+        self.governor = None
+        self.orchestrator = self._initialize_orchestrator()
         self.stopwords = self._load_stopwords(self.stopwords)
 
         required_configs = [
@@ -137,6 +139,23 @@ class KnowledgeAgent(BaseAgent):
                     setattr(self, param, 1000)
 
         logger.info(f"Knowledge Agent Initialized with SBERT model: {self.embedding_model if self.sbert_model else 'Failed to load'}")
+
+    def _initialize_orchestrator(self) -> KnowledgeOrchestrator:
+        """Initialize the production subsystem orchestrator once and bind shared components."""
+        governor = self.governor if self.governor is not None else self._initialize_governance()
+        orchestrator = KnowledgeOrchestrator(
+            agent=self,
+            cache=self.knowledge_cache,
+            governor=governor,
+            action_executor=self.perform_action,
+            lazy_start=True,
+        )
+        if not orchestrator.started:
+            orchestrator.start()
+        self.knowledge_cache = orchestrator.cache
+        self.perform_action = orchestrator.action_executor
+        self.governor = orchestrator.governor
+        return orchestrator
 
     @property
     def decay_factor(self):
@@ -196,13 +215,17 @@ class KnowledgeAgent(BaseAgent):
 
     def _initialize_governance(self):
         """Conditionally create governor based on config"""
-        if self.config.get('governor.enabled', True):
+        if self.governor is not None:
+            return self.governor
+
+        governor_config = get_config_section('governor') or {}
+        if governor_config.get('enabled', True):
             governor = Governor(knowledge_agent=self)
             logger.info("Governance subsystem initialized")
             return governor
         logger.info("Governance subsystem disabled")
         return None
-    
+
     def _load_stopwords(self, path: str) -> list:
         try:
             with open(path, 'r') as f:
@@ -474,6 +497,7 @@ class KnowledgeAgent(BaseAgent):
         cache_key = hashlib.sha256(query.encode()).hexdigest()
         start_time = time.time()
         cache_hit = False
+        expanded_query_text = query
 
         # Clear cache periodically
         if len(self.expanded_terms_cache) > 100000:
@@ -620,67 +644,36 @@ class KnowledgeAgent(BaseAgent):
             final_k_results = self._apply_bias_analysis(final_k_results)
 
         serializable_results = [(float(score), doc) for score, doc in final_k_results]
-        
+
         # Thread-safe cache update
         with self.cache_lock:
             if len(self.knowledge_cache) > self.cache_size:
                 self.knowledge_cache.popitem()
             self.knowledge_cache.set(cache_key, serializable_results)
-            
+
+        retrieval_payload = {
+            "query": query,
+            "retrieval_mode": self.retrieval_mode,
+            "timestamp": time.time(),
+            "results": [
+                {
+                    "score": float(score),
+                    "doc_id": doc.get("doc_id"),
+                    "text": doc.get("text"),
+                    "metadata": doc.get("metadata", {}),
+                }
+                for score, doc in final_k_results
+            ],
+        }
+        self.shared_memory.set("knowledge:last_retrieval", retrieval_payload)
         self.shared_memory.set("retrieved_knowledge", [doc['text'] for _, doc in final_k_results])
+        self.shared_memory.increment(f"knowledge:metrics:{self.name}:retrieval_count", 1)
         self.performance_metrics['retrieval_times'].append(time.time() - start_time)
-        
+
         safe_query = query.encode('ascii', 'replace').decode('ascii')
         logger.info(f"Retrieved {len(final_k_results)} documents for query '{safe_query}' using {self.retrieval_mode} mode.")
         return final_k_results
     
-    #def retrieve_batch(self, queries: List[str], k: int = 2) -> List[Tuple[float, Dict[str, Any]]]:
-    #    """
-    #    Retrieves relevant documents for a batch of queries efficiently.
-    #    Fixed implementation using existing attributes and methods.#
-
-    #    Args:
-    #        queries (List[str]): A list of query strings.
-    #        k (int): The number of documents to retrieve for each query.
-
-    #    Returns:
-    #        A list where each element is a list of retrieved documents for the corresponding query.
-    #    """
-    #    if not queries or not self.knowledge_agent:
-    #        return [[] for _ in queries]
-            
-        #try:
-            # Process in chunks to avoid resource exhaustion
-            #CHUNK_SIZE = 500  # Optimal for memory/CPU balance
-            #batch_results = [None] * len(queries)
-            
-            #with tqdm(total=len(queries), desc="Batch Retrieval") as pbar:
-            #    for start_idx in range(0, len(queries), CHUNK_SIZE):
-            #        end_idx = min(start_idx + CHUNK_SIZE, len(queries))
-            #        chunk = queries[start_idx:end_idx]
-                    
-            #        with ThreadPoolExecutor(max_workers=8) as executor:
-            #            future_to_index = {
-            #                executor.submit(self.retrieve, query, k): idx 
-            #                for idx, query in enumerate(chunk, start=start_idx)
-            #            }
-                        
-            #            for future in as_completed(future_to_index):
-            #                idx = future_to_index[future]
-            #                try:
-            #                    batch_results[idx] = future.result()
-            #                except Exception as e:
-            #                    logger.error(f"Retrieval failed for query index {idx}: {e}")
-            #                    batch_results[idx] = []
-            #                finally:
-            #                    pbar.update(1)
-
-            # return batch_results
-
-        #except Exception as e:
-        #    logger.error(f"Batch retrieval failed: {str(e)}")
-        #    return [[] for _ in queries]
-
     def retrieve_batch(self, original_texts: List[str], k: int = 2) -> List[Tuple[float, Dict[str, Any]]]:
 
         if not original_texts or not self.knowledge_agent:
@@ -696,7 +689,7 @@ class KnowledgeAgent(BaseAgent):
             # Process chunk with separate thread pool
             with ThreadPoolExecutor(max_workers=4) as executor:
                 future_to_index = {
-                    executor.submit(self.retrieve, query, k=2): idx 
+                    executor.submit(self.retrieve, query, k=k): idx 
                     for idx, query in enumerate(chunk, start=start_idx)
                 }
                 
@@ -828,43 +821,6 @@ class KnowledgeAgent(BaseAgent):
             "ttl": ttl
         }
 
-    def _calculate_relevance(self, value, context):
-        """
-        Computes a relevance score between a memory value and its context.
-    
-        Args:
-            value (str): The text or knowledge snippet being stored.
-            context (dict): Context in which the value was generated (includes query, user, etc.).
-    
-        Returns:
-            float: A relevance score between 0.0 and 1.0.
-        """
-        try:
-            # Step 1: Preprocess both value and context (if textual)
-            value_tokens = self._preprocess(value) if isinstance(value, str) else []
-            context_query = context.get("query") or context.get("source", "")
-            context_tokens = self._preprocess(context_query) if context_query else []
-    
-            # Step 2: Generate TF-IDF vectors for both
-            value_vector = self._calculate_tfidf(value_tokens)
-            context_vector = self._calculate_tfidf(context_tokens)
-    
-            # Step 3: Compute cosine similarity
-            score = self._cosine_similarity(value_vector, context_vector)
-    
-            # Step 4: Bias-aware penalty (optional)
-            if self.bias_detection_enabled and self.governor:
-                bias_conf = self.governor._detect_unethical_content(value)
-                if bias_conf > self.bias_threshold:
-                    penalty = min(bias_conf * 0.5, 0.3)  # Clamp penalty
-                    score *= (1.0 - penalty)
-    
-            return round(min(score, 1.0), 4)
-    
-        except Exception as e:
-            logger.warning(f"Failed to calculate relevance: {e}")
-            return 0.0
-
     def recall_memory(self, key: str = None, filters: dict = None, sort_by: str = None, top_k: int = None) -> list:
         """
         Recalls values from memory, with optional filtering, sorting, and top-k retrieval.
@@ -882,11 +838,14 @@ class KnowledgeAgent(BaseAgent):
     
         if key:
             entry = self.shared_memory.get(key)
-            if entry:
+            if isinstance(entry, dict) and "value" in entry and "metadata" in entry:
                 results.append((entry["value"], entry["metadata"]))
         else:
-            results = [(entry["value"], entry["metadata"]) for entry in self.shared_memory.values()]
-    
+            for memory_key in self.shared_memory.get_all_keys():
+                entry = self.shared_memory.get(memory_key)
+                if isinstance(entry, dict) and "value" in entry and "metadata" in entry:
+                    results.append((entry["value"], entry["metadata"]))
+
         # Apply filters
         if filters:
             results = [(value, metadata) for value, metadata in results if self._apply_filters(metadata, filters)]
@@ -1005,7 +964,7 @@ class KnowledgeAgent(BaseAgent):
 
         return references
 
-    def broadcast_knowledge(self, context=None):
+    def broadcast_knowledge(self, context=None, ttl: int = 300):
         """
         Stores and publishes the last 5 knowledge items into shared memory,
         with enriched metadata and broadcast to subscribers.
@@ -1050,16 +1009,19 @@ class KnowledgeAgent(BaseAgent):
                 return self._process_rules(raw_rules)
             except Exception as e:
                 logger.error(f"Governor rule discovery failed: {e}")
-        
+
         # Fallback to direct rule engine access
         try:
-            rules = self.governor.rule_engine.get_rules_by_category("governance_approved")
+            if self.orchestrator and getattr(self.orchestrator, "rule_engine", None):
+                rules = self.orchestrator.rule_engine.get_rules_by_category("governance_approved")
+            else:
+                rules = []
             logger.info(f"Discovered {len(rules)} rules directly from RuleEngine")
             return self._process_rules(rules)
         except Exception as e:
             logger.error(f"Direct rule discovery failed: {e}")
             return []
-    
+
     def _process_rules(self, raw_rules: list) -> list:
         """Process and filter raw rules"""
         min_confidence = 0.7
@@ -1133,29 +1095,41 @@ class KnowledgeAgent(BaseAgent):
                         'source': doc.get('metadata', {}).get('source'),
                         'categories': bias_meta.get('categories', {})
                     })
-        
+
         # 3. Freshness check
         current_time = time.time()
         fresh_results = []
+        freshness_threshold_seconds = 720 * 3600
+        if self.governor:
+            freshness_threshold_seconds = self.governor.freshness_threshold * 3600
         for score, doc in retrieved:
             doc_time = doc.get('metadata', {}).get('timestamp', 0)
-            if current_time - doc_time < self.governor.freshness_threshold * 3600:
+            if current_time - doc_time < freshness_threshold_seconds:
                 fresh_results.append((score, doc))
-        
+
         # Use fresh results if available, fallback to all results
         final_results = fresh_results if fresh_results else retrieved
         
         # --- ACT PHASE ---
         # 1. Format response
         response_text = "\n\n".join([doc['text'] for _, doc in final_results[:3]])
-        
+
         # 2. Check if action is required
         action_required = self._detect_action_trigger(query, final_results)
         if action_required:
-            action_result = self.perform_action.execute(
-                action_required,
-                context=context,
-                references=[doc['text'] for _, doc in final_results]
+            action_docs = [{"text": doc["text"]} for _, doc in final_results]
+            action_result = self.orchestrator.execute_actions(action_docs)
+            self.update_memory(
+                key=f"knowledge:actions:{int(time.time())}",
+                value={
+                    "trigger": action_required,
+                    "query": query,
+                    "results_used": len(final_results),
+                    "action_result": action_result,
+                },
+                metadata={"type": "action_execution", "source": "knowledge_agent"},
+                context={"query": query, "source": "respond_to_query"},
+                ttl=3600,
             )
             return {
                 "response": response_text,
