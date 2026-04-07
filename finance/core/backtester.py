@@ -399,8 +399,13 @@ class Backtester:
         try:
             prediction = float(self.model.predict(X)[0])
         except Exception as exc:
-            logger.warning("Prediction failed: %s", exc)
-            return 0
+            try:
+                # Fallback path for models that were fitted with ndarray inputs or
+                # feature-name metadata that no longer aligns with runtime DataFrames.
+                prediction = float(self.model.predict(X.to_numpy())[0])
+            except Exception:
+                logger.warning("Prediction failed: %s", exc)
+                return 0
         current = float(point["close"])
         point["prediction"] = prediction
         change = (prediction - current) / max(current, 1e-12)
