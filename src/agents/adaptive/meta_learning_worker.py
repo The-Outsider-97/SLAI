@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.agents.adaptive.utils.config_loader import load_global_config, get_config_section
 from src.agents.adaptive.adaptive_memory import MultiModalMemory
-from src.tuning.utils.bayesian_neural_network import BayesianNeuralNetwork
+from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Meta Learning Worker")
