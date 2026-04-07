@@ -325,7 +325,12 @@ class Backtester:
             raise FeatureEngineeringError("No numeric features available for training.", context=self._context("train_model"))
         X = data[feature_names].copy()
         X = X.replace([np.inf, -np.inf], np.nan)
-        y = data[target_col]
+        y = pd.to_numeric(data[target_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        valid_mask = y.notna()
+        if valid_mask.sum() < 20:
+            raise FeatureEngineeringError("Insufficient finite target values for training.", context=self._context("train_model"))
+        X = X.loc[valid_mask].copy()
+        y = y.loc[valid_mask].copy()
 
         if feature_mode == "auto" and X.shape[1] > 1:
             selector = SelectKBest(score_func=f_regression, k=min(15, X.shape[1]))
@@ -358,7 +363,10 @@ class Backtester:
                     grid.fit(X, y)
                     pipeline = grid.best_estimator_
                 elif tuning_strategy == "bayesian":
-                    tuner = HyperparamTuner(model_type=model_type, evaluation_function=lambda **kwargs: self._evaluate_candidate(model_type, X, y, kwargs))
+                    tuner = HyperparamTuner(
+                        model_type=model_type,
+                        evaluation_function=lambda params, *_args: self._evaluate_candidate(model_type, X, y, params),
+                    )
                     best_params = tuner.run_tuning_pipeline(X_data=X, y_data=y)
                     if isinstance(best_params, Mapping):
                         pipeline.set_params(**{f"model__{k}": v for k, v in best_params.items()})
@@ -387,7 +395,7 @@ class Backtester:
             except Exception:
                 numeric = 0.0
             values.append(numeric)
-        X = pd.DataFrame([values], columns=self.feature_columns)
+        X = pd.DataFrame([values], columns=self.feature_columns).reindex(columns=self.feature_columns)
         try:
             prediction = float(self.model.predict(X)[0])
         except Exception as exc:
