@@ -129,13 +129,14 @@ class AutonomousEvaluator:
         validated_tasks = []
         for task in tasks:
             # Add missing keys with defaults
+            task.setdefault('completion_time', 0.0)
             task.setdefault('optimal_path', [])
             task.setdefault('path', [])
             task.setdefault('energy_consumed', 0.0)
             task.setdefault('collisions', 0)
             task.setdefault('success', False)
             validated_tasks.append(task)
-        
+
         # Process validated tasks
         return self._evaluate_valid_tasks(validated_tasks)
     
