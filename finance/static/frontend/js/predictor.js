@@ -1,5 +1,20 @@
-
 let fetchInProgress = false;
+
+async function fetchJsonWithFallback(paths) {
+    let lastError = null;
+    for (const path of paths) {
+        try {
+            const response = await fetch(path);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status} - ${path}`);
+            }
+            return await response.json();
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError || new Error('All endpoint attempts failed.');
+}
 
 // Ensure these are in a scope accessible by event listeners
 function openModal() {
@@ -301,8 +316,7 @@ function fetchAndDisplaySignals() {
 }
 
 function fetchAndDisplayLearningInsights() {
-    fetch('/api/learning_insights')
-        .then(response => response.json())
+    fetchJsonWithFallback(['/api/learning_insights', '/api/learning-insights'])
         .then(data => {
             const learningTableBody = document.getElementById('learning-data');
             if (!learningTableBody) return;
@@ -542,8 +556,13 @@ function fetchAndDisplayUltimateSuggestions() {
     }
 
 function updateMarketStatus() {
-    fetch('/api/market/status')
-        .then(response => response.json())
+    fetchJsonWithFallback(['/api/market/status', '/api/market_status'])
+        .then(data => {
+            if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, 'is_open')) {
+                return data;
+            }
+            return { is_open: false, error: true, details: 'Market status payload was unavailable.' };
+        })
         .then(data => {
             const banner = document.getElementById('market-status-banner');
             if (!banner) return;
@@ -766,8 +785,7 @@ function fetchAndDisplayBacktestingMetrics() {
     }
 
 function fetchAndDisplayOptimizationResults() {
-    fetch('/api/portfolio/optimization')
-        .then(response => response.json())
+    fetchJsonWithFallback(['/api/portfolio/optimization', '/api/portfolio_optimization'])
         .then(data => {
             const optTableBody = document.getElementById('optimization-results-data');
             if (!optTableBody) return;
@@ -822,13 +840,28 @@ function fetchAllData() {
     fetchAndDisplayDataQuality();
     fetchAndDisplayBacktestingMetrics();
     fetchAndDisplayOptimizationResults();
-    
+
     setTimeout(() => { fetchInProgress = false; }, 5000);
+}
+
+function ensureResponsiveTableContainers() {
+    const tables = document.querySelectorAll('.data-section table, section table');
+    tables.forEach((table) => {
+        const parent = table.parentElement;
+        if (!parent) return;
+        if (parent.classList.contains('table-scroll-container')) return;
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-scroll-container';
+        parent.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
+    });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     if (typeof initTheme === 'function') initTheme();
     if (typeof initDropdown === 'function') initDropdown();
+    ensureResponsiveTableContainers();
     
     const path = window.location.pathname;
 
