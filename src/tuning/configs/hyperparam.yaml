@@ -1,6 +1,6 @@
 # ==============================================
 # Unified Hyperparameter Tuning Configuration
-# Supports both Grid Search and Bayesian Search
+# Supports deterministic grid tuning and Bayesian search workflows
 # ==============================================
 
 model:
@@ -15,6 +15,87 @@ run:
 training:
   num_samples: 500
 
+bnn:
+  learning_rate: 0.005
+  prior_mu: 0.0
+  prior_logvar: 0.0
+  random_state: 42
+  hidden_activation: relu
+  leaky_relu_slope: 0.01
+  likelihood_std: 1.0
+  min_variance: 1.0e-6
+  stability_epsilon: 1.0e-8
+  weight_init_scale: 0.75
+  gradient_clip_norm: 5.0
+  logvar_clip_range:
+    - -8.0
+    - 4.0
+
+  training:
+    epochs: 200
+    batch_size: 64
+    num_samples: 5
+    shuffle: true
+    early_stopping_patience: 15
+    min_delta: 1.0e-4
+    restore_best_weights: true
+
+  persistence:
+    format: json
+    indent: 2
+    sort_keys: true
+
+  monitoring:
+    track_gradient_norm: true
+    track_elbo: true
+    track_kl_divergence: true
+    track_log_likelihood: true
+    track_predictive_std: true
+
+  prediction:
+    num_samples: 200
+    lower_quantile: 0.05
+    upper_quantile: 0.95
+
+gnn:
+  task_type: regression
+  optimizer: adam
+  learning_rate: 0.001
+  random_state: 42
+  hidden_activation: relu
+  output_activation: auto
+  leaky_relu_slope: 0.01
+  weight_init_scale: 1.0
+  gradient_clip_norm: 5.0
+  l2_lambda: 1.0e-4
+  dropout_rate: 0.10
+  stability_epsilon: 1.0e-8
+  beta1: 0.9
+  beta2: 0.999
+  adam_epsilon: 1.0e-8
+  prediction_threshold: 0.5
+
+  training:
+    epochs: 120
+    batch_size: 64
+    shuffle: true
+    early_stopping_patience: 12
+    min_delta: 1.0e-4
+    restore_best_weights: true
+
+  persistence:
+    format: json
+    indent: 2
+    sort_keys: true
+
+  monitoring:
+    track_gradient_norm: true
+    track_loss: true
+    track_learning_rate: true
+
+  grid_defaults:
+    metric: r2
+
 # ==========================
 # Hyperparameters Definition
 # ==========================
@@ -25,19 +106,19 @@ hyperparameters:
       type: real
       min: 0.0001
       max: 0.1
-      prior: "log-uniform"
-      
+      # prior: "log-uniform"
+
     - name: n_estimators
       type: integer
       min: 50
       max: 300
-      
+
   RandomForest:
     - name: n_estimators
       type: integer
       min: 50
       max: 300
-      
+
     - name: max_depth
       type: integer
       min: 3
@@ -54,15 +135,87 @@ hyperparameters:
       type: integer
       values: [0, 1, 2, 3]
 
+  BayesianNeuralNetwork:
+    - name: learning_rate
+      type: real
+      min: 0.0001
+      max: 0.01
+      prior: log-uniform
+
+    - name: hidden_layer_sizes
+      type: categorical
+      values:
+        - "64"
+        - "128"
+        - "128,64"
+        - "256,128"
+
+    - name: batch_size
+      type: categorical
+      values: [32, 64, 128]
+
+    - name: epochs
+      type: integer
+      min: 50
+      max: 300
+
+    - name: num_samples_mc        # number of Monte Carlo samples during training
+      type: integer
+      min: 1
+      max: 10
+
+    - name: prior_logvar
+      type: real
+      min: -5.0
+      max: 0.0
+
+    - name: likelihood_std
+      type: real
+      min: 0.1
+      max: 2.0
+
+  GridNeuralNetwork:
+    - name: hidden_layer_sizes
+      type: categorical
+      values:
+        - "64"
+        - "128"
+        - "128,64"
+        - "256,128"
+
+    - name: learning_rate
+      type: categorical
+      values: [0.0005, 0.001, 0.003]
+
+    - name: batch_size
+      type: categorical
+      values: [32, 64]
+
+    - name: epochs
+      type: categorical
+      values: [80, 120]
+
+    - name: hidden_activation
+      type: categorical
+      values: [relu, tanh]
+
+    - name: dropout_rate
+      type: categorical
+      values: [0.0, 0.1]
+
+    - name: l2_lambda
+      type: categorical
+      values: [0.0, 0.0001, 0.001]
+
 # ==========================
 # Tuning Strategy Settings
 # ==========================
 
 tuning:
-  strategy: bayesian         # options: bayesian, grid
-  n_calls: 50                # used for Bayesian
-  n_random_starts: 5         # used for Bayesian
-  allow_generate: True
+  strategy: bayesian
+  n_calls: 50
+  n_random_starts: 5
+  allow_generate: true
 
 bayesian_search:
   n_calls: 50
@@ -79,9 +232,6 @@ grid_search:
   output_dir: "src/tuning/reports"
   summary_dir: "src/tuning/reports"
 
-
 configs:
   bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
   grid_config: "hyperparam_tuning/example_grid_config.json"
-
-
