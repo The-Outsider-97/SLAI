@@ -99,7 +99,7 @@ agent_service = FinanceAgentService(agent=_BOOT_AGENT, init_error=_BOOT_ERROR)
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
+    app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
 
     # -------------------------
     # Frontend routes
@@ -408,6 +408,15 @@ def create_app() -> Flask:
         agent, err = _safe_agent()
         if err:
             return jsonify({"error": "agent_unavailable", "details": err}), 503
+        cycle_result: Dict[str, Any] = {}
+        cycle_error: Optional[str] = None
+        try:
+            # Run one full decision cycle on every refresh so the dashboard reflects
+            # current buy/sell/hold decisions and goal-driven risk updates.
+            cycle_result = agent_service.run_cycle(symbol=request.args.get("symbol"))
+        except Exception as exc:
+            cycle_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("Portfolio refresh cycle failed: %s", cycle_error)
 
         open_positions = []
         for symbol, pos in agent.open_positions.items():
@@ -457,6 +466,8 @@ def create_app() -> Flask:
             "daily_profit_target": float((agent.financial_goals or {}).get("monthly_profit", {}).get("target", 0.0)) / 22.0,
             "current_risk_factor": agent._determine_risk_factor(),
             "last_daily_maintenance_date": datetime.now(timezone.utc).date().isoformat(),
+            "latest_cycle": cycle_result,
+            "latest_cycle_error": cycle_error,
         }
         return jsonify(payload)
 
