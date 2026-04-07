@@ -1,6 +1,5 @@
 # ==============================================
 # Unified Hyperparameter Tuning Configuration
-# Supports deterministic grid tuning and Bayesian search workflows
 # ==============================================
 
 model:
@@ -8,28 +7,79 @@ model:
   version: v1.8.1
 
 run:
-  id_prefix: "run"
-  output_dir: "logs/"
-  plots_dir: "plots/"
+  id_prefix: run
+  output_dir: logs/
+  plots_dir: plots/
 
 training:
   num_samples: 500
 
+# Used by HyperparamTuner when model_type is not passed at runtime.
+model_type: GradientBoosting
+
+# ==========================================================
+# High-level orchestration settings (non-strategy-specific)
+# ==========================================================
+tuning:
+  strategy: bayesian    # bayesian | grid
+  allow_generate: true
+
+# ============================
+# Bayesian search configuration
+# ============================
+bayesian_search:
+  n_calls: 50
+  n_initial_points: 5
+  random_state: 42
+  output_dir: src/tuning/reports/bayesian_search
+
+  # Strategy behavior
+  objective: auto       # auto | minimize | maximize
+  scoring_metric: null  # e.g. elbo, mse, rmse, log_likelihood
+
+  # Built-in BNN evaluator split controls
+  validation_fraction: 0.2
+  shuffle_validation: true
+
+  # Reporting
+  plot_results: true
+
+# =======================
+# Grid search configuration
+# =======================
+grid_search:
+  n_jobs: -1
+  cross_val_folds: 5
+  random_state: 42
+  output_dir: src/tuning/reports/grid_search
+
+  # Optional overrides
+  model_type: GradientBoosting
+  scoring_metric: null  # if null, evaluator falls back to gnn.grid_defaults.metric
+  task_type: auto       # auto | regression | classification | binary_classification | multiclass_classification
+
+  # Reporting
+  plot_results: true
+
+# ======================================
+# Bayesian Neural Network default settings
+# ======================================
 bnn:
   learning_rate: 0.005
   prior_mu: 0.0
   prior_logvar: 0.0
   random_state: 42
+
   hidden_activation: relu
   leaky_relu_slope: 0.01
   likelihood_std: 1.0
+
   min_variance: 1.0e-6
   stability_epsilon: 1.0e-8
+  logvar_clip_range: [-8.0, 4.0]
+
   weight_init_scale: 0.75
   gradient_clip_norm: 5.0
-  logvar_clip_range:
-    - -8.0
-    - 4.0
 
   training:
     epochs: 200
@@ -39,6 +89,11 @@ bnn:
     early_stopping_patience: 15
     min_delta: 1.0e-4
     restore_best_weights: true
+
+  prediction:
+    num_samples: 200
+    lower_quantile: 0.05
+    upper_quantile: 0.95
 
   persistence:
     format: json
@@ -52,24 +107,25 @@ bnn:
     track_log_likelihood: true
     track_predictive_std: true
 
-  prediction:
-    num_samples: 200
-    lower_quantile: 0.05
-    upper_quantile: 0.95
-
+# ==========================================
+# Deterministic Grid Neural Network defaults
+# ==========================================
 gnn:
   task_type: regression
   optimizer: adam
-  learning_rate: 0.001
   random_state: 42
+
+  learning_rate: 0.001
   hidden_activation: relu
   output_activation: auto
   leaky_relu_slope: 0.01
+
   weight_init_scale: 1.0
   gradient_clip_norm: 5.0
   l2_lambda: 1.0e-4
   dropout_rate: 0.10
   stability_epsilon: 1.0e-8
+
   beta1: 0.9
   beta2: 0.999
   adam_epsilon: 1.0e-8
@@ -83,6 +139,9 @@ gnn:
     min_delta: 1.0e-4
     restore_best_weights: true
 
+  grid_defaults:
+    metric: r2
+
   persistence:
     format: json
     indent: 2
@@ -93,20 +152,15 @@ gnn:
     track_loss: true
     track_learning_rate: true
 
-  grid_defaults:
-    metric: r2
-
 # ==========================
-# Hyperparameters Definition
+# Hyperparameter search spaces
 # ==========================
-
 hyperparameters:
   GradientBoosting:
     - name: learning_rate
       type: real
       min: 0.0001
       max: 0.1
-      # prior: "log-uniform"
 
     - name: n_estimators
       type: integer
@@ -144,11 +198,7 @@ hyperparameters:
 
     - name: hidden_layer_sizes
       type: categorical
-      values:
-        - "64"
-        - "128"
-        - "128,64"
-        - "256,128"
+      values: ["64", "128", "128,64", "256,128"]
 
     - name: batch_size
       type: categorical
@@ -159,7 +209,7 @@ hyperparameters:
       min: 50
       max: 300
 
-    - name: num_samples_mc        # number of Monte Carlo samples during training
+    - name: num_samples_mc
       type: integer
       min: 1
       max: 10
@@ -177,11 +227,7 @@ hyperparameters:
   GridNeuralNetwork:
     - name: hidden_layer_sizes
       type: categorical
-      values:
-        - "64"
-        - "128"
-        - "128,64"
-        - "256,128"
+      values: ["64", "128", "128,64", "256,128"]
 
     - name: learning_rate
       type: categorical
@@ -207,31 +253,9 @@ hyperparameters:
       type: categorical
       values: [0.0, 0.0001, 0.001]
 
-# ==========================
-# Tuning Strategy Settings
-# ==========================
-
-tuning:
-  strategy: bayesian
-  n_calls: 50
-  n_random_starts: 5
-  allow_generate: true
-
-bayesian_search:
-  n_calls: 50
-  random_state: 42
-  n_initial_points: 5
-  model_type: "GradientBoosting"
-  output_dir: "src/tuning/reports"
-  summary_dir: "src/tuning/reports"
-
-grid_search:
-  n_jobs: -1
-  random_state: 42
-  cross_val_folds: 5
-  output_dir: "src/tuning/reports"
-  summary_dir: "src/tuning/reports"
-
+# =================================
+# Generator input/output file mapping
+# =================================
 configs:
-  bayesian_config: "hyperparam_tuning/example_bayesian_config.json"
-  grid_config: "hyperparam_tuning/example_grid_config.json"
+  bayesian_config: src/tuning/configs/bayesian_config.json
+  grid_config: src/tuning/configs/grid_config.json
