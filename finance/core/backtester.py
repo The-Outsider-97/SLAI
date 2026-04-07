@@ -15,6 +15,7 @@ from sklearn.linear_model import Lasso, Ridge
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from .utils.config_loader import load_global_config, get_config_section
@@ -322,7 +323,8 @@ class Backtester:
         feature_names = [col for col in numeric_cols if col not in exclude]
         if not feature_names:
             raise FeatureEngineeringError("No numeric features available for training.", context=self._context("train_model"))
-        X = data[feature_names]
+        X = data[feature_names].copy()
+        X = X.replace([np.inf, -np.inf], np.nan)
         y = data[target_col]
 
         if feature_mode == "auto" and X.shape[1] > 1:
@@ -336,7 +338,11 @@ class Backtester:
                 logger.warning("Feature selection failed, using all numeric features: %s", exc)
 
         scaler_cls = RobustScaler if model_type.lower() in {"gradientboosting", "randomforest"} else StandardScaler
-        pipeline = Pipeline([("scaler", scaler_cls()), ("model", self._build_model(model_type))])
+        pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", scaler_cls()),
+            ("model", self._build_model(model_type)),
+        ])
 
         if bool(self.bt_config.get("hyperparameter_tuning", True)):
             tuning_strategy = str(self.bt_config.get("tuning_strategy", "bayesian")).lower()
