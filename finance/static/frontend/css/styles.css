@@ -284,17 +284,20 @@ th {
     width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    display: block;
 }
 
 .data-section table {
     width: 100%;
-    min-width: 720px;
-    table-layout: auto;
+    min-width: 100%;
+    table-layout: fixed;
 }
 
 .data-section table th,
 .data-section table td {
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-word;
+    vertical-align: top;
 }
 
 @media (max-width: 900px) {
