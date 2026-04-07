@@ -110,7 +110,17 @@ class PlanningMemory:
             return []
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw = f.read().strip()
+            if not raw:
+                logger.warning("Manifest file was empty. Reinitializing manifest: %s", path)
+                self._write_manifest([])
+                return []
+            payload = json.loads(raw)
+            if not isinstance(payload, list):
+                logger.warning("Manifest content was invalid (expected list). Reinitializing: %s", path)
+                self._write_manifest([])
+                return []
+            return payload
         except Exception as e:
             logger.error(f"Failed to read manifest: {e}")
             return []
@@ -118,9 +128,13 @@ class PlanningMemory:
     def _write_manifest(self, entries: List[Dict[str, Any]]) -> None:
         """Write the manifest to disk."""
         path = self._get_manifest_path()
+        tmp_path = f"{path}.tmp"
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(entries, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
         except Exception as e:
             logger.error(f"Failed to write manifest: {e}")
             raise
