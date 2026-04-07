@@ -75,7 +75,7 @@ class HyperparamTuner:
                 raise ValueError("X_data and y_data are required for GridSearch.")
             best_params = self.optimizer.run_search(X_data, y_data)
         else:
-            best_params, _, _ = self.optimizer.run_search()
+            best_params, _, _ = self.optimizer.run_search(X_data=X_data, y_data=y_data)
 
         logger.info("Best parameters: %s", best_params)
         return best_params
