@@ -14,7 +14,7 @@ from threading import RLock
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 from requests import Session
 from requests.adapters import HTTPAdapter
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, HTTPError
 from urllib3.util.retry import Retry
 
 from finance.core.utils.financial_errors import (DataUnavailableError, log_error,
@@ -126,6 +126,21 @@ class APIClientBase:
             response = self.session.get(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
+        except HTTPError as exc:  # pragma: no cover - depends on network
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {401, 403, 429}:
+                logger.warning(
+                    "Provider %s request blocked (status=%s) for %s. Falling back to next provider.",
+                    self.provider_name,
+                    status_code,
+                    url,
+                )
+                return {}
+            raise classify_external_exception(
+                exc,
+                context=ErrorContext(component="market_data_handler", operation="provider_request", provider=self.provider_name, endpoint=url),
+                message=f"{self.provider_name} request failed.",
+            ) from exc
         except Exception as exc:  # pragma: no cover - depends on network
             raise classify_external_exception(
                 exc,
