@@ -34,7 +34,7 @@ def sigmoid(x):
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
-from ....tuning.utils.bayesian_neural_network import BayesianNeuralNetwork
+from ....tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Uncertainty-Aware Heuristic")
