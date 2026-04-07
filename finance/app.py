@@ -68,8 +68,23 @@ def _load_boot_symbols() -> List[Dict[str, str]]:
                     return result
         except Exception:
             logger.warning("Boot symbol load failed, using fallback list", exc_info=True)
-    return [{"symbol": "AAPL", "name": "Apple Inc."}]
-
+    return [
+        {'symbol': 'AAPL', 'name': 'Apple Inc.'},
+        {'symbol': 'MSFT', 'name': 'Microsoft Corporation'},
+        {'symbol': 'GOOGL', 'name': 'Alphabet Inc.'},
+        {'symbol': 'AMZN', 'name': 'Amazon.com, Inc.'},
+        {'symbol': 'NVDA', 'name': 'NVIDIA Corporation'},
+        {'symbol': 'TSLA', 'name': 'Tesla, Inc.'},
+        {'symbol': 'AVGO', 'name': 'Broadcom, Inc.'},
+        {'symbol': 'RKLB', 'name': 'Rocket Lab USA, Inc.'},
+        {'symbol': 'GME', 'name': 'GameStop Corp.'},
+        {'symbol': 'CZR', 'name': 'Caesars Entertainment, Inc.'},
+        {'symbol': 'PLTR', 'name': 'Palantir Technologies, Inc.'},
+        {'symbol': 'ACN', 'name': 'Accenture PLC'},
+        {'symbol': 'TWLO', 'name': 'Twilio, Inc. A'},
+        {'symbol': 'SMCI', 'name': 'Super Micro Computer, Inc.'},
+        {'symbol': 'TSM', 'name': 'Taiwan Semiconductor Manufacturing, Co. Ltd-ADR'}
+    ]
 
 _BOOT_AGENT: Optional[FinanceAgent] = None
 _BOOT_ERROR: Optional[str] = None
@@ -124,11 +139,10 @@ def create_app() -> Flask:
             return agent_service.get_agent(), None
         except Exception as exc:
             return None, f"{type(exc).__name__}: {exc}"
-
     def _stocks_catalog() -> List[Dict[str, str]]:
         stocks_file = DATA_DIR / "north_american_stocks.json"
         if not stocks_file.exists():
-            return [{"symbol": "AAPL", "name": "Apple Inc."}]
+            return _load_boot_symbols()
         try:
             payload = json.loads(stocks_file.read_text(encoding="utf-8"))
             if isinstance(payload, list):
@@ -139,7 +153,7 @@ def create_app() -> Flask:
                 ]
         except Exception:
             logger.warning("Failed to parse stock catalog", exc_info=True)
-        return [{"symbol": "AAPL", "name": "Apple Inc."}]
+        return _load_boot_symbols()
 
     def _latest_price(agent, symbol: str) -> float:
         try:
@@ -150,6 +164,27 @@ def create_app() -> Flask:
             pass
         return 0.0
 
+
+    def _latest_bar(agent, symbol: str) -> Dict[str, Any]:
+        try:
+            bars = agent.market_handler.fetch_data(symbol, lookback=1)
+            if bars and isinstance(bars[0], dict):
+                return bars[0]
+        except Exception:
+            pass
+        return {}
+
+    def _market_status_payload() -> Dict[str, Any]:
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()
+        is_open = weekday < 5 and 13 <= now_utc.hour < 20
+        return {
+            "is_open": is_open,
+            "session": "regular" if is_open else "closed",
+            "timestamp": now_utc.isoformat(),
+            "timezone": "UTC",
+        }
+
     # -------------------------
     # API endpoints
     # -------------------------
@@ -157,6 +192,9 @@ def create_app() -> Flask:
     @app.route('/api/market_status', methods=['GET'])
     @app.route('/api/market/status/', methods=['GET'])
     @app.route('/api/market_status/', methods=['GET'])
+    def market_status():
+        return jsonify(_market_status_payload())
+
     @app.get("/health")
     def health():
         return jsonify(
@@ -213,8 +251,11 @@ def create_app() -> Flask:
         rows: List[Dict[str, Any]] = []
         for stock in _stocks_catalog()[:50]:
             symbol = stock["symbol"]
-            current_price = _latest_price(agent, symbol)
+            latest_bar = _latest_bar(agent, symbol)
+            current_price = float(latest_bar.get("close", 0.0) or _latest_price(agent, symbol))
             hybrid = agent._generate_hybrid_signal(symbol)
+            market_cap = latest_bar.get("market_cap")
+            volume_24h = latest_bar.get("volume")
             pred_price = float(hybrid.get("predicted_price", current_price or 0.0))
             confidence = float(hybrid.get("confidence", 0.0))
             delta = pred_price - current_price
@@ -223,8 +264,8 @@ def create_app() -> Flask:
                     "Stocks": stock["name"],
                     "Ticker Symbol": symbol,
                     "Price ($)": round(current_price, 4),
-                    "MarketCap": "N/A",
-                    "24h Volume": "N/A",
+                    "MarketCap": round(float(market_cap), 2) if isinstance(market_cap, (int, float)) else "Unavailable",
+                    "24h Volume": round(float(volume_24h), 2) if isinstance(volume_24h, (int, float)) else 0.0,
                     "1h Prediction": round(pred_price, 4),
                     "24h Prediction": round(pred_price * 1.002, 4),
                     "1w Prediction": round(pred_price * 1.01, 4),
@@ -311,6 +352,8 @@ def create_app() -> Flask:
         return jsonify(diagnostics)
 
     @app.get("/api/learning")
+    @app.get("/api/learning_insights")
+    @app.get("/api/learning-insights")
     def learning_insights():
         agent, err = _safe_agent()
         if err:
@@ -326,7 +369,39 @@ def create_app() -> Flask:
             "rl_signal": signal.get("rl_signal", "hold"),
             "adaptive_diagnostics": agent.adaptive_learner.get_diagnostics() if hasattr(agent.adaptive_learner, "get_diagnostics") else {},
         }
+        payload["adaptive_learner"] = payload["adaptive_diagnostics"]
         return jsonify(payload)
+
+    @app.get("/api/ultimate_suggestions")
+    def ultimate_suggestions():
+        agent, err = _safe_agent()
+        if err:
+            return jsonify({"error": "agent_unavailable", "details": err}), 503
+
+        predictions_payload = predictions().get_json()
+        top = [row for row in (predictions_payload or []) if isinstance(row, dict)][:10]
+        suggestions: List[Dict[str, Any]] = []
+        for row in top:
+            current_price = float(row.get("Price ($)", 0.0) or 0.0)
+            target_price = float(row.get("24h Prediction", current_price) or current_price)
+            confidence = float(row.get("Confidence", 0.0) or 0.0)
+            expected_pct = ((target_price - current_price) / current_price * 100.0) if current_price > 0 else 0.0
+            suggestions.append({
+                "type": "Prediction",
+                "stock_name": row.get("Stocks", "Unknown"),
+                "stock_symbol": row.get("Ticker Symbol", "N/A"),
+                "action": "BUY" if expected_pct > 0.25 else ("SELL" if expected_pct < -0.25 else "HOLD"),
+                "confidence_pct": confidence * 100.0,
+                "expected_gain_loss_pct": expected_pct,
+                "current_price": current_price,
+                "target_price_24h": target_price,
+            })
+
+        return jsonify({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "current_portfolio_value_display": f"${agent._get_total_portfolio_value():,.2f}",
+            "suggestions": suggestions,
+        })
 
     @app.get("/api/portfolio")
     def portfolio():
@@ -356,6 +431,7 @@ def create_app() -> Flask:
         peak = max(agent.monthly_peak_portfolio_value, 1e-12)
         drawdown = (peak - agent._get_total_portfolio_value()) / peak
 
+        backtest_metrics = agent.backtester.get_last_metrics() if hasattr(agent, "backtester") else {}
         payload = {
             "portfolio_value": agent._get_total_portfolio_value(),
             "cash": agent.cash,
@@ -366,6 +442,21 @@ def create_app() -> Flask:
             "financial_goals": agent.financial_goals,
             "market_regime": agent.market_regime,
             "risk_factor": agent._determine_risk_factor(),
+            "backtest_metrics": backtest_metrics,
+            # legacy keys consumed by frontend
+            "current_total_portfolio_value_incl_unrealized": agent._get_total_portfolio_value(),
+            "current_portfolio_value_cash": agent.cash,
+            "unrealized_pnl_total": float(sum(p["unrealized_pnl"] for p in open_positions)),
+            "monthly_peak_portfolio_value": agent.monthly_peak_portfolio_value,
+            "current_drawdown_percentage": drawdown * 100.0,
+            "open_positions_detailed": [
+                {**p, "size_value": float(p.get("initial_size", 0.0))} for p in open_positions
+            ],
+            "default_symbol_for_analysis": getattr(agent, "symbol", "AAPL"),
+            "latest_price_of_default_symbol_for_state": _latest_price(agent, getattr(agent, "symbol", "AAPL")),
+            "daily_profit_target": float((agent.financial_goals or {}).get("monthly_profit", {}).get("target", 0.0)) / 22.0,
+            "current_risk_factor": agent._determine_risk_factor(),
+            "last_daily_maintenance_date": datetime.now(timezone.utc).date().isoformat(),
         }
         return jsonify(payload)
 
@@ -378,9 +469,9 @@ def create_app() -> Flask:
         hybrid = agent._generate_hybrid_signal(symbol)
         return jsonify(
             [
-                {"Source": "Adaptive Learning", "Key Activity": f"Pred={hybrid.get('predicted_price', 0):.4f}", "Impact": hybrid.get("als_signal", "hold"), "Confidence": hybrid.get("confidence", 0.0)},
-                {"Source": "Learning Agent", "Key Activity": "Policy action projection", "Impact": hybrid.get("rl_signal", "hold"), "Confidence": hybrid.get("confidence", 0.0)},
-                {"Source": "Fusion Engine", "Key Activity": hybrid.get("source", "unknown"), "Impact": hybrid.get("signal", "hold"), "Confidence": hybrid.get("confidence", 0.0)},
+                {"Source": "Adaptive Learning", "source": "Adaptive Learning", "Key Activity": f"Pred={hybrid.get('predicted_price', 0):.4f}", "activity": f"Pred={hybrid.get('predicted_price', 0):.4f}", "Impact": hybrid.get("als_signal", "hold"), "impact": hybrid.get("als_signal", "hold"), "Confidence": hybrid.get("confidence", 0.0), "confidence": hybrid.get("confidence", 0.0)},
+                {"Source": "Learning Agent", "source": "Learning Agent", "Key Activity": "Policy action projection", "activity": "Policy action projection", "Impact": hybrid.get("rl_signal", "hold"), "impact": hybrid.get("rl_signal", "hold"), "Confidence": hybrid.get("confidence", 0.0), "confidence": hybrid.get("confidence", 0.0)},
+                {"Source": "Fusion Engine", "source": "Fusion Engine", "Key Activity": hybrid.get("source", "unknown"), "activity": hybrid.get("source", "unknown"), "Impact": hybrid.get("signal", "hold"), "impact": hybrid.get("signal", "hold"), "Confidence": hybrid.get("confidence", 0.0), "confidence": hybrid.get("confidence", 0.0)},
             ]
         )
 
@@ -406,6 +497,8 @@ def create_app() -> Flask:
         return jsonify({"symbol": symbol, "records": len(data), "quality_ok": quality_ok})
 
     @app.get("/api/optimization")
+    @app.get("/api/portfolio/optimization")
+    @app.get("/api/portfolio_optimization")
     def optimization():
         agent, err = _safe_agent()
         if err:
