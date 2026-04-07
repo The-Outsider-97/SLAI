@@ -280,56 +280,27 @@ th {
     position: relative;
 }
 
-#predictionsData table {
-    min-width: 1600px;
-    table-layout: fixed;
-    border-collapse: collapse;
+.table-scroll-container {
     width: 100%;
-}
-
-#predictionsData table th,
-#predictionsData table td {
-    width: 150px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: center;
-    padding: 8px;
-    border: 1px solid #ddd;
-    background: inherit;
-    z-index: 1;
-}
-
-/* Sticky first three columns */
-#predictionsData table th:nth-child(1),
-#predictionsData table td:nth-child(1) {
-    position: sticky;
-    left: 0;
-    z-index: 5;
-    background: inherit;
-}
-
-#predictionsData table th:nth-child(2),
-#predictionsData table td:nth-child(2) {
-    position: sticky;
-    left: 150px;
-    z-index: 5;
-    background: inherit;
-}
-
-#predictionsData table th:nth-child(3),
-#predictionsData table td:nth-child(3) {
-    position: sticky;
-    left: 300px;
-    z-index: 5;
-    background: inherit;
-}
-
-/* Make only the table body horizontally scrollable */
-#predictionsData .table-scroll-container {
     overflow-x: auto;
-    width: calc(100% - 450px); /* leaves space for the fixed 3 columns */
-    margin-left: 450px; /* pushes the scrollable part right */
+    -webkit-overflow-scrolling: touch;
+}
+
+.data-section table {
+    width: 100%;
+    min-width: 720px;
+    table-layout: auto;
+}
+
+.data-section table th,
+.data-section table td {
+    white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+    .data-section table {
+        min-width: 640px;
+    }
 }
 
 .modal {
