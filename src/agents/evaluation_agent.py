@@ -1,4 +1,4 @@
-__version__ = "2.1.0"
+__version__ = "1.9.0"
 
 """
 Unified Evaluation Framework
@@ -1467,3 +1467,29 @@ class AIValidationSuite:
             "test_framework": "Certified per ISO/IEC 29119"
         }
         return tools
+
+
+if __name__ == "__main__":
+    print("\n=== Running Evaluation Agent ===\n")
+    printer.status("TEST", "Evaluation Agent initialized", "info")
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+
+    memory = SharedMemory()
+    factory = AgentFactory()
+    eval_config = get_config_section("evaluation_agent")
+    issues = []
+    params = {}
+
+    agent = EvaluationAgent(shared_memory=memory, agent_factory=factory, config=eval_config)
+    # print(agent)
+    health = agent.get_overall_system_health()
+    train_model = agent._train_anomaly_model()
+    anomalies = agent.detect_anomalies(current_issues=issues)
+    validation = agent.execute_validation_cycle(params=params)
+    printer.pretty("System Health", health, "success" if health else "error")
+    printer.pretty("Train Model", train_model, "success" if train_model else "error")
+    printer.pretty("Detect Anomalies", anomalies, "success" if anomalies else "error")
+    printer.pretty("Detect Anomalies", validation, "success" if validation else "error")
+
+    print("\n=== All tests completed ===")
