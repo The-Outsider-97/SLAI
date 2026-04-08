@@ -1,4 +1,4 @@
-__version__ = "1.9.0"
+__version__ = "2.1.0"
 
 """
 Unified Evaluation Framework
@@ -28,6 +28,7 @@ from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
 
 from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
+from src.agents.base_agent import BaseAgent
 from src.utils.interpretability import InterpretabilityHelper
 from src.utils.database import IssueDBConnector, FallbackIssueTracker
 from src.agents.evaluators.adaptive_risk import RiskAdaptation
@@ -39,14 +40,13 @@ from src.agents.evaluators.autonomous_evaluator import AutonomousEvaluator
 from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
 from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
 from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
-from src.agents.evaluators.utils.certification_framework import CertificationStatus
+from src.agents.evaluators.modules.certification_framework import CertificationStatus
 from src.agents.evaluators.utils.evaluation_errors import OperationalError, CertificationError
 from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
 from src.agents.evaluators.utils.evaluation_transformer import EvaluationTransformer
 from src.agents.evaluators.utils.validation_protocol import ValidationProtocol
 from src.agents.evaluators.utils.static_analyzer import StaticAnalyzer
 from src.agents.safety.safety_guard import SafetyGuard
-from src.agents.base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Evaluation Agent")
@@ -63,6 +63,7 @@ class FallbackEvaluatorAgent(BaseAgent):
             agent_factory=agent_factory,
             config=config
         )
+        self.safety_guard = SafetyGuard()
 
     def is_initialized(self):
         return True
@@ -172,6 +173,7 @@ class EvaluationAgent(BaseAgent):
         self.validation_suite = AIValidationSuite(protocol=self.protocol)
         self.risk_model = self._init_risk_model()
         self.tuner = self._init_hyperparam_tuner()
+        self.safety_guard = SafetyGuard()
 
         self.transformer = None
 
@@ -644,7 +646,7 @@ class EvaluationAgent(BaseAgent):
                 results['statistical'] = {'status': 'skipped', 'reason': 'Insufficient data'}
 
             # Safety Incident Evaluation (use persistent safety evaluator instance)
-            safety_incidents = self.evaluators['safety'].raw_incidents
+            safety_incidents = params.get('safety_incidents') or self.evaluators['safety'].raw_incidents
             if safety_incidents:
                 try:
                     results['safety'] = self.evaluators['safety'].evaluate_operation(safety_incidents)
@@ -717,16 +719,19 @@ class EvaluationAgent(BaseAgent):
             'financial_metrics': metrics,
             'critical_issues': critical_issues
         }
-    
+
     def _determine_system_status(self, results: Dict) -> str:
         """Determine overall system health status"""
         min_success = self.risk_thresholds.get('min_success_rate', 0.8)  # Default value
-        
-        if results.get('safety', {}).get('compliance_rate', 0) < min_success:
+
+        safety_aggregates = results.get('safety', {}).get('aggregates', {}) if isinstance(results, dict) else {}
+        performance_metrics = results.get('performance', {}).get('metrics', {}) if isinstance(results, dict) else {}
+
+        if safety_aggregates.get('compliance_rate', 0) < min_success:
             return 'critical'
         if results.get('critical_issues'):
             return 'critical'
-        if results.get('performance', {}).get('accuracy', 0) < 0.7:
+        if performance_metrics.get('accuracy', 0) < 0.7:
             return 'warning'
         return 'normal'
 
@@ -799,13 +804,14 @@ class EvaluationAgent(BaseAgent):
             f"- Critical Security Issues: {security_metrics.get('critical_count', 0)} "
             f"(Max Allowed: {self.protocol.static_analysis['security']['max_critical']})"
         )
-    
+
     def _explain_test_results(self, results: Dict) -> str:
-        """Generate test outcome summary using actual result keys"""
+        """Generate test outcome summary from behavioral validator payload."""
+        summary = results.get("summary", {}) if isinstance(results, dict) else {}
         return self.interpreter.explain_validation_metrics({
-            'passed': results['passed'],
-            'failed': results['failed'],
-            'coverage': results['requirement_coverage']
+            'passed': summary.get('passed', 0),
+            'failed': summary.get('failed', 0) + summary.get('errored', 0),
+            'coverage': summary.get('requirement_coverage_rate', 0.0)
         })
 
     def _gather_core_metrics(self, raw_results: Dict) -> Dict[str, Any]:
@@ -821,32 +827,36 @@ class EvaluationAgent(BaseAgent):
                 return float(value)
             return float(default)
 
-        def _extract_score(container: Any, key: str = "score", default: float = 0.0) -> float:
-            if isinstance(container, dict):
-                if key in container:
-                    return _safe_numeric(container.get(key), default=default)
-                return _safe_numeric(container.get("composite_score"), default=default)
-            if isinstance(container, (int, float)) and not isinstance(container, bool):
-                return float(container)
-            return float(default)
+        performance_payload = _as_mapping(raw_results.get('performance', {}))
+        performance_metrics = _as_mapping(performance_payload.get('metrics', performance_payload))
 
-        # Get nested statistical value safely
-        statistical = _as_mapping(raw_results.get('statistical', {}))
-        hypothesis_tests = _as_mapping(statistical.get('hypothesis_tests', {}))
-        main_effect = hypothesis_tests.get('main_effect', {})
+        efficiency_payload = _as_mapping(raw_results.get('efficiency', {}))
+        efficiency_metrics = _as_mapping(efficiency_payload.get('metrics', efficiency_payload))
+
+        resource_payload = _as_mapping(raw_results.get('resource', {}))
+        autonomous_payload = _as_mapping(raw_results.get('autonomous', {}))
+        safety_payload = _as_mapping(raw_results.get('safety', {}))
+        safety_aggregates = _as_mapping(safety_payload.get('aggregates', safety_payload))
+        statistical_payload = _as_mapping(raw_results.get('statistical', {}))
+        statistical_analysis = _as_mapping(statistical_payload.get('analysis', statistical_payload))
+
         p_value = 1.0
-        if statistical and 'hypothesis_tests' in statistical:
-            main_effect = _as_mapping(statistical['hypothesis_tests']).get('main_effect', {})
-            p_value = _safe_numeric(_as_mapping(main_effect).get('p_value', 1.0), default=1.0)
+        pairwise_tests = statistical_analysis.get('pairwise_tests')
+        if isinstance(pairwise_tests, list) and pairwise_tests:
+            first_test = _as_mapping(pairwise_tests[0])
+            p_value = _safe_numeric(first_test.get('p_value', 1.0), default=1.0)
     
         metrics = {
-            "accuracy": _safe_numeric(_as_mapping(raw_results.get('performance', {})).get('accuracy', 0.0), default=0.0),
-            "efficiency": _extract_score(raw_results.get('efficiency', {}), key='score', default=0.0),
+            "accuracy": _safe_numeric(performance_metrics.get('accuracy', 0.0), default=0.0),
+            "efficiency": _safe_numeric(
+                efficiency_metrics.get('composite_score', efficiency_metrics.get('score', 0.0)),
+                default=0.0
+            ),
             "safety_score": self.risk_model.get_current_risk("system_failure")['risk_metrics']['current_mean'],
-            "resource_usage": _extract_score(raw_results.get('resource', {}), key='composite_score', default=1.0),
-            "statistical_significance": p_value,  # Use safely accessed value
-            "autonomous_score": _extract_score(raw_results.get('autonomous', {}), key='composite_score', default=0.0),
-            "safety_compliance": _safe_numeric(_as_mapping(raw_results.get('safety', {})).get('compliance_rate', 0.0), default=0.0)
+            "resource_usage": _safe_numeric(resource_payload.get('weighted_score', 1.0), default=1.0),
+            "statistical_significance": p_value,
+            "autonomous_score": _safe_numeric(autonomous_payload.get('composite_score', 0.0), default=0.0),
+            "safety_compliance": _safe_numeric(safety_aggregates.get('compliance_rate', 0.0), default=0.0)
         }
         return metrics
 
@@ -1267,8 +1277,12 @@ class EvaluationAgent(BaseAgent):
         """
     
         # 1. Check fallback safety guard
-        guard_present = hasattr(self, 'safety_guard') and isinstance(SafetyGuard)
-        guard_viable = guard_present and SafetyGuard.is_minimal_viable()
+        guard_instance = getattr(self, 'safety_guard', None)
+        guard_viable = bool(
+            guard_instance
+            and callable(getattr(guard_instance, "is_minimal_viable", None))
+            and guard_instance.is_minimal_viable()
+        )
     
         # 2. Configured thresholds in safety_limits
         static_limits = self.config.get("safety_limits", {})
@@ -1289,7 +1303,12 @@ class EvaluationAgent(BaseAgent):
         liveness_ok = hasattr(self, 'shared_memory') and self.shared_memory.get('last_alive_ping') is not None
     
         # 6. Runtime safety hooks (like SafetyGuard monitoring threads)
-        runtime_hooks = hasattr(SafetyGuard, 'monitor_thread') if guard_present else False
+        runtime_hooks = bool(
+            guard_instance and (
+                hasattr(guard_instance, 'monitor_thread') or
+                hasattr(guard_instance, 'start_monitoring')
+            )
+        )
     
         return any([
             guard_viable,
@@ -1365,7 +1384,11 @@ class AIValidationSuite:
         # Verify the outcome of the certification suite
         if results['overall_status'] == "FAILED":
             # Extract details for the error message
-            failed_reqs = [t['requirement_id'] for t in results['traceability_matrix'] if t['status'] == 'FAILED']
+            failed_reqs = [
+                t['requirement_id']
+                for t in results.get('traceability_matrix', [])
+                if t.get('status') in {'FAILED', 'ERROR'}
+            ]
             raise CertificationError(f"Behavioral qualification failed. Failed requirements: {failed_reqs}")
             
         return results
@@ -1382,13 +1405,13 @@ class AIValidationSuite:
     def _generate_certification_package(self) -> Dict:
         """Generate ISO-compliant certification package"""
         certificate = {
-            'certification_status': CertificationStatus,
+            'certification_status': CertificationStatus(),
             'compliance_matrix': self._generate_compliance_matrix(),
             'safety_case': self.artifacts['safety_case'],
             'evidence_bundle': self._package_evidence()
         }
         return certificate
-    
+
     def _generate_compliance_matrix(self) -> Dict[str, bool]:
         """Map requirements to verification evidence"""
         return {
@@ -1417,11 +1440,12 @@ class AIValidationSuite:
             raise CertificationError("Behavioral results are missing. Cannot build traceability matrix.")
     
         traceability = []
-        behavioral_tests = self.artifacts['behavioral_results'].get("tests", [])
+        behavioral_payload = self.artifacts['behavioral_results'] or {}
+        behavioral_tests = behavioral_payload.get("records") or behavioral_payload.get("tests", [])
     
         for test in behavioral_tests:
             requirement_id = test.get("requirement_id", "UNKNOWN")
-            test_case_id = test.get("test_case_id", "N/A")
+            test_case_id = test.get("test_id", test.get("test_case_id", "N/A"))
             outcome = test.get("status", "UNKNOWN")
             rationale = test.get("notes", "No explanation provided")
     
