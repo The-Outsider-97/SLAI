@@ -1,4 +1,3 @@
-
 import gzip
 import copy
 import os
@@ -6,11 +5,12 @@ import time
 import copy
 import json, yaml
 import threading
+import tempfile
 
 from typing import Any, Deque, Dict, List, Optional, Union
 from collections import deque, defaultdict
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
+from .utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Memory")
@@ -128,16 +128,41 @@ class PlanningMemory:
     def _write_manifest(self, entries: List[Dict[str, Any]]) -> None:
         """Write the manifest to disk."""
         path = self._get_manifest_path()
-        tmp_path = f"{path}.tmp"
+        path_dir = os.path.dirname(path) or "."
+        max_retries = 5
+        retry_delay = 0.05
+        tmp_path = None
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path_dir,
+                prefix=f"{os.path.basename(path)}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                tmp_path = f.name
                 json.dump(entries, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, path)
+            for attempt in range(max_retries):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    # Windows can transiently lock files (e.g., AV scanners, indexers).
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(retry_delay * (attempt + 1))
         except Exception as e:
             logger.error(f"Failed to write manifest: {e}")
             raise
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     # -------------------------------------------------------------------------
     # Checkpoint persistence
