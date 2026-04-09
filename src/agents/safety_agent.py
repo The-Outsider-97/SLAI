@@ -102,6 +102,7 @@ class SafetyAgent(BaseAgent):
         self.audit_trail = []
 
         self.learning_factory = self._init_learning_factory()
+        self.calls = 0  
 
         logger.info(f"Safety Agent succesfully initialized with: {self.training_data}")
 
@@ -155,6 +156,8 @@ class SafetyAgent(BaseAgent):
         logger.info(f"[{self.name}] Performing comprehensive safety assessment.")
         if context is None:
             context = {}
+
+        self.calls += 1
         
         assessment_results = {
             "timestamp": time.time(),
@@ -292,6 +295,9 @@ class SafetyAgent(BaseAgent):
         # For now, this perform_task is about assessment, not generation.
 
         return assessment_results
+
+    def reset_calls(self):
+        self.calls = 0
 
     def _request_human_feedback(self, input_data, assessment, context):
         """Simulate human feedback collection"""
