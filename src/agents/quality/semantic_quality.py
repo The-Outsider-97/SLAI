@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.quality_error import ( ProvenanceTrustError, DataQualityError, QualityDomain,
@@ -460,17 +460,17 @@ class SemanticQuality:
             record_id = self._record_id(record)
             record_contaminated = False
 
-            for field in candidate_fields:
-                feature_value = self._normalize_value(record.get(field))
+            for candidate_field in candidate_fields:
+                feature_value = self._normalize_value(record.get(candidate_field))
                 if not feature_value:
                     continue
 
-                stats = field_stats[field]
+                stats = field_stats[candidate_field]
                 stats["comparable"] += 1
                 if feature_value == label_value:
                     stats["exact_matches"] += 1
                     record_contaminated = True
-                elif field in text_fields and self._similarity(label_value, feature_value) >= similarity_threshold:
+                elif candidate_field in text_fields and self._similarity(label_value, feature_value) >= similarity_threshold:
                     stats["near_matches"] += 1
                     record_contaminated = True
 
@@ -479,7 +479,7 @@ class SemanticQuality:
 
         field_summaries: List[Dict[str, Any]] = []
         max_field_leakage_rate = 0.0
-        for field, stats in field_stats.items():
+        for field_name, stats in field_stats.items():
             comparable = int(stats["comparable"])
             exact_matches = int(stats["exact_matches"])
             near_matches = int(stats["near_matches"])
@@ -489,16 +489,16 @@ class SemanticQuality:
             risk_level = str(stats["suspicious_name"])
 
             if risk_level == "block":
-                block_named_fields.append(field)
+                block_named_fields.append(field_name)
             elif risk_level == "warn":
-                warning_named_fields.append(field)
+                warning_named_fields.append(field_name)
 
             if leakage_rate >= exact_warn_threshold or near_match_rate > 0.0 or risk_level != "none":
-                suspicious_fields.append(field)
+                suspicious_fields.append(field_name)
 
             field_summaries.append(
                 {
-                    "field": field,
+                    "field": field_name,
                     "risk_level": risk_level,
                     "comparable": comparable,
                     "exact_matches": exact_matches,
