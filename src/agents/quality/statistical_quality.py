@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from statistics import mean, median, pstdev
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.quality_error import (DataQualityError, DriftThresholdError,
@@ -1065,15 +1065,15 @@ class StatisticalQuality:
         categorical_fields: Dict[str, Any] = {}
         missing_rate_by_field: Dict[str, float] = {}
 
-        for field in field_names:
-            column = [record.get(field) for record in records]
+        for field_name in field_names:
+            column = [record.get(field_name) for record in records]
             missing_count = sum(1 for value in column if self._is_missing(value))
             missing_rate = missing_count / max(len(records), 1)
-            missing_rate_by_field[field] = missing_rate
+            missing_rate_by_field[field_name] = missing_rate
 
             numeric_values = [float(value) for value in column if self._is_numeric(value)]
             if len(numeric_values) >= int(self.drift_config.get("min_observations", 20)):
-                numeric_fields[field] = {
+                numeric_fields[field_name] = {
                     "count": len(numeric_values),
                     "mean": mean(numeric_values),
                     "std": pstdev(numeric_values) if len(numeric_values) > 1 else 0.0,
@@ -1088,7 +1088,7 @@ class StatisticalQuality:
             categorical_values = [self._normalize_categorical(value) for value in column if not self._is_missing(value)]
             if categorical_values:
                 distribution = self._distribution(categorical_values)
-                categorical_fields[field] = {
+                categorical_fields[field_name] = {
                     "count": len(categorical_values),
                     "unique_count": len(distribution),
                     "distribution": distribution,
@@ -1128,16 +1128,16 @@ class StatisticalQuality:
         fields: set[str] = set()
         for record in records:
             fields.update(str(key) for key in record.keys())
-        for field in required_fields or []:
-            fields.add(str(field))
+        for required_field in required_fields or []:
+            fields.add(str(required_field))
         return sorted(fields)
 
     def _numeric_fields(self, records: Sequence[Mapping[str, Any]]) -> List[str]:
         candidates = Counter()
         for record in records:
-            for field, value in record.items():
+            for required_field, value in record.items():
                 if self._is_numeric(value):
-                    candidates[str(field)] += 1
+                    candidates[str(required_field)] += 1
         return [field for field, _ in candidates.most_common()]
 
     # ------------------------------------------------------------------
