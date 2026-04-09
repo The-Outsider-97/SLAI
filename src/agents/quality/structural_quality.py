@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.quality_error import (DataQualityError, QualityErrorType, QualitySeverity,
