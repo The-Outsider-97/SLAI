@@ -8,10 +8,10 @@ from PyQt5.QtWidgets import QApplication
 from datetime import timedelta, datetime
 from typing import Dict, List, Callable, Union
 
-from src.agents.evaluators.utils.report import get_visualizer
-from src.agents.safety.utils.config_loader import load_global_config, get_config_section
-from src.agents.safety.utils.score_model import ScoreModel
-from src.agents.safety.secure_memory import SecureMemory
+from ..evaluators.modules.report import get_visualizer
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.score_model import ScoreModel
+from .secure_memory import SecureMemory
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Security Reward Model")
