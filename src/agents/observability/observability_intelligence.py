@@ -156,6 +156,37 @@ def _coerce_mapping(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         raise TypeError(f"expected mapping, received {type(value).__name__}")
     return {str(key): payload for key, payload in value.items()}
 
+def _iter_record_mappings(
+    value: Any,
+    *,
+    key_field: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+
+    if isinstance(value, Mapping):
+        records: List[Dict[str, Any]] = []
+
+        # Dict-of-records: {"subject_a": {...}, "subject_b": {...}}
+        if all(isinstance(item, Mapping) for item in value.values()):
+            for key, item in value.items():
+                record = dict(item)
+                if key_field and key_field not in record:
+                    record[key_field] = str(key)
+                records.append(record)
+            return records
+
+        # Single record: {"level": "warning", ...}
+        return [dict(value)]
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        records = []
+        for item in value:
+            if isinstance(item, Mapping):
+                records.append(dict(item))
+        return records
+
+    return []
 
 def _coerce_sequence(value: Optional[Iterable[Any]]) -> List[Any]:
     if value is None:
@@ -1036,12 +1067,12 @@ class ObservabilityIntelligence:
     def _signals_from_performance(self, report: Mapping[str, Any]) -> List[IncidentSignal]:
         if not report:
             return []
-
+    
         signals: List[IncidentSignal] = []
-        for regression in _coerce_sequence(report.get("latency_regressions")):
-            entry = _coerce_mapping(regression)
-            subject = entry.get("subject") or entry.get("agent_name") or "unknown"
+    
+        for entry in _iter_record_mappings(report.get("latency_regressions"), key_field="subject"):
             level = _normalize_level(entry.get("level") or entry.get("severity") or "warning")
+            subject = entry.get("subject") or entry.get("agent_name") or "unknown"
             current_value = _safe_float(entry.get("recent_value") or entry.get("current_ms") or entry.get("value"))
             baseline_value = _safe_float(entry.get("baseline_value") or entry.get("baseline_ms"))
             signals.append(
@@ -1051,19 +1082,18 @@ class ObservabilityIntelligence:
                     level=level,
                     title=f"Latency regression for '{subject}'",
                     description=(
-                        f"Recent latency is {current_value:.2f} ms versus baseline {baseline_value:.2f} ms "
-                        f"for subject '{subject}'."
+                        f"Recent latency is {current_value:.2f} ms versus baseline "
+                        f"{baseline_value:.2f} ms for subject '{subject}'."
                     ),
                     score=max(1.0, _safe_float(entry.get("delta_ratio"), 0.0) * self._signal_weight(level)),
                     timestamp_ms=_safe_float(entry.get("timestamp_ms"), _now_ms()),
                     context=entry,
                 )
             )
-
-        for regression in _coerce_sequence(report.get("throughput_regressions")):
-            entry = _coerce_mapping(regression)
-            subject = entry.get("subject") or entry.get("service") or "unknown"
+    
+        for entry in _iter_record_mappings(report.get("throughput_regressions"), key_field="subject"):
             level = _normalize_level(entry.get("level") or entry.get("severity") or "warning")
+            subject = entry.get("subject") or entry.get("service") or "unknown"
             recent_value = _safe_float(entry.get("recent_value") or entry.get("current_rps") or entry.get("value"))
             baseline_value = _safe_float(entry.get("baseline_value") or entry.get("baseline_rps"))
             signals.append(
@@ -1073,15 +1103,21 @@ class ObservabilityIntelligence:
                     level=level,
                     title=f"Throughput regression for '{subject}'",
                     description=(
-                        f"Recent throughput is {recent_value:.2f} versus baseline {baseline_value:.2f} for '{subject}'."
+                        f"Recent throughput is {recent_value:.2f} versus baseline "
+                        f"{baseline_value:.2f} for '{subject}'."
                     ),
                     score=max(1.0, (1.0 - _safe_float(entry.get("delta_ratio"), 1.0)) * self._signal_weight(level)),
                     timestamp_ms=_safe_float(entry.get("timestamp_ms"), _now_ms()),
                     context=entry,
                 )
             )
-
-        slo_view = _coerce_mapping(report.get("slo_evaluation") or report.get("slo_status"))
+    
+        slo_view = report.get("slo_evaluation") or report.get("slo_status")
+        if isinstance(slo_view, Mapping):
+            slo_view = dict(slo_view)
+        else:
+            slo_view = {}
+    
         if slo_view:
             status = str(slo_view.get("status", "")).lower()
             if status in {"breach", "violated", "critical", "failed"} or bool(slo_view.get("breached")):
@@ -1093,23 +1129,25 @@ class ObservabilityIntelligence:
                         level=level,
                         title="Latency SLO breach detected",
                         description=(
-                            f"Observed {_safe_float(slo_view.get('observed')):.2f} against target "
-                            f"{_safe_float(slo_view.get('target')):.2f} for SLO '{slo_view.get('slo_name', 'default')}'."
+                            f"Observed {_safe_float(slo_view.get('observed') or slo_view.get('observed_ms')):.2f} "
+                            f"against target {_safe_float(slo_view.get('target') or slo_view.get('target_ms')):.2f} "
+                            f"for SLO '{slo_view.get('slo_name', 'default')}'."
                         ),
                         score=2.0 * self._signal_weight(level),
                         timestamp_ms=_now_ms(),
                         context=slo_view,
                     )
                 )
+    
         return signals
 
     def _signals_from_capacity(self, report: Mapping[str, Any]) -> List[IncidentSignal]:
         if not report:
             return []
-
+    
         signals: List[IncidentSignal] = []
-        for alert in _coerce_sequence(report.get("alerts")):
-            entry = _coerce_mapping(alert)
+    
+        for entry in _iter_record_mappings(report.get("alerts")):
             level = _normalize_level(entry.get("level") or entry.get("severity") or "warning")
             signal_type = str(entry.get("signal") or entry.get("signal_type") or "capacity_alert")
             title = str(entry.get("title") or entry.get("message") or signal_type.replace("_", " ").title())
@@ -1126,10 +1164,14 @@ class ObservabilityIntelligence:
                     context=entry,
                 )
             )
-
-        queue_items = _coerce_sequence(report.get("queue_findings") or report.get("queues") or report.get("queue_analysis"))
-        for entry in queue_items:
-            queue_view = _coerce_mapping(entry)
+    
+        queue_items = (
+            report.get("queue_findings")
+            or report.get("queues")
+            or report.get("queue_analysis")
+            or report.get("queue_reports")
+        )
+        for queue_view in _iter_record_mappings(queue_items, key_field="queue_name"):
             queue_name = queue_view.get("queue_name") or queue_view.get("subject") or "queue"
             backlog_depth = _safe_float(queue_view.get("depth") or queue_view.get("backlog_depth"))
             growth_rate = _safe_float(queue_view.get("growth_rate_per_min") or queue_view.get("slope_per_min"))
@@ -1143,17 +1185,22 @@ class ObservabilityIntelligence:
                         level=level,
                         title=f"Queue pressure on '{queue_name}'",
                         description=(
-                            f"Queue '{queue_name}' has depth {backlog_depth:.2f} and growth rate {growth_rate:.2f}/min."
+                            f"Queue '{queue_name}' has depth {backlog_depth:.2f} and "
+                            f"growth rate {growth_rate:.2f}/min."
                         ),
                         score=max(1.0, self._signal_weight(level)),
                         timestamp_ms=_safe_float(queue_view.get("timestamp_ms"), _now_ms()),
                         context=queue_view,
                     )
                 )
-
-        resource_items = _coerce_sequence(report.get("resource_findings") or report.get("resources") or report.get("resource_analysis"))
-        for entry in resource_items:
-            resource_view = _coerce_mapping(entry)
+    
+        resource_items = (
+            report.get("resource_findings")
+            or report.get("resources")
+            or report.get("resource_analysis")
+            or report.get("resource_reports")
+        )
+        for resource_view in _iter_record_mappings(resource_items, key_field="resource_name"):
             resource_name = resource_view.get("resource_name") or resource_view.get("host") or resource_view.get("resource_type") or "resource"
             utilization_pct = _safe_float(resource_view.get("utilization_pct") or resource_view.get("observed") or resource_view.get("value"))
             if utilization_pct <= 0:
@@ -1172,6 +1219,7 @@ class ObservabilityIntelligence:
                     context=resource_view,
                 )
             )
+    
         return signals
 
     def _signals_from_event_records(
@@ -1257,9 +1305,7 @@ class ObservabilityIntelligence:
             f"Primary symptom: {top_signal}. Most likely cause: {top_root_cause}."
         )
 
-    def _derive_customer_impact(
-        self,
-        incident_level: str,
+    def _derive_customer_impact(self, incident_level: str,
         signals: Sequence[IncidentSignal],
         waterfall_summary: Optional[Mapping[str, Any]],
         capacity_report: Optional[Mapping[str, Any]],
@@ -1277,9 +1323,7 @@ class ObservabilityIntelligence:
             return "User-facing impact is possible if current regressions continue; close monitoring and remediation are warranted."
         return "Current evidence suggests limited or localized user impact, but continued observation is recommended."
 
-    def _build_evidence_snapshot(
-        self,
-        *,
+    def _build_evidence_snapshot(self, *,
         signals: Sequence[IncidentSignal],
         waterfall_summary: Optional[Mapping[str, Any]],
         capacity_report: Optional[Mapping[str, Any]],
@@ -1299,15 +1343,30 @@ class ObservabilityIntelligence:
                 "retry_chain_count": _safe_int(waterfall_summary.get("retry_chain_count", len(_coerce_sequence(waterfall_summary.get("retry_chains"))))),
             }
         if capacity_report:
+            capacity_records = _coerce_mapping(capacity_report)
             snapshot["capacity"] = {
-                "alert_count": len(_coerce_sequence(_coerce_mapping(capacity_report).get("alerts"))),
-                "queue_count": len(_coerce_sequence(_coerce_mapping(capacity_report).get("queue_findings") or _coerce_mapping(capacity_report).get("queues"))),
-                "resource_count": len(_coerce_sequence(_coerce_mapping(capacity_report).get("resource_findings") or _coerce_mapping(capacity_report).get("resources"))),
+                "alert_count": len(_iter_record_mappings(capacity_records.get("alerts"))),
+                "queue_count": len(
+                    _iter_record_mappings(
+                        capacity_records.get("queue_findings")
+                        or capacity_records.get("queues")
+                        or capacity_records.get("queue_reports")
+                    )
+                ),
+                "resource_count": len(
+                    _iter_record_mappings(
+                        capacity_records.get("resource_findings")
+                        or capacity_records.get("resources")
+                        or capacity_records.get("resource_reports")
+                    )
+                ),
             }
+        
         if performance_report:
+            performance_records = _coerce_mapping(performance_report)
             snapshot["performance"] = {
-                "latency_regression_count": len(_coerce_sequence(_coerce_mapping(performance_report).get("latency_regressions"))),
-                "throughput_regression_count": len(_coerce_sequence(_coerce_mapping(performance_report).get("throughput_regressions"))),
+                "latency_regression_count": len(_iter_record_mappings(performance_records.get("latency_regressions"), key_field="subject")),
+                "throughput_regression_count": len(_iter_record_mappings(performance_records.get("throughput_regressions"), key_field="subject")),
             }
         return snapshot
 
