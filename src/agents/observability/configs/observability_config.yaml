@@ -1,0 +1,264 @@
+observability_capacity:
+  enabled: true
+  enable_memory_integration: false
+  queue_history_limit: 512
+  resource_history_limit: 512
+  max_queue_series: 128
+  max_resource_series: 64
+  sustained_growth_min_points: 3
+  stale_after_ms: 300000.0
+  queue_depth_warning: 50.0
+  queue_depth_critical: 200.0
+  backlog_growth_ratio_warning: 1.25
+  backlog_growth_ratio_critical: 1.75
+  backlog_slope_warning_per_min: 10.0
+  backlog_slope_critical_per_min: 30.0
+  drain_ratio_warning: 0.9
+  drain_ratio_critical: 0.75
+  resource_pressure_thresholds:
+    cpu:
+      warning: 75.0
+      critical: 90.0
+    memory:
+      warning: 80.0
+      critical: 92.0
+    gpu:
+      warning: 85.0
+      critical: 95.0
+
+observability_intelligence:
+  enabled: true
+  enable_memory_integration: false
+  similar_incident_limit: 5
+  root_cause_top_k: 5
+  runbook_top_k: 4
+  timeline_event_limit: 100
+  incident_history_limit: 500
+  alert_fatigue_window_seconds: 1800.0
+  alert_fatigue_repeat_threshold: 4
+  latency_warning_ms: 1000.0
+  latency_critical_ms: 2500.0
+  critical_path_ratio_warning: 0.60
+  critical_path_ratio_critical: 0.85
+  anomaly_warning_count: 1
+  anomaly_critical_count: 3
+  retry_chain_warning_count: 1
+  retry_chain_critical_count: 3
+  bottleneck_warning_count: 1
+  bottleneck_critical_count: 3
+  incident_score_thresholds:
+    warning: 4.0
+    critical: 9.0
+  signal_weights:
+    info: 1.0
+    warning: 3.0
+    critical: 6.0
+  incident_brief_max_symptoms: 6
+  incident_brief_max_evidence_items: 12
+  root_cause_weights:
+    resource_saturation: 0.8
+    queue_saturation: 0.7
+    retry_amplification: 0.5
+    downstream_dependency_failure: 0.9
+    cross_agent_cascade: 0.6
+    service_degradation: 0.4
+  impact_templates:
+    critical: "User-facing degradation is likely active and immediate mitigation is required."
+    warning: "User-facing impact is possible if the current regressions persist."
+    info: "Current evidence suggests limited user impact, but continued monitoring is recommended."
+  default_runbooks:
+    - playbook_id: "fallback-observability-triage"
+      title: "Fallback observability triage"
+      priority: 99
+      automation_safe: false
+      estimated_impact: "Provides a safe generic stabilization path when no specialized runbook is mapped."
+      actions:
+        - "Inspect the critical path and dominant bottlenecks."
+        - "Compare queue backlog and resource pressure against baseline."
+        - "Apply degraded mode if the user-facing objective is at risk."
+  runbook_catalog:
+    resource_saturation:
+      - playbook_id: "rbk-resource-saturation"
+        title: "Relieve saturated compute resources"
+        priority: 10
+        automation_safe: false
+        estimated_impact: "Reduces host pressure and prevents wider runtime starvation."
+        actions:
+          - "Throttle non-critical workloads."
+          - "Drain or rebalance work away from the saturated host."
+          - "Scale or restart affected workers if saturation persists."
+    queue_saturation:
+      - playbook_id: "rbk-queue-backlog-drain"
+        title: "Drain queue backlog and restore consumer balance"
+        priority: 20
+        automation_safe: true
+        estimated_impact: "Reduces queue growth and restores scheduler responsiveness."
+        actions:
+          - "Identify blocked or slow consumers."
+          - "Increase consumer concurrency within safe limits."
+          - "Shed non-critical queue classes if backlog continues to rise."
+    retry_amplification:
+      - playbook_id: "rbk-retry-storm-mitigation"
+        title: "Mitigate retry amplification"
+        priority: 15
+        automation_safe: true
+        estimated_impact: "Cuts retry waste and protects downstream dependencies from amplification."
+        actions:
+          - "Reduce retry budget and enforce jittered backoff."
+          - "Disable recursive fallback retries on the hot path."
+          - "Inspect dependency health before re-enabling normal retry policy."
+    downstream_dependency_failure:
+      - playbook_id: "rbk-dependency-timeout-triage"
+        title: "Triage downstream dependency timeout"
+        priority: 5
+        automation_safe: false
+        estimated_impact: "Localizes the failing dependency and restores degraded-path safety."
+        actions:
+          - "Check dependency error and timeout rates."
+          - "Enable cached or degraded response mode."
+          - "Tighten timeouts and isolate the failing dependency path."
+    cross_agent_cascade:
+      - playbook_id: "rbk-cascade-containment"
+        title: "Contain cross-agent cascading degradation"
+        priority: 8
+        automation_safe: false
+        estimated_impact: "Limits blast radius and stabilizes the most affected dependency edge first."
+        actions:
+          - "Identify the first failing edge on the critical path."
+          - "Rate-limit fan-out from unstable upstream agents."
+          - "Temporarily isolate non-critical downstream workflows."
+    service_degradation:
+      - playbook_id: "rbk-user-impact-stabilization"
+        title: "Stabilize user-facing degradation"
+        priority: 12
+        automation_safe: false
+        estimated_impact: "Protects user-facing objectives while investigation continues."
+        actions:
+          - "Enable degraded mode or fallback policy."
+          - "Route traffic away from degraded workloads when possible."
+          - "Notify incident command and begin user-impact tracking."
+    agent_latency_bottleneck:
+      - playbook_id: "rbk-critical-path-latency"
+        title: "Reduce dominant agent latency on the critical path"
+        priority: 18
+        automation_safe: false
+        estimated_impact: "Targets the slowest span contributing to end-to-end latency."
+        actions:
+          - "Inspect the hottest span and its upstream waits."
+          - "Reduce synchronous fan-out or redundant retries."
+          - "Cache or parallelize the slow critical-path operation."
+
+observability_memory:
+  enabled: true
+  archive_raw_spans: true
+  persist_timelines: true
+  persist_incidents: true
+  persist_slo_history: true
+  persist_suppressions: true
+  persist_remediations: true
+  enable_snapshot_persistence: false
+  flush_snapshot_on_write: false
+  write_pretty_json: true
+  snapshot_path: "observability/data/observability_memory_snapshot.json"
+  max_trace_archives: 2000
+  max_raw_spans_per_trace: 5000
+  max_timeline_events_per_trace: 1000
+  max_incident_fingerprints: 2000
+  max_trace_ids_per_incident: 50
+  max_related_agents_per_incident: 25
+  max_root_cause_candidates: 10
+  max_recommended_actions: 10
+  max_objective_history_per_key: 365
+  max_alert_suppressions: 1000
+  max_runbook_records_per_playbook: 1000
+  max_agent_latency_samples_per_agent: 20000
+  max_shared_memory_actions: 5
+  similarity_top_k_default: 5
+  similarity_min_score: 0.2
+  default_latency_window_seconds: 86400
+  default_latency_bucket_seconds: 3600
+  default_suppression_ttl_seconds: 1800
+  supported_percentiles: [50, 75, 90, 95, 99]
+
+observability_performance:
+  enabled: true
+  enable_memory_integration: false
+  max_trace_records: 2000
+  max_latency_samples_per_subject: 10000
+  max_throughput_samples_per_subject: 5000
+  max_subjects: 256
+  min_regression_samples: 5
+  recent_sample_window: 20
+  baseline_sample_window: 50
+  histogram_buckets_ms:
+  - 5
+  - 10
+  - 25
+  - 50
+  - 100
+  - 250
+  - 500
+  - 1000
+  - 2500
+  - 5000
+  - 10000
+  percentiles:
+  - 50
+  - 90
+  - 95
+  - 99
+  latency_regression_warning_ratio: 1.2
+  latency_regression_critical_ratio: 1.5
+  throughput_regression_warning_ratio: 0.85
+  throughput_regression_critical_ratio: 0.65
+  default_latency_slo_ms: 1500.0
+  default_slo_percentile: 95
+  default_throughput_window_seconds: 300.0
+  archive_trace_reports: true
+  record_timeline_events: true
+
+observability_tracing:
+  enabled: true
+  enable_memory_integration: false
+  auto_archive_on_finalize: true
+  auto_analyze_on_finalize: true
+  preserve_completed_traces: true
+  finalize_open_spans_on_close: true
+  append_timeline_events: true
+  record_lifecycle_events: true
+  record_contract_failures_as_events: true
+  enforce_contract_validation: true
+  allow_orphan_spans: false
+  allow_external_trace_creation: false
+  archive_trace_reports: true
+  include_shared_memory_snapshot: true
+  analyze_on_reconstruct: true
+  max_active_traces: 1000
+  max_completed_traces: 2000
+  max_spans_per_trace: 5000
+  max_events_per_trace: 1000
+  default_span_timeout_ms: 30000.0
+  max_metadata_keys: 64
+  max_metadata_value_length: 1024
+  max_payload_keys: 64
+  max_payload_value_length: 2048
+  trace_id_prefix: "trace"
+  span_id_prefix: "span"
+  default_service: "slai"
+  default_incident_level: "info"
+  default_open_span_close_status: "cancelled"
+  required_trace_context_fields:
+    - trace_id
+    - agent_name
+    - operation_name
+
+waterfall_analysis:
+  bottleneck_threshold_ratio: 0.25
+  timeout_ms: 30000.0
+  percentile_threshold: 0.95
+  max_ranked_bottlenecks: 10
+  min_retry_chain_length: 2
+  zero_duration_epsilon_ms: 0.001
+  repeated_error_threshold: 3
+  treat_orphans_as_roots: true
+  require_parent_child_time_alignment: true
