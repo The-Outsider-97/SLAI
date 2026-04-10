@@ -180,6 +180,54 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
+observability_agent:
+    enabled: true
+    default_service: "slai"
+    default_task_name: "agent_workflow"
+    default_trace_operation: "observe"
+    default_incident_status: "open"
+
+    auto_start_trace: true
+    auto_finalize_trace: true
+    enable_trace_span_ingestion: true
+    enable_trace_event_ingestion: true
+    enable_state_transition_ingestion: true
+    enable_log_ingestion: true
+    enable_performance_trace_analysis: true
+    enable_health_snapshots: true
+    enable_kpi_tracking: true
+    enable_shared_context_export: true
+    allow_degraded_reports: true
+
+    max_recent_reports: 100
+    max_recent_errors: 200
+    max_signature_history: 512
+    max_event_records_per_run: 200
+    max_log_records_per_run: 200
+    max_alert_records_per_run: 100
+    max_error_records_per_run: 100
+    max_state_transition_records_per_run: 200
+    max_objective_records_per_run: 50
+    max_related_agents: 16
+
+    alert_dedupe_window_seconds: 1800.0
+    alert_dedupe_repeat_threshold: 3
+    recurring_incident_threshold: 2
+    alert_precision_decay: 1.0
+    degraded_status_levels: ["warning", "critical"]
+    required_trace_context_fields: ["task_name", "agent_name", "operation_name"]
+
+    routing:
+        handler_on_warning: true
+        handler_on_critical: true
+        planning_on_capacity: true
+        safety_on_critical: true
+        evaluation_on_degradation: true
+        handler_agent_names: ["handler", "handler_agent", "HandlerAgent"]
+        planning_agent_names: ["planning", "planning_agent", "PlanningAgent"]
+        safety_agent_names: ["safety", "safety_agent", "SafetyAgent"]
+        evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
+
 perception_agent:
     device: "cpu"
     embed_dim: 512
@@ -196,6 +244,52 @@ perception_agent:
     contrastive_weight: 1.0  # for hybrid loss
 
 planning_agent: {}
+
+privacy_agent: {}
+
+quality_agent:
+    enabled: true
+    default_window: latest
+    stop_on_blocking_structural: true
+    fail_closed_on_subsystem_error: true
+    auto_route_via_workflow: true
+    prefer_workflow_verdict: true
+    include_workflow_findings_in_summary: true
+    include_record_previews_in_shared_memory: false
+    max_shared_record_preview: 5
+    pass_threshold: 0.90
+    warn_threshold: 0.75
+
+    subsystem_order:
+        - structural
+        - statistical
+        - semantic
+
+    subsystem_weights:
+        structural: 0.34
+        statistical: 0.33
+        semantic: 0.33
+
+    bridge_resolution:
+        resolve_handler_from_factory: false
+        resolve_safety_from_factory: false
+        handler_factory_names:
+            - handler_agent
+            - handler
+            - HandlerAgent
+        safety_factory_names:
+            - safety_agent
+            - safety
+            - SafetyAgent
+
+    shared_memory:
+        enabled: true
+        ttl_seconds: 86400
+        publish_notifications: true
+        result_key_prefix: quality_agent.result
+        summary_key_prefix: quality_agent.summary
+        error_key_prefix: quality_agent.error
+        event_channel: quality.events
 
 reader_agent:
     default_output_format: "txt"
