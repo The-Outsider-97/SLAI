@@ -53,3 +53,9 @@ class ObservabilityAgent(BaseAgent):
             self.observability_config.update(dict(config))
 
         self.enabled = bool(self.observability_config.get("enabled", True))
+
+        # subsystem initialization
+        self.observability_capacity = ObservabilityCapacity()
+        self.observability_performance = ObservabilityPerformance()
+        self.observability_intel = ObservabilityIntelligence()
+        self.observability_tracing = ObservabilityTracing()
