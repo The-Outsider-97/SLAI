@@ -8,6 +8,7 @@
 4. Rate limiting with in-memory and Redis-backed token buckets
 5. Email delivery with SMTP, async queueing, and simple templating
 6. File storage with local filesystem and S3 backends
+7. Transport adapters for LoRa/serial/mesh/LTE/SATCOM connect-send-receive workflows
 
 ---
 
@@ -57,6 +58,18 @@ from src.functions import (
     Storage,
     LocalStorage,
     S3Storage,
+
+    # Transport
+    TransportService,
+    TransportPacket,
+    TransportType,
+    ChannelState,
+    ChannelStatus,
+    LoRaAdapter,
+    SerialAdapter,
+    MeshAdapter,
+    LTEAdapter,
+    SATCOMAdapter,
 )
 ```
 
@@ -495,3 +508,38 @@ Depending on which modules you use, you may need additional packages:
 - Use Redis-backed rate limiting for horizontally scaled services.
 - Keep SMTP credentials and auth peppers outside source control.
 - Prefer `Storage.from_config()` or a concrete backend instance over direct use of the abstract `StorageBackend` base class.
+
+
+## 7) `transport.py`
+
+Transport communication layer that normalizes channel operations across LoRa, serial, mesh, LTE, and SATCOM adapters.
+
+### Main types
+
+- `TransportService`: orchestrates multiple adapters by alias
+- `TransportAdapter`: shared connect/send/receive/retry contract
+- `TransportPacket`: payload envelope with source/destination metadata
+- `ChannelState`: status + signal quality snapshots
+- Adapter implementations: `LoRaAdapter`, `SerialAdapter`, `MeshAdapter`, `LTEAdapter`, `SATCOMAdapter`
+
+### Key capabilities
+
+- consistent `connect(...)`, `disconnect(...)`, `send(...)`, and `receive(...)` APIs
+- bounded `send_with_retry(...)` with exponential backoff + jitter
+- channel health status transitions (`DISCONNECTED`, `CONNECTING`, `READY`, `DEGRADED`, `ERROR`)
+- injectable receive buffer for simulation and test scenarios
+
+### Example
+
+```python
+from src.functions import TransportPacket, TransportService, LoRaAdapter
+
+transport = TransportService({"field-lora": LoRaAdapter(name="field-lora")})
+transport.connect("field-lora")
+
+packet = TransportPacket(payload=b"hello", source="node-1", destination="gateway")
+tx_id = transport.send_with_retry("field-lora", packet, max_attempts=4)
+ack = transport.receive("field-lora", timeout_seconds=1.0)
+
+print(tx_id, ack.metadata if ack else None)
+```
