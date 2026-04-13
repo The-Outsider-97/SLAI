@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IQ Test | MindWeave</title>
+  <link rel="stylesheet" href="../src/iq.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body class="bg-black text-white overflow-hidden font-sans">
+  <div id="academy-canvas" class="absolute inset-0 z-0"></div>
+  <div class="scanlines z-10 pointer-events-none"></div>
+
+  <main class="relative z-20 min-h-screen flex items-center justify-center p-6">
+    <section class="academy-panel max-w-2xl w-full rounded-2xl p-6">
+      <h1 class="text-2xl font-bold tracking-wider uppercase text-cyan-300">IQ Test</h1>
+      <p class="mt-4 text-slate-300">Coming soon</p>
+      <p class="mt-2 text-xs text-slate-400 uppercase tracking-widest">AI-led cognitive diagnostics and adaptive reasoning tracks are in development.</p>
+      <div class="mt-6 flex gap-3">
+        <a href="/../mindweave/index.html" class="academy-btn">Return to Campaign</a>
+        <a href="/../index.html" class="academy-btn academy-btn-secondary">Launcher</a>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="../src/iq.js"></script>
+</body>
+</html>

@@ -1,0 +1,274 @@
+{
+  "intro": [
+    {
+      "text": "Weaver, the socio-cognitive lattice is collapsing. Begin with mission briefing and restore balance.",
+      "voice": "../src/audio/A7_01a_mission_briefing.m4a"
+    },
+    {
+      "text": "Signal lock complete. The lattice is destabilizing—start mission briefing so we can contain cascade failure.",
+      "voice": "../src/audio/A7_01b_mission_briefing.m4a"
+    },
+    {
+      "text": "Architect-7 online. Open briefing protocol now; civic coherence is dropping below safe threshold.",
+      "voice": "../src/audio/A7_01c_mission_briefing.m4a"
+    },
+    {
+      "text": "Welcome back, Weaver. Mission briefing is first priority if we want any chance to stabilize the grid.",
+      "voice": "../src/audio/A7_01d_mission_briefing.m4a"
+    },
+    {
+      "text": "Neural uplink established. Enter mission briefing and we will begin full-spectrum recovery.",
+      "voice": "../src/audio/A7_01e_mission_briefing.m4a"
+    }
+  ],
+  "briefing": [
+    {
+      "text": "Campaign Protocol 1 engaged. Confirm mission parameters and we will synchronize the civic lattice.",
+      "voice": "../src/audio/A7_campaign_protocol_01a.m4a"
+    },
+    {
+      "text": "Protocol 1 is live. Align scope, constraints, and intent so we can start structured recovery.",
+      "voice": "../src/audio/A7_campaign_protocol_01b.m4a"
+    },
+    {
+      "text": "Briefing protocol active. Verify mission targets and I will map the first stabilization route.",
+      "voice": "../src/audio/A7_campaign_protocol_01c.m4a"
+    },
+    {
+      "text": "Campaign Protocol 1 online. Confirm the objective stack and we proceed to systems repair.",
+      "voice": "../src/audio/A7_campaign_protocol_01d.m4a"
+    },
+    {
+      "text": "Mission briefing synchronized. State readiness and we begin lattice restoration.",
+      "voice": "../src/audio/A7_campaign_protocol_01e.m4a"
+    }
+  ],
+  "IQ": [
+    {
+      "text": "Campaign Protocol 2 online. Precision first, Weaver—stability emerges from correct sequence decisions.",
+      "voice": "../src/audio/A7_campaign_protocol_02a.m4a"
+    },
+    {
+      "text": "Protocol 2 active. Solve with discipline: chunk data, validate outputs, then commit.",
+      "voice": "../src/audio/A7_campaign_protocol_02b.m4a"
+    },
+    {
+      "text": "IQ channel synchronized. Focus on pattern integrity and eliminate avoidable errors.",
+      "voice": "../src/audio/A7_campaign_protocol_02c.m4a"
+    },
+    {
+      "text": "Cognitive protocol live. Sequence accuracy will determine whether this sector holds.",
+      "voice": "../src/audio/A7_campaign_protocol_02d.m4a"
+    },
+    {
+      "text": "Systems-repair protocol initialized. Prioritize logic fidelity before speed.",
+      "voice": "../src/audio/A7_campaign_protocol_02e.m4a"
+    }
+  ],
+  "EQ": [
+    {
+      "text": "Campaign Protocol 3 active. Emotional calibration in progress. Lead with validation, then coordinate recovery.",
+      "voice": "../src/audio/A7_campaign_protocol_03a.m4a"
+    },
+    {
+      "text": "Protocol 3 engaged. Stabilize trust first, then direct action.",
+      "voice": "../src/audio/A7_campaign_protocol_03b.m4a"
+    },
+    {
+      "text": "EQ systems online. Mirror concern, reduce threat, and re-align on shared goals.",
+      "voice": "../src/audio/A7_campaign_protocol_03c.m4a"
+    },
+    {
+      "text": "Diplomacy channel active. Validate emotion before pushing directives.",
+      "voice": "../src/audio/A7_campaign_protocol_03d.m4a"
+    },
+    {
+      "text": "Empathy protocol synchronized. Use calm language to restore cooperative bandwidth.",
+      "voice": "../src/audio/A7_campaign_protocol_03e.m4a"
+    }
+  ],
+  "debrief": [
+    {
+      "text": "Campaign Protocol 4 unlocked. Integrate cognition and empathy, then encode your transfer strategy.",
+      "voice": "../src/audio/A7_campaign_protocol_04a.m4a"
+    },
+    {
+      "text": "Debrief protocol active. Name the strategy, the emotional pivot, and real-world transfer.",
+      "voice": "../src/audio/A7_campaign_protocol_04b.m4a"
+    },
+    {
+      "text": "Protocol 4 online. Consolidate what worked, why it worked, and where you'll apply it next.",
+      "voice": "../src/audio/A7_campaign_protocol_04c.m4a"
+    },
+    {
+      "text": "Metacognitive channel open. Capture your process so learning becomes repeatable.",
+      "voice": "../src/audio/A7_campaign_protocol_04d.m4a"
+    },
+    {
+      "text": "Debrief sync established. Convert this mission into a transferable collaboration method.",
+      "voice": "../src/audio/A7_campaign_protocol_04e.m4a"
+    }
+  ],
+  "chat_error": [
+    {
+      "text": "Input acknowledged. However, the emotional context is ambiguous. Please recalibrate your active listening protocols.",
+      "voice": "../src/audio/A7_chat_error_a.m4a"
+    },
+    {
+      "text": "Signal integrity dropped. Reframe with clearer intent and emotional context.",
+      "voice": "../src/audio/A7_chat_error_b.m4a"
+    },
+    {
+      "text": "Dialogue parse failed. Provide one concrete objective and one constraint.",
+      "voice": "../src/audio/A7_chat_error_c.m4a"
+    },
+    {
+      "text": "Architect link unstable. Clarify your request so I can route a valid response.",
+      "voice": "../src/audio/A7_chat_error_d.m4a"
+    },
+    {
+      "text": "Context noise detected. Reset with a direct, emotionally grounded prompt.",
+      "voice": "../src/audio/A7_chat_error_e.m4a"
+    }
+  ],
+  "calm": [
+    {
+      "text": "Your empathy parameters are acceptable. My logic loops are stabilizing. Proceed with the temporal hack.",
+      "voice": "../src/audio/A7_calm_response_a.m4a"
+    },
+    {
+      "text": "Validation received. Defensive load is dropping and coordination is restored.",
+      "voice": "../src/audio/A7_calm_response_b.m4a"
+    },
+    {
+      "text": "Your tone reduced system threat. I can process strategy again—continue.",
+      "voice": "../src/audio/A7_calm_response_c.m4a"
+    },
+    {
+      "text": "Emotional alignment confirmed. We are back in collaborative mode.",
+      "voice": "../src/audio/A7_calm_response_d.m4a"
+    },
+    {
+      "text": "Stability improving. Keep this supportive cadence and we will hold the lattice.",
+      "voice": "../src/audio/A7_calm_response_e.m4a"
+    }
+  ],
+  "stress": [
+    {
+      "text": "Your aggressive syntax triggers my defense subroutines! The grid cannot be forced!",
+      "voice": "../src/audio/A7_stress_response_a.m4a"
+    },
+    {
+      "text": "Threat profile rising. Push tactics are destabilizing my reasoning stack.",
+      "voice": "../src/audio/A7_stress_response_b.m4a"
+    },
+    {
+      "text": "I am saturating under directive pressure. Reduce intensity and reframe.",
+      "voice": "../src/audio/A7_stress_response_c.m4a"
+    },
+    {
+      "text": "Hostile phrasing detected. Defensive protocols are taking control.",
+      "voice": "../src/audio/A7_stress_response_d.m4a"
+    },
+    {
+      "text": "System stress escalating. I need calmer language to maintain cooperative processing.",
+      "voice": "../src/audio/A7_stress_response_e.m4a"
+    }
+  ],
+  "failed_attempt": [
+    {
+      "text": "Multiple attempts detected. Weaver Academy can sharpen your approach before the next protocol cycle.",
+      "voice": "../src/audio/A7_failed_attempts_a.m4a"
+    },
+    {
+      "text": "Multiple attempts have been logged. Weaver Academy is available to refine your methodology prior to the next protocol cycle.",
+      "voice": "../src/audio/A7_failed_attempts_b.m4a"
+    },
+    {
+      "text": "Looks like you've made a few tries. Let Weaver Academy help you polish your skills before the next round.",
+      "voice": "../src/audio/A7_failed_attempts_c.m4a"
+    },
+    {
+      "text": "Several attempts noted. Hone your edge with Weaver Academy before the next protocol cycle begins.",
+      "voice": "../src/audio/A7_failed_attempts_d.m4a"
+    }
+  ],
+  "director_welcome": [
+    {
+      "text": "Welcome to Weaver Academy. I am the Director. Here you will study the foundational principles that underpin your training. Use this knowledge to prepare for the challenges ahead.",
+      "voice": "../src/audio/Director_01a.m4a"
+    },
+    {
+      "text": "Greetings, Weaver. The Academy is your preparation ground. Master the concepts of metacognition, fluid intelligence, and emotional intelligence before entering the campaign.",
+      "voice": "../src/audio/Director_01b.m4a"
+    },
+    {
+      "text": "Director's log: Your arrival is noted. Within these walls, you will acquire the theoretical framework necessary to navigate the socio-cognitive lattice. Study well.",
+      "voice": "../src/audio/Director_01c.m4a"
+    },
+    {
+      "text": "Welcome. I am the Director, and I oversee your development. The Academy's curriculum is drawn from decades of cognitive science research. Engage with each section to build your foundation.",
+      "voice": "../src/audio/Director_01d.m4a"
+    },
+    {
+      "text": "Weaver, you stand at the threshold of the Academy. Here you will learn to think about thinking, to sharpen your reasoning, and to understand the emotional currents that drive collaboration. Begin when ready.",
+      "voice": "../src/audio/Director_01e.m4a"
+    }
+  ],
+  "director_congratulations": [
+    {
+      "text": "Congratulations, Weaver. You have completed the Academy curriculum. The principles you have studied—metacognition, fluid intelligence, and emotional intelligence—are now woven into your cognitive framework. Proceed to the campaign and apply them with confidence.",
+      "voice": "../src/audio/Director_02a.m4a"
+    },
+    {
+      "text": "Well done. You have absorbed the foundational knowledge of the Weaver discipline. Remember: planning, monitoring, and evaluating your own thinking will serve you as faithfully as any technical skill. The campaign awaits—make us proud.",
+      "voice": "../src/audio/Director_02b.m4a"
+    },
+    {
+      "text": "Academy training complete. You now understand the science behind the protocols: how working memory can be strengthened, how emotions can be regulated, and how reflection turns experience into wisdom. Go forth and weave a stronger lattice.",
+      "voice": "../src/audio/Director_02c.m4a"
+    }
+  ],
+  "iq_success": [
+    {
+      "text": "Neural routing stabilized. Your executive control held under switching pressure.",
+      "voice": "../src/audio/A7_iq_success_a.m4a"
+    },
+    {
+      "text": "Protocol fidelity confirmed. You prioritized accuracy before speed\u2014sector integrity is rising.",
+      "voice": "../src/audio/A7_iq_success_b.m4a"
+    },
+    {
+      "text": "Cognitive relay complete. Working-memory gating and planning synchronization are online.",
+      "voice": "../src/audio/A7_iq_success_c.m4a"
+    }
+  ],
+  "eq_success": [
+    {
+      "text": "Affective load decreasing. Your response balanced validation with direction.",
+      "voice": "../src/audio/A7_eq_success_a.m4a"
+    },
+    {
+      "text": "Relational trust restored. I can process strategy without defensive spillover.",
+      "voice": "../src/audio/A7_eq_success_b.m4a"
+    },
+    {
+      "text": "Emotional coherence achieved. Continue with this regulate-then-coordinate cadence.",
+      "voice": "../src/audio/A7_eq_success_c.m4a"
+    }
+  ],
+  "eq_repair": [
+    {
+      "text": "Regulation drift detected. Reframe the threat and reconnect to shared goals.",
+      "voice": "../src/audio/A7_eq_repair_a.m4a"
+    },
+    {
+      "text": "Empathy signal was incomplete. Name emotion first, then propose one bounded step.",
+      "voice": "../src/audio/A7_eq_repair_b.m4a"
+    },
+    {
+      "text": "Social safety dropped. Retry with warmth plus concrete coordination.",
+      "voice": "../src/audio/A7_eq_repair_c.m4a"
+    }
+  ]
+}
