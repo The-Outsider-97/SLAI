@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Patolli | R-Games</title>
+  <link rel="icon" type="image/x-icon" href="../img/Logo01.svg" />
+  <link rel="stylesheet" href="src/index.css" />
+</head>
+<body>
+  <a href="/" class="home-btn" aria-label="Home">
+    <img src="../img/home.svg" alt="" />
+  </a>
+
+  <main class="patolli-shell">
+    <header class="top-bar">
+      <div class="title-wrap">
+        <p class="subtitle">AZTEC STRATEGY / LUCK RACE</p>
+        <h1>PATOLLI</h1>
+        <p class="title-note">Cross the sacred path, capture rivals, and claim favor.</p>
+      </div>
+
+      <div class="status-right">
+        <p id="turn-label">CURRENT TURN</p>
+        <h2 id="turn-name" class="red-turn">RED</h2>
+        <div class="audio-controls" aria-label="Background music controls">
+          <button id="mute-btn" class="audio-btn" type="button" aria-pressed="false" aria-label="Mute background music">
+            <img id="mute-icon" src="../img/sound_on.svg" alt="" />
+          </button>
+          <label for="volume-slider">Volume</label>
+          <input id="volume-slider" type="range" min="0" max="100" value="50" />
+          <span id="volume-value">50%</span>
+        </div>
+        <div id="winner-banner" class="winner-banner hidden" role="status" aria-live="polite"></div>
+      </div>
+    </header>
+
+    <section class="board-row">
+      <aside class="player-stack">
+        <section class="player-card red active" id="red-card">
+          <h3>RED</h3>
+          <p><span>Points</span><strong id="red-score">0</strong></p>
+          <p><span>Finished</span><strong id="red-lap">0</strong></p>
+          <p><span>Off Board</span><strong id="red-home">6</strong></p>
+          <p class="objective">Move all six tokens along the X-board track. Each token that exits scores 5 points.</p>
+        </section>
+
+        <section class="player-card blue" id="blue-card">
+          <h3>BLUE</h3>
+          <p><span>Points</span><strong id="blue-score">0</strong></p>
+          <p><span>Finished</span><strong id="blue-lap">0</strong></p>
+          <p><span>Off Board</span><strong id="blue-home">6</strong></p>
+          <p class="objective">Landing on a rival sends that token off-board (except on safe spaces).</p>
+        </section>
+      </aside>
+
+      <section class="board-wrap">
+        <div class="lane red"></div>
+
+        <div class="patolli-board" aria-label="Patolli board">
+          <div class="board-ring ring-outer" aria-hidden="true"></div>
+          <div class="board-ring ring-inner" aria-hidden="true"></div>
+          <div class="board-glyph-north board-glyph" aria-hidden="true">✦</div>
+          <div class="board-glyph-east board-glyph" aria-hidden="true">✦</div>
+          <div class="board-glyph-south board-glyph" aria-hidden="true">✦</div>
+          <div class="board-glyph-west board-glyph" aria-hidden="true">✦</div>
+
+          <div class="cross-arm arm-a"></div>
+          <div class="cross-arm arm-b"></div>
+          <div class="center-stone">
+            <span>☉</span>
+          </div>
+
+          <div id="token-layer" class="token-layer" aria-label="Patolli tokens"></div>
+        </div>
+
+        <div class="lane blue"></div>
+
+        <div class="controls">
+          <button id="roll-btn" class="action-btn">Cast Beans</button>
+          <button id="move-btn" class="action-btn" disabled>Advance Runner</button>
+        </div>
+
+        <div class="bean-tray" aria-label="Bean cast result">
+          <p>BEAN CAST</p>
+          <div id="bean-pips" class="bean-pips" aria-live="polite">
+            <span>•</span><span>•</span><span>•</span><span>•</span><span>•</span>
+          </div>
+        </div>
+      </section>
+
+      <aside id="scoreboard-sidebar" class="scoreboard-sidebar">
+        <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-expanded="true">▸ Hide Scoreboard</button>
+        <section class="right-panel">
+          <h4>SCOREBOARD</h4>
+          <div class="scoreboard-box">
+            <p><span>Lead</span><strong id="score-lead">Tied</strong></p>
+            <p><span>Score Gap</span><strong id="score-gap">0</strong></p>
+            <p><span>Tokens Finished</span><strong id="total-laps">0</strong></p>
+            <p><span>Last Action</span><strong id="score-last-action">—</strong></p>
+          </div>
+
+          <h4>RITUAL LOG</h4>
+          <div id="last-roll" class="last-roll">Roll: —</div>
+          <div id="log" class="log-box"></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <audio id="bg-music" src="../src/audio/bg_aztec.mp3" loop preload="auto"></audio>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

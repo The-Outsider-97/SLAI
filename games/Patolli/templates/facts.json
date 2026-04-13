@@ -1,0 +1,306 @@
+{
+  "dataset": "Aztec Civilization Facts with Sources",
+  "total_facts": 30,
+  "facts":[
+    {
+      "id": 1,
+      "category": "Origins",
+      "title": "The Name 'Aztec'",
+      "description": "The people we call the Aztecs actually called themselves the 'Mexica' (pronounced meh-SHEE-kah). The term 'Aztec' was popularized by 19th-century historians to describe the people of Aztlan, their mythical homeland.",
+      "source": {
+        "name": "History.com",
+        "reference": "Aztecs: Empire, Culture & Facts"
+      }
+    },
+    {
+      "id": 2,
+      "category": "Geography",
+      "title": "A City on a Lake",
+      "description": "The Aztec capital, Tenochtitlan, was built on an island in the middle of Lake Texcoco. Today, modern-day Mexico City sits on top of the ruins of this ancient capital.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Tenochtitlan | History, Map, & Facts"
+      }
+    },
+    {
+      "id": 3,
+      "category": "Agriculture",
+      "title": "Floating Gardens",
+      "description": "To create arable land, the Aztecs engineered 'chinampas'—artificial islands made of woven reeds and mud, allowing them to grow abundant crops directly on the lake.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Chinampa (Floating Gardens)"
+      }
+    },
+    {
+      "id": 4,
+      "category": "Education",
+      "title": "Mandatory Universal Schooling",
+      "description": "The Aztecs were one of the first societies in the world to mandate education for all children, regardless of gender or social status, though boys and girls attended different schools.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Aztec Education"
+      }
+    },
+    {
+      "id": 5,
+      "category": "Politics",
+      "title": "The Triple Alliance",
+      "description": "The 'Aztec Empire' was not a single monolithic state but a 'Triple Alliance' formed in 1428 between three powerful city-states: Tenochtitlan, Texcoco, and Tlacopan.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Triple Alliance | Mesoamerican history"
+      }
+    },
+    {
+      "id": 6,
+      "category": "Religion",
+      "title": "Nourishing the Sun",
+      "description": "The Aztecs practiced human sacrifice on a large scale because they believed the sun god, Huitzilopochtli, was in a constant battle with darkness and required human blood to rise each day.",
+      "source": {
+        "name": "History.com",
+        "reference": "Why the Aztecs Practiced Human Sacrifice"
+      }
+    },
+    {
+      "id": 7,
+      "category": "Warfare",
+      "title": "The Macuahuitl",
+      "description": "Aztec warriors wielded a deadly weapon called the macuahuitl, a wooden club embedded with razor-sharp obsidian blades capable of decapitating a horse in a single blow.",
+      "source": {
+        "name": "Archaeology Magazine",
+        "reference": "The Aztec Sword: The Macuahuitl"
+      }
+    },
+    {
+      "id": 8,
+      "category": "Economy",
+      "title": "Cacao Bean Currency",
+      "description": "Like the Maya, the Aztecs used cacao beans as currency. Small purchases, such as a rabbit or a piece of cloth, were priced in specific numbers of cacao beans.",
+      "source": {
+        "name": "Smithsonian Magazine",
+        "reference": "A Brief History of Chocolate"
+      }
+    },
+    {
+      "id": 9,
+      "category": "Public Health",
+      "title": "Obsessive Cleanliness",
+      "description": "Tenochtitlan was remarkably clean. The city employed thousands of street sweepers, and the emperor, Moctezuma II, bathed twice a day. The Spanish conquerors were astonished by the city's hygiene.",
+      "source": {
+        "name": "National Geographic",
+        "reference": "Life in the Aztec Capital"
+      }
+    },
+    {
+      "id": 10,
+      "category": "Society",
+      "title": "Voluntary Slavery",
+      "description": "Slavery in Aztec society was not hereditary. Impoverished individuals or gamblers with severe debts could sell themselves into slavery, and slaves could buy back their freedom.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Aztec Society and Classes"
+      }
+    },
+    {
+      "id": 11,
+      "category": "Architecture",
+      "title": "The Templo Mayor",
+      "description": "The Templo Mayor was the central pyramid of Tenochtitlan, topped with two twin shrines: one dedicated to the god of war and the sun, and the other to the god of rain and agriculture.",
+      "source": {
+        "name": "Penn Museum",
+        "reference": "The Templo Mayor of Tenochtitlan"
+      }
+    },
+    {
+      "id": 12,
+      "category": "Engineering",
+      "title": "Advanced Aqueducts",
+      "description": "To supply the island capital with fresh water, the Aztecs built the Chapultepec aqueduct, a complex twin-pipe system. While one pipe was cleaned, water flowed through the other.",
+      "source": {
+        "name": "American Society of Civil Engineers (ASCE)",
+        "reference": "Chapultepec Aqueduct"
+      }
+    },
+    {
+      "id": 13,
+      "category": "Arts",
+      "title": "Flower and Song",
+      "description": "Poetry was the highest art form in Aztec culture, referred to metaphorically as 'In xochitl, in cuicatl' (The flower and the song). Nezahualcoyotl, the ruler of Texcoco, was a famous philosopher-king and poet.",
+      "source": {
+        "name": "Library of Congress",
+        "reference": "Aztec Poetry and Literature"
+      }
+    },
+    {
+      "id": 14,
+      "category": "Sports",
+      "title": "The Game of Ullamaliztli",
+      "description": "The Aztecs played a fast-paced ballgame called Ullamaliztli using a solid rubber ball. Hitting the ball through a stone ring was so difficult that doing so instantly won the game.",
+      "source": {
+        "name": "The Metropolitan Museum of Art",
+        "reference": "The Mesoamerican Ballgame"
+      }
+    },
+    {
+      "id": 15,
+      "category": "Language",
+      "title": "The Origin of Modern Words",
+      "description": "The Aztec language, Nahuatl, is still spoken today. English words like avocado, chocolate, chili, coyote, and tomato all derive from their Nahuatl origins.",
+      "source": {
+        "name": "Oxford English Dictionary",
+        "reference": "Nahuatl Loanwords in English"
+      }
+    },
+    {
+      "id": 16,
+      "category": "Astronomy",
+      "title": "The Two Calendars",
+      "description": "The Aztecs utilized a 365-day agricultural calendar (Xiuhpohualli) and a 260-day sacred calendar (Tonalpohualli). The two synced up every 52 years, prompting the 'New Fire Ceremony.'",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Aztec Calendar"
+      }
+    },
+    {
+      "id": 17,
+      "category": "History",
+      "title": "The Spanish Conquest",
+      "description": "The Aztec Empire fell in 1521 to Spanish conquistador Hernán Cortés, but the Spanish relied heavily on tens of thousands of indigenous allies, notably the Tlaxcalans, who hated Aztec rule.",
+      "source": {
+        "name": "History.com",
+        "reference": "The Fall of the Aztecs"
+      }
+    },
+    {
+      "id": 18,
+      "category": "Urban Planning",
+      "title": "A Megacity",
+      "description": "At its peak, Tenochtitlan had an estimated population of over 200,000, making it significantly larger than most contemporary European cities, including London and Paris.",
+      "source": {
+        "name": "National Geographic",
+        "reference": "Tenochtitlan: The Aztec Metropolis"
+      }
+    },
+    {
+      "id": 19,
+      "category": "Animals",
+      "title": "Hairless Dogs",
+      "description": "The Aztecs bred the Xoloitzcuintli, a hairless breed of dog. They believed these dogs guided the souls of the dead through the underworld.",
+      "source": {
+        "name": "American Kennel Club",
+        "reference": "History of the Xoloitzcuintli"
+      }
+    },
+    {
+      "id": 20,
+      "category": "Medicine",
+      "title": "Herbal Mastery",
+      "description": "Aztec physicians were highly skilled herbalists. The Badianus Manuscript (1552) details hundreds of medicinal plants they used, including passionflower for insomnia and muscle spasms.",
+      "source": {
+        "name": "National Institutes of Health (NIH)",
+        "reference": "The Badianus Manuscript and Aztec Medicine"
+      }
+    },
+    {
+      "id": 21,
+      "category": "Economy",
+      "title": "The Tribute System",
+      "description": "The wealth of the empire relied heavily on a tribute system. Conquered provinces were forced to send regular payments of maize, jade, jaguar skins, feathers, and sacrificial captives.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Aztec Tribute System"
+      }
+    },
+    {
+      "id": 22,
+      "category": "Military",
+      "title": "Eagle and Jaguar Warriors",
+      "description": "The Aztec military featured elite ranks known as Eagle and Jaguar warriors. To enter these prestigious orders, a warrior had to capture at least four enemies alive in battle.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Aztec Warfare"
+      }
+    },
+    {
+      "id": 23,
+      "category": "Mathematics",
+      "title": "Base-20 Mathematics",
+      "description": "Like the Maya, the Aztecs used a vigesimal (base-20) number system. They indicated numbers using dots, flags, feathers, and incense pouches to represent multiples of 20, 400, and 8,000.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Mesoamerican Mathematics"
+      }
+    },
+    {
+      "id": 24,
+      "category": "Warfare",
+      "title": "The Flower Wars",
+      "description": "The Aztecs occasionally engaged in 'Xochiyaoyotl' or 'Flower Wars.' These were pre-arranged, ritualistic battles fought not for conquest, but explicitly to capture prisoners for sacrifice.",
+      "source": {
+        "name": "History.com",
+        "reference": "Aztec Flower Wars"
+      }
+    },
+    {
+      "id": 25,
+      "category": "Engineering",
+      "title": "The Dike of Nezahualcoyotl",
+      "description": "To prevent flooding and separate the salty waters of Lake Texcoco from the fresh spring waters used for farming, they constructed a massive 10-mile-long stone dike.",
+      "source": {
+        "name": "American Society of Civil Engineers (ASCE)",
+        "reference": "The Water Infrastructure of Tenochtitlan"
+      }
+    },
+    {
+      "id": 26,
+      "category": "Society",
+      "title": "Strict Alcohol Laws",
+      "description": "The consumption of 'pulque' (fermented agave sap) was heavily regulated. Drunkenness was a capital offense for young nobles, but elderly citizens over 70 were allowed to drink as much as they pleased.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Food and Drink in the Aztec World"
+      }
+    },
+    {
+      "id": 27,
+      "category": "Trade",
+      "title": "The Pochteca",
+      "description": "The Pochteca were an exclusive guild of long-distance merchants. They acted not only as wealthy traders but also as spies for the emperor, gathering intelligence on foreign cities.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Pochteca | Aztec merchant class"
+      }
+    },
+    {
+      "id": 28,
+      "category": "Textiles",
+      "title": "Cochineal Red Dye",
+      "description": "The Aztecs produced an incredibly vibrant and colorfast red dye by crushing tiny cochineal insects that lived on prickly pear cacti. This dye later became one of Spain's most valuable exports.",
+      "source": {
+        "name": "Smithsonian Magazine",
+        "reference": "The Bug That Had the World Seeing Red"
+      }
+    },
+    {
+      "id": 29,
+      "category": "Religion",
+      "title": "The Status of Mothers",
+      "description": "Childbirth was viewed as a literal battlefield. A woman who died in childbirth was given the same honored status as a male warrior who died in battle, becoming a spirit known as a Cihuateteo.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Women in Aztec Society"
+      }
+    },
+    {
+      "id": 30,
+      "category": "Entertainment",
+      "title": "The Board Game Patolli",
+      "description": "Patolli was a highly popular, fast-paced board game that involved moving pebbles across a cross-shaped mat. The Aztecs were enthusiastic gamblers and would sometimes bet their homes or their freedom on a game.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Patolli: Aztec Board Game"
+      }
+    }
+  ]
+}
