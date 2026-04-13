@@ -30,20 +30,14 @@ SESSION_COOKIE = "r_games_session"
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
-# Add AI folder to sys.path so 'src' and 'logs' can be imported as top-level packages
-ai_root = project_root / "AI"
-sys.path.insert(0, str(ai_root))
+from src.agents.agent_factory import AgentFactory
+from src.agents.collaborative.shared_memory import SharedMemory
+from src.agents.planning.planning_types import Task, TaskType
+from logs.logger import get_logger, PrettyPrinter
 
-try:
-    from src.agents.agent_factory import AgentFactory
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.planning.planning_types import Task, TaskType
-    from logs.logger import get_logger
-except ImportError as e:
-    print(f"Error importing modules: {e}")
-    raise
 
 logger = get_logger("R-Games")
+printer = PrettyPrinter
 
 @dataclass(frozen=True)
 class GameConfig:
@@ -60,42 +54,42 @@ GAMES: dict[str, GameConfig] = {
         display_name="Chronos",
         ai_module="ai_chronos",
         ai_initializer="initialize_ai",
-        launch_url="/chronos/index.html",
+        launch_url="/games/chronos/index.html",
     ),
     "aether_shift": GameConfig(
         key="aether_shift",
         display_name="Aether Shift",
         ai_module="ai_aether",
         ai_initializer="initialize_ai",
-        launch_url="/aether/index.html",
+        launch_url="/games/aether/index.html",
     ),
     "mindweave": GameConfig(
         key="mindweave",
         display_name="Project: Mindweave",
         ai_module="ai_mindweave",
         ai_initializer="initialize_ai",
-        launch_url="/mindweave/index.html",
+        launch_url="/games/mindweave/index.html",
     ),
     "patolli": GameConfig(
         key="patolli",
         display_name="Patolli",
         ai_module="ai_patolli",
         ai_initializer="initialize_ai",
-        launch_url="/patolli/index.html",
+        launch_url="/games/patolli/index.html",
     ),
     "puluc": GameConfig(
         key="puluc",
         display_name="Puluc",
         ai_module="ai_puluc",
         ai_initializer="initialize_ai",
-        launch_url="/puluc/index.html",
+        launch_url="/games/puluc/index.html",
     ),
     "parallax_protocol": GameConfig(
         key="parallax",
         display_name="Parallax Protocol",
         ai_module="ai_parallax",
         ai_initializer="initialize_ai",
-        launch_url="/parallax/index.html",
+        launch_url="/games/parallax/index.html",
     ),
 }
 
@@ -400,7 +394,7 @@ class RequestHandler(SimpleHTTPRequestHandler):
             return
 
         if self.path == "/":
-            self.path = "/index.html"
+            self.path = "/games/index.html"
 
         super().do_GET()
 
