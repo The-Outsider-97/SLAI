@@ -54,26 +54,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-# Add project root to sys.path
-project_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(project_root))
+# Add repository root to sys.path so shared src/ and logs/ imports resolve
+games_root = Path(__file__).resolve().parent
+project_root = games_root.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Add AI folder to sys.path so 'src' and 'logs' can be imported as top-level packages
-ai_root = project_root / "AI"
-sys.path.insert(0, str(ai_root))
-
-try:
-    from src.agents.agent_factory import AgentFactory
-    from src.agents.collaborative_agent import CollaborativeAgent
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.planning.planning_types import Task, TaskType
-    from logs.logger import get_logger
-except ImportError as e:
-    print(f"Error importing modules: {e}")
-    raise
+from ..src.agents.agent_factory import AgentFactory
+from ..src.agents.collaborative_agent import CollaborativeAgent
+from ..src.agents.collaborative.shared_memory import SharedMemory
+from ..src.agents.planning.planning_types import Task, TaskType
+from ..logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Project: Mindweave")
-RESPONSE_TEMPLATE_PATH = project_root / "mindweave" / "templates" / "responses.JSON"
+printer = PrettyPrinter()
+RESPONSE_TEMPLATE_PATH = games_root / "mindweave" / "templates" / "responses.JSON"
 
 class AgentAdapter:
     """Normalizes heterogeneous agent APIs to a single execute(task_data) contract."""
@@ -123,7 +118,7 @@ class MindweaveAI:
         self._planning_task_registered = False
         self._planning_enabled = True
         self.response_templates = self._load_response_templates()
-        self.match_log_path = project_root / 'AI' / 'logs' / 'mindweave.jsonl'
+        self.match_log_path = project_root / 'logs' / 'mindweave.jsonl'
         self.shared_memory.set("mindweave_ai_status", "initialized")
         logger.info("Project: Mindweave AI initialized with Knowledge, Planning, Evaluation, Language, and Safety agents")
 

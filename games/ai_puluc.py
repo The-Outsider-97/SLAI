@@ -17,21 +17,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Add project root and AI package paths
-project_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(project_root))
+# Add repository root to sys.path so shared src/ and logs/ imports resolve
+games_root = Path(__file__).resolve().parent
+project_root = games_root.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-ai_root = project_root / "AI"
-sys.path.insert(0, str(ai_root))
-
-from logs.logger import get_logger
-from src.agents.agent_factory import AgentFactory
-from src.agents.collaborative.shared_memory import SharedMemory
-from src.agents.collaborative_agent import CollaborativeAgent
-from src.agents.planning.planning_types import Task, TaskType
+from ..src.agents.agent_factory import AgentFactory
+from ..src.agents.collaborative.shared_memory import SharedMemory
+from ..src.agents.collaborative_agent import CollaborativeAgent
+from ..src.agents.planning.planning_types import Task, TaskType
+from ..logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Puluc")
-
+printer = PrettyPrinter()
 
 @dataclass
 class PulucAI:

@@ -11,19 +11,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Add project root and AI package paths
-project_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(project_root))
+# Add repository root to sys.path so shared src/ and logs/ imports resolve
+games_root = Path(__file__).resolve().parent
+project_root = games_root.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-ai_root = project_root / "AI"
-sys.path.insert(0, str(ai_root))
-
-from logs.logger import get_logger
-from src.agents.agent_factory import AgentFactory
-from src.agents.collaborative.shared_memory import SharedMemory
-from src.agents.planning.planning_types import Task, TaskType
+from ..src.agents.agent_factory import AgentFactory
+from ..src.agents.collaborative.shared_memory import SharedMemory
+from ..src.agents.planning.planning_types import Task, TaskType
+from ..logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Aether Shift")
+printer = PrettyPrinter()
 
 ACTION_BY_CARD_ID = {
     "card-place": "PLACE",
@@ -49,7 +49,7 @@ class AetherShiftAI:
 
         self._planning_task_registered = False
         self._planning_enabled = True
-        self.match_log_path = project_root / 'AI' / 'logs' / 'aether_matches.jsonl'
+        self.match_log_path = project_root / 'logs' / 'aether_matches.jsonl'
         self.shared_memory.set("aether_ai_status", "initialized")
         logger.info("Aether Shift AI initialized with Knowledge, Planning, Execution, and Learning agents")
 
