@@ -76,24 +76,23 @@ class CredentialPolicy:
         Raises:
             CredentialPolicyError: if the password is invalid.
         """
-        if not isinstance(password, str):
-            raise CredentialPolicyError("Password must be a string")
-
         violations: list[str] = []
+    
         if len(password) < self.min_length:
-            violations.append(f"at least {self.min_length} characters")
-        if self.require_upper and not any(char.isupper() for char in password):
-            violations.append("an uppercase letter")
-        if self.require_lower and not any(char.islower() for char in password):
-            violations.append("a lowercase letter")
-        if self.require_digit and not any(char.isdigit() for char in password):
-            violations.append("a digit")
-        if self.require_symbol and not any(not char.isalnum() for char in password):
-            violations.append("a symbol")
-
+            violations.append(f"Password must be at least {self.min_length} characters")
+        if self.require_upper and not any(c.isupper() for c in password):
+            violations.append("Password must include an uppercase letter")
+        if self.require_lower and not any(c.islower() for c in password):
+            violations.append("Password must include a lowercase letter")
+        if self.require_digit and not any(c.isdigit() for c in password):
+            violations.append("Password must include a digit")
+        if self.require_symbol and not any(not c.isalnum() for c in password):
+            violations.append("Password must include a symbol")
+    
         if violations:
             raise CredentialPolicyError(
-                "Password validation failed; required: " + ", ".join(violations)
+                reason="Password failed credential policy validation",
+                violations=violations,
             )
 
     def is_valid(self, password: str) -> bool:
