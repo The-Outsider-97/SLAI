@@ -34,6 +34,13 @@ from .search import (
     StopwordAnalyzer,
 )
 from .sidebar import Sidebar, SidebarAnimation, SidebarSection
+from .codec import (
+    DecodedRelayFrame,
+    RelayCodecError,
+    RelayFrameCodec,
+    RelayFrameHeader,
+    RelayReassembler,
+)
 from .utils.inverted_index import InvertedIndex, BM25Scorer, SearchAnalyzer
 
 __all__ = [
@@ -63,6 +70,12 @@ __all__ = [
     "InvertedIndex",
     "BM25Scorer",
     "SearchAnalyzer",
+    # Codec
+    "RelayCodecError",
+    "RelayFrameCodec",
+    "RelayFrameHeader",
+    "DecodedRelayFrame",
+    "RelayReassembler",
     # Sidebar
     "Sidebar",
     "SidebarAnimation",
