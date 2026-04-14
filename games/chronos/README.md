@@ -87,18 +87,23 @@ Chronos uses a multi-agent AI pipeline to produce tactical decisions.
   - Applies the plan to concrete candidate actions and supports move selection logic.
 - **Learning Agent**
   - Updates long-term behavior from wins/losses to improve future decisions.
+- **Adaptive Agent**
+  - Dynamically shifts tactical stance (comeback, conversion, defensive, core-contest, balanced) based on score/material/core pressure and opponent tempo signatures.
 
-At runtime, the AI loops through: context retrieval → planning → move scoring/selection. After each match, learning updates influence future planning preferences.
+At runtime, the AI loops through: context retrieval → adaptive stance synthesis → planning → execution scoring/arbitration. After each match, both learning and adaptation updates influence future planning preferences, risk appetite, and zone/action priorities.
 
 ```mermaid
 flowchart TD
     A[Current Game State] --> B[Knowledge Agent]
-    A --> C[Planning Agent]
-    B -->|Strategic Context| C
-    C -->|High-Level Action Plan| D[Execution / Move Scoring]
-    D --> E[Chosen Move]
+    A --> C[Adaptive Agent]
+    A --> D[Planning Agent]
+    B -->|Strategic Context| D
+    C -->|Dynamic Stance + Risk Profile| D
+    D -->|High-Level Action Plan| E[Execution / Move Scoring]
+    E --> F[Chosen Move]
 
-    E --> F[Game Outcome]
-    F --> G[Learning Agent]
-    G -->|Policy/Preference Updates| C
+    F --> G[Game Outcome]
+    G --> H[Learning Agent]
+    G --> C
+    H -->|Policy/Preference Updates| D
 ```
