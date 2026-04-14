@@ -832,6 +832,12 @@ export class Game {
       currentSlot: this.currentSlot,
       turnCount: this.turnCount,
       phase: this.phase,
+      slotLimit: this.slotLimit,
+      requiredActionsPerPlayer: [...this.requiredActionsPerPlayer],
+      timeline: this.timeline.map(([a0, a1]) => [
+        a0 ? { type: a0.type, token: a0.token, unitId: a0.unit ? a0.unit.id : null } : null,
+        a1 ? { type: a1.type, token: a1.token, unitId: a1.unit ? a1.unit.id : null } : null,
+      ]),
       validMoves: this.getValidMovesForAI(1) // Helper to send valid moves to AI
     };
   }
