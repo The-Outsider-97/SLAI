@@ -9,8 +9,8 @@ from threading import RLock
 from datetime import timedelta, datetime
 from collections import deque, defaultdict
 
-from .utils.config_loader import load_global_config, get_config_section
-from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
+from .config_loader import load_global_config, get_config_section
+from ...utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Distributed Replay Buffer")
