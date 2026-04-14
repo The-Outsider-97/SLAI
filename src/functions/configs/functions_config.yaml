@@ -29,6 +29,13 @@ credential_policy:
     require_digit: true
     require_symbol: true
 
+portable_store:
+  lock_timeout: 5.0
+  ensure_ascii: false
+  indent: 2
+  sort_keys: true
+  create_if_missing: true
+
 language_aware:
     stopwords: "src/agents/language/templates/stopwords.json"
 
