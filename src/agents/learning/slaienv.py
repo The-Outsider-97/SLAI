@@ -9,9 +9,9 @@ from collections import namedtuple
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..base.utils.physics_constraints import PhysicsEngine, PhysicsConfig
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from src.agents.learning.utils.policy_network import NoveltyDetector
-from src.agents.learning.learning_memory import LearningMemory, Transition
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.policy_network import NoveltyDetector
+from .learning_memory import LearningMemory, Transition
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("SLAI Learning Environment")
