@@ -75,16 +75,16 @@ GAMES: dict[str, GameConfig] = {
         display_name="Patolli",
         ai_module="games.ai_patolli",
         ai_initializer="initialize_ai",
-        launch_url="/games/patolli/index.html",
+        launch_url="/games/Patolli/index.html",
     ),
     "puluc": GameConfig(
         key="puluc",
         display_name="Puluc",
         ai_module="games.ai_puluc",
         ai_initializer="initialize_ai",
-        launch_url="/games/puluc/index.html",
+        launch_url="/games/Puluc/index.html",
     ),
-    "parallax_protocol": GameConfig(
+    "parallax": GameConfig(
         key="parallax",
         display_name="Parallax Protocol",
         ai_module="games.ai_parallax",
@@ -179,6 +179,17 @@ class GameRuntime:
             raise LookupError(f"AI for {config.display_name} is not initialized")
 
         return config, instance
+    
+    def _infer_game_from_referer(self, referer: str | None) -> str | None:
+        """Map a Referer URL to a game key, e.g. '/games/aether/index.html' -> 'aether_shift'."""
+        if not referer:
+            return None
+        # Normalise path: remove query and fragment
+        path = referer.split('?')[0].split('#')[0]
+        for game in GAMES.values():
+            if game.launch_url in path:
+                return game.key
+        return None
 
     def ai_health(self, session_id: str) -> dict[str, Any]:
         game_key = self.get_selected_game(session_id)
@@ -202,6 +213,21 @@ class GameRuntime:
         return status
 
     def ai_move(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            game_key = self.get_selected_game(session_id)
+            if game_key is None:
+                # Auto-select from Referer
+                game_key = self._infer_game_from_referer(referer)
+                if game_key is None:
+                    raise LookupError("No game selected for this session and could not infer from Referer")
+                # Perform selection (initialises AI if needed)
+                self.select_game(session_id, game_key)
+                logger.info("Auto-selected game %s for session %s based on Referer", game_key, session_id)
+            config = GAMES[game_key]
+            instance = self.ai_instances.get(game_key)
+            if instance is None:
+                raise LookupError(f"AI for {config.display_name} is not initialised")
+
         _, instance = self._get_selected_instance(session_id)
 
         move_fn = getattr(instance, "get_move", None)
@@ -442,7 +468,8 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/ai/move":
             try:
-                result = runtime.ai_move(self.session_id, payload)
+                referer = self.headers.get("Referer")
+                result = runtime.ai_move(self.session_id, payload, referer=referer)
                 self._send_json(result)
             except LookupError as error:
                 self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
