@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # Add repository root to sys.path so shared src/ and logs/ imports resolve
 games_root = Path(__file__).resolve().parent
@@ -132,7 +132,7 @@ class AetherShiftAI:
     def learn_from_game(self, payload: dict[str, Any]) -> bool:
         try:
             if hasattr(self.learning_agent, "learn"):
-                self.learning_agent.learn(payload)
+                cast(Any, self.learning_agent).learn(payload)
 
             enriched_payload = {
                 **payload,
@@ -162,7 +162,7 @@ class AetherShiftAI:
         )
         try:
             if hasattr(self.knowledge_agent, "query"):
-                result = self.knowledge_agent.query("Aether Shift strategy for board control and wells")
+                result = cast(Any, self.knowledge_agent).query("Aether Shift strategy for board control and wells")
                 context = str(result) if result else baseline
                 self.shared_memory.set("aether_strategy_context", context)
                 return context
@@ -196,11 +196,11 @@ class AetherShiftAI:
             )
 
             if not self._planning_task_registered and hasattr(self.planning_agent, "register_task"):
-                self.planning_agent.register_task(goal_task)
+                cast(Any, self.planning_agent).register_task(goal_task)
                 self._planning_task_registered = True
 
             if hasattr(self.planning_agent, "generate_plan"):
-                plan = self.planning_agent.generate_plan(goal_task)
+                plan = cast(Any, self.planning_agent).generate_plan(goal_task)
                 if isinstance(plan, list):
                     self.shared_memory.set("aether_last_plan", [getattr(step, "name", str(step)) for step in plan])
                     return plan
@@ -219,7 +219,7 @@ class AetherShiftAI:
         execution_bonus = 0.0
         try:
             if hasattr(self.execution_agent, "predict"):
-                execution_signal = self.execution_agent.predict(
+                execution_signal = cast(Any, self.execution_agent).predict(
                     {
                         "game": self.game,
                         "strategy": strategy_context,
@@ -398,7 +398,6 @@ class AetherShiftAI:
             return None
 
         board = state.get("board")
-        players = state.get("players", {})
         active_player = int(state.get("activePlayer", 1))
         player = self._get_player(state, active_player)
         if player is None or not isinstance(board, list):
@@ -431,7 +430,11 @@ class AetherShiftAI:
             current_pos = player.get("position")
             if not self._is_valid_move(board, current_pos, {"row": row, "col": col}):
                 return None
-            old_tile = board[current_pos["row"]][current_pos["col"]]
+            current_coords = self._extract_position_coords(current_pos)
+            if current_coords is None:
+                return None
+            current_row, current_col = current_coords
+            old_tile = board[current_row][current_col]
             if old_tile and isinstance(old_tile.get("playersPresent"), list):
                 old_tile["playersPresent"] = [pid for pid in old_tile["playersPresent"] if int(pid) != active_player]
             player["position"] = {"row": row, "col": col}
@@ -586,8 +589,8 @@ class AetherShiftAI:
         board = state["board"]
         players = state.get("players", {})
 
-        axis = None
-        direction = None
+        axis = ""
+        direction = 0
         if row == 0:
             axis = "col"
             direction = 1
@@ -613,7 +616,10 @@ class AetherShiftAI:
             for player in players.values():
                 pos = player.get("position") if isinstance(player, dict) else None
                 if isinstance(pos, dict) and pos.get("row") == row:
-                    new_col = int(pos.get("col", 0)) + direction
+                    col_value = pos.get("col")
+                    if not isinstance(col_value, int):
+                        continue
+                    new_col = col_value + direction
                     if new_col >= BOARD_SIZE:
                         new_col = 0
                     if new_col < 0:
@@ -634,7 +640,10 @@ class AetherShiftAI:
             for player in players.values():
                 pos = player.get("position") if isinstance(player, dict) else None
                 if isinstance(pos, dict) and pos.get("col") == col:
-                    new_row = int(pos.get("row", 0)) + direction
+                    row_value = pos.get("row")
+                    if not isinstance(row_value, int):
+                        continue
+                    new_row = row_value + direction
                     if new_row >= BOARD_SIZE:
                         new_row = 0
                     if new_row < 0:
@@ -698,16 +707,14 @@ class AetherShiftAI:
 
         return min(99.0, (max_progress / (BOARD_SIZE - 1)) * 90.0)
 
-    def _is_valid_move(self, board: list[list[Any]], from_pos: dict[str, Any], to_pos: dict[str, Any]) -> bool:
-        if not isinstance(from_pos, dict) or not isinstance(to_pos, dict):
+    def _is_valid_move(self, board: list[list[Any]], from_pos: Any, to_pos: Any) -> bool:
+        from_coords = self._extract_position_coords(from_pos)
+        to_coords = self._extract_position_coords(to_pos)
+        if from_coords is None or to_coords is None:
             return False
 
-        from_row = from_pos.get("row")
-        from_col = from_pos.get("col")
-        to_row = to_pos.get("row")
-        to_col = to_pos.get("col")
-        if not all(isinstance(v, int) for v in (from_row, from_col, to_row, to_col)):
-            return False
+        from_row, from_col = from_coords
+        to_row, to_col = to_coords
         if not (0 <= to_row < BOARD_SIZE and 0 <= to_col < BOARD_SIZE):
             return False
 
@@ -746,10 +753,12 @@ class AetherShiftAI:
 
         for tile_type in PLACE_TYPES:
             temp = json.loads(json.dumps(state))
+            temp_player = self._get_player(temp, player_id)
+            player_color = temp_player.get("color", "neutral") if isinstance(temp_player, dict) else "neutral"
             temp["board"][row][col] = {
                 "type": tile_type,
                 "rotation": 0,
-                "color": self._get_player(temp, player_id).get("color", "neutral"),
+                "color": player_color,
                 "hasResonator": False,
                 "playersPresent": [],
             }
@@ -760,12 +769,24 @@ class AetherShiftAI:
 
         return best_type
 
-    def _is_adjacent(self, from_pos: dict[str, Any], to_pos: dict[str, int]) -> bool:
-        if not isinstance(from_pos, dict):
+    def _is_adjacent(self, from_pos: Any, to_pos: dict[str, int]) -> bool:
+        coords = self._extract_position_coords(from_pos)
+        if coords is None:
             return False
-        d_row = abs(int(from_pos.get("row", -999)) - to_pos["row"])
-        d_col = abs(int(from_pos.get("col", -999)) - to_pos["col"])
+        from_row, from_col = coords
+        d_row = abs(from_row - to_pos["row"])
+        d_col = abs(from_col - to_pos["col"])
         return (d_row + d_col) == 1
+
+    @staticmethod
+    def _extract_position_coords(position: Any) -> tuple[int, int] | None:
+        if not isinstance(position, dict):
+            return None
+        row_value = position.get("row")
+        col_value = position.get("col")
+        if not isinstance(row_value, int) or not isinstance(col_value, int):
+            return None
+        return cast(int, row_value), cast(int, col_value)
 
     def _is_power_well(self, row: int, col: int) -> bool:
         return any(well["row"] == row and well["col"] == col for well in POWER_WELLS)
@@ -807,7 +828,7 @@ class AetherShiftAI:
         if winner in {"draw", None, 0}:
             self.stats["draws"] = int(self.stats.get("draws", 0)) + 1
             self.stats["last_result"] = "draw"
-        elif int(winner) == ai_player_id:
+        elif self._coerce_int(winner, default=-1) == ai_player_id:
             self.stats["wins"] = int(self.stats.get("wins", 0)) + 1
             self.stats["last_result"] = "win"
         else:
@@ -864,6 +885,13 @@ class AetherShiftAI:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
 def initialize_ai() -> AetherShiftAI:
     ai = AetherShiftAI()
