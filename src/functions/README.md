@@ -9,6 +9,7 @@
 5. Email delivery with SMTP, async queueing, and simple templating
 6. File storage with local filesystem and S3 backends
 7. Transport adapters for LoRa/serial/mesh/LTE/SATCOM connect-send-receive workflows
+8. Relay protocol codec/parser with frame checksums and fragmentation reassembly
 
 ---
 
@@ -70,6 +71,13 @@ from src.functions import (
     MeshAdapter,
     LTEAdapter,
     SATCOMAdapter,
+
+    # Codec
+    RelayCodecError,
+    RelayFrameCodec,
+    RelayFrameHeader,
+    DecodedRelayFrame,
+    RelayReassembler,
 )
 ```
 
@@ -89,6 +97,7 @@ graph TD
     EM[email.py] --> SMTP[SMTP backend]
     ST[storage.py] --> FS[Local filesystem]
     ST --> S3[S3 backend]
+    CODEC[codec.py] --> TRANSPORT[relay frame pipeline]
 ```
 
 ```mermaid
@@ -542,4 +551,42 @@ tx_id = transport.send_with_retry("field-lora", packet, max_attempts=4)
 ack = transport.receive("field-lora", timeout_seconds=1.0)
 
 print(tx_id, ack.metadata if ack else None)
+```
+
+---
+
+## 8) `codec.py`
+
+Relay communication codec utilities for a standardized frame pipeline.
+
+### Main types
+
+- `RelayFrameCodec`: encode/decode for relay frames
+- `RelayFrameHeader`: parsed frame metadata (versioning + fragment descriptors)
+- `DecodedRelayFrame`: decoded frame bundle with payload and checksum metadata
+- `RelayReassembler`: message reassembly buffer for fragmented payloads
+- `RelayCodecError`: validation and parsing exception
+
+### Key capabilities
+
+- stable binary frame structure with explicit protocol magic + version
+- header CRC32 + payload CRC32 validation
+- deterministic fragmentation for oversized payloads
+- stream parser (`decode_stream`) that handles partial-frame tails
+- incremental fragment reassembly with expiration-based cleanup
+
+### Example
+
+```python
+from src.functions import RelayFrameCodec, RelayReassembler
+
+payload = b"high-priority relay message"
+frames = RelayFrameCodec.encode(payload, message_type=4, max_fragment_payload=8)
+
+reassembler = RelayReassembler()
+for frame_bytes in frames:
+    decoded = RelayFrameCodec.decode_frame(frame_bytes)
+    complete = reassembler.add(decoded)
+    if complete is not None:
+        assert complete == payload
 ```
