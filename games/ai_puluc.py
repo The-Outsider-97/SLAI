@@ -50,8 +50,8 @@ class PulucAI:
         self._planning_task_registered = False
         self._planning_enabled = True
 
-        self.match_log_path = project_root / "AI" / "logs" / "puluc_matches.jsonl"
-        self.learning_store_path = project_root / "AI" / "logs" / "puluc_learning_state.json"
+        self.match_log_path = project_root / "logs" / "puluc_matches.jsonl"
+        self.learning_store_path = project_root / "logs" / "puluc_learning_state.json"
 
         self.stats: dict[str, Any] = {
             "games_played": 0,
