@@ -22,6 +22,7 @@ from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 SESSION_COOKIE = "r_games_session"
@@ -91,6 +92,15 @@ GAMES: dict[str, GameConfig] = {
         ai_initializer="initialize_ai",
         launch_url="/games/parallax/index.html",
     ),
+}
+
+GAME_PATH_ALIASES: dict[str, str] = {
+    "aether": "aether_shift",
+    "chronos": "chronos",
+    "mindweave": "mindweave",
+    "patolli": "patolli",
+    "puluc": "puluc",
+    "parallax": "parallax",
 }
 
 
@@ -168,6 +178,51 @@ class GameRuntime:
     def get_selected_game(self, session_id: str) -> str | None:
         return self.session_selected_game.get(session_id)
 
+    @staticmethod
+    def _guess_game_from_referer(referer: str | None) -> str | None:
+        if not referer:
+            return None
+
+        try:
+            parsed = urlparse(referer)
+            path = parsed.path or ""
+        except Exception:  # noqa: BLE001
+            return None
+
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 2:
+            return None
+
+        if parts[0] != "games":
+            return None
+
+        slug = parts[1].lower()
+        return GAME_PATH_ALIASES.get(slug)
+
+    def _ensure_game_selected(
+        self,
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        referer: str | None = None,
+    ) -> None:
+        if self.get_selected_game(session_id):
+            return
+
+        game_key = None
+        if isinstance(payload, dict):
+            hinted_game = payload.get("game") or payload.get("game_key")
+            if isinstance(hinted_game, str):
+                hinted_normalized = hinted_game.strip().lower()
+                if hinted_normalized in GAMES:
+                    game_key = hinted_normalized
+                else:
+                    game_key = GAME_PATH_ALIASES.get(hinted_normalized)
+
+        game_key = game_key or self._guess_game_from_referer(referer)
+        if game_key:
+            self.select_game(session_id, game_key)
+
     def _get_selected_instance(self, session_id: str) -> tuple[GameConfig, object]:
         game_key = self.get_selected_game(session_id)
         if not game_key:
@@ -208,6 +263,7 @@ class GameRuntime:
         *,
         referer: str | None = None,
     ) -> dict[str, Any]:
+        self._ensure_game_selected(session_id, payload, referer=referer)
         _, instance = self._get_selected_instance(session_id)
 
         move_fn = getattr(instance, "get_move", None)
@@ -227,6 +283,7 @@ class GameRuntime:
         return {"move": move}
 
     def ai_learn(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_game_selected(session_id, payload)
         _, instance = self._get_selected_instance(session_id)
         learn_fn = getattr(instance, "learn_from_game", None)
         if not callable(learn_fn):
@@ -242,6 +299,7 @@ class GameRuntime:
         return {"status": "error", "message": "Learning update failed"}
 
     def ai_chat(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_game_selected(session_id, payload)
         _, instance = self._get_selected_instance(session_id)
         chat_fn = getattr(instance, "chat", None)
         if not callable(chat_fn):
@@ -373,14 +431,32 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if self._set_cookie_header:
-            self.send_header("Set-Cookie", self._set_cookie_header)
-            self._set_cookie_header = None
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if self._set_cookie_header:
+                self.send_header("Set-Cookie", self._set_cookie_header)
+                self._set_cookie_header = None
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as error:
+            if self._is_client_disconnect(error):
+                logger.info(
+                    "Client disconnected before response was delivered (%s %s): %s",
+                    self.command,
+                    self.path,
+                    error,
+                )
+                return
+            raise
+
+    @staticmethod
+    def _is_client_disconnect(error: BaseException) -> bool:
+        disconnect_errnos = {32, 104, 10053, 10054}
+        winerror = getattr(error, "winerror", None)
+        errno = getattr(error, "errno", None)
+        return winerror in disconnect_errnos or errno in disconnect_errnos
 
     def do_GET(self) -> None:
         self._ensure_session()
