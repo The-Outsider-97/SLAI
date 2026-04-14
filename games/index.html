@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>R-Games Launcher</title>
-    <link rel="icon" type="image/x-icon" href="img/Logo01.svg" />
-    <link rel="stylesheet" href="src/style.css">
+    <link rel="icon" type="image/x-icon" href="games/img/Logo01.svg" />
+    <link rel="stylesheet" href="games/src/style.css">
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body class="min-h-screen flex items-center justify-center p-6">
@@ -23,19 +23,19 @@
       </section>
 
       <section id="game-grid" class="grid gap-4 md:gap-6 md:grid-cols-3">
-        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--sky-blue)]" data-game="chronos" data-launch="/chronos/index.html">
+        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--sky-blue)]" data-game="chronos" data-launch="/games/chronos/index.html">
           <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Tactical Strategy</p>
           <h2 class="text-2xl font-extrabold mt-2 text-[var(--sky-blue)]">Chronos</h2>
           <p class="text-xs text-slate-400 mt-3">Command temporal units and fight for core control.</p>
         </button>
 
-        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--signal-white)]" data-game="aether_shift" data-launch="/aether/index.html">
+        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--signal-white)]" data-game="aether_shift" data-launch="/games/aether/index.html">
           <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Arcane Systems</p>
           <h2 class="text-2xl font-extrabold mt-2 text-[var(--signal-white)]">Aether Shift</h2>
           <p class="text-xs text-slate-400 mt-3">Manipulate energy lanes and outmaneuver rival casters.</p>
         </button>
 
-        <button id="btn-mindweave" class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--traffic-red)]" data-game="mindweave" data-launch="/mindweave/index.html" data-requires-api="true">
+        <button id="btn-mindweave" class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--traffic-red)]" data-game="mindweave" data-launch="/games/mindweave/index.html" data-requires-api="true">
           <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Neural Puzzle</p>
           <h2 class="text-2xl font-extrabold mt-2 text-[var(--traffic-red)]">Project: Mindweave</h2>
           <p class="text-xs text-slate-400 mt-3">A Web-Based Cognitive and Socio-Emotional RPG Simulation.</p>
@@ -44,13 +44,13 @@
 
       <section class="mt-4 md:mt-6">
         <div class="grid gap-4 md:gap-6 md:grid-cols-3">
-          <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[#ddba79]" data-game="patolli" data-launch="/Patolli/index.html">
+          <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[#ddba79]" data-game="patolli" data-launch="/games/Patolli/index.html">
             <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Aztec Race</p>
             <h2 class="text-2xl font-extrabold mt-1 text-[#ddba79]">Patolli</h2>
             <p class="text-xs text-slate-400 mt-2">Cast beans, race the sacred cross, and outscore your rival.</p>
           </button>
 
-          <button class="game-card card-glow rounded-xl border border-[#2f6f42]/60 bg-black/40 px-4 py-3 text-left transition-all hover:-translate-y-1 hover:border-[#5fbf73]" data-game="puluc" data-launch="/puluc/index.html">
+          <button class="game-card card-glow rounded-xl border border-[#2f6f42]/60 bg-black/40 px-4 py-3 text-left transition-all hover:-translate-y-1 hover:border-[#5fbf73]" data-game="puluc" data-launch="/games/puluc/index.html">
             <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Mayan Race</p>
             <h2 class="text-2xl font-extrabold mt-1 text-[#6fcf84]">Puluc</h2>
             <p class="text-xs text-slate-400 mt-2">Throw sticks, race warriors, and capture enemy stacks.</p>
@@ -109,6 +109,6 @@
       </div>
     </div>
 
-    <script src="src/script.js"></script>
+    <script src="games/src/script.js"></script>
   </body>
 </html>
