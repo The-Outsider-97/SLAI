@@ -11,9 +11,9 @@ import threading
 
 from typing import Dict, List, Optional, Union, Any
 
-from src.agents.planning.planning_types import Task, ResourceProfile, ClusterResources
-from src.agents.planning.utils.config_loader import get_config_section, load_global_config
-from src.agents.planning.utils.resource_monitor import ResourceMonitor
+from ..planning_types import Task, ResourceProfile, ClusterResources
+from .config_loader import get_config_section, load_global_config
+from .resource_monitor import ResourceMonitor
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Planning Calculations")
@@ -41,6 +41,7 @@ class PlanningCalculations:
 
         # Resource monitor (may be None if not initialised)
         self.resource_monitor: Optional[ResourceMonitor] = None
+        self._warned_missing_resource_monitor = False
 
         # Simple caches with locks
         self._cache: Dict[str, Any] = {}
@@ -76,7 +77,9 @@ class PlanningCalculations:
         # Get available resources
         if resource_state is None:
             if self.resource_monitor is None:
-                logger.warning("No resource monitor available – returning default margin")
+                if not self._warned_missing_resource_monitor:
+                    logger.warning("No resource monitor available – returning conservative default margin")
+                    self._warned_missing_resource_monitor = True
                 return 0.7  # Conservative default
             available = self.resource_monitor.get_available_resources()
         else:
