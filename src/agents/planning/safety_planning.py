@@ -11,14 +11,14 @@ from collections import defaultdict
 from requests.exceptions import RequestException
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                        SafetyMarginError, ResourceViolation)
-from src.agents.planning.utils.planning_calculations import PlanningCalculations
-from src.agents.planning.utils.resource_monitor import ResourceMonitor
-from src.agents.planning.planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
+from .utils.planning_calculations import PlanningCalculations
+from .utils.resource_monitor import ResourceMonitor
+from .planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
                                                 ClusterResources, RepairCandidate, SafetyViolation)
-from src.agents.planning.planning_memory import PlanningMemory
+from .planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Safety Planning")
@@ -274,7 +274,7 @@ class SafetyPlanning:
         
         # Fallback to task decomposition
         if adjustment.get("type") == "add_task":
-            task = adjustment.get("task")
+            self.task = adjustment.get("task")
             try:
                 subtasks = self.distributed_decomposition(task)
                 if subtasks:
@@ -526,8 +526,15 @@ class SafetyPlanning:
             if isinstance(task.start_time, (int, float)) and task.start_time <= 0:
                 task.start_time = current_time + 10
             elif isinstance(task.start_time, (int, float)) and task.start_time < current_time:
+                skew_seconds = current_time - task.start_time
                 task.start_time = current_time + 10
-                raise TemporalViolation(f"Task {task.name} starts in past")
+                if skew_seconds > 30:
+                    raise TemporalViolation(f"Task {task.name} starts in past")
+                logger.warning(
+                    "Adjusted task '%s' start_time by %.3fs clock skew to keep plan safe",
+                    task.name,
+                    skew_seconds,
+                )
 
             if isinstance(task.deadline, (int, float)) and task.deadline:
                 if task.deadline <= current_time:
@@ -1074,14 +1081,23 @@ class SafetyPlanning:
 
         logger.info(f"Generated {len(candidates)} repair candidates")
         return candidates
-    
+
     def _create_pruned_plan(self, original_plan: List[Task], failed_task: Task) -> List[Task]:
         """
         Generates a pruned version of the original plan by removing the failed task and its dependents.
         """
-        if failed_task not in original_plan:
+        failed_index = next(
+            (
+                idx
+                for idx, task in enumerate(original_plan)
+                if task.id == failed_task.id or task.name == failed_task.name
+            ),
+            None,
+        )
+        if failed_index is None:
             logger.warning(f"Failed task '{failed_task.name}' not in original plan")
             return original_plan
+        failed_task = original_plan[failed_index]
     
         # Build a dependency graph if needed
         dependents = self._get_dependent_tasks(original_plan, failed_task)
@@ -1090,7 +1106,7 @@ class SafetyPlanning:
     
         logger.info(f"Pruned plan: removed {1 + len(dependents)} tasks")
         return pruned_plan
-    
+
     def _get_dependent_tasks(self, plan: List[Task], task: Task) -> List[Task]:
         """
         Recursively finds all tasks in the plan that depend on the given task.
@@ -1110,7 +1126,7 @@ class SafetyPlanning:
             victims = victims or []
             
             for task in self.current_plan:
-                if task.id == failed_task.id:  # or task.name == failed_task.name: 
+                if task.id == failed_task.id or task.name == failed_task.name:
                     new_plan.extend(replacement_tasks)
                     replaced = True
                 elif task in victims:
