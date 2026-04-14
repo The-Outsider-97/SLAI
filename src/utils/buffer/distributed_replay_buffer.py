@@ -1,4 +1,3 @@
-
 import time
 import heapq
 import random
@@ -10,22 +9,12 @@ from threading import RLock
 from datetime import timedelta, datetime
 from collections import deque, defaultdict
 
+from .utils.config_loader import load_global_config, get_config_section
 from src.utils.metrics_utils import FairnessMetrics, PerformanceMetrics, BiasDetection, MetricSummarizer
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Distributed Replay Buffer")
 printer = PrettyPrinter
-
-CONFIG_PATH = "src/utils/buffer/configs/buffer_config.yaml"
-
-def load_config(config_path=CONFIG_PATH):
-    with open(config_path, "r", encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-def get_merged_config(user_config=None):
-    base_config = load_config()
-    if user_config: base_config.update(user_config)
-    return base_config
 
 PUSH_TIMEOUT = 5  # seconds
 DEADLOCK_TIMEOUT = 10
@@ -40,8 +29,8 @@ class DistributedReplayBuffer:
             staleness_threshold: Automatically remove experiences older than this
             prioritization_alpha: Prioritization exponent (0=uniform, 1=full prioritization)
         """
-        config = get_merged_config(user_config)
-        dist_config = config.get('distributed', {})
+        self.config = load_global_config()
+        self.buffer_config = get_config_section("distributed") or {}
         
         self.capacity = dist_config.get('capacity', 100_000)
         self.staleness_threshold = timedelta(days=dist_config.get('staleness_threshold_days', 1))
@@ -295,16 +284,6 @@ class DistributedReplayBuffer:
 
         logger.debug(f"Removed {removed} stale experiences")
 
-    def _track_reward_stats(self, agent_id, reward):
-        """Update stats without nested locking"""
-        self.reward_stats['sum'] += reward
-        self.reward_stats['max'] = max(self.reward_stats['max'], reward)
-        self.reward_stats['min'] = min(self.reward_stats['min'], reward)
-        
-        if not hasattr(self, 'agent_rewards'):
-            self.agent_rewards = defaultdict(list)
-        self.agent_rewards[agent_id].append(reward)
-
     def _check_fairness(self, batch, strategy):
         """Implements Barocas's fairness framework for experience selection"""
         agent_ids = batch[0]
@@ -342,43 +321,6 @@ class DistributedReplayBuffer:
             references=self.metric_provenance
         )
 
-    def _prioritized_sample(self, batch_size, beta):
-        """Prioritized sampling based on stored priorities (Schaul et al., 2015)"""
-        priorities = np.array([-p[0] for p in heapq.nsmallest(batch_size, self.priorities)])
-        probs = priorities ** self.alpha
-        probs /= probs.sum()
-        
-        indices = np.random.choice(len(probs), batch_size, p=probs)
-        weights = (len(self.buffer) * probs[indices]) ** (-beta)
-        weights /= weights.max()
-        
-        batch = [self.buffer[i] for i in indices]
-        return self._process_batch(batch), indices, weights
-
-    def _reward_based_sample(self, batch_size):
-        """Quality-based sampling using reward values (Oh et al., 2018)"""
-        rewards = np.array([exp[3] for exp in self.buffer])
-        exp_rewards = rewards - self.reward_stats['min'] + 1e-6
-        probs = exp_rewards / exp_rewards.sum()
-        
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
-        batch = [self.buffer[i] for i in indices]
-        return self._process_batch(batch)
-
-    def _agent_balanced_sample(self, batch_size, distribution):
-        """Stratified sampling by agent ID (Christianos et al., 2020)"""
-        if not distribution:
-            distribution = {aid: count/len(self.buffer) 
-                          for aid, count in self.agent_experience_map.items()}
-            
-        samples = []
-        for agent_id, proportion in distribution.items():
-            n_samples = int(batch_size * proportion)
-            agent_experiences = [exp for exp in self.buffer if exp[0] == agent_id]
-            samples.extend(random.sample(agent_experiences, min(n_samples, len(agent_experiences))))
-            
-        return self._process_batch(samples[:batch_size])
-
     def _uniform_sample(self, batch_size):
         """Random uniform sampling from all experiences.
         
@@ -394,19 +336,6 @@ class DistributedReplayBuffer:
         
         # Return formatted batch with original priority weights (1.0 for all)
         return self._process_batch(batch)
-    
-    def _remove_stale_experiences(self):
-        """Automatic removal of stale experiences (Agarwal et al., 2021)"""
-        now = datetime.now()
-        stale_indices = [i for i, ts in enumerate(self.timestamps)
-                        if now - ts > self.staleness_threshold]
-        
-        # Remove from all tracking structures
-        for i in sorted(stale_indices, reverse=True):
-            #del self.buffer[i]
-            del self.timestamps[i]
-            
-        logger.debug(f"Removed {len(stale_indices)} stale experiences")
 
     def update_priorities(self, indices, new_priorities):
         """Update priorities for prioritized replay (Schaul et al., 2015)"""
@@ -495,8 +424,9 @@ class DistributedReplayBuffer:
         with self.lock:
             if not self.buffer:
                 return [], [], [], [], [], []
-            agent_ids, states, actions, rewards, next_states, dones = map(np.array, zip(*self.buffer))
-        return agent_ids, states, actions, rewards, next_states, dones
+            # Return as lists of original objects (no numpy conversion)
+            agent_ids, states, actions, rewards, next_states, dones = zip(*self.buffer)
+            return list(agent_ids), list(states), list(actions), list(rewards), list(next_states), list(dones)
 
 
 # ====================== Usage Example ======================
