@@ -2,8 +2,7 @@ import gzip
 import copy
 import os
 import time
-import copy
-import json, yaml
+import json
 import threading
 import tempfile
 
@@ -23,20 +22,77 @@ class PlanningMemory:
     CHECKPOINT_PREFIX = "checkpoint"
     MANIFEST_FILE = "checkpoints_manifest.json"
 
-    def __init__(self, agent: Optional[Any]=None):
+    def __init__(self, agent: Optional[Any] = None):
         self.config = load_global_config()
         self.monitor_snapshot = self.config.get('monitor_snapshot')
         self.memory_config = get_config_section('planning_memory')
 
-        self.checkpoints_dir = self.memory_config.get('checkpoints_dir')
-        self.max_checkpoints = self.memory_config.get('max_checkpoints')
-        self.history_window = self.memory_config.get('history_window')
-        self.retention_days = self.memory_config.get('retention_days')
-        self.compression = self.memory_config.get('compression')
-        self.auto_save_interval = self.memory_config.get('auto_save_interval')
+        # ----- Safe extraction of config values with defaults and type conversion -----
+        # checkpoints_dir: must be a non-empty string
+        raw_checkpoints_dir = self.memory_config.get('checkpoints_dir')
+        if raw_checkpoints_dir is None or not isinstance(raw_checkpoints_dir, str):
+            self.checkpoints_dir = "src/agents/planning/checkpoints/"  # fallback
+            logger.warning("Missing or invalid 'checkpoints_dir' in planning_memory config. Using default.")
+        else:
+            self.checkpoints_dir = raw_checkpoints_dir
+
+        # max_checkpoints: must be int > 0
+        raw_max = self.memory_config.get('max_checkpoints')
+        if raw_max is None or not isinstance(raw_max, int) or raw_max <= 0:
+            self.max_checkpoints = 100
+            logger.warning("Missing or invalid 'max_checkpoints'. Using default 100.")
+        else:
+            self.max_checkpoints = raw_max
+
+        # history_window: must be int >= 0
+        raw_history = self.memory_config.get('history_window')
+        if raw_history is None or not isinstance(raw_history, int) or raw_history < 0:
+            self.history_window = 1000
+            logger.warning("Missing or invalid 'history_window'. Using default 1000.")
+        else:
+            self.history_window = raw_history
+
+        # retention_days: can be None or int (None means no age-based pruning)
+        raw_retention = self.memory_config.get('retention_days')
+        if raw_retention is None:
+            self.retention_days = None
+        elif isinstance(raw_retention, int) and raw_retention > 0:
+            self.retention_days = raw_retention
+        else:
+            self.retention_days = None
+            logger.warning("Invalid 'retention_days' (must be positive int). Disabling age-based pruning.")
+
+        # compression: bool
+        raw_compression = self.memory_config.get('compression')
+        self.compression = bool(raw_compression) if raw_compression is not None else False
+
+        # auto_save_interval: float or int > 0, or 0/None to disable
+        raw_interval = self.memory_config.get('auto_save_interval')
+        if raw_interval is None:
+            self.auto_save_interval = 0.0  # disabled
+        else:
+            try:
+                interval = float(raw_interval)
+                self.auto_save_interval = interval if interval > 0 else 0.0
+            except (ValueError, TypeError):
+                self.auto_save_interval = 0.0
+                logger.warning("Invalid 'auto_save_interval' (must be numeric). Auto-save disabled.")
+
+        # default_duration_fallback: not in config originally, but used in get_min_duration
+        raw_fallback = self.memory_config.get('default_duration_fallback')
+        if raw_fallback is None:
+            self.default_duration_fallback = 300.0
+        else:
+            try:
+                self.default_duration_fallback = float(raw_fallback)
+            except (ValueError, TypeError):
+                self.default_duration_fallback = 300.0
+
+        self._missing_duration_warned: set[str] = set()
 
         self.agent = agent
-        self._base_state = self._init_base_state() if agent is None else None
+        # Always initialize _base_state as a dict (even if agent is provided, we keep it as fallback)
+        self._base_state = self._init_base_state()
 
         # In‑memory cache of recent checkpoints (most recent first)
         self.checkpoints: Deque[Dict[str, Any]] = deque(maxlen=self.max_checkpoints)
@@ -58,7 +114,7 @@ class PlanningMemory:
             self._start_auto_save()
 
     def _init_base_state(self) -> Dict[str, Any]:
-        """Create an empty base state for use when no agent is provided."""
+        """Create a base state dictionary (used when no agent is provided or as fallback)."""
         return {
             "task_library": {},
             "method_stats": defaultdict(lambda: {"success": 0, "total": 0, "avg_cost": 0.0}),
@@ -85,6 +141,9 @@ class PlanningMemory:
     # -------------------------------------------------------------------------
     def ensure_checkpoint_dir(self) -> None:
         """Create the checkpoint directory if it does not exist."""
+        if not self.checkpoints_dir:
+            logger.error("Checkpoint directory path is empty or None. Cannot create.")
+            raise ValueError("checkpoints_dir is not configured properly.")
         try:
             os.makedirs(self.checkpoints_dir, exist_ok=True)
             logger.info(f"Checkpoint directory ready: {self.checkpoints_dir}")
@@ -94,6 +153,8 @@ class PlanningMemory:
 
     def _get_checkpoint_path(self, timestamp: float) -> str:
         """Return the filesystem path for a checkpoint with the given timestamp."""
+        if not self.checkpoints_dir:
+            raise RuntimeError("checkpoints_dir is not set.")
         filename = f"{self.CHECKPOINT_PREFIX}_{timestamp:.6f}.json"
         if self.compression:
             filename += ".gz"
@@ -101,6 +162,8 @@ class PlanningMemory:
 
     def _get_manifest_path(self) -> str:
         """Return the path to the manifest file."""
+        if not self.checkpoints_dir:
+            raise RuntimeError("checkpoints_dir is not set.")
         return os.path.join(self.checkpoints_dir, self.MANIFEST_FILE)
 
     def _read_manifest(self) -> List[Dict[str, Any]]:
@@ -150,7 +213,6 @@ class PlanningMemory:
                     os.replace(tmp_path, path)
                     break
                 except PermissionError:
-                    # Windows can transiently lock files (e.g., AV scanners, indexers).
                     if attempt == max_retries - 1:
                         raise
                     time.sleep(retry_delay * (attempt + 1))
@@ -168,31 +230,23 @@ class PlanningMemory:
     # Checkpoint persistence
     # -------------------------------------------------------------------------
     def _save_checkpoint_to_disk(self, checkpoint: Dict[str, Any]) -> None:
-        """
-        Persist a checkpoint dictionary to a file.
-        Handles compression if enabled.
-        """
+        """Persist a checkpoint dictionary to a file. Handles compression if enabled."""
         path = self._get_checkpoint_path(checkpoint["timestamp"])
         try:
-            # Serialize
             data = json.dumps(checkpoint, indent=2, default=self._json_serializer).encode("utf-8")
-
             if self.compression:
                 with gzip.open(path, "wb") as f:
                     f.write(data)
             else:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(data.decode("utf-8"))
-
             logger.debug(f"Checkpoint saved to {path}")
         except Exception as e:
             logger.error(f"Failed to save checkpoint to {path}: {e}")
             raise
 
     def _load_checkpoint_from_disk(self, path: str) -> Dict[str, Any]:
-        """
-        Load a checkpoint from a file (supports compressed files).
-        """
+        """Load a checkpoint from a file (supports compressed files)."""
         try:
             if self.compression and path.endswith(".gz"):
                 with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -225,11 +279,11 @@ class PlanningMemory:
         # Sort by timestamp descending (most recent first)
         entries.sort(key=lambda e: e["timestamp"], reverse=True)
 
-        # Apply retention days filter
-        cutoff = time.time() - (self.retention_days * 86400) if self.retention_days else 0
+        # Apply retention days filter (if retention_days is set)
+        cutoff = time.time() - (self.retention_days * 86400) if self.retention_days is not None else 0
         to_keep = []
         for entry in entries:
-            if self.retention_days and entry["timestamp"] < cutoff:
+            if self.retention_days is not None and entry["timestamp"] < cutoff:
                 # too old
                 try:
                     os.remove(entry["path"])
@@ -241,7 +295,7 @@ class PlanningMemory:
 
         # Apply max_checkpoints limit (keep most recent)
         if len(to_keep) > self.max_checkpoints:
-            extra = to_keep[self.max_checkpoints :]
+            extra = to_keep[self.max_checkpoints:]
             for entry in extra:
                 try:
                     os.remove(entry["path"])
@@ -254,13 +308,10 @@ class PlanningMemory:
         self._write_manifest(to_keep)
 
     def _update_manifest(self, checkpoint: Dict[str, Any]) -> None:
-        """
-        Add a checkpoint to the manifest and optionally prune old ones.
-        """
+        """Add a checkpoint to the manifest and optionally prune old ones."""
         entries = self._read_manifest()
         # Remove any existing entry with the same timestamp (should not happen)
         entries = [e for e in entries if e["timestamp"] != checkpoint["timestamp"]]
-        # Add new
         entries.append(
             {
                 "timestamp": checkpoint["timestamp"],
@@ -270,24 +321,13 @@ class PlanningMemory:
             }
         )
         self._write_manifest(entries)
-
-        # Prune after adding new
         self._prune_old_checkpoints()
 
     # -------------------------------------------------------------------------
     # Public checkpoint API
     # -------------------------------------------------------------------------
     def save_checkpoint(self, label: Optional[str] = None, metadata: Optional[dict] = None) -> Dict[str, Any]:
-        """
-        Capture current planning state and save it to disk and memory.
-
-        Args:
-            label: Optional identifier for the checkpoint.
-            metadata: Additional user data to store.
-
-        Returns:
-            The checkpoint dictionary.
-        """
+        """Capture current planning state and save it to disk and memory."""
         with self._lock:
             checkpoint = {
                 "timestamp": time.time(),
@@ -295,33 +335,19 @@ class PlanningMemory:
                 "state": self._capture_agent_state(),
                 "metadata": metadata or {},
             }
-
-            # Save to disk
             self._save_checkpoint_to_disk(checkpoint)
             self._update_manifest(checkpoint)
-
-            # Update in‑memory deque (most recent first)
             self.checkpoints.appendleft(checkpoint)
-
             logger.info(f"Saved planning checkpoint '{checkpoint['label']}'")
             self._last_auto_save_time = checkpoint["timestamp"]
             return checkpoint
 
     def load_checkpoint(self, index: int = -1) -> bool:
-        """
-        Restore planning state from a checkpoint in the in‑memory deque.
-
-        Args:
-            index: Index into the deque (0 = most recent, -1 = oldest).
-
-        Returns:
-            True if successful, False otherwise.
-        """
+        """Restore planning state from a checkpoint in the in‑memory deque."""
         with self._lock:
             if not self.checkpoints:
                 logger.warning("No checkpoints available to load")
                 return False
-
             try:
                 checkpoint = self.checkpoints[index]
                 self._restore_agent_state(checkpoint["state"])
@@ -332,12 +358,7 @@ class PlanningMemory:
                 return False
 
     def load_latest_checkpoint(self) -> bool:
-        """
-        Load the most recent checkpoint from the in‑memory deque.
-
-        Returns:
-            True if a checkpoint was loaded, False otherwise.
-        """
+        """Load the most recent checkpoint from the in‑memory deque."""
         with self._lock:
             if not self.checkpoints:
                 logger.info("No checkpoints available to load.")
@@ -348,22 +369,17 @@ class PlanningMemory:
             return True
 
     def _load_manifest(self) -> None:
-        """
-        Load all checkpoints from disk into the in‑memory deque.
-        This is called once during initialization.
-        """
+        """Load all checkpoints from disk into the in‑memory deque."""
         entries = self._read_manifest()
         if not entries:
             return
-        # Sort descending (most recent first)
         entries.sort(key=lambda e: e["timestamp"], reverse=True)
-        # Keep only up to max_checkpoints
         entries = entries[: self.max_checkpoints]
         self.checkpoints.clear()
         for entry in entries:
             try:
                 cp = self._load_checkpoint_from_disk(entry["path"])
-                self.checkpoints.append(cp)  # append in order (most recent first)
+                self.checkpoints.append(cp)
             except Exception as e:
                 logger.warning(f"Failed to load checkpoint from {entry['path']}: {e}")
         logger.info(f"Loaded {len(self.checkpoints)} checkpoints from manifest.")
@@ -389,7 +405,7 @@ class PlanningMemory:
             self.agent.execution_history = deque(state["execution_history"], maxlen=self.history_window)
             self.agent.plan_metrics = state["plan_metrics"]
         else:
-            # Update base state
+            # Update base state (always a dict)
             self._base_state["task_library"] = state["task_library"]
             self._base_state["method_stats"] = state["method_stats"]
             self._base_state["world_state"] = state["world_state"]
@@ -403,6 +419,7 @@ class PlanningMemory:
         """Start a background timer that triggers auto‑saves periodically."""
         if self._auto_save_timer:
             self._auto_save_timer.cancel()
+        # auto_save_interval is guaranteed to be a float > 0 here (checked in __init__)
         self._auto_save_timer = threading.Timer(self.auto_save_interval, self._auto_save_worker)
         self._auto_save_timer.daemon = True
         self._auto_save_timer.start()
@@ -414,14 +431,14 @@ class PlanningMemory:
         except Exception as e:
             logger.error(f"Auto‑save failed: {e}")
         finally:
-            # Reschedule
+            # Reschedule only if auto_save_interval is still > 0
             if self.auto_save_interval > 0:
                 self._start_auto_save()
 
     def auto_save(self) -> None:
-        """
-        Perform an automatic save if enough time has passed since the last auto‑save.
-        """
+        """Perform an automatic save if enough time has passed since the last auto‑save."""
+        if self.auto_save_interval <= 0:
+            return
         now = time.time()
         if now - self._last_auto_save_time >= self.auto_save_interval:
             self.save_checkpoint(label="auto_save")
@@ -437,15 +454,7 @@ class PlanningMemory:
     # State query methods (consistent with the original API)
     # -------------------------------------------------------------------------
     def get_task_outcome(self, task_id: str) -> Optional[bool]:
-        """
-        Retrieve the actual outcome of a task.
-
-        Args:
-            task_id: Identifier of the task.
-
-        Returns:
-            True if the task succeeded, False if failed, None if not found.
-        """
+        """Retrieve the actual outcome of a task."""
         history = self._state["execution_history"]
         for entry in history:
             if entry.get("task_id") == task_id:
@@ -453,30 +462,14 @@ class PlanningMemory:
         return None
 
     def get_method_success_rate(self, method_name: str) -> float:
-        """
-        Get historical success rate for a method.
-
-        Args:
-            method_name: Name of the method.
-
-        Returns:
-            Success rate between 0 and 1, or 0.0 if no data.
-        """
+        """Get historical success rate for a method."""
         stats = self._state["method_stats"].get(method_name)
         if stats and stats["total"] > 0:
             return stats["success"] / stats["total"]
         return 0.0
 
     def get_min_duration(self, task_name: str) -> float:
-        """
-        Retrieve the minimum observed duration for a given task.
-
-        Args:
-            task_name: Name of the task.
-
-        Returns:
-            Minimum duration in seconds, or infinity if no data.
-        """
+        """Retrieve the minimum observed duration for a given task."""
         durations = []
         history = self._state["execution_history"]
         for entry in history:
@@ -485,30 +478,23 @@ class PlanningMemory:
                 end = entry.get("end_time")
                 if start is not None and end is not None and end > start:
                     durations.append(end - start)
-
         if durations:
             return min(durations)
-
-        logger.warning(f"No valid duration data found for task '{task_name}'. Returning infinity.")
-        return float("inf")
+        if task_name not in self._missing_duration_warned:
+            logger.warning(
+                "No valid duration data found for task '%s'. Using fallback %.1fs.",
+                task_name,
+                self.default_duration_fallback,
+            )
+            self._missing_duration_warned.add(task_name)
+        return self.default_duration_fallback
 
     def is_sequential_task(self, task: Dict[str, Any], min_length: int) -> bool:
-        """
-        Check if the task is part of a sequential pattern of length >= min_length.
-
-        Args:
-            task: Task dictionary with "name" and optionally "parent".
-            min_length: Minimum sequence length to consider.
-
-        Returns:
-            True if the task appears in a chain of at least min_length tasks.
-        """
+        """Check if the task is part of a sequential pattern of length >= min_length."""
         task_chain = self._get_task_ancestry(task)
-        # Check memory for sequential patterns
         history = self._state["execution_history"]
         for entry in history:
             entry_chain = entry.get("task_chain", [])
-            # Compare the last min_length elements of the chain
             if len(entry_chain) >= min_length and entry_chain[-min_length:] == task_chain[-min_length:]:
                 return True
         return False
@@ -530,15 +516,7 @@ class PlanningMemory:
     # Utility methods
     # -------------------------------------------------------------------------
     def to_json(self, file_path: Optional[str] = None) -> Union[str, None]:
-        """
-        Serialize the current in‑memory checkpoints to JSON.
-
-        Args:
-            file_path: If provided, write to file; otherwise return JSON string.
-
-        Returns:
-            JSON string if file_path is None, otherwise None.
-        """
+        """Serialize the current in‑memory checkpoints to JSON."""
         data = {"config": self.config, "checkpoints": list(self.checkpoints)}
         json_str = json.dumps(data, indent=2, default=self._json_serializer)
         if file_path:
@@ -549,29 +527,14 @@ class PlanningMemory:
 
     @classmethod
     def from_json(cls, json_data: Union[str, dict], agent: Optional[Any] = None) -> "PlanningMemory":
-        """
-        Reconstruct a PlanningMemory from JSON data.
-
-        Args:
-            json_data: JSON string or dict.
-            agent: Agent to associate with the new memory.
-
-        Returns:
-            A new PlanningMemory instance.
-        """
+        """Reconstruct a PlanningMemory from JSON data."""
         data = json.loads(json_data) if isinstance(json_data, str) else json_data
         memory = cls(agent=agent)
         memory.checkpoints = deque(data.get("checkpoints", []), maxlen=memory.max_checkpoints)
-        # Also restore the manifest? Not needed, but we could update.
         return memory
 
     def get_memory_usage(self) -> Dict[str, int]:
-        """
-        Return memory consumption statistics.
-
-        Returns:
-            Dictionary with counts of various items.
-        """
+        """Return memory consumption statistics."""
         state = self._state
         return {
             "checkpoints": len(self.checkpoints),
@@ -584,7 +547,6 @@ class PlanningMemory:
 if __name__ == "__main__":
     print("\n=== Running Planning Memory Test ===\n")
     printer.status("Init", "Planning Memory initialized", "success")
-
     memory = PlanningMemory()
     print(memory.get_memory_usage())
     print("\n=== Successfully Ran Planning Memory ===\n")
