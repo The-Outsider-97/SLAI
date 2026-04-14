@@ -39,15 +39,24 @@ On your turn, you must perform **2 Actions**. You select actions from the shared
 ## AI Decision Flow
 ```mermaid
 flowchart TD
-    A[AI turn starts] --> B[Collect all valid moves from visible action cards]
-    B --> C[Score each move by action priority]
-    C --> D{Targets Power Well?}
-    D -->|Yes| E[Increase score
-+ stronger bonus if it can secure 3rd Well]
-    D -->|No| F[Evaluate path pressure and board disruption]
-    E --> G[Blend strategy + planning/execution agent signals]
-    F --> G
-    G --> H[Pick highest-score move
-with slight randomness among top band]
+    A[AI turn starts] --> B[Read shared game state + valid moves]
+    B --> C[Query Knowledge Agent for strategic context]
+    C --> D[Generate planning task for current turn]
+    D --> E[Score each move with tactical simulation]
+    E --> F{Immediate win?}
+    F -->|Yes| G[Force winning move]
+    F -->|No| H[Evaluate two-action follow-up potential]
+    H --> I[Estimate opponent best reply risk]
+    I --> J[Apply learned action-weight adjustments]
+    J --> K[Blend execution-agent confidence bonus]
+    K --> L[Select from top scoring band for controlled variety]
+    L --> M[Store decision trace in shared memory]
+    M --> N[Return move to game client]
+```
+
+### Integration Notes
+- The Aether backend AI performs deterministic state simulation for `PLACE`, `ROTATE`, `SHIFT`, `ADVANCE`, and `ATTUNE`, including action-economy updates, path victory checks, and Power Well capture resolution.
+- The scorer uses board-level evaluation (path progress, well control, resonator economy, and positional pressure) plus two-ply tactical lookahead when the AI still has a second action in the turn.
+- Match learning persists to `logs/aether_learning_state.json` and updates action preferences based on outcomes, so behavior adapts over time without placeholders or stubs.
     H --> I[Return move to game client]
 ```
