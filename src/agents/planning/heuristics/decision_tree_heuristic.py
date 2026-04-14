@@ -50,9 +50,13 @@ class DecisionTreeHeuristic(BaseHeuristics):
         self.min_impurity_decrease = self.dt_config.get('min_impurity_decrease', 0.01)
         self.ccp_alpha = self.dt_config.get('ccp_alpha', 0.02)
 
-        # Paths
+        # Paths – ensure strings, provide fallback
         self.planning_db_path = self.heuristics_config.get('planning_db_path')
         self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
+        if self.heuristic_model_path is None:
+            self.heuristic_model_path = "src/agents/planning/models/"   # default
+        # Ensure it's a string (in case config returned non-string)
+        self.heuristic_model_path = str(self.heuristic_model_path)
         os.makedirs(self.heuristic_model_path, exist_ok=True)
         self.model_path = os.path.join(self.heuristic_model_path, 'dt_heuristic_model.pkl')
 
@@ -101,18 +105,16 @@ class DecisionTreeHeuristic(BaseHeuristics):
         return DecisionTreeClassifier(**params)
 
     def _ensure_model_ready(self) -> bool:
-        if self.trained:
+        if self.trained and self.model is not None:
             return True
         with self._lock:
-            # Try to load again in case another thread loaded it
-            if self.trained:
+            if self.trained and self.model is not None:
                 return True
-            # Attempt auto‑training
             try:
                 X, y = self.load_training_data()
                 if len(X) > 0 and len(np.unique(y)) >= 2:
                     self.train(X, y)
-                    return self.trained
+                    return self.trained and self.model is not None
             except Exception as e:
                 logger.error(f"Auto‑training failed: {e}")
         return False
@@ -134,7 +136,25 @@ class DecisionTreeHeuristic(BaseHeuristics):
         try:
             features = self.extract_features(task, world_state, method_stats)
             scaled = self.scaler.transform(features.reshape(1, -1))
-            prob = self.model.predict_proba(scaled)[0][1]
+            probabilities = self.model.predict_proba(scaled)[0]
+            classes = getattr(self.model, "classes_", [])
+
+            if len(classes) == len(probabilities) and len(classes) > 0:
+                class_to_prob = {
+                    int(label): float(probability)
+                    for label, probability in zip(classes, probabilities)
+                }
+                if 1 in class_to_prob:
+                    prob = class_to_prob[1]
+                else:
+                    # Single-class or non-binary model without class "1".
+                    prob = 0.0 if 0 in class_to_prob else float(next(iter(class_to_prob.values())))
+            elif len(probabilities) > 1:
+                prob = float(probabilities[1])
+            elif len(probabilities) == 1:
+                prob = float(probabilities[0])
+            else:
+                prob = 0.5
         except Exception as e:
             logger.error(f"Prediction failed: {e}")
             prob = 0.5
@@ -200,28 +220,23 @@ class DecisionTreeHeuristic(BaseHeuristics):
                 logger.error("Need at least two classes for training")
                 return 0.0
     
-            # Optionally limit training samples
             max_samples = self.dt_config.get('validation', {}).get('max_training_samples', 10000)
             if len(X) > max_samples:
                 indices = np.random.choice(len(X), max_samples, replace=False)
                 X, y = X[indices], y[indices]
     
-            # Determine if stratification is safe
             min_class_count = counts.min()
             stratify = y if min_class_count >= 2 else None
             if stratify is None and min_class_count < 2:
                 logger.warning("Minority class has less than 2 samples; stratification disabled.")
     
-            # Split
             X_train, X_val, y_train, y_val = train_test_split(
                 X, y, test_size=test_size, stratify=stratify, random_state=self.random_state
             )
     
-            # Fit scaler and transform
             X_train_scaled = self.scaler.fit_transform(X_train)
-            X_val_scaled = self.scaler.transform(X_val)
+            X_val_scaled = self.scaler.transform(X_val) if len(X_val) > 0 else None
     
-            # Create and train model
             self.model = DecisionTreeClassifier(
                 max_depth=self.max_depth,
                 min_samples_split=self.min_samples_split,
@@ -232,8 +247,8 @@ class DecisionTreeHeuristic(BaseHeuristics):
             )
             self.model.fit(X_train_scaled, y_train)
     
-            # Evaluate if validation set is non-empty
-            if len(y_val) > 0:
+            val_acc = 0.0  # default
+            if X_val_scaled is not None and len(y_val) > 0:
                 val_acc = accuracy_score(y_val, self.model.predict(X_val_scaled))
                 logger.info(f"Validation accuracy: {val_acc:.2f}")
                 if self.dt_config.get('validation', {}).get('max_training_samples', 0):
@@ -243,7 +258,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
     
             self.trained = True
             joblib.dump((self.model, self.scaler), self.model_path)
-            return val_acc if len(y_val) > 0 else 0.0
+            return val_acc
 
     def load_training_data(self) -> Tuple[np.ndarray, np.ndarray]:
         tasks, method_stats, world_states = self.load_planning_db()
@@ -262,7 +277,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
             y.append(1 if outcome == "success" else 0)
         return np.array(X), np.array(y)
 
-    def load_planning_db(self, path: str = None):
+    def load_planning_db(self, path: Optional[str] = None):
         if path is None:
             path = os.path.join(os.path.dirname(__file__), '..', self.planning_db_path)
         with open(path, 'r', encoding='utf-8') as f:
@@ -294,6 +309,10 @@ class DecisionTreeHeuristic(BaseHeuristics):
         """
         Perform post-training cost-complexity pruning and refit model with optimal ccp_alpha.
         """
+        if self.model is None:
+            logger.warning("No model to prune. Train first.")
+            return None
+    
         path = self.model.cost_complexity_pruning_path(X_train, y_train)
         ccp_alphas = path.ccp_alphas[:-1]  # Drop the last value (trivial tree)
         impurities = path.impurities[:-1]
@@ -316,13 +335,14 @@ class DecisionTreeHeuristic(BaseHeuristics):
     
         # Evaluate and choose the best pruned tree (based on validation accuracy)
         best_score = -1
-        best_model = self.model
+        best_model = self.model   # fallback to original
         for clf in models:
             score = clf.score(X_train, y_train)  # Could use validation set instead
             if score > best_score:
                 best_score = score
                 best_model = clf
     
+        # best_model is guaranteed to be a DecisionTreeClassifier (never None)
         logger.info(f"Pruned tree selected with ccp_alpha={best_model.ccp_alpha}")
         return best_model
 
