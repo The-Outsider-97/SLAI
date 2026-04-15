@@ -40,3 +40,12 @@ eviction:
 telemetry:
   enabled: true
   log_interval: 200
+
+nstep:
+  n_step: 3
+  gamma: 0.99
+  clear_on_terminal: true
+
+reservoir:
+  capacity: 100000
+  seed: null
