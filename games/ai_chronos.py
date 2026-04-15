@@ -576,8 +576,16 @@ class ChronosAI:
                     },
                 }
                 response = cast(Any, self.adaptive_agent).perform_task(adaptive_payload)
-                if isinstance(response, dict) and "confidence" in response:
-                    confidence = max(0.1, min(0.95, float(response["confidence"])))
+                if isinstance(response, dict):
+                    adaptive_confidence = response.get("confidence")
+                    if adaptive_confidence is None:
+                        policy_metrics = response.get("policy_metrics")
+                        if isinstance(policy_metrics, dict):
+                            adaptive_confidence = policy_metrics.get("recent_success_rate")
+                    if adaptive_confidence is None and "success" in response:
+                        adaptive_confidence = 0.7 if bool(response.get("success")) else 0.35
+                    if adaptive_confidence is not None:
+                        confidence = max(0.1, min(0.95, float(adaptive_confidence)))
             except Exception as error:  # noqa: BLE001
                 logger.warning("Adaptive-agent direct task execution skipped: %s", error)
 
