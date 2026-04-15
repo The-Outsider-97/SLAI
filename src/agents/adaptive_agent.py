@@ -271,10 +271,24 @@ class AdaptiveAgent(BaseAgent):
 
     def _initialize_subsystems(self) -> None:
         self.skills = self._initialize_skills()
-        #if not self.skills:
-        #    logger.warning("No skills configured. Creating fallback skill.")
-        #    self.skills = self._create_fallback_skill()
+        if not self.skills and not self.use_global_rl_engine:
+            raise EmptyRegistryError(
+                "AdaptiveAgent requires at least one configured skill when use_global_rl_engine is disabled.",
+                component="adaptive_agent",
+                remediation=(
+                    "Either define adaptive_agent.skills in agents_config.yaml or set "
+                    "adaptive_agent.use_global_rl_engine=true to register the global RL engine as a managed skill."
+                ),
+            )
 
+        self.rl_engine = self._build_global_rl_engine()
+        if self.use_global_rl_engine:
+            self.skills[self.global_rl_skill_id] = self.rl_engine
+            logger.info(
+                "Registered global RL engine as managed skill %s (configured skills=%s)",
+                self.global_rl_skill_id,
+                max(0, len(self.skills) - 1),
+            )
         self.policy_manager = PolicyManager()
         self.policy_manager.initialize_skills(self.skills)
 
@@ -286,7 +300,6 @@ class AdaptiveAgent(BaseAgent):
         else:
             self.meta_learning = MetaLearningWorker()
 
-        self.rl_engine = self._build_global_rl_engine()
         imitation_policy = self._resolve_imitation_policy_network()
         self.imitation_worker = ImitationLearningWorker(
             action_dim=self.num_actions,
@@ -406,10 +419,20 @@ class AdaptiveAgent(BaseAgent):
             if hasattr(worker, "attach_meta_learning"):
                 worker.attach_meta_learning(self.meta_learning)
 
+    def _iter_unique_workers(self) -> Iterable[SkillWorker]:
+        seen_workers: set[int] = set()
+        for worker in list(self.skills.values()) + [getattr(self, "rl_engine", None)]:
+            if worker is None:
+                continue
+            worker_key = id(worker)
+            if worker_key in seen_workers:
+                continue
+            seen_workers.add(worker_key)
+            yield worker
+
     # ------------------------------------------------------------------
     # Shared-memory backed state and recovery persistence
     # ------------------------------------------------------------------
-
     @property
     def _state_key(self) -> str:
         return f"agent_state:{self.name}"
@@ -830,10 +853,20 @@ class AdaptiveAgent(BaseAgent):
 
         dagger_update = None
         if self.auto_dagger_update and hasattr(self.imitation_worker, "dagger_update"):
-            try:
-                dagger_update = self.imitation_worker.dagger_update()
-            except Exception as exc:
-                logger.warning("DAgger update failed: %s", exc)
+            demo_counts: Dict[str, int] = {}
+            if hasattr(self.imitation_worker, "get_demonstration_count"):
+                try:
+                    demo_counts = self.imitation_worker.get_demonstration_count()
+                except Exception:
+                    demo_counts = {}
+
+            if int(demo_counts.get("total_demos", 0)) > 0:
+                try:
+                    dagger_update = self.imitation_worker.dagger_update()
+                except Exception as exc:
+                    logger.warning("DAgger update failed: %s", exc)
+            else:
+                dagger_update = {"skipped": True, "reason": "no_demonstrations", "loss": None}
 
         meta_update = None
         if self.auto_meta_optimize and self.episode > 0 and self.episode % max(1, self.agent_config.get("meta_update_frequency", 5)) == 0:
@@ -853,7 +886,7 @@ class AdaptiveAgent(BaseAgent):
         return result
 
     def _apply_tuner_params_to_workers(self, tuned_params: Mapping[str, Any]) -> None:
-        for worker in list(self.skills.values()) + [self.rl_engine]:
+        for worker in self._iter_unique_workers():
             if hasattr(worker, "apply_hyperparameters"):
                 try:
                     worker.apply_hyperparameters(tuned_params)
@@ -1121,7 +1154,7 @@ class AdaptiveAgent(BaseAgent):
 
     def _recover_full_reset(self) -> bool:
         try:
-            for worker in list(self.skills.values()) + [self.rl_engine]:
+            for worker in self._iter_unique_workers():
                 if hasattr(worker, "reset"):
                     worker.reset()
             self.tuner.reset()
