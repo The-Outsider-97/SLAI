@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.2.0"
 
 """
 Adaptive Agent with Reinforcement Learning Capabilities
@@ -289,6 +289,7 @@ class AdaptiveAgent(BaseAgent):
                 self.global_rl_skill_id,
                 max(0, len(self.skills) - 1),
             )
+
         self.policy_manager = PolicyManager()
         self.policy_manager.initialize_skills(self.skills)
 
@@ -301,9 +302,10 @@ class AdaptiveAgent(BaseAgent):
             self.meta_learning = MetaLearningWorker()
 
         imitation_policy = self._resolve_imitation_policy_network()
+        imitation_state_dim = self._resolve_imitation_state_dim()
         self.imitation_worker = ImitationLearningWorker(
             action_dim=self.num_actions,
-            state_dim=self.state_dim,
+            state_dim=imitation_state_dim,
             policy_network=imitation_policy,
             memory=getattr(self.rl_engine, "local_memory", None),
         )
@@ -401,6 +403,26 @@ class AdaptiveAgent(BaseAgent):
         ensure_not_none(getattr(first_skill, "actor_critic", None), "first_skill.actor_critic", component="adaptive_agent")
         actor_critic = first_skill.actor_critic
         return actor_critic.actor if hasattr(actor_critic, "actor") else actor_critic
+
+    def _resolve_imitation_state_dim(self) -> int:
+        if self.use_global_rl_engine and hasattr(self.rl_engine, "input_dim"):
+            try:
+                input_dim = int(getattr(self.rl_engine, "input_dim"))
+                if input_dim > 0:
+                    return input_dim
+            except (TypeError, ValueError):
+                pass
+
+        if self.skills:
+            first_skill = next(iter(self.skills.values()))
+            if hasattr(first_skill, "input_dim"):
+                try:
+                    input_dim = int(getattr(first_skill, "input_dim"))
+                    if input_dim > 0:
+                        return input_dim
+                except (TypeError, ValueError):
+                    pass
+        return int(self.state_dim)
 
     def _connect_imitation_learning(self) -> None:
         for worker in self.skills.values():
@@ -783,19 +805,6 @@ class AdaptiveAgent(BaseAgent):
             log_prob=0.0,
             entropy=0.0,
         )
-        if hasattr(self.rl_engine, "local_memory") and hasattr(self.rl_engine.local_memory, "store_experience"):
-            try:
-                self.rl_engine.local_memory.store_experience(
-                    state=state,
-                    action=skill_id,
-                    reward=reward,
-                    next_state=next_state,
-                    done=done,
-                    context={"source": "adaptive_agent", "task_type": self.current_task_type or self.default_task_type},
-                    params=self.tuner.get_params(include_metadata=False),
-                )
-            except Exception:
-                pass
 
     def _end_episode(self, *, task_payload: Mapping[str, Any]) -> None:
         self.tuner.update_performance(self.episode_reward)
@@ -818,7 +827,6 @@ class AdaptiveAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Learning and adaptation
     # ------------------------------------------------------------------
-
     def _learn(self) -> Dict[str, Any]:
         rewards = self._recent_rewards()
         if rewards:
@@ -868,6 +876,7 @@ class AdaptiveAgent(BaseAgent):
             else:
                 dagger_update = {"skipped": True, "reason": "no_demonstrations", "loss": None}
 
+
         meta_update = None
         if self.auto_meta_optimize and self.episode > 0 and self.episode % max(1, self.agent_config.get("meta_update_frequency", 5)) == 0:
             try:
@@ -913,6 +922,27 @@ class AdaptiveAgent(BaseAgent):
 
         return rewards
 
+    def _prepare_imitation_state(self, state: np.ndarray) -> np.ndarray:
+        state_arr = self._validate_state(state)
+        target_dim = int(getattr(self.imitation_worker, "state_dim", self.state_dim))
+        if state_arr.shape[0] == target_dim:
+            return state_arr
+
+        for worker in self._iter_unique_workers():
+            process_fn = getattr(worker, "_process_state", None)
+            if not callable(process_fn):
+                continue
+            try:
+                processed = np.asarray(process_fn(state_arr), dtype=np.float32).reshape(-1)
+                if processed.shape[0] == target_dim:
+                    return processed
+            except Exception:
+                continue
+
+        if state_arr.shape[0] < target_dim:
+            return np.pad(state_arr, (0, target_dim - state_arr.shape[0]), mode="constant").astype(np.float32, copy=False)
+        return state_arr[:target_dim].astype(np.float32, copy=False)
+
     def learn_from_demonstration(self, demo_data: Mapping[str, Any]) -> Dict[str, Any]:
         ensure_instance(demo_data, Mapping, "demo_data", component="adaptive_agent")
         if "state" not in demo_data or "action" not in demo_data:
@@ -923,8 +953,9 @@ class AdaptiveAgent(BaseAgent):
             )
 
         state = self._validate_state(demo_data["state"])
+        imitation_state = self._prepare_imitation_state(state)
         action = demo_data["action"]
-        self.imitation_worker.add_demonstration(state, action)
+        self.imitation_worker.add_demonstration(imitation_state, action)
 
         reward = float(demo_data.get("reward", self.demonstration_bonus))
         self._store_global_experience(
@@ -968,7 +999,8 @@ class AdaptiveAgent(BaseAgent):
             skill_id=self.global_rl_skill_id,
         )
         if feedback_type == "demonstration":
-            self.imitation_worker.add_demonstration(state, action)
+            imitation_state = self._prepare_imitation_state(state)
+            self.imitation_worker.add_demonstration(imitation_state, action)
 
         learn_result = self._learn() if self.learn_after_task else {}
         result = {
