@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "1.9.0"
 
 import inspect
 import re
@@ -921,10 +921,14 @@ class BaseAgent(abc.ABC):
         else:
             for key, value in metrics.items():
                 if isinstance(value, (int, float)):
-                    self.metric_store.metrics['timings']['performance'][key].append(value)
+                    timings_bucket = self.metric_store.metrics.setdefault('timings', defaultdict(lambda: defaultdict(list)))
+                    performance_bucket = timings_bucket.get('performance')
+                    if not isinstance(performance_bucket, (dict, defaultdict)):
+                        performance_bucket = defaultdict(list)
+                        timings_bucket['performance'] = performance_bucket
+                    performance_bucket[key].append(value)
                 else:
                     self.logger.debug(f"[{self.name}] Skipping rolling update for non-scalar metric '{key}'.")
-
 
         self.log_evaluation_result(metrics) # Log current evaluation to file
     
