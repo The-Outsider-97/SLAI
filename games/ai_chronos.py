@@ -102,6 +102,9 @@ class ChronosAI:
         }
         self.action_weights: dict[str, float] = {}
         self.zone_weights: dict[str, float] = {"core": 0.0, "near_core": 0.0, "perimeter": 0.0}
+        self.move_signature_weights: dict[str, float] = {}
+        self.current_match_signatures: list[str] = []
+        self.opening_signature_stats: dict[str, dict[str, int]] = {}
         self.adaptive_state: dict[str, Any] = {
             "pace_preference": 0.0,
             "risk_appetite": 0.0,
@@ -161,10 +164,16 @@ class ChronosAI:
         if best_move is None:
             best_move = random.choice(valid_moves)
 
+        move_signature = self._move_signature(best_move, self._board_size(game_state))
+        if move_signature:
+            self.current_match_signatures.append(move_signature)
+            self.current_match_signatures = self.current_match_signatures[-256:]
+
         self.shared_memory.set(
             "chronos_last_decision",
             {
                 "move": best_move,
+                "move_signature": move_signature,
                 "score": best_score,
                 "top_candidates": top_candidates,
                 "adaptive_profile": {
@@ -478,6 +487,18 @@ class ChronosAI:
 
         # Learned action priors + controlled exploration.
         score += self.action_weights.get(move_type, 0.0)
+        signature = self._move_signature(move, board_size)
+        score += self.move_signature_weights.get(signature, 0.0)
+
+        if int(game_state.get("round", 0) or 0) <= 2 and signature:
+            opening = self.opening_signature_stats.get(signature, {})
+            opening_games = int(opening.get("games", 0) or 0)
+            if opening_games >= 4:
+                opening_wins = int(opening.get("wins", 0) or 0)
+                opening_rate = opening_wins / max(1, opening_games)
+                if opening_rate < 0.35:
+                    score -= min(6.0, (0.35 - opening_rate) * 20.0)
+
         score += random.uniform(0.0, 2.5 + adaptive_profile.exploration)
 
         return score, "; ".join(reasons)
@@ -748,6 +769,43 @@ class ChronosAI:
                 zone = self._classify_zone(r, c, board_size)
                 self.zone_weights[zone] = max(-6.0, min(10.0, self.zone_weights.get(zone, 0.0) + (delta * 0.5)))
 
+        if self.current_match_signatures:
+            per_move_scale = max(0.2, min(1.2, abs(float(payload.get("reward", 0.0) or 0.0)) / 55.0))
+            for index, signature in enumerate(self.current_match_signatures):
+                recency = 0.5 + (index / max(1, len(self.current_match_signatures) - 1))
+                change = delta * 0.18 * recency * per_move_scale
+                self.move_signature_weights[signature] = max(
+                    -10.0,
+                    min(10.0, self.move_signature_weights.get(signature, 0.0) + change),
+                )
+
+            opening_signature = self.current_match_signatures[0]
+            opening_stats = self.opening_signature_stats.get(opening_signature, {"games": 0, "wins": 0, "losses": 0})
+            opening_stats["games"] = int(opening_stats.get("games", 0)) + 1
+            if outcome == "win":
+                opening_stats["wins"] = int(opening_stats.get("wins", 0)) + 1
+            elif outcome == "loss":
+                opening_stats["losses"] = int(opening_stats.get("losses", 0)) + 1
+            self.opening_signature_stats[opening_signature] = opening_stats
+
+            if len(self.opening_signature_stats) > 250:
+                ranked = sorted(
+                    self.opening_signature_stats.items(),
+                    key=lambda entry: int(entry[1].get("games", 0)),
+                    reverse=True,
+                )
+                self.opening_signature_stats = dict(ranked[:250])
+
+            if len(self.move_signature_weights) > 1500:
+                ranked = sorted(
+                    self.move_signature_weights.items(),
+                    key=lambda entry: abs(entry[1]),
+                    reverse=True,
+                )
+                self.move_signature_weights = dict(ranked[:1500])
+
+        self.current_match_signatures = []
+
         if hasattr(self.learning_agent, "observe"):
             try:
                 signal = {
@@ -757,6 +815,7 @@ class ChronosAI:
                     "weights": {
                         "actions": self.action_weights,
                         "zones": self.zone_weights,
+                        "signatures": self.move_signature_weights,
                     },
                 }
                 cast(Any, self.learning_agent).observe(signal)
@@ -804,6 +863,10 @@ class ChronosAI:
             self.stats.update(payload.get("stats", {}))
             self.action_weights.update(payload.get("action_weights", {}))
             self.zone_weights.update(payload.get("zone_weights", {}))
+            self.move_signature_weights.update(payload.get("move_signature_weights", {}))
+            loaded_opening_stats = payload.get("opening_signature_stats", {})
+            if isinstance(loaded_opening_stats, dict):
+                self.opening_signature_stats.update(loaded_opening_stats)
             loaded_adaptive_state = payload.get("adaptive_state", {})
             if isinstance(loaded_adaptive_state, dict):
                 self.adaptive_state.update(loaded_adaptive_state)
@@ -817,6 +880,8 @@ class ChronosAI:
                 "stats": self.stats,
                 "action_weights": self.action_weights,
                 "zone_weights": self.zone_weights,
+                "move_signature_weights": self.move_signature_weights,
+                "opening_signature_stats": self.opening_signature_stats,
                 "adaptive_state": self.adaptive_state,
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -825,6 +890,22 @@ class ChronosAI:
             logger.warning("Failed to persist Chronos learning state: %s", error)
 
     # ------------------------------ state helpers ---------------------------
+
+    def _move_signature(self, move: dict[str, Any] | None, board_size: int) -> str:
+        if not isinstance(move, dict):
+            return ""
+        move_type = str(move.get("type", "pass"))
+        target = move.get("target") if isinstance(move.get("target"), dict) else {}
+        params = move.get("params") if isinstance(move.get("params"), dict) else {}
+        if not target and isinstance(params.get("target"), dict):
+            target = params.get("target")
+        target = target if isinstance(target, dict) else {}
+        r = target.get("r") if isinstance(target.get("r"), int) else target.get("row")
+        c = target.get("c") if isinstance(target.get("c"), int) else target.get("col")
+        if isinstance(r, int) and isinstance(c, int):
+            zone = self._classify_zone(r, c, board_size)
+            return f"{move_type}:{zone}:{r}:{c}"
+        return move_type
 
     def _extract_units(self, game_state: dict[str, Any]) -> list[dict[str, Any]]:
         units = game_state.get("units", [])
