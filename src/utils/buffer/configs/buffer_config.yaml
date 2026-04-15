@@ -11,3 +11,32 @@ distributed:
   seed: null
   staleness_threshold_days: 1
   prioritization_alpha: 0.6
+
+validation:
+  required_length: 6
+  enforce_numeric_reward: true
+  enforce_boolean_done: true
+  allow_none_state: false
+  allow_none_next_state: false
+  max_abs_reward: null
+
+segment_tree:
+  capacity: 100000
+  dtype: float32
+
+sequence_replay:
+  capacity: 100000
+  sequence_length: 16
+  burn_in: 4
+  min_episode_length: 2
+  pad_value: 0.0
+  seed: null
+
+eviction:
+  policy: fifo
+  age_weight: 0.7
+  reward_weight: 0.3
+
+telemetry:
+  enabled: true
+  log_interval: 200
