@@ -669,7 +669,8 @@ class SkillWorker:
 
         if self.imitation_learning and explore and random.random() < self.imitation_usage_prob:
             try:
-                imitation_action = self.imitation_learning.get_action(np.asarray(state, dtype=np.float32))
+                imitation_state = self._process_state(state)
+                imitation_action = self.imitation_learning.get_action(imitation_state)
                 self.last_action_info = {
                     "source": "imitation",
                     "explore": bool(explore),
@@ -873,27 +874,69 @@ class SkillWorker:
                 details={"available": len(experiences), "required": self.min_update_batch},
             )
 
-        states = np.asarray([np.asarray(e["state"], dtype=np.float32) for e in experiences], dtype=np.float32)
-        next_states = np.asarray([np.asarray(e["next_state"], dtype=np.float32) for e in experiences], dtype=np.float32)
-        rewards = np.asarray([float(e["reward"]) for e in experiences], dtype=np.float32)
-        dones = np.asarray([float(bool(e.get("done", False))) for e in experiences], dtype=np.float32)
+        states: List[np.ndarray] = []
+        next_states: List[np.ndarray] = []
+        rewards: List[float] = []
+        dones: List[float] = []
+        actions: List[Any] = []
+        dropped_experiences = 0
 
+        for exp in experiences:
+            try:
+                state_arr = self._sanitize_state(exp.get("state"), label="state")
+                next_state_arr = self._sanitize_state(exp.get("next_state"), label="next_state")
+                reward_value = float(np.asarray(exp.get("reward"), dtype=np.float32).reshape(-1)[0])
+                done_value = float(bool(exp.get("done", False)))
+
+                if self.continuous_actions:
+                    action_value = np.asarray(exp.get("action"), dtype=np.float32).reshape(-1)
+                else:
+                    action_value = int(np.asarray(exp.get("action")).reshape(-1)[0])
+                    if action_value < 0 or action_value >= self.action_dim:
+                        raise RangeValidationError(
+                            "Discrete action is outside the valid action range.",
+                            component="skill_worker",
+                            details={"action": action_value, "action_dim": self.action_dim},
+                        )
+
+                states.append(state_arr)
+                next_states.append(next_state_arr)
+                rewards.append(reward_value)
+                dones.append(done_value)
+                actions.append(action_value)
+            except Exception:
+                dropped_experiences += 1
+
+        if len(states) < self.min_update_batch:
+            raise EmptyCollectionError(
+                "Not enough valid on-policy experiences to update the skill worker.",
+                component="skill_worker",
+                details={
+                    "available": len(experiences),
+                    "valid": len(states),
+                    "dropped": dropped_experiences,
+                    "required": self.min_update_batch,
+                },
+            )
+
+        rewards_arr = np.asarray(rewards, dtype=np.float32)
+        dones_arr = np.asarray(dones, dtype=np.float32)
         if self.continuous_actions:
-            actions = np.asarray([np.asarray(e["action"], dtype=np.float32) for e in experiences], dtype=np.float32)
+            actions_arr = np.asarray(actions, dtype=np.float32)
         else:
-            actions = np.asarray([int(e["action"]) for e in experiences], dtype=np.int64)
+            actions_arr = np.asarray(actions, dtype=np.int64)
 
         processed_states = np.vstack([self._process_state(state) for state in states]).astype(np.float32)
         processed_next_states = np.vstack([self._process_state(state) for state in next_states]).astype(np.float32)
 
         states_tensor = torch.as_tensor(processed_states, dtype=torch.float32, device=self.device)
         next_states_tensor = torch.as_tensor(processed_next_states, dtype=torch.float32, device=self.device)
-        rewards_tensor = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
-        dones_tensor = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
+        rewards_tensor = torch.as_tensor(rewards_arr, dtype=torch.float32, device=self.device)
+        dones_tensor = torch.as_tensor(dones_arr, dtype=torch.float32, device=self.device)
         if self.continuous_actions:
-            actions_tensor = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
+            actions_tensor = torch.as_tensor(actions_arr, dtype=torch.float32, device=self.device)
         else:
-            actions_tensor = torch.as_tensor(actions, dtype=torch.long, device=self.device)
+            actions_tensor = torch.as_tensor(actions_arr, dtype=torch.long, device=self.device)
 
         values = self.actor_critic.forward_critic(states_tensor).view(-1)
         with torch.no_grad():
