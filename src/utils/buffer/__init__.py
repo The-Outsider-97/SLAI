@@ -16,7 +16,9 @@ from .eviction_policies import (
     build_eviction_policy,
 )
 from .segment_tree import MinSegmentTree, SegmentTree, SegmentTreeFactory, SumSegmentTree
-from .sequence_replay_buffer import SequenceReplayBuffer, SequenceReplayConfig
+from .nstep_buffer import NStepBuffer, NStepConfig
+from .reservoir_buffer import ReservoirConfig, ReservoirReplayBuffer
+from .sequence_replay_buffer import *
 
 __all__ = [
     "AgeRewardHybridEviction",
@@ -28,11 +30,16 @@ __all__ = [
     "LargestEpisodeEviction",
     "MetricStats",
     "MinSegmentTree",
+    "NStepBuffer",
+    "NStepConfig",
     "SegmentTree",
     "SegmentTreeFactory",
-    "SequenceReplayBuffer",
-    "SequenceReplayConfig",
+    "ReservoirConfig",
+    "ReservoirReplayBuffer",
+    "SegmentTree",
     "SumSegmentTree",
+    "MinSegmentTree",
+    "SegmentTreeFactory",
     "Transition",
     "TransitionSchema",
     "TransitionValidationError",
