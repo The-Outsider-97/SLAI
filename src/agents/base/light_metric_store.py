@@ -17,8 +17,8 @@ class LightMetricStore:
         self.lm_config = get_config_section('lm_store')
         
         self.metrics = {
-            'timings': defaultdict(list),
-            'memory_deltas': defaultdict(list)
+            'timings': defaultdict(lambda: defaultdict(list)),
+            'memory_deltas': defaultdict(lambda: defaultdict(list))
         }
         self._start_times = {}
         self._start_memory_rss = {}
