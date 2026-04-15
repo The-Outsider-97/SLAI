@@ -1,44 +1,154 @@
-
 adaptive_memory:
-  episodic_capacity: 1000
+  episodic_capacity: 2000
   experience_staleness_days: 7
-  semantic_decay_rate: 0.9
+  semantic_decay_rate: 0.92
   semantic_threshold: 0.5
   min_memory_strength: 0.1
+  semantic_max_strength: 1.0
+  reinforcement_boost_factor: 1.2
+
   replay_capacity: 50000
+  replay_staleness_days: 7
+  replay_sample_strategy: uniform          # uniform | prioritized | reward | agent_balanced
+  replay_sample_beta: 0.4
+  replay_default_agent_id: default
+  allow_partial_replay_failures: true
+
   drift_threshold: 0.4
+  drift_bins: 10
+  drift_min_window: 30
   priority_alpha: 0.6
+
   retrieval_limit: 5
-  enable_goals: True
+  context_match_boost: 1.25
+  recency_weight: 0.15
+  reward_weight: 0.15
+  strength_weight: 0.20
+  parameter_weight: 0.50
+
+  enable_goals: true
   goal_dim: 16
   max_size: 5000
   goal_capacity: 1000
-  enable_policy_grad: True
+  enable_policy_grad: true
   uncertainty_dropout: 0.2
+
+  max_parameter_history: 5000
+  parameter_impact_window: 100
+  memory_bias_temperature: 1.0
+  memory_bias_scale: 2.0
+  track_access_on_retrieval: true
+  default_context_on_missing: true
+  checkpoint_protocol: 5
+
   goal_conditioning:
-    goal_layers: 
-      - {'neurons': 64, 'activation': 'relu'}
-      - {'neurons': 16, 'activation': 'tanh'}
+    goal_layers:
+      - neurons: 64
+        activation: relu
+      - neurons: 16
+        activation: tanh
 
 policy_manager:
-  hidden_layers: [64, 32]
-  activation: 'tanh'
-  output_activation: 'softmax'
-  explore: True
+  state_dim: null                  # null -> infer from the first registered skill
+  hidden_layers: [128, 64]
+  activation: relu                 # relu | tanh | leaky_relu | sigmoid | etc. (supported by PolicyNetwork)
+  output_activation: softmax       # softmax for discrete skill selection
+  explore: true
+
+  skill_discount_factor: 0.99
+  manager_learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer_name: adamw            # adam | adamw | sgd
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+
+  batch_size: 32
+  min_batch_size: 16
+  update_frequency: 10
+  grad_clip_norm: 1.0
+  entropy_coef: 0.01
+
+  normalize_advantages: true
+  advantage_epsilon: 1.0e-8
+  policy_temperature: 1.0
+
+  use_memory_bias: true
+  memory_query: manager
+  memory_context_type: skill_selection
+  memory_bias_blend: 1.0
+
+  pad_states: true
+  strict_state_dim: false
+  device: auto                     # auto | cpu | cuda
+
+  use_batch_norm: false
+  dropout_rate: 0.0
+  l1_lambda: 0.0
+  l2_lambda: 0.0
+  weight_init: auto                # auto | kaiming | xavier
+
+  checkpoint_protocol: 5
 
 parameter_tuner:
+  # Base adaptive parameters
   base_learning_rate: 0.01
-  base_exploration_rate: 0.3
+  base_exploration_rate: 0.30
   base_discount_factor: 0.95
-  base_temperature: 1.0
+  base_temperature: 1.00
+
+  # Safety bounds
   min_learning_rate: 0.0001
-  max_learning_rate: 0.1
+  max_learning_rate: 0.1000
   min_exploration: 0.01
-  weight_decay_lambda: 0.0001
+  max_exploration: 1.00
+  min_discount_factor: 0.80
+  max_discount_factor: 0.999
+  min_temperature: 0.05
+  max_temperature: 5.00
+
+  # History and diagnostics
+  history_size: 100
+  max_adaptation_history: 500
+  max_tuning_history: 200
+  performance_baseline_window: 10
+  stability_window: 10
+  trend_window: 5
+
+  # Reward-regime thresholds
+  stable_variance_threshold: 0.10
+  high_variance_threshold: 1.00
+  negative_reward_threshold: 0.0
+
+  # Learning-rate adaptation
+  stable_lr_decay: 0.995
+  volatile_lr_growth: 1.010
+  lr_trend_bonus: 0.0025
+
+  # Exploration adaptation
+  negative_reward_exploration_boost: 1.10
+  positive_reward_exploration_decay: 0.995
   exploration_decay: 0.9995
-  target_update_interval: 100  # Hard update frequency
-  base_tau: 0.005              # Soft update mixing factor
-  strategy: 'bayesian'
+
+  # Discount-factor adaptation
+  discount_familiar_growth: 1.010
+  discount_novelty_decay: 0.990
+  state_visit_high_threshold: 100
+  state_visit_low_threshold: 5
+
+  # Temperature adaptation
+  temperature_growth: 1.020
+  temperature_decay: 0.995
+  schedule_initial_temperature: 1.00
+  schedule_final_temperature: 0.10
+  schedule_decay_episodes: 1000
+
+  # Tuning integration
+  default_apply_best_params: true
+  estimate_delta_from_memory: true
+  log_every_update: true
+  tuning_model_type: null
+  checkpoint_protocol: 5
 
 rl:
   state_dim: 10
@@ -47,28 +157,126 @@ rl:
   batch_size: 64
 
 meta_learning:
-  skill_workers: 'SkillWorkerRegistry'
-  training_epochs: 10
+  skill_workers: SkillWorkerRegistry
+  training_epochs: 20
+
+  hidden_layers: [64, 64]
+  exploration_factor: 0.10
+  update_frequency: 100
+  batch_size: 32
+  num_candidates: 100
+  prediction_samples: 100
+
+  min_history_for_model: 5
+  max_history: 1000
+  normalize_targets: true
+
+  validation_fraction: 0.20
+  shuffle_training: true
+  early_stopping_patience: 10
+  min_delta: 1.0e-4
+
+  random_state: 42
+  checkpoint_protocol: 5
+
+  apply_optimizer_updates: true
+  store_registry_in_memory: false
+
+  candidate_strategy: hybrid      # random | best_perturbation | hybrid
+  acquisition: expected_improvement
+  reward_aggregation: mean        # mean | median
+  fallback_to_random_when_unfitted: true
+
+  hyperparameter_space:
+    learning_rate:
+      min: 1.0e-5
+      max: 1.0e-2
+    exploration_rate:
+      min: 1.0e-2
+      max: 3.0e-1
+    entropy_coef:
+      min: 1.0e-3
+      max: 1.0e-1
+    discount_factor:
+      min: 9.0e-1
+      max: 9.99e-1
 
 imitation_learning:
   learning_rate: 0.001
+  batch_size: 32
   grad_clip: 1.0
-  rl_mix_ratio: 0.7
-  entropy_threshold: 0.5
-  continuous_actions: False
+  rl_mix_ratio: 0.70
+  entropy_threshold: 0.50
+
+  continuous_actions: false
   demo_capacity: 10000
   dagger_capacity: 5000
   dagger_frequency: 5
-  initial_query_prob: 0.8
+
+  initial_query_prob: 0.80
+  min_query_prob: 0.05
   query_decay: 0.99
+  query_strategy: hybrid            # probabilistic | uncertainty | hybrid
+  use_uncertainty_query: true
+
+  optimizer_name: adamw             # adam | adamw | sgd | rmsprop
+  weight_decay: 0.0001
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  sgd_momentum: 0.9
+  rmsprop_alpha: 0.99
+
+  scheduler:
+    name: reduce_on_plateau         # none | step | cosine | reduce_on_plateau
+    mode: min
+    factor: 0.5
+    patience: 5
+    min_lr: 1.0e-6
+    step_size: 10
+    gamma: 0.5
+    t_max: 20
+
+  label_smoothing: 0.0
+  imitation_reward: 2.0
+  advantage_weighted_imitation: false
+  normalize_advantages_for_il: true
+
+  log_to_memory: true
+  store_dagger_in_memory: true
+  memory_context_source: demonstration
+
+  device: auto                      # auto | cpu | cuda
+  demo_dirname: demo
+  save_optimizer_state: true
+  checkpoint_protocol: 5
 
 sgd_regressor:
-  eta0: 0.01
-  learning_rate: 'constant'
-  alpha: 0.0001
-  power_t: 0.25
-  max_iter: 1000
-  tol: 0.0001
+  eta0: 0.01                      # Base learning rate
+  learning_rate: constant         # constant | invscaling | adaptive
+  alpha: 0.0001                   # L2 regularization strength
+  power_t: 0.25                   # Exponent for invscaling schedule
+  max_iter: 100                   # Epochs per fit/partial_fit call
+  tol: 0.0001                     # Convergence tolerance
+
+  fit_intercept: true
+  shuffle: true
+  random_state: 42
+
+  min_learning_rate: 0.000001     # Lower bound for scheduled learning rates
+  adaptive_decay: 0.5             # Multiplicative LR decay for adaptive schedule
+  adaptive_patience: 5            # Epochs without improvement before decay
+  adaptive_tolerance: 0.0001      # Minimum improvement required to reset patience
+  lr_decay_frequency: 100         # Periodic decay step for adaptive schedule
+  lr_decay_factor: 0.9            # Periodic decay multiplier for adaptive schedule
+
+  clip_gradient: 10.0             # null to disable gradient clipping
+  track_history: true
+  max_history: 1000               # Maximum number of tracked diagnostic values
+  weight_init_scale: 0.01         # Std dev for coefficient initialization
+  convergence_check: parameter_change   # parameter_change | loss | either
+  epsilon: 1.0e-12                # Numerical stability constant
+
 
 neuron:
   activation_name: 'sigmoid'
@@ -82,20 +290,37 @@ neural_layer:
   is_training: False
 
 neural_network:
-  final_activation: 'softmax'
-  loss_function_name: 'cross_entropy' # or 'mse'
-  optimizer_name: 'adam' # New: 'sgd_momentum_adagrad', 'adam'
-  initialization_method_default: 'he_normal'
   input_dim: 10
+  final_activation: softmax          # linear | sigmoid | softmax
+  apply_final_activation_in_forward: false
+  initialization_method_default: he_normal
+
+  optimizer_name: adamw             # adam | adamw | sgd | rmsprop
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  momentum: 0.9                     # used by sgd/rmsprop
+  alpha: 0.99                       # used by rmsprop and leaky/elu if layer alpha omitted
+
+  loss_function_name: cross_entropy           # mse | mae | huber | cross_entropy | bce_with_logits
   layer_config:
     - neurons: 64
       activation: relu
       dropout: 0.2
-      batch_norm: true
-    - neurons: 32
-      activation: relu
-    - neurons: 2  # or the number of output classes for classification
-      activation: linear
+      batch_norm: false
+    - neurons: 2                     # <-- number of classes (e.g., 2)
+      activation: linear 
+  huber_beta: 1.0
+  clip_grad_norm: 1.0
+  batch_size: 32
+  epochs: 50
+  restore_best_weights: true
+  track_history: true
+  scheduler:
+    name: reduce_on_plateau         # step | cosine | reduce_on_plateau
+    mode: min
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
 
 bayesian_dqn:
   num_uncertainty_samples: 10
@@ -123,3 +348,78 @@ reward_shaping:
   learned_potential_layers: [32, 16]  # For learned potential
 potential_scale: 0.1
 potential_discount: 0.95
+
+skill_worker:
+  enable_goals: true
+  goal_dim: 16
+  continuous_actions: false
+  continuous_action_std_init: 0.5
+
+  actor_layers:
+    - neurons: 128
+      activation: relu
+      dropout: 0.0
+      batch_norm: false
+    - neurons: 64
+      activation: relu
+      dropout: 0.0
+      batch_norm: false
+    - neurons: 2
+      activation: linear
+
+  critic_layers:
+    - neurons: 128
+      activation: relu
+      dropout: 0.0
+      batch_norm: false
+    - neurons: 64
+      activation: relu
+      dropout: 0.0
+      batch_norm: false
+    - neurons: 1
+      activation: linear
+
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.001
+  exploration_rate: 0.10
+  entropy_coef: 0.01
+  value_coef: 0.50
+  max_grad_norm: 0.50
+  update_epochs: 1
+  min_update_batch: 1
+  normalize_advantages: true
+  advantage_epsilon: 1.0e-8
+
+  imitation_usage_prob: 0.30
+  auto_meta_update: false
+  meta_update_frequency: 25
+  performance_window: 100
+  success_reward_threshold: 0.0
+
+  reward_normalization: true
+  reward_clip_range: [-5.0, 5.0]
+  reward_scale: 1.0
+  reward_bias: 0.0
+  reward_momentum: 0.99
+
+  optimizer_name: adamw            # adam | adamw | sgd | rmsprop
+  weight_decay: 0.0001
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  sgd_momentum: 0.9
+  rmsprop_alpha: 0.99
+
+  scheduler:
+    name: none                     # none | step | cosine | reduce_on_plateau
+    mode: min
+    factor: 0.5
+    patience: 5
+    min_lr: 1.0e-6
+    step_size: 10
+    gamma: 0.5
+    t_max: 20
+
+  device: auto                     # auto | cpu | cuda
+  checkpoint_protocol: 5
