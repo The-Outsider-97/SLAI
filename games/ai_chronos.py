@@ -43,6 +43,29 @@ ACTION_BASE_WEIGHTS = {
 
 
 @dataclass
+class AdaptiveProfile:
+    stance: str
+    confidence: float
+    exploration: float
+    action_bias: dict[str, float]
+    zone_bias: dict[str, float]
+    threat_tolerance: float
+    token_conservation: float
+    target_bias: dict[str, float]
+    notes: list[str]
+
+
+class NullAdaptiveAgent:
+    """Safe no-op adaptive agent used when full adaptive agent cannot be initialized."""
+
+    def perform_task(self, task_data: Any) -> dict[str, Any]:
+        return {"status": "skipped", "reason": "adaptive_agent_unavailable"}
+
+    def learn_from_feedback(self, feedback: dict[str, Any]) -> None:
+        return None
+
+
+@dataclass
 class ChronosAI:
     game: str = "chronos"
     initialized_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -55,7 +78,12 @@ class ChronosAI:
         self.planning_agent = self.factory.create("planning", self.shared_memory)
         self.execution_agent = self.factory.create("execution", self.shared_memory)
         self.learning_agent = self.factory.create("learning", self.shared_memory)
-        self.adaptive_agent = self.factory.create("adaptive", self.shared_memory)
+        try:
+            self.adaptive_agent = self.factory.create("adaptive", self.shared_memory)
+            self.adaptive_agent_available = True
+        except Exception as adaptive_error:  # noqa: BLE001
+            logger.warning("Adaptive agent unavailable for Chronos runtime: %s", adaptive_error)
+            self.adaptive_agent_available = False
 
         self._planning_enabled = True
 
@@ -74,6 +102,16 @@ class ChronosAI:
         }
         self.action_weights: dict[str, float] = {}
         self.zone_weights: dict[str, float] = {"core": 0.0, "near_core": 0.0, "perimeter": 0.0}
+        self.adaptive_state: dict[str, Any] = {
+            "pace_preference": 0.0,
+            "risk_appetite": 0.0,
+            "opponent_aggression": 0.0,
+            "opponent_claim_pressure": 0.0,
+            "opponent_focus_core": 0.0,
+            "confidence": 0.5,
+            "last_stance": "balanced",
+            "history": [],
+        }
 
         self._load_learning_state()
         self.shared_memory.set("chronos_ai_status", "initialized")
@@ -86,11 +124,13 @@ class ChronosAI:
         return {
             "agent_status": "ready",
             "initialized_at": self.initialized_at,
-            "agents": ["knowledge", "planning", "execution", "learning"],
+            "agents": ["knowledge", "planning", "execution", "learning", "adaptive"],
+            "adaptive_agent_available": self.adaptive_agent_available,
             "game": self.game,
             "stats": self.stats,
             "action_weights": self.action_weights,
             "zone_weights": self.zone_weights,
+            "adaptive_state": self.adaptive_state,
         }
 
     def get_move(self, game_state: dict[str, Any]) -> dict[str, Any] | None:
@@ -108,13 +148,15 @@ class ChronosAI:
             return None
 
         strategy_context = self._get_strategy_context(game_state)
-        plan = self._generate_plan(game_state, strategy_context)
+        adaptive_profile = self._build_adaptive_profile(game_state, valid_moves)
+        plan = self._generate_plan(game_state, strategy_context, adaptive_profile)
 
         best_move, best_score, top_candidates = self._select_move_via_execution(
             valid_moves=valid_moves,
             game_state=game_state,
             strategy_context=strategy_context,
             plan=plan,
+            adaptive_profile=adaptive_profile,
         )
         if best_move is None:
             best_move = random.choice(valid_moves)
@@ -125,6 +167,12 @@ class ChronosAI:
                 "move": best_move,
                 "score": best_score,
                 "top_candidates": top_candidates,
+                "adaptive_profile": {
+                    "stance": adaptive_profile.stance,
+                    "confidence": adaptive_profile.confidence,
+                    "exploration": adaptive_profile.exploration,
+                    "notes": adaptive_profile.notes,
+                },
                 "plan_steps": len(plan) if isinstance(plan, list) else 0,
                 "timestamp": time.time(),
             },
@@ -203,7 +251,12 @@ class ChronosAI:
             logger.warning("Chronos knowledge query failed: %s", error)
         return baseline
 
-    def _generate_plan(self, game_state: dict[str, Any], strategy_context: str) -> list[Task] | None:
+    def _generate_plan(
+        self,
+        game_state: dict[str, Any],
+        strategy_context: str,
+        adaptive_profile: AdaptiveProfile,
+    ) -> list[Task] | None:
         if not self._planning_enabled:
             return None
 
@@ -232,6 +285,12 @@ class ChronosAI:
                         "valid_move_count": len(game_state.get("validMoves", [])),
                     },
                     "strategy": strategy_context,
+                    "adaptive": {
+                        "stance": adaptive_profile.stance,
+                        "confidence": adaptive_profile.confidence,
+                        "threat_tolerance": adaptive_profile.threat_tolerance,
+                        "token_conservation": adaptive_profile.token_conservation,
+                    },
                 },
             )
 
@@ -260,10 +319,11 @@ class ChronosAI:
         game_state: dict[str, Any],
         strategy_context: str,
         plan: list[Task] | None,
+        adaptive_profile: AdaptiveProfile,
     ) -> tuple[dict[str, Any] | None, float, list[dict[str, Any]]]:
         scored_moves: list[tuple[dict[str, Any], float, str]] = []
         for move in valid_moves:
-            score, reason = self._score_move(move, game_state, strategy_context, plan)
+            score, reason = self._score_move(move, game_state, strategy_context, plan, adaptive_profile)
             scored_moves.append((move, score, reason))
 
         if not scored_moves:
@@ -295,6 +355,11 @@ class ChronosAI:
                     "phase": game_state.get("phase", "planning"),
                     "knowledge_signals": self._extract_knowledge_signals(strategy_context),
                     "plan_signals": self._extract_plan_signals(plan),
+                    "adaptive_signals": {
+                        "stance": adaptive_profile.stance,
+                        "confidence": adaptive_profile.confidence,
+                        "exploration": adaptive_profile.exploration,
+                    },
                     "top_candidate_score": best_score,
                 }
                 selected = cast(Any, self.execution_agent).action_selector.select(action_candidates, execution_context)
@@ -324,6 +389,7 @@ class ChronosAI:
         game_state: dict[str, Any],
         strategy_context: str,
         plan: list[Task] | None,
+        adaptive_profile: AdaptiveProfile,
     ) -> tuple[float, str]:
         move_type = str(move.get("type", "pass"))
         params = move.get("params") if isinstance(move.get("params"), dict) else {}
@@ -341,6 +407,15 @@ class ChronosAI:
 
         score = ACTION_BASE_WEIGHTS.get(move_type, -8.0)
         reasons: list[str] = [f"base={round(score, 2)}", f"type={move_type}"]
+        score += adaptive_profile.action_bias.get(move_type, 0.0)
+        score += adaptive_profile.target_bias.get("all", 0.0)
+        if move_type == "attack":
+            score += adaptive_profile.target_bias.get("attack", 0.0)
+        elif move_type == "claim":
+            score += adaptive_profile.target_bias.get("claim", 0.0)
+        elif move_type == "move":
+            score += adaptive_profile.target_bias.get("move", 0.0)
+        reasons.append(f"stance={adaptive_profile.stance}")
 
         if isinstance(acting_unit, dict):
             unit_type = str(acting_unit.get("type", "Scout"))
@@ -352,6 +427,7 @@ class ChronosAI:
             zone = self._classify_zone(tr, tc, board_size)
             score += {"core": 42.0, "near_core": 19.0, "perimeter": 4.0}.get(zone, 0.0)
             score += self.zone_weights.get(zone, 0.0)
+            score += adaptive_profile.zone_bias.get(zone, 0.0)
             reasons.append(f"zone={zone}")
 
             distance_penalty = self._distance_to_center(tr, tc, board_size) * 1.2
@@ -375,14 +451,14 @@ class ChronosAI:
         if isinstance(acting_unit, dict):
             destination = self._infer_destination(move, acting_unit)
             threat = self._estimate_enemy_threat(destination, acting_unit, unit_map)
-            score -= threat * 20.0
+            score -= threat * (22.0 - (adaptive_profile.threat_tolerance * 8.0))
             if threat > 0:
                 reasons.append(f"threat={threat}")
 
         # Token efficiency (lower token preserves flexibility).
         token_id = move.get("tokenId")
         if isinstance(token_id, int):
-            score += max(0, 6 - token_id) * 1.6
+            score += max(0, 6 - token_id) * (1.2 + adaptive_profile.token_conservation)
 
         # Plan alignment bonus.
         if plan:
@@ -402,9 +478,213 @@ class ChronosAI:
 
         # Learned action priors + controlled exploration.
         score += self.action_weights.get(move_type, 0.0)
-        score += random.uniform(0.0, 2.5)
+        score += random.uniform(0.0, 2.5 + adaptive_profile.exploration)
 
         return score, "; ".join(reasons)
+
+    # ------------------------------ adaptation -----------------------------
+
+    def _build_adaptive_profile(self, game_state: dict[str, Any], valid_moves: list[dict[str, Any]]) -> AdaptiveProfile:
+        metrics = self._collect_state_metrics(game_state, valid_moves)
+        confidence = max(
+            0.1,
+            min(
+                0.95,
+                0.45
+                + (metrics["score_diff"] * 0.05)
+                + (metrics["material_diff"] * 0.04)
+                + (self.adaptive_state.get("confidence", 0.5) - 0.5) * 0.25,
+            ),
+        )
+        pressure = metrics["enemy_pressure"]
+        initiative = metrics["initiative"]
+        core_balance = metrics["core_balance"]
+
+        stance = "balanced"
+        notes = []
+        if confidence < 0.35 or initiative < -0.35:
+            stance = "comeback"
+            notes.append("recover_initiative")
+        elif confidence > 0.72 and core_balance >= 0:
+            stance = "conversion"
+            notes.append("secure_advantage")
+        elif pressure > 0.55:
+            stance = "defensive"
+            notes.append("high_enemy_pressure")
+        elif core_balance < 0:
+            stance = "core_contest"
+            notes.append("retake_core")
+        else:
+            notes.append("balanced_progression")
+
+        stance_biases = {
+            "comeback": {
+                "action_bias": {"attack": 7.0, "claim": 4.0, "move": 3.0, "pass": -4.0},
+                "zone_bias": {"core": 8.0, "near_core": 4.0, "perimeter": -1.5},
+                "threat_tolerance": 0.82,
+                "token_conservation": 0.8,
+                "exploration": 1.2,
+            },
+            "conversion": {
+                "action_bias": {"attack": 2.0, "claim": 6.0, "move": 2.0, "pass": -2.0},
+                "zone_bias": {"core": 7.5, "near_core": 2.5, "perimeter": -2.0},
+                "threat_tolerance": 0.3,
+                "token_conservation": 1.6,
+                "exploration": 0.45,
+            },
+            "defensive": {
+                "action_bias": {"attack": 2.5, "claim": 2.0, "move": 5.0, "pass": -1.0},
+                "zone_bias": {"core": 4.0, "near_core": 5.5, "perimeter": 1.0},
+                "threat_tolerance": 0.25,
+                "token_conservation": 1.9,
+                "exploration": 0.35,
+            },
+            "core_contest": {
+                "action_bias": {"attack": 4.0, "claim": 6.5, "move": 3.5, "pass": -3.0},
+                "zone_bias": {"core": 9.0, "near_core": 5.0, "perimeter": -1.0},
+                "threat_tolerance": 0.55,
+                "token_conservation": 1.25,
+                "exploration": 0.75,
+            },
+            "balanced": {
+                "action_bias": {"attack": 3.5, "claim": 4.0, "move": 3.0, "pass": -2.0},
+                "zone_bias": {"core": 6.0, "near_core": 4.0, "perimeter": 0.0},
+                "threat_tolerance": 0.45,
+                "token_conservation": 1.4,
+                "exploration": 0.6,
+            },
+        }
+        config = stance_biases[stance]
+        target_bias = {
+            "all": (metrics["round_progress"] - 0.5) * 2.2,
+            "attack": pressure * 2.5,
+            "claim": max(0.0, -core_balance) * 2.2 + max(0.0, core_balance) * 1.3,
+            "move": 1.2 if initiative < 0 else 0.5,
+        }
+
+        if hasattr(self.adaptive_agent, "perform_task"):
+            try:
+                adaptive_payload = {
+                    "type": "chronos_adaptation",
+                    "goal": "optimize_competitive_stance",
+                    "context": {
+                        "confidence": confidence,
+                        "enemy_pressure": pressure,
+                        "initiative": initiative,
+                        "core_balance": core_balance,
+                        "round_progress": metrics["round_progress"],
+                    },
+                }
+                response = cast(Any, self.adaptive_agent).perform_task(adaptive_payload)
+                if isinstance(response, dict) and "confidence" in response:
+                    confidence = max(0.1, min(0.95, float(response["confidence"])))
+            except Exception as error:  # noqa: BLE001
+                logger.warning("Adaptive-agent direct task execution skipped: %s", error)
+
+        profile = AdaptiveProfile(
+            stance=stance,
+            confidence=confidence,
+            exploration=float(config["exploration"]),
+            action_bias=dict(config["action_bias"]),
+            zone_bias=dict(config["zone_bias"]),
+            threat_tolerance=float(config["threat_tolerance"]),
+            token_conservation=float(config["token_conservation"]),
+            target_bias=target_bias,
+            notes=notes,
+        )
+        self._update_adaptive_memory(profile, metrics)
+        return profile
+
+    def _collect_state_metrics(self, game_state: dict[str, Any], valid_moves: list[dict[str, Any]]) -> dict[str, float]:
+        players = game_state.get("players", [])
+        ai_score = 0.0
+        human_score = 0.0
+        ai_tokens = 0
+        human_tokens = 0
+        if isinstance(players, list):
+            for player in players:
+                if not isinstance(player, dict):
+                    continue
+                pid = player.get("id")
+                tokens = player.get("tokens", [])
+                token_count = len(tokens) if isinstance(tokens, list) else 0
+                if pid == 1:
+                    ai_score = float(player.get("score", 0) or 0)
+                    ai_tokens = token_count
+                elif pid == 0:
+                    human_score = float(player.get("score", 0) or 0)
+                    human_tokens = token_count
+
+        units = self._extract_units(game_state)
+        ai_alive = [u for u in units if u.get("owner") == 1 and int(u.get("hp", 0) or 0) > 0]
+        human_alive = [u for u in units if u.get("owner") == 0 and int(u.get("hp", 0) or 0) > 0]
+        material_ai = sum(PIECE_VALUES.get(str(u.get("type")), 1.0) for u in ai_alive)
+        material_human = sum(PIECE_VALUES.get(str(u.get("type")), 1.0) for u in human_alive)
+        material_diff = material_ai - material_human
+
+        board_size = self._board_size(game_state)
+        ai_core = sum(
+            1
+            for u in ai_alive
+            if isinstance(u.get("r"), int) and isinstance(u.get("c"), int) and self._is_core_cell(int(u["r"]), int(u["c"]), board_size)
+        )
+        human_core = sum(
+            1
+            for u in human_alive
+            if isinstance(u.get("r"), int) and isinstance(u.get("c"), int) and self._is_core_cell(int(u["r"]), int(u["c"]), board_size)
+        )
+        core_balance = float(ai_core - human_core)
+
+        attack_moves = sum(1 for m in valid_moves if m.get("type") == "attack")
+        claim_moves = sum(1 for m in valid_moves if m.get("type") == "claim")
+        move_moves = sum(1 for m in valid_moves if m.get("type") == "move")
+        total_moves = max(1, len(valid_moves))
+        initiative = ((attack_moves * 1.2) + (claim_moves * 1.1) + move_moves) / total_moves - 0.8
+
+        round_index = float(game_state.get("round", 0) or 0)
+        round_progress = min(1.0, round_index / 10.0)
+        enemy_pressure = max(
+            0.0,
+            min(
+                1.0,
+                0.35
+                + max(0.0, human_score - ai_score) * 0.03
+                + max(0.0, -material_diff) * 0.06
+                + max(0.0, human_core - ai_core) * 0.1,
+            ),
+        )
+        return {
+            "score_diff": ai_score - human_score,
+            "material_diff": material_diff,
+            "core_balance": core_balance,
+            "initiative": initiative,
+            "enemy_pressure": enemy_pressure,
+            "round_progress": round_progress,
+            "token_balance": float(ai_tokens - human_tokens),
+        }
+
+    def _update_adaptive_memory(self, profile: AdaptiveProfile, metrics: dict[str, float]) -> None:
+        history = self.adaptive_state.get("history")
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "timestamp": time.time(),
+                "stance": profile.stance,
+                "confidence": profile.confidence,
+                "initiative": metrics["initiative"],
+                "enemy_pressure": metrics["enemy_pressure"],
+                "core_balance": metrics["core_balance"],
+            }
+        )
+        self.adaptive_state["history"] = history[-100:]
+        self.adaptive_state["confidence"] = profile.confidence
+        self.adaptive_state["last_stance"] = profile.stance
+        self.adaptive_state["risk_appetite"] = (profile.threat_tolerance * 2.0) - 1.0
+        self.adaptive_state["pace_preference"] = metrics["initiative"]
+        self.adaptive_state["opponent_aggression"] = metrics["enemy_pressure"]
+        self.adaptive_state["opponent_claim_pressure"] = max(0.0, -metrics["core_balance"])
+        self.adaptive_state["opponent_focus_core"] = max(0.0, -metrics["core_balance"]) / 3.0
 
     # ------------------------------- learning -------------------------------
 
@@ -475,6 +755,39 @@ class ChronosAI:
             except Exception as error:  # noqa: BLE001
                 logger.warning("Learning-agent observe skipped: %s", error)
 
+        if hasattr(self.adaptive_agent, "learn_from_feedback"):
+            try:
+                cast(Any, self.adaptive_agent).learn_from_feedback(
+                    {
+                        "reward": float(payload.get("reward", 0.0) or 0.0),
+                        "success": outcome == "win",
+                        "meta_context": {
+                            "outcome": outcome,
+                            "confidence": self.adaptive_state.get("confidence", 0.5),
+                            "last_stance": self.adaptive_state.get("last_stance", "balanced"),
+                            "pace_preference": self.adaptive_state.get("pace_preference", 0.0),
+                            "risk_appetite": self.adaptive_state.get("risk_appetite", 0.0),
+                        },
+                    }
+                )
+            except Exception as error:  # noqa: BLE001
+                logger.warning("Adaptive-agent feedback update skipped: %s", error)
+
+        reward_signal = float(payload.get("reward", 0.0) or 0.0)
+        trend = 0.03 if reward_signal >= 0 else -0.035
+        self.adaptive_state["confidence"] = max(
+            0.1,
+            min(0.95, float(self.adaptive_state.get("confidence", 0.5)) + trend),
+        )
+        self.adaptive_state["risk_appetite"] = max(
+            -1.0,
+            min(
+                1.0,
+                float(self.adaptive_state.get("risk_appetite", 0.0))
+                + (0.08 if outcome == "loss" else (-0.03 if outcome == "win" else 0.01)),
+            ),
+        )
+
     def _load_learning_state(self) -> None:
         if not self.learning_store_path.exists():
             return
@@ -483,6 +796,9 @@ class ChronosAI:
             self.stats.update(payload.get("stats", {}))
             self.action_weights.update(payload.get("action_weights", {}))
             self.zone_weights.update(payload.get("zone_weights", {}))
+            loaded_adaptive_state = payload.get("adaptive_state", {})
+            if isinstance(loaded_adaptive_state, dict):
+                self.adaptive_state.update(loaded_adaptive_state)
         except Exception as error:  # noqa: BLE001
             logger.warning("Failed to load Chronos learning state: %s", error)
 
@@ -493,6 +809,7 @@ class ChronosAI:
                 "stats": self.stats,
                 "action_weights": self.action_weights,
                 "zone_weights": self.zone_weights,
+                "adaptive_state": self.adaptive_state,
                 "updated_at": datetime.utcnow().isoformat(),
             }
             self.learning_store_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
