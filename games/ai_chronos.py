@@ -119,7 +119,7 @@ class ChronosAI:
         self._load_learning_state()
         self.shared_memory.set("chronos_ai_status", "initialized")
         self.shared_memory.set("chronos_stats", self.stats)
-        logger.info("Chronos AI initialized with SLAI knowledge/planning/execution/learning agents")
+        logger.info("Chronos AI initialized with SLAI adaptive/knowledge/planning/execution/learning agents")
 
     # ------------------------------ public API ------------------------------
 
