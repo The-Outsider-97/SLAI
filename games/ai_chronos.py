@@ -769,17 +769,26 @@ class ChronosAI:
                 zone = self._classify_zone(r, c, board_size)
                 self.zone_weights[zone] = max(-6.0, min(10.0, self.zone_weights.get(zone, 0.0) + (delta * 0.5)))
 
-        if self.current_match_signatures:
-            per_move_scale = max(0.2, min(1.2, abs(float(payload.get("reward", 0.0) or 0.0)) / 55.0))
-            for index, signature in enumerate(self.current_match_signatures):
-                recency = 0.5 + (index / max(1, len(self.current_match_signatures) - 1))
+        payload_signatures = payload.get("ai_move_signatures", [])
+        learned_signatures: list[str] = list(self.current_match_signatures)
+        if not learned_signatures and isinstance(payload_signatures, list):
+            learned_signatures = [str(signature) for signature in payload_signatures if isinstance(signature, str)]
+
+        if learned_signatures:
+            reward_magnitude = max(
+                abs(float(payload.get("reward", 0.0) or 0.0)),
+                abs(float(payload.get("final_score", 0.0) or 0.0)),
+            )
+            per_move_scale = max(0.2, min(1.2, reward_magnitude / 55.0))
+            for index, signature in enumerate(learned_signatures):
+                recency = 0.5 + (index / max(1, len(learned_signatures) - 1))
                 change = delta * 0.18 * recency * per_move_scale
                 self.move_signature_weights[signature] = max(
                     -10.0,
                     min(10.0, self.move_signature_weights.get(signature, 0.0) + change),
                 )
 
-            opening_signature = self.current_match_signatures[0]
+            opening_signature = learned_signatures[0]
             opening_stats = self.opening_signature_stats.get(opening_signature, {"games": 0, "wins": 0, "losses": 0})
             opening_stats["games"] = int(opening_stats.get("games", 0)) + 1
             if outcome == "win":
