@@ -34,6 +34,12 @@ const SCOREBOARD_MAX_MATCHES = 200;
 let activeSidePanel = 'comms';
 let sidePanelHidden = false;
 let aiStrategosSubmitted = false;
+let trainingStatusEl = null;
+let trainingMonitorInterval = null;
+let selfPlayStatusInterval = null;
+let selfPlayFrameInterval = null;
+let selfPlayStatusEl = null;
+let selfPlayFrameEl = null;
 
 mountPageBackgroundLights();
 
@@ -143,6 +149,38 @@ function computeFinalScore(args) {
 function computeAiReward(finalScore) {
   // AI controls Player 2, so positive reward means Player 2 favorable result.
   return Math.max(-1, Math.min(1, (-finalScore) / 100));
+}
+
+function classifyBoardZone(r, c, boardSize) {
+  const center = Math.floor(boardSize / 2);
+  if (r >= center - 1 && r <= center + 1 && c >= center - 1 && c <= center + 1) return 'core';
+  if (Math.max(Math.abs(r - center), Math.abs(c - center)) <= 2) return 'near_core';
+  return 'perimeter';
+}
+
+function buildAiMoveSignatures(gameRef) {
+  const signatures = [];
+  const timeline = Array.isArray(gameRef.timeline) ? gameRef.timeline : [];
+  const boardSize = CONFIG.board.size;
+
+  for (const slot of timeline) {
+    if (!Array.isArray(slot)) continue;
+    const aiAction = slot[1];
+    if (!aiAction || typeof aiAction !== 'object') continue;
+
+    const type = String(aiAction.type || 'pass');
+    const target = aiAction.target && typeof aiAction.target === 'object' ? aiAction.target : null;
+    const r = Number.isInteger(target?.r) ? target.r : Number.isInteger(target?.row) ? target.row : null;
+    const c = Number.isInteger(target?.c) ? target.c : Number.isInteger(target?.col) ? target.col : null;
+
+    if (Number.isInteger(r) && Number.isInteger(c)) {
+      const zone = classifyBoardZone(r, c, boardSize);
+      signatures.push(`${type}:${zone}:${r}:${c}`);
+    } else {
+      signatures.push(type);
+    }
+  }
+  return signatures;
 }
 
 function setSidebarVisibility(hidden) {
@@ -450,7 +488,8 @@ async function reportGameResult() {
         rounds: game.round,
         board_size: CONFIG.board.size,
         final_score: finalScore,
-        reward: computeAiReward(finalScore)
+        reward: computeAiReward(finalScore),
+        ai_move_signatures: buildAiMoveSignatures(game),
     };
     
     try {
@@ -1323,3 +1362,178 @@ function appendChatMessage(sender, text, colorClass) {
   chatHistory.scrollTop = chatHistory.scrollHeight;
   return id;
 }
+
+function ensureTrainingStatusPanel() {
+  if (!chatHistory) return null;
+  if (trainingStatusEl) return trainingStatusEl;
+
+  const panel = document.createElement('div');
+  panel.id = 'training-status-panel';
+  panel.className = 'rounded-xl border border-white/10 bg-black/40 p-3 text-[10px] font-mono text-slate-400';
+  panel.innerHTML = `
+    <div class="text-[9px] tracking-[0.2em] uppercase text-slate-500 mb-2">Training Telemetry</div>
+    <div id="training-status-content" class="leading-relaxed">Checking training status...</div>
+  `;
+  chatHistory.prepend(panel);
+  trainingStatusEl = panel.querySelector('#training-status-content');
+  return trainingStatusEl;
+}
+
+function renderTrainingStatus(status) {
+  const target = ensureTrainingStatusPanel();
+  if (!target) return;
+
+  if (!status?.available) {
+    target.innerHTML = 'No training checkpoint found yet.<br><span class="text-slate-600">Run train_chronos_agents to stream progress here.</span>';
+    return;
+  }
+
+  const activityClass = status.active ? 'text-emerald-400' : 'text-slate-400';
+  const activityText = status.active ? 'LIVE' : 'IDLE';
+  const completed = Number(status.completed_episodes) || 0;
+  const total = Number(status.total_episodes) || 0;
+  const progress = Number(status.progress_percent) || 0;
+  const lastUpdate = Number.isFinite(status.seconds_since_update) ? `${status.seconds_since_update}s ago` : 'n/a';
+
+  target.innerHTML = `
+    <div class="mb-1">Status: <span class="${activityClass} font-bold">${activityText}</span></div>
+    <div class="mb-1">Episodes: <span class="text-white">${completed}/${total || '?'}</span> (${progress.toFixed(2)}%)</div>
+    <div class="mb-1">Depth/Playouts: <span class="text-white">${status.depth || '-'} / ${status.counter_playouts || '-'}</span></div>
+    <div class="mb-1">Explored/Counter Evals: <span class="text-white">${status.explored_states || 0} / ${status.counter_evals || 0}</span></div>
+    <div class="mb-1">Wins: <span class="text-white">${JSON.stringify(status.wins || {})}</span></div>
+    <div>Last update: <span class="text-white">${lastUpdate}</span></div>
+  `;
+}
+
+async function refreshTrainingStatus() {
+  try {
+    const response = await fetch('/api/ai/training-status');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    renderTrainingStatus(data);
+  } catch (error) {
+    const target = ensureTrainingStatusPanel();
+    if (!target) return;
+    target.innerHTML = `Training telemetry unavailable.<br><span class="text-red-400">${error.message}</span>`;
+  }
+}
+
+function startTrainingStatusMonitor() {
+  ensureTrainingStatusPanel();
+  refreshTrainingStatus();
+  if (trainingMonitorInterval) clearInterval(trainingMonitorInterval);
+  trainingMonitorInterval = setInterval(refreshTrainingStatus, 2000);
+}
+
+startTrainingStatusMonitor();
+
+function ensureSelfPlayPanel() {
+  const host = document.getElementById('chat-history');
+  if (!host) return;
+  if (selfPlayStatusEl && selfPlayFrameEl) return;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'rounded-xl border border-white/10 bg-black/40 p-3 text-[10px] font-mono text-slate-300 mt-2';
+  wrapper.innerHTML = `
+    <div class="text-[9px] tracking-[0.2em] uppercase text-slate-500 mb-2">Self-Play Viewer</div>
+    <div class="flex gap-2 mb-2">
+      <button id="selfplay-start-btn" class="px-2 py-1 rounded bg-emerald-700/40 border border-emerald-500 text-emerald-300">START</button>
+      <button id="selfplay-stop-btn" class="px-2 py-1 rounded bg-red-700/30 border border-red-500 text-red-300">STOP</button>
+    </div>
+    <div id="selfplay-status" class="mb-2 text-slate-400">Status: idle</div>
+    <div id="selfplay-frame" class="max-h-48 overflow-y-auto bg-black/30 rounded p-2 border border-white/5 text-[10px]">No frame yet.</div>
+  `;
+  host.prepend(wrapper);
+  selfPlayStatusEl = wrapper.querySelector('#selfplay-status');
+  selfPlayFrameEl = wrapper.querySelector('#selfplay-frame');
+
+  const startBtn = wrapper.querySelector('#selfplay-start-btn');
+  const stopBtn = wrapper.querySelector('#selfplay-stop-btn');
+  if (startBtn) startBtn.onclick = startSelfPlay;
+  if (stopBtn) stopBtn.onclick = stopSelfPlay;
+}
+
+async function startSelfPlay() {
+  try {
+    const response = await fetch('/api/ai/selfplay/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ episodes: 60, depth: 2, playouts: 8, speed_ms: 140 }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    pollSelfPlayStatus();
+    pollSelfPlayFrame();
+  } catch (error) {
+    if (selfPlayStatusEl) selfPlayStatusEl.textContent = `Status: start failed (${error.message})`;
+  }
+}
+
+async function stopSelfPlay() {
+  try {
+    await fetch('/api/ai/selfplay/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  } catch (error) {
+    if (selfPlayStatusEl) selfPlayStatusEl.textContent = `Status: stop failed (${error.message})`;
+  }
+}
+
+function renderSelfPlayFrame(framePayload) {
+  if (!selfPlayFrameEl) return;
+  const frameContainer = framePayload?.frame?.frame;
+  if (!frameContainer) {
+    selfPlayFrameEl.textContent = 'No frame yet.';
+    return;
+  }
+  const units = Array.isArray(frameContainer.units) ? frameContainer.units.slice(0, 24) : [];
+  const lines = units
+    .map((unit) => `P${unit.owner} ${unit.type.padEnd(9)} @ (${unit.r},${unit.c}) hp=${unit.hp}`)
+    .join('\n');
+
+  selfPlayFrameEl.textContent = [
+    `Episode: ${framePayload.frame.episode}`,
+    `Board: ${frameContainer.board_size}x${frameContainer.board_size} | Round: ${frameContainer.round_index} | Turn: P${frameContainer.turn}`,
+    `Scores -> P0: ${frameContainer.scores?.p0 ?? 0} | P1: ${frameContainer.scores?.p1 ?? 0}`,
+    '',
+    lines || 'No active units.',
+  ].join('\n');
+}
+
+async function pollSelfPlayStatus() {
+  try {
+    const response = await fetch('/api/ai/selfplay/status');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (!selfPlayStatusEl) return;
+    const progress = data.progress || {};
+    selfPlayStatusEl.innerHTML = `Status: <span class="${data.running ? 'text-emerald-400' : 'text-slate-400'}">${data.status}</span><br/>`
+      + `Episodes: ${progress.episodes_completed ?? 0}/${progress.episodes_total ?? 0} | W/L/D: ${progress.wins ?? 0}/${progress.losses ?? 0}/${progress.draws ?? 0}`;
+  } catch (error) {
+    if (selfPlayStatusEl) selfPlayStatusEl.textContent = `Status: unavailable (${error.message})`;
+  }
+}
+
+async function pollSelfPlayFrame() {
+  try {
+    const response = await fetch('/api/ai/selfplay/frame');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    renderSelfPlayFrame(data);
+  } catch (error) {
+    if (selfPlayFrameEl) selfPlayFrameEl.textContent = `Frame unavailable (${error.message})`;
+  }
+}
+
+function startSelfPlayMonitor() {
+  ensureSelfPlayPanel();
+  pollSelfPlayStatus();
+  pollSelfPlayFrame();
+  if (selfPlayStatusInterval) clearInterval(selfPlayStatusInterval);
+  if (selfPlayFrameInterval) clearInterval(selfPlayFrameInterval);
+  selfPlayStatusInterval = setInterval(pollSelfPlayStatus, 1200);
+  selfPlayFrameInterval = setInterval(pollSelfPlayFrame, 500);
+}
+
+startSelfPlayMonitor();
