@@ -13,7 +13,9 @@ import importlib
 import json
 import sys, os
 import threading
+import time
 import uuid
+import random
 import requests
 
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ from src.agents.agent_factory import AgentFactory
 from src.agents.collaborative.shared_memory import SharedMemory
 from src.agents.planning.planning_types import Task, TaskType
 from logs.logger import get_logger, PrettyPrinter
+from games.train_chronos_agents import ChronosTrainingSimulator
 
 
 logger = get_logger("R-Games")
@@ -112,6 +115,7 @@ class GameRuntime:
         self.ai_instances: dict[str, object] = {}
         self.session_selected_game: dict[str, str] = {}
         self._module_status_cache: dict[str, dict[str, Any]] = {}
+        self.selfplay_sessions: dict[str, dict[str, Any]] = {}
 
     def _load_initializer(self, config: GameConfig) -> Callable[[], object]:
         module = importlib.import_module(config.ai_module)
@@ -310,7 +314,186 @@ class GameRuntime:
             raise TypeError("Chat response must be a JSON object")
         return result
 
+    def selfplay_start(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        referer: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            self.get_selected_game(session_id) is None
+            and not isinstance(payload.get("game"), str)
+            and not isinstance(payload.get("game_key"), str)
+            and not referer
+        ):
+            payload = {**payload, "game": "chronos"}
+        self._ensure_game_selected(session_id, payload, referer=referer)
+        config, instance = self._get_selected_instance(session_id)
+        if config.key != "chronos":
+            raise NotImplementedError("Self-play viewer is currently available for Chronos only")
+
+        episodes = max(1, min(500, int(payload.get("episodes", 30) or 30)))
+        depth = max(1, min(4, int(payload.get("depth", 2) or 2)))
+        playouts = max(1, min(32, int(payload.get("playouts", 8) or 8)))
+        seed = int(payload.get("seed", int(time.time())) or int(time.time()))
+        speed_ms = max(20, min(2000, int(payload.get("speed_ms", 180) or 180)))
+
+        with self._lock:
+            active = self.selfplay_sessions.get(session_id)
+            if active and active.get("running"):
+                return {"status": "already_running", "session_id": session_id, "progress": active.get("progress", {})}
+
+            stop_event = threading.Event()
+            state_lock = threading.RLock()
+            shared_state = {
+                "running": True,
+                "started_at": time.time(),
+                "updated_at": time.time(),
+                "progress": {
+                    "episodes_total": episodes,
+                    "episodes_completed": 0,
+                    "depth": depth,
+                    "playouts": playouts,
+                    "wins": 0,
+                    "losses": 0,
+                    "draws": 0,
+                },
+                "latest_frame": None,
+                "latest_result": None,
+                "error": None,
+            }
+
+            def worker() -> None:
+                board_sizes = [9, 11, 13]
+                rng = random.Random(seed)
+                try:
+                    for episode in range(1, episodes + 1):
+                        if stop_event.is_set():
+                            break
+                        board_size = board_sizes[(episode - 1) % len(board_sizes)]
+                        sim_seed = rng.randint(1, 10_000_000)
+                        simulator = ChronosTrainingSimulator(board_size=board_size, seed=sim_seed)
+
+                        def on_frame(frame: dict[str, Any]) -> None:
+                            with state_lock:
+                                shared_state["latest_frame"] = {
+                                    "episode": episode,
+                                    "board_size": board_size,
+                                    "frame": frame,
+                                }
+                                shared_state["updated_at"] = time.time()
+
+                        result = simulator.rollout(
+                            ai=instance,
+                            search_depth=depth,
+                            playouts=playouts,
+                            frame_callback=on_frame,
+                        )
+                        outcome = "draw"
+                        if result["winner"] == 1:
+                            outcome = "win"
+                        elif result["winner"] == 0:
+                            outcome = "loss"
+
+                        learn_payload = {
+                            "outcome": outcome,
+                            "reward": float(result["reward"]),
+                            "final_score": int(result["final_score"]),
+                            "board_size": int(board_size),
+                            "rounds": int(result["rounds"]),
+                            "ai_move_signatures": result["ai_moves"],
+                            "explored_states": int(result["explored_states"]),
+                            "counter_evaluations": int(result["counter_evals"]),
+                            "training_mode": "webapp_selfplay_viewer",
+                        }
+                        learn_fn = getattr(instance, "learn_from_game", None)
+                        if callable(learn_fn):
+                            learn_fn(learn_payload)
+
+                        with state_lock:
+                            progress = shared_state["progress"]
+                            progress["episodes_completed"] = episode
+                            if outcome == "win":
+                                progress["wins"] += 1
+                            elif outcome == "loss":
+                                progress["losses"] += 1
+                            else:
+                                progress["draws"] += 1
+                            shared_state["latest_result"] = {
+                                "episode": episode,
+                                "board_size": board_size,
+                                "outcome": outcome,
+                                "reward": float(result["reward"]),
+                                "final_score": int(result["final_score"]),
+                            }
+                            shared_state["updated_at"] = time.time()
+
+                        time.sleep(speed_ms / 1000.0)
+                except Exception as error:  # noqa: BLE001
+                    with state_lock:
+                        shared_state["error"] = str(error)
+                        shared_state["updated_at"] = time.time()
+                    logger.exception("Chronos self-play worker failed")
+                finally:
+                    with state_lock:
+                        shared_state["running"] = False
+                        shared_state["updated_at"] = time.time()
+
+            thread = threading.Thread(target=worker, name=f"chronos-selfplay-{session_id[:8]}", daemon=True)
+            shared_state["thread"] = thread
+            shared_state["stop_event"] = stop_event
+            shared_state["lock"] = state_lock
+            self.selfplay_sessions[session_id] = shared_state
+            thread.start()
+
+        return {"status": "started", "session_id": session_id, "progress": shared_state["progress"]}
+
+    def selfplay_stop(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            session = self.selfplay_sessions.get(session_id)
+            if not session:
+                return {"status": "idle"}
+            stop_event = session.get("stop_event")
+            if isinstance(stop_event, threading.Event):
+                stop_event.set()
+            session["running"] = False
+            session["updated_at"] = time.time()
+        return {"status": "stopping"}
+
+    def selfplay_status(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            session = self.selfplay_sessions.get(session_id)
+            if not session:
+                return {"status": "idle", "running": False}
+            lock = session.get("lock")
+            if hasattr(lock, "acquire") and hasattr(lock, "release"):
+                with lock:
+                    return {
+                        "status": "running" if session.get("running") else "stopped",
+                        "running": bool(session.get("running")),
+                        "started_at": session.get("started_at"),
+                        "updated_at": session.get("updated_at"),
+                        "progress": dict(session.get("progress", {})),
+                        "latest_result": session.get("latest_result"),
+                        "error": session.get("error"),
+                    }
+            return {"status": "unknown", "running": bool(session.get("running"))}
+
+    def selfplay_frame(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            session = self.selfplay_sessions.get(session_id)
+            if not session:
+                return {"available": False}
+            lock = session.get("lock")
+            if hasattr(lock, "acquire") and hasattr(lock, "release"):
+                with lock:
+                    frame = session.get("latest_frame")
+                    return {"available": bool(frame), "frame": frame}
+            return {"available": False}
+
 runtime = GameRuntime()
+
 
 def _infer_llm_provider(api_key: str) -> str:
     """Infer provider from common API key prefixes."""
@@ -477,6 +660,12 @@ class RequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/ai/health":
             self._send_json(runtime.ai_health(self.session_id))
             return
+        if self.path == "/api/ai/selfplay/status":
+            self._send_json(runtime.selfplay_status(self.session_id))
+            return
+        if self.path == "/api/ai/selfplay/frame":
+            self._send_json(runtime.selfplay_frame(self.session_id))
+            return
 
         if self.path == "/":
             self.path = "/games/index.html"
@@ -567,6 +756,42 @@ class RequestHandler(SimpleHTTPRequestHandler):
             except Exception as error:
                 logger.exception("AI chat endpoint failed")
                 self._send_json({"error": f"Chat request failed: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.path == "/api/ai/selfplay/start":
+            try:
+                referer = self.headers.get("Referer")
+                result = runtime.selfplay_start(
+                    self.session_id,
+                    payload if isinstance(payload, dict) else {},
+                    referer=referer,
+                )
+                self._send_json(result)
+            except LookupError as error:
+                try:
+                    runtime.select_game(self.session_id, "chronos")
+                    fallback = runtime.selfplay_start(
+                        self.session_id,
+                        payload if isinstance(payload, dict) else {"game": "chronos"},
+                        referer=referer,
+                    )
+                    self._send_json(fallback)
+                except Exception:
+                    self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except NotImplementedError as error:
+                self._send_json({"error": str(error)}, HTTPStatus.NOT_IMPLEMENTED)
+            except Exception as error:
+                logger.exception("AI self-play start endpoint failed")
+                self._send_json({"error": f"Self-play start failed: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.path == "/api/ai/selfplay/stop":
+            try:
+                result = runtime.selfplay_stop(self.session_id)
+                self._send_json(result)
+            except Exception as error:
+                logger.exception("AI self-play stop endpoint failed")
+                self._send_json({"error": f"Self-play stop failed: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
