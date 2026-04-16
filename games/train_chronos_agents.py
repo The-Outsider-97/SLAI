@@ -23,7 +23,7 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # Ensure repository imports resolve when run as script.
@@ -90,11 +90,20 @@ class ChronosTrainingSimulator:
             winner=None,
         )
 
-    def rollout(self, ai: ChronosAI, search_depth: int, playouts: int) -> dict[str, Any]:
+    def rollout(
+        self,
+        ai: ChronosAI,
+        search_depth: int,
+        playouts: int,
+        frame_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         state = self.initialize()
         ai_move_signatures: list[dict[str, Any]] = []
         explored_states = 0
         counter_evals = 0
+
+        if callable(frame_callback):
+            frame_callback(self._snapshot_state(state, episode_round=0, acting_owner=state.turn))
 
         while state.winner is None and state.round_index < self.max_rounds:
             legal_moves = self._legal_moves(state, owner=state.turn)
@@ -123,6 +132,8 @@ class ChronosTrainingSimulator:
 
             self._update_scoring(state)
             state.winner = self._winner_if_any(state)
+            if callable(frame_callback):
+                frame_callback(self._snapshot_state(state, episode_round=state.round_index, acting_owner=state.turn))
 
         if state.winner is None:
             state.winner = self._winner_by_score_tiebreak(state)
@@ -137,6 +148,26 @@ class ChronosTrainingSimulator:
             "ai_moves": ai_move_signatures,
             "explored_states": explored_states,
             "counter_evals": counter_evals,
+        }
+
+    def _snapshot_state(self, state: MiniChronosState, *, episode_round: int, acting_owner: int) -> dict[str, Any]:
+        return {
+            "board_size": state.board_size,
+            "round_index": int(episode_round),
+            "turn": int(acting_owner),
+            "scores": {"p0": int(state.scores[0]), "p1": int(state.scores[1])},
+            "units": [
+                {
+                    "id": unit.id,
+                    "owner": unit.owner,
+                    "type": unit.type,
+                    "r": unit.r,
+                    "c": unit.c,
+                    "hp": unit.hp,
+                }
+                for unit in state.units
+                if unit.hp > 0
+            ],
         }
 
     def _build_game_state_payload(self, state: MiniChronosState, valid_moves: list[dict[str, Any]]) -> dict[str, Any]:
