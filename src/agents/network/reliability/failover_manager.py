@@ -39,14 +39,6 @@ from logs.logger import PrettyPrinter, get_logger
 logger = get_logger("Failover Manager")
 printer = PrettyPrinter()
 
-__all__ = [
-    "FailoverProfile",
-    "FailoverCandidateScore",
-    "FailoverAttemptRecord",
-    "FailoverDecision",
-    "FailoverManager",
-]
-
 
 _FAILOVER_MANAGER_LAST_KEY = "network.reliability.failover_manager.last"
 _FAILOVER_MANAGER_SNAPSHOT_KEY = "network.reliability.failover_manager.snapshot"
