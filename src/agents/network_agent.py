@@ -73,14 +73,13 @@ class NetworkAgent(BaseAgent):
         self.history_shared_key = str(self.network_config.get("history_shared_key", "network_agent:history"))
         self.max_history = max(1, int(self.network_config.get("max_history", 200)))
 
-        # Network subsystem primitives (their internal memory is subsystem-local).
-        self.network_memory = NetworkMemory()
-        self.adapters = NetworkAdapters(memory=self.network_memory)
-        self.stream = NetworkStream(memory=self.network_memory, adapters=self.adapters)
-        self.lifecycle = NetworkLifecycle(memory=self.network_memory)
-        self.reliability = NetworkReliability(memory=self.network_memory)
-        self.policy = NetworkPolicy(memory=self.network_memory)
-        self.metrics = NetworkMetrics(memory=self.network_memory)
+        # Network subsystem
+        self.adapters = NetworkAdapters()
+        self.stream = NetworkStream()
+        self.lifecycle = NetworkLifecycle()
+        self.reliability = NetworkReliability()
+        self.policy = NetworkPolicy()
+        self.metrics = NetworkMetrics()
 
     def perform_task(self, task_data: Any) -> Dict[str, Any]:
         """Dispatch supported network operations in a consistent agent-facing interface."""
@@ -94,7 +93,14 @@ class NetworkAgent(BaseAgent):
             if operation in {"receive", "recv", "inbound"}:
                 channel = str(payload.get("channel", payload.get("protocol", "http")))
                 timeout_ms = int(payload.get("timeout_ms", self.default_receive_timeout_ms))
-                return self.receive(channel=channel, timeout_ms=timeout_ms)
+                endpoint = payload.get("endpoint")
+                protocol = payload.get("protocol")
+                return self.receive(
+                    channel=channel,
+                    timeout_ms=timeout_ms,
+                    endpoint=str(endpoint) if endpoint is not None else None,
+                    protocol=str(protocol) if protocol is not None else None,
+                )
             if operation in {"health", "status", "snapshot"}:
                 return self.get_network_health()
             raise PayloadValidationError(
@@ -378,14 +384,27 @@ class NetworkAgent(BaseAgent):
             metadata={"agent": self.name},
         )
 
-    def receive(self, channel: str, timeout_ms: int = 5000) -> dict:
+    def receive(
+        self,
+        channel: str,
+        timeout_ms: int = 5000,
+        *,
+        endpoint: Optional[str] = None,
+        protocol: Optional[str] = None,
+    ) -> dict:
         """Receive and normalize inbound message from a channel."""
         if not self.enabled:
             return {"status": "disabled", "agent": self.name, "reason": "network agent disabled"}
 
         normalized_channel = normalize_protocol_name(channel)
+        resolved_protocol = normalize_protocol_name(protocol) if protocol is not None else normalized_channel
         started = time.monotonic()
-        stream_result = self.stream.receive(channel=normalized_channel, timeout_ms=timeout_ms)
+        stream_result = self.stream.receive(
+            channel=normalized_channel,
+            protocol=resolved_protocol,
+            endpoint=endpoint,
+            timeout_ms=timeout_ms,
+        )
 
         result_payload = ensure_mapping(stream_result.get("result"), field_name="stream_result.result", allow_none=True)
         envelope = ensure_mapping(result_payload.get("envelope"), field_name="result.envelope", allow_none=True)
@@ -395,8 +414,8 @@ class NetworkAgent(BaseAgent):
             envelope=envelope or None,
             payload=inbound_payload,
             channel=envelope.get("channel") or normalized_channel,
-            protocol=envelope.get("protocol") or normalized_channel,
-            endpoint=envelope.get("endpoint"),
+            protocol=envelope.get("protocol") or resolved_protocol,
+            endpoint=envelope.get("endpoint") or endpoint,
             route=envelope.get("route"),
             timeout_ms=timeout_ms,
             metadata={"source": "network_agent.receive"},
@@ -408,8 +427,8 @@ class NetworkAgent(BaseAgent):
 
         self.metrics.record_success(
             channel=envelope.get("channel") or normalized_channel,
-            endpoint=envelope.get("endpoint"),
-            protocol=envelope.get("protocol") or normalized_channel,
+            endpoint=envelope.get("endpoint") or endpoint,
+            protocol=envelope.get("protocol") or resolved_protocol,
             route=envelope.get("route"),
             operation="receive",
             latency_ms=max(0.0, (time.monotonic() - started) * 1000.0),
@@ -481,6 +500,10 @@ if __name__ == "__main__":
     print("\n=== Running Network Agent ===\n")
     printer.status("TEST", "Network Agent initialized", "info")
 
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    from time import sleep
+
     from .agent_factory import AgentFactory
     from .collaborative.shared_memory import SharedMemory
 
@@ -496,27 +519,84 @@ if __name__ == "__main__":
     agent.metrics = NetworkMetrics()
     agent.network_memory = NetworkMemory()
 
-    relay_task = {
-        "operation": "relay",
-        "envelope": {
-            "payload": {"hello": "network"},
-            "channel": "http",
-            "protocol": "http",
-            "endpoint": "http://localhost:8080/relay",
-            "route": "primary",
-            "operation": "send",
-            "timeout_ms": 1000,
-            "metadata": {"source": "__main__"},
-        },
-        "constraints": {"requires_tls": False},
-    }
-    relay_result = agent.perform_task(relay_task)
-    printer.pretty("NETWORK RELAY", relay_result, "success")
+    class _SmokeHTTPHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-    receive_result = agent.perform_task({"operation": "receive", "channel": "http", "timeout_ms": 1000})
-    printer.pretty("NETWORK RECEIVE", receive_result, "success")
+        def _write_json(self, status: int, body: str) -> None:
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
 
-    health_result = agent.perform_task({"operation": "health"})
-    printer.pretty("NETWORK HEALTH", health_result, "success")
+        def do_GET(self) -> None:  # noqa: N802
+            self._write_json(200, '{"ok": true, "method": "GET", "source": "network_agent.__main__"}')
+
+        def do_POST(self) -> None:  # noqa: N802
+            content_length = int(self.headers.get("Content-Length", "0") or 0)
+            if content_length > 0:
+                self.rfile.read(content_length)
+            self._write_json(200, '{"ok": true, "method": "POST", "source": "network_agent.__main__"}')
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            return
+
+    class _SmokeHTTPServer:
+        def __init__(self) -> None:
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), _SmokeHTTPHandler)
+            self.thread = Thread(target=self.server.serve_forever, daemon=True)
+
+        @property
+        def endpoint(self) -> str:
+            host, port = self.server.server_address
+            return f"http://{host}:{port}/relay"
+
+        def start(self) -> None:
+            self.thread.start()
+            sleep(0.15)
+
+        def stop(self) -> None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=2.0)
+
+    smoke_server = _SmokeHTTPServer()
+    smoke_server.start()
+    smoke_endpoint = smoke_server.endpoint
+
+    try:
+        relay_task = {
+            "operation": "relay",
+            "envelope": {
+                "payload": {"hello": "network"},
+                "channel": "http",
+                "protocol": "http",
+                "endpoint": smoke_endpoint,
+                "route": "primary",
+                "operation": "send",
+                "timeout_ms": 1500,
+                "metadata": {"source": "__main__"},
+            },
+            "constraints": {"tls_required": False, "allow_loopback_hosts": True},
+        }
+        relay_result = agent.perform_task(relay_task)
+        printer.pretty("NETWORK RELAY", relay_result, "success")
+
+        receive_result = agent.perform_task(
+            {
+                "operation": "receive",
+                "channel": "http",
+                "protocol": "http",
+                "endpoint": smoke_endpoint,
+                "timeout_ms": 1500,
+            }
+        )
+        printer.pretty("NETWORK RECEIVE", receive_result, "success")
+
+        health_result = agent.perform_task({"operation": "health"})
+        printer.pretty("NETWORK HEALTH", health_result, "success")
+    finally:
+        smoke_server.stop()
 
     print("\n=== Successfully ran the Network Agent smoke block ===\n")
