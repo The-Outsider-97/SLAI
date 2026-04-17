@@ -38,8 +38,6 @@ from logs.logger import PrettyPrinter, get_logger
 logger = get_logger("Network Lifecycle")
 printer = PrettyPrinter()
 
-__all__ = ["NetworkLifecycle"]
-
 _LIFECYCLE_LAST_KEY = "network.lifecycle.last"
 _LIFECYCLE_SNAPSHOT_KEY = "network.lifecycle.snapshot"
 _LIFECYCLE_HISTORY_KEY = "network.lifecycle.history"
