@@ -8,11 +8,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .network import *
-from .network.utils.network_errors import *
+from .network.utils import *
 from logs.logger import PrettyPrinter, get_logger
 
 logger = get_logger("Network Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class NetworkAgent(BaseAgent):
