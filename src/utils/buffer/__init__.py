@@ -18,6 +18,7 @@ from .eviction_policies import (
 from .segment_tree import MinSegmentTree, SegmentTree, SegmentTreeFactory, SumSegmentTree
 from .nstep_buffer import NStepBuffer, NStepConfig
 from .reservoir_buffer import ReservoirConfig, ReservoirReplayBuffer
+from .network_buffer import NetworkBuffer, NetworkBufferConfig, NetworkMessage
 from .sequence_replay_buffer import *
 
 __all__ = [
@@ -36,6 +37,9 @@ __all__ = [
     "SegmentTreeFactory",
     "ReservoirConfig",
     "ReservoirReplayBuffer",
+    "NetworkBuffer",
+    "NetworkBufferConfig",
+    "NetworkMessage",
     "SegmentTree",
     "SumSegmentTree",
     "MinSegmentTree",
