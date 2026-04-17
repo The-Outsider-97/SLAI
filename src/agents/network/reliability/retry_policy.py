@@ -39,14 +39,6 @@ from logs.logger import PrettyPrinter, get_logger
 logger = get_logger("Retry Policy")
 printer = PrettyPrinter()
 
-__all__ = [
-    "RetryProfile",
-    "RetryAttemptRecord",
-    "RetryDecision",
-    "RetryPolicy",
-]
-
-
 _RETRY_POLICY_LAST_KEY = "network.reliability.retry_policy.last"
 _RETRY_POLICY_SNAPSHOT_KEY = "network.reliability.retry_policy.snapshot"
 _RETRY_POLICY_HISTORY_KEY = "network.reliability.retry_policy.history"
@@ -635,10 +627,8 @@ class RetryPolicy:
             base = profile.initial_backoff_ms * attempt
         elif strategy == "decorrelated":
             # Upper-bounded variant suitable for stateless evaluation.
-            base = min(
-                profile.max_backoff_ms,
-                int(profile.initial_backoff_ms * (profile.backoff_multiplier ** max(0, attempt - 1))),
-            )
+            prev = profile.initial_backoff_ms * (profile.backoff_multiplier ** max(0, attempt - 2))
+            base = random.randint(profile.initial_backoff_ms, min(profile.max_backoff_ms, int(prev * profile.backoff_multiplier)))
         else:
             base = int(profile.initial_backoff_ms * (profile.backoff_multiplier ** max(0, attempt - 1)))
         return max(0, min(int(base), int(profile.max_backoff_ms)))
