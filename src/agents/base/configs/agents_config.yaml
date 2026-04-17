@@ -228,6 +228,19 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
+network_agent:
+    max_delivery_attempts: 3
+    retry_sleep_enabled: False
+    max_retry_sleep_ms: 1500
+    default_receive_timeout_ms: 5000
+    health_shared_key:
+        network_agent: "health"
+    last_result_shared_key:
+        network_agent: "last_result"
+    history_shared_key:
+        network_agent: "history"
+    max_history: 200
+
 observability_agent:
     enabled: true
     default_service: "slai"
