@@ -36,13 +36,7 @@ from .network_memory import NetworkMemory
 from logs.logger import PrettyPrinter, get_logger
 
 logger = get_logger("Network Reliability")
-printer = PrettyPrinter
-
-__all__ = [
-    "ReliabilityDecision",
-    "NetworkReliability",
-]
-
+printer = PrettyPrinter()
 
 _NETWORK_RELIABILITY_LAST_KEY = "network.reliability.last"
 _NETWORK_RELIABILITY_SNAPSHOT_KEY = "network.reliability.snapshot"
