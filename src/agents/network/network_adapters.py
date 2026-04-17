@@ -138,7 +138,7 @@ class ManagedAdapterRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def touch(self) -> None:
-        self.last_used_at = _utcnow()
+        self.last_used_at = utcnow()
         self.usage_count += 1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -215,7 +215,7 @@ class NetworkAdapters:
             "delegated_acks": 0,
             "delegated_nacks": 0,
         }
-        self._started_at = _utcnow()
+        self._started_at = utcnow()
 
         if self.auto_register_defaults:
             self._register_default_adapters()
@@ -431,8 +431,8 @@ class NetworkAdapters:
                 spec_name=spec.name,
                 endpoint=self._safe_endpoint(endpoint),
                 adapter=adapter,
-                created_at=_utcnow(),
-                last_used_at=_utcnow(),
+                created_at=utcnow(),
+                last_used_at=utcnow(),
                 usage_count=1,
                 metadata={"requested_protocol": protocol, "requested_channel": channel},
             )
@@ -582,17 +582,9 @@ class NetworkAdapters:
             config_section="network_queue_adapter",
         )
 
-    def _register_default(
-        self,
-        *,
-        name: str,
-        cls_ref: Any,
-        protocols: Sequence[str],
-        channels: Sequence[str],
-        aliases: Sequence[str],
-        priority: int,
-        config_section: str,
-    ) -> None:
+    def _register_default(self, *, name: str, cls_ref: Any, protocols: Sequence[str],
+                          channels: Sequence[str], aliases: Sequence[str],
+                          priority: int, config_section: str) -> None:
         if cls_ref is None:
             return
         adapter_defaults = ensure_mapping(self.adapters_config.get("adapter_defaults"), field_name="adapter_defaults", allow_none=True)
@@ -921,155 +913,143 @@ class NetworkAdapters:
         return coerced
 
 
-class _DemoHTTPHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def _write(self, status: int, body: bytes, content_type: str = "application/json") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_HEAD(self) -> None:  # noqa: N802
-        self.send_response(200)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def do_GET(self) -> None:  # noqa: N802
-        body = stable_json_dumps({"ok": True, "path": self.path, "method": "GET"}).encode("utf-8")
-        self._write(200, body)
-
-    def do_POST(self) -> None:  # noqa: N802
-        content_length = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(content_length) if content_length > 0 else b""
-        body = stable_json_dumps({"ok": True, "payload": raw.decode("utf-8"), "method": "POST"}).encode("utf-8")
-        self._write(200, body)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-class _DemoHTTPServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
-        self.server = ThreadingHTTPServer((host, port), _DemoHTTPHandler)
-        self.thread = Thread(target=self.server.serve_forever, daemon=True)
-
-    @property
-    def host(self) -> str:
-        return str(self.server.server_address[0])
-
-    @property
-    def port(self) -> int:
-        return int(self.server.server_address[1])
-
-    def start(self) -> None:
-        self.thread.start()
-        sleep(0.15)
-
-    def stop(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=2)
-
-
-class _DemoGRPCTransport:
-    def __init__(self) -> None:
-        self.connected = False
-        self.messages: List[Dict[str, Any]] = []
-
-    def connect(self, *, endpoint: str, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        self.connected = True
-        return {"connected": True, "endpoint": endpoint, "timeout_ms": timeout_ms, "metadata": dict(metadata)}
-
-    def unary_unary(self, *, method: str, request: Any, timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
-        payload = {"method": method, "request": request, "timeout_ms": timeout_ms, "metadata": dict(metadata)}
-        self.messages.append(payload)
-        return {"kind": "unary", **payload}
-
-    def unary_stream(self, *, method: str, request: Any, timeout_ms: int, metadata: Mapping[str, Any]) -> Iterable[Any]:
-        yield {"kind": "stream", "index": 1, "method": method, "request": request}
-        yield {"kind": "stream", "index": 2, "method": method, "request": request}
-
-    def stream_unary(self, *, method: str, request: Sequence[Any], timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
-        return {"kind": "stream_unary", "method": method, "items": list(request)}
-
-    def stream_stream(self, *, method: str, request: Sequence[Any], timeout_ms: int, metadata: Mapping[str, Any]) -> Iterable[Any]:
-        for idx, item in enumerate(request, start=1):
-            yield {"kind": "stream_stream", "index": idx, "method": method, "item": item}
-
-    def recv(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
-        return {"kind": "recv", "timeout_ms": timeout_ms, "metadata": dict(metadata)}
-
-    def ack(self, *, message_id: str, correlation_id: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        return {"acknowledged": True, "message_id": message_id, "correlation_id": correlation_id}
-
-    def nack(self, *, message_id: str, correlation_id: Optional[str], reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        return {"nacked": True, "message_id": message_id, "correlation_id": correlation_id, "reason": reason}
-
-    def close(self, *, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        self.connected = False
-        return {"closed": True, "reason": reason}
-
-
-class _DemoQueueTransport:
-    def __init__(self) -> None:
-        self.connected = False
-        self.queues: Dict[str, List[Dict[str, Any]]] = {}
-
-    def connect(self, *, endpoint: str, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        self.connected = True
-        return {"connected": True, "endpoint": endpoint}
-
-    def declare(self, *, queue_name: str, durable: bool, exclusive: bool, auto_delete: bool, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        self.queues.setdefault(queue_name, [])
-        return {"declared": True, "queue_name": queue_name}
-
-    def publish(self, *, queue_name: str, payload: bytes, timeout_ms: int, metadata: Mapping[str, Any], headers: Mapping[str, Any], message_id: str, correlation_id: Optional[str], exchange: Optional[str], routing_key: Optional[str], delivery_mode: str) -> Mapping[str, Any] | None:
-        self.queues.setdefault(queue_name, []).append({
-            "message_id": message_id,
-            "correlation_id": correlation_id,
-            "payload": payload,
-            "content_type": headers.get("content-type", "application/json"),
-            "receipt": {"queue_name": queue_name, "message_id": message_id},
-        })
-        return {"published": True, "queue_name": queue_name}
-
-    def consume(self, *, queue_name: str, timeout_ms: int, metadata: Mapping[str, Any], auto_ack: bool, visibility_timeout_ms: Optional[int], prefetch_count: int) -> Mapping[str, Any] | None:
-        queue = self.queues.setdefault(queue_name, [])
-        if not queue:
-            raise ReceiveFailureError("Queue is empty.", context={"operation": "consume", "channel": "queue", "protocol": "queue"})
-        return queue.pop(0)
-
-    def ack(self, *, receipt: Mapping[str, Any], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        return {"acknowledged": True, "receipt": dict(receipt)}
-
-    def nack(self, *, receipt: Mapping[str, Any], requeue: bool, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        return {"nacked": True, "receipt": dict(receipt), "requeue": requeue, "reason": reason}
-
-    def close(self, *, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        self.connected = False
-        return {"closed": True, "reason": reason}
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _printer_status(label: str, message: str, level: str = "info") -> None:
-    try:
-        printer.status(label, message, level)
-    except Exception:
-        print(f"[{label}] {message}")
-
-
 if __name__ == "__main__":
     print("\n=== Running Network Adapters ===\n")
-    _printer_status("TEST", "Network Adapters initialized", "info")
+    printer.status("TEST", "Network Adapters initialized", "info")
+
+    class _DemoHTTPHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _write(self, status: int, body: bytes, content_type: str = "application/json") -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802
+            body = stable_json_dumps({"ok": True, "path": self.path, "method": "GET"}).encode("utf-8")
+            self._write(200, body)
+
+        def do_POST(self) -> None:  # noqa: N802
+            content_length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(content_length) if content_length > 0 else b""
+            body = stable_json_dumps({"ok": True, "payload": raw.decode("utf-8"), "method": "POST"}).encode("utf-8")
+            self._write(200, body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+
+    class _DemoHTTPServer:
+        def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
+            self.server = ThreadingHTTPServer((host, port), _DemoHTTPHandler)
+            self.thread = Thread(target=self.server.serve_forever, daemon=True)
+
+        @property
+        def host(self) -> str:
+            return str(self.server.server_address[0])
+
+        @property
+        def port(self) -> int:
+            return int(self.server.server_address[1])
+
+        def start(self) -> None:
+            self.thread.start()
+            sleep(0.15)
+
+        def stop(self) -> None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=2)
+
+
+    class _DemoGRPCTransport:
+        def __init__(self) -> None:
+            self.connected = False
+            self.messages: List[Dict[str, Any]] = []
+
+        def connect(self, *, endpoint: str, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            self.connected = True
+            return {"connected": True, "endpoint": endpoint, "timeout_ms": timeout_ms, "metadata": dict(metadata)}
+
+        def unary_unary(self, *, method: str, request: Any, timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
+            payload = {"method": method, "request": request, "timeout_ms": timeout_ms, "metadata": dict(metadata)}
+            self.messages.append(payload)
+            return {"kind": "unary", **payload}
+
+        def unary_stream(self, *, method: str, request: Any, timeout_ms: int, metadata: Mapping[str, Any]) -> Iterable[Any]:
+            yield {"kind": "stream", "index": 1, "method": method, "request": request}
+            yield {"kind": "stream", "index": 2, "method": method, "request": request}
+
+        def stream_unary(self, *, method: str, request: Sequence[Any], timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
+            return {"kind": "stream_unary", "method": method, "items": list(request)}
+
+        def stream_stream(self, *, method: str, request: Sequence[Any], timeout_ms: int, metadata: Mapping[str, Any]) -> Iterable[Any]:
+            for idx, item in enumerate(request, start=1):
+                yield {"kind": "stream_stream", "index": idx, "method": method, "item": item}
+
+        def recv(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> Any:
+            return {"kind": "recv", "timeout_ms": timeout_ms, "metadata": dict(metadata)}
+
+        def ack(self, *, message_id: str, correlation_id: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            return {"acknowledged": True, "message_id": message_id, "correlation_id": correlation_id}
+
+        def nack(self, *, message_id: str, correlation_id: Optional[str], reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            return {"nacked": True, "message_id": message_id, "correlation_id": correlation_id, "reason": reason}
+
+        def close(self, *, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            self.connected = False
+            return {"closed": True, "reason": reason}
+
+
+    class _DemoQueueTransport:
+        def __init__(self) -> None:
+            self.connected = False
+            self.queues: Dict[str, List[Dict[str, Any]]] = {}
+
+        def connect(self, *, endpoint: str, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            self.connected = True
+            return {"connected": True, "endpoint": endpoint}
+
+        def declare(self, *, queue_name: str, durable: bool, exclusive: bool, auto_delete: bool, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            self.queues.setdefault(queue_name, [])
+            return {"declared": True, "queue_name": queue_name}
+
+        def publish(self, *, queue_name: str, payload: bytes, timeout_ms: int, metadata: Mapping[str, Any], headers: Mapping[str, Any], message_id: str, correlation_id: Optional[str], exchange: Optional[str], routing_key: Optional[str], delivery_mode: str) -> Mapping[str, Any] | None:
+            self.queues.setdefault(queue_name, []).append({
+                "message_id": message_id,
+                "correlation_id": correlation_id,
+                "payload": payload,
+                "content_type": headers.get("content-type", "application/json"),
+                "receipt": {"queue_name": queue_name, "message_id": message_id},
+            })
+            return {"published": True, "queue_name": queue_name}
+
+        def consume(self, *, queue_name: str, timeout_ms: int, metadata: Mapping[str, Any], auto_ack: bool, visibility_timeout_ms: Optional[int], prefetch_count: int) -> Mapping[str, Any] | None:
+            queue = self.queues.setdefault(queue_name, [])
+            if not queue:
+                raise ReceiveFailureError("Queue is empty.", context={"operation": "consume", "channel": "queue", "protocol": "queue"})
+            return queue.pop(0)
+
+        def ack(self, *, receipt: Mapping[str, Any], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            return {"acknowledged": True, "receipt": dict(receipt)}
+
+        def nack(self, *, receipt: Mapping[str, Any], requeue: bool, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            return {"nacked": True, "receipt": dict(receipt), "requeue": requeue, "reason": reason}
+
+        def close(self, *, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            self.connected = False
+            return {"closed": True, "reason": reason}
 
     manager = NetworkAdapters()
     registry_snapshot = manager.get_registry_snapshot()
-    _printer_status("TEST", "Default adapters registered", "info")
+    printer.status("TEST", "Default adapters registered", "info")
 
     http_server = _DemoHTTPServer()
     http_server.start()
@@ -1077,10 +1057,10 @@ if __name__ == "__main__":
 
     try:
         http_selection = manager.select_adapter(protocol="http", endpoint=http_endpoint)
-        _printer_status("TEST", "HTTP adapter selected", "info")
+        printer.status("TEST", "HTTP adapter selected", "info")
 
         http_connected = manager.connect(name="http", endpoint=http_endpoint, metadata={"env": "test"})
-        _printer_status("TEST", "HTTP adapter connected through facade", "info")
+        printer.status("TEST", "HTTP adapter connected through facade", "info")
 
         http_sent = manager.send(
             {"task": "relay", "payload": {"hello": "network adapters"}},
@@ -1088,10 +1068,10 @@ if __name__ == "__main__":
             endpoint=http_endpoint,
             metadata={"trace": "http-demo"},
         )
-        _printer_status("TEST", "HTTP payload sent through facade", "info")
+        printer.status("TEST", "HTTP payload sent through facade", "info")
 
         http_received = manager.recv(name="http", endpoint=http_endpoint, metadata={"consumer": "demo"})
-        _printer_status("TEST", "HTTP cached response received through facade", "info")
+        printer.status("TEST", "HTTP cached response received through facade", "info")
 
         grpc_adapter = manager.create_adapter(
             name="grpc",
@@ -1106,7 +1086,7 @@ if __name__ == "__main__":
             },
         )
         grpc_capabilities = grpc_adapter.capabilities.to_dict()
-        _printer_status("TEST", "gRPC adapter created", "info")
+        printer.status("TEST", "gRPC adapter created", "info")
 
         queue_adapter = manager.create_adapter(
             name="queue",
@@ -1119,7 +1099,7 @@ if __name__ == "__main__":
             },
         )
         queue_capabilities = queue_adapter.capabilities.to_dict()
-        _printer_status("TEST", "Queue adapter created", "info")
+        printer.status("TEST", "Queue adapter created", "info")
 
         websocket_adapter = manager.create_adapter(
             name="websocket",
@@ -1127,12 +1107,12 @@ if __name__ == "__main__":
             reuse_instance=False,
         )
         websocket_capabilities = websocket_adapter.capabilities.to_dict()
-        _printer_status("TEST", "WebSocket adapter created", "info")
+        printer.status("TEST", "WebSocket adapter created", "info")
 
         active_snapshot = manager.list_active_adapters()
         health_snapshot = manager.get_active_health()
         close_count = manager.close_all(reason="demo complete")
-        _printer_status("TEST", "Managed adapters closed", "info")
+        printer.status("TEST", "Managed adapters closed", "info")
 
         print("Registry Snapshot:", stable_json_dumps(registry_snapshot))
         print("HTTP Selection:", stable_json_dumps(http_selection))
@@ -1158,7 +1138,7 @@ if __name__ == "__main__":
         assert manager.memory.get("network.adapters.registry") is not None
         assert manager.memory.get("network.adapters.active") is not None
 
-        _printer_status("TEST", "All Network Adapters checks passed", "info")
+        printer.status("TEST", "All Network Adapters checks passed", "info")
         print("\n=== Test ran successfully ===\n")
     finally:
         try:
