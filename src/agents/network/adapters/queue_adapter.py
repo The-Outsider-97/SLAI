@@ -72,9 +72,7 @@ class QueueTransportProtocol(Protocol):
         routing_key: Optional[str],
         delivery_mode: str,
     ) -> Mapping[str, Any] | None: ...
-    def consume(
-        self,
-        *,
+    def consume(self, *,
         queue_name: str,
         timeout_ms: int,
         metadata: Mapping[str, Any],
@@ -83,9 +81,7 @@ class QueueTransportProtocol(Protocol):
         prefetch_count: int,
     ) -> Mapping[str, Any] | None: ...
     def ack(self, *, receipt: Mapping[str, Any], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None: ...
-    def nack(
-        self,
-        *,
+    def nack(self, *,
         receipt: Mapping[str, Any],
         requeue: bool,
         reason: Optional[str],
@@ -135,10 +131,7 @@ class QueueAdapter(BaseAdapter):
     )
     DEFAULT_QUEUE_AUTH_MODES: Tuple[str, ...] = ("none", "basic", "token", "mtls")
 
-    def __init__(
-        self,
-        *,
-        memory=None,
+    def __init__(self, *, memory=None,
         config: Optional[Mapping[str, Any]] = None,
         endpoint: Optional[str] = None,
         adapter_name: str = "Queue",
@@ -252,10 +245,7 @@ class QueueAdapter(BaseAdapter):
             "metadata": normalize_metadata(metadata),
         }
 
-    def _send_impl(
-        self,
-        *,
-        payload: bytes,
+    def _send_impl(self, *, payload: bytes,
         envelope: Mapping[str, Any],
         timeout_ms: int,
         metadata: Mapping[str, Any],
@@ -363,9 +353,7 @@ class QueueAdapter(BaseAdapter):
 
         return normalized_message
 
-    def _ack_impl(
-        self,
-        *,
+    def _ack_impl(self, *,
         message_id: str,
         correlation_id: Optional[str],
         metadata: Mapping[str, Any],
@@ -404,9 +392,7 @@ class QueueAdapter(BaseAdapter):
             "result": json_safe(result),
         }
 
-    def _nack_impl(
-        self,
-        *,
+    def _nack_impl(self, *,
         message_id: str,
         correlation_id: Optional[str],
         reason: Optional[str],
