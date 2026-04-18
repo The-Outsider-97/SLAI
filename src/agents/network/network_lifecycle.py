@@ -142,6 +142,7 @@ class NetworkLifecycle:
                        max_attempts: Optional[int] = None,
                        metadata: Optional[Mapping[str, Any]] = None,
                        owner_token: Optional[str] = None,
+                       initial_state: Optional[str] = None,
                        ) -> Dict[str, Any]:
         if not self.enabled:
             raise ReliabilityError("NetworkLifecycle is disabled by configuration.", context={"operation": "begin_delivery"})
@@ -224,6 +225,7 @@ class NetworkLifecycle:
                 built_envelope,
                 max_attempts=max_attempts,
                 expires_in_seconds=expires_in_seconds,
+                initial_state=initial_state,
             )
 
             if self.auto_mark_processing_on_begin:
@@ -270,6 +272,7 @@ class NetworkLifecycle:
                 timeout_ms=timeout_ms or self.default_receive_timeout_ms,
                 metadata=metadata,
                 owner_token=owner_token,
+                initial_state="received",
             )
             # If begin_delivery returned a conflict (e.g. duplicate_active with fail_on_duplicate_active=False)
             if begun.get("delivery") is None:
@@ -537,6 +540,7 @@ class NetworkLifecycle:
         *,
         max_attempts: Optional[int],
         expires_in_seconds: Optional[int],
+        initial_state: Optional[str] = None,
     ) -> Dict[str, Any]:
         message_id = ensure_non_empty_string(str(envelope["message_id"]), field_name="message_id")
         existing = self.deliveries.get_delivery(message_id, include_history=True)
@@ -546,6 +550,7 @@ class NetworkLifecycle:
             envelope=envelope,
             max_attempts=max_attempts,
             expires_in_seconds=expires_in_seconds,
+            state=initial_state,
         )
 
     def _transition_delivery(self, message_or_key: str, to_state: str, **kwargs: Any) -> Dict[str, Any]:
