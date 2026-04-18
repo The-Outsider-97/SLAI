@@ -1,724 +1,395 @@
-"""
-WebSocket adapter implementation for SLAI's Network Agent.
-
-This module provides the production-grade WebSocket transport adapter that
-inherits from the shared BaseAdapter contract. It keeps WebSocket-specific
-behavior in one place while relying on the base adapter for lifecycle
-orchestration, structured memory updates, delivery bookkeeping, health
-snapshots, and network-native error semantics.
-
-The adapter is intentionally scoped to WebSocket transport concerns:
-- session establishment for ws:// and wss:// endpoints,
-- bidirectional message transmission,
-- frame-mode and content-type aware send/receive handling,
-- configurable TLS posture for secure sockets,
-- application-level synthetic or on-wire ack/nack semantics,
-- ping support and receive buffering,
-- adapter-local message state useful to routing and observability.
-
-It does not own routing strategy, retry policy, circuit breaking, or policy
-arbitration. Those belong to the higher-level network modules and agents.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import json
-import socket
-import ssl
-import websocket
-import websockets
-
-from collections import deque
-from threading import Event, Thread
-from time import monotonic, sleep
-from typing import Any, Deque, Dict, Mapping, Optional, Sequence, Tuple
-from urllib.parse import urlparse, urlunparse
-
-from ..utils import *
-from .base_adapter import BaseAdapter, AdapterCapabilities
-from logs.logger import PrettyPrinter, get_logger
-
-logger = get_logger("WebSocket Adapter")
-printer = PrettyPrinter()
-
-__all__ = ["WebSocketAdapter"]
-
-
-_VALID_WS_SCHEMES = {"ws", "wss", "websocket"}
-_VALID_ACK_MODES = {"synthetic", "frame", "disabled"}
-
-
-class WebSocketAdapter(BaseAdapter):
-    """
-    Production-grade WebSocket transport adapter.
-
-    The adapter supports long-lived bidirectional sessions, text/binary frame
-    handling, JSON-aware receive normalization, configurable TLS posture, and
-    optional application-level ack/nack signaling.
-    """
-
-    DEFAULT_WEBSOCKET_CONTENT_TYPES: Tuple[str, ...] = (
-        "application/json",
-        "text/plain",
-        "application/octet-stream",
-    )
-    DEFAULT_WEBSOCKET_AUTH_MODES: Tuple[str, ...] = ("none", "bearer", "custom_header", "cookie")
-
-    def __init__(
-        self,
-        *,
-        memory=None,
-        config: Optional[Mapping[str, Any]] = None,
-        endpoint: Optional[str] = None,
-        adapter_name: str = "WebSocket",
-        protocol: Optional[str] = None,
-    ) -> None:
-        provided_config = ensure_mapping(config, field_name="config", allow_none=True)
-        section_config = get_config_section("network_websocket_adapter") or {}
-        merged_ws_config = merge_mappings(section_config, provided_config)
-        self.websocket_adapter_config = merged_ws_config
-        self.ack_mode = str(merged_ws_config.get("ack_mode", "synthetic")).strip().lower() or "synthetic"
-        self.nack_mode = str(merged_ws_config.get("nack_mode", self.ack_mode)).strip().lower() or self.ack_mode
-        self.subprotocols = tuple(
-            str(item).strip()
-            for item in ensure_sequence(merged_ws_config.get("subprotocols"), field_name="subprotocols", allow_none=True, coerce_scalar=True)
-            if str(item).strip()
-        )
-
-        inferred_protocol = protocol or merged_ws_config.get("protocol") or self._infer_protocol_from_endpoint(endpoint) or "websocket"
-
-        super().__init__(
-            adapter_name=adapter_name,
-            protocol=inferred_protocol,
-            channel="websocket",
-            memory=memory,
-            config=merged_ws_config,
-            endpoint=endpoint or merged_ws_config.get("endpoint"),
-        )
-
-        self.websocket_adapter_config = merge_mappings(section_config, self.adapter_config)
-
-        self.verify_tls = self._get_bool_config("verify_tls", True)
-        self.allow_insecure_tls = self._get_bool_config("allow_insecure_tls", False)
-        self.ping_on_connect = self._get_bool_config("ping_on_connect", False)
-        self.auto_detect_json_messages = self._get_bool_config("auto_detect_json_messages", True)
-        self.reconnect_on_send_if_closed = self._get_bool_config("reconnect_on_send_if_closed", True)
-        self.reconnect_on_receive_if_closed = self._get_bool_config("reconnect_on_receive_if_closed", False)
-        self.capture_sent_messages = self._get_bool_config("capture_sent_messages", True)
-        self.capture_received_messages = self._get_bool_config("capture_received_messages", True)
-        self.strict_subprotocol_match = self._get_bool_config("strict_subprotocol_match", False)
-        self.include_origin_header = self._get_bool_config("include_origin_header", False)
-
-        self.default_send_mode = self._get_send_mode_config("default_send_mode", "auto")
-        self.ack_mode = self._get_ack_mode_config("ack_mode", "synthetic")
-        self.nack_mode = self._get_ack_mode_config("nack_mode", self.ack_mode)
-
-        self.ping_timeout_ms = coerce_timeout_ms(
-            self.websocket_adapter_config.get("ping_timeout_ms"),
-            default=self.default_timeout_ms,
-            minimum=1,
-            maximum=300000,
-        )
-        self.close_timeout_seconds = max(1, self._get_non_negative_int_config("close_timeout_seconds", 3))
-        self.close_status_code = max(1000, self._get_non_negative_int_config("close_status_code", 1000))
-        self.max_message_history_size = max(1, self._get_non_negative_int_config("max_message_history_size", 200))
-        self.max_queued_inbound_messages = max(1, self._get_non_negative_int_config("max_queued_inbound_messages", 200))
-
-        self.origin = self._get_optional_string_config("origin")
-        self.host_header = self._get_optional_string_config("host_header")
-        self.ping_payload = self._get_optional_string_config("ping_payload") or "ping"
-
-        self.subprotocols = self._get_sequence_config("subprotocols", ())
-        self.extra_headers = normalize_headers(
-            ensure_mapping(self.websocket_adapter_config.get("extra_headers"), field_name="extra_headers", allow_none=True),
-            lowercase=False,
-        )
-        self.ssl_options = ensure_mapping(
-            self.websocket_adapter_config.get("ssl_options"),
-            field_name="ssl_options",
-            allow_none=True,
-        )
-
-        self._ws: Optional[websocket.WebSocket] = None
-        self._parsed_endpoint: Optional[ParsedEndpoint] = None
-        self._connected_url: Optional[str] = None
-        self._message_history: Deque[Dict[str, Any]] = deque(maxlen=self.max_message_history_size)
-        self._inbound_queue: Deque[Dict[str, Any]] = deque(maxlen=self.max_queued_inbound_messages)
-        self._last_subprotocol: Optional[str] = None
-
-    # ------------------------------------------------------------------
-    # BaseAdapter protocol hooks
-    # ------------------------------------------------------------------
-    def _connect_impl(self, *, endpoint: str, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        parsed = parse_endpoint(endpoint, default_scheme="ws", protocol=self.protocol, require_host=True)
-        ws_url = self._render_websocket_url(parsed)
-        header_lines = self._build_connection_headers(metadata)
-        ssl_options = self._build_ssl_options(parsed)
-
-        self._reset_socket()
-        self._ws = websocket.create_connection(
-            ws_url,
-            timeout=timeout_ms / 1000.0,
-            header=header_lines or None,
-            subprotocols=list(self.subprotocols) or None,
-            host=self.host_header,
-            origin=self.origin if self.include_origin_header else None,
-            sslopt=ssl_options if ws_url.startswith("wss://") else None,
-            enable_multithread=True,
-        )
-        self._ws.settimeout(timeout_ms / 1000.0)
-        self._parsed_endpoint = parsed
-        self._connected_url = ws_url
-        self._last_subprotocol = self._resolve_subprotocol()
-
-        if self.strict_subprotocol_match and self.subprotocols and self._last_subprotocol not in set(self.subprotocols):
-            raise ProtocolNegotiationError(
-                "WebSocket connection established without an allowed subprotocol.",
-                context={"operation": "connect", "endpoint": ws_url, "protocol": self.protocol, "channel": self.channel},
-                details={"requested_subprotocols": list(self.subprotocols), "resolved_subprotocol": self._last_subprotocol},
-            )
-
-        if self.ping_on_connect:
-            self._ws.ping(self.ping_payload.encode("utf-8"))
-
-        return {
-            "endpoint": ws_url,
-            "session_id": self.session.session_id,
-            "subprotocol": self._last_subprotocol,
-            "secure": ws_url.startswith("wss://"),
-            "verify_tls": self.verify_tls,
-            "subprotocols": list(self.subprotocols),
-            "metadata": normalize_metadata(metadata),
-        }
-
-    def _send_impl(
-        self,
-        *,
-        payload: bytes,
-        envelope: Mapping[str, Any],
-        timeout_ms: int,
-        metadata: Mapping[str, Any],
-    ) -> Mapping[str, Any] | None:
-        if self._ws is None or not self._socket_is_connected():
-            if self.reconnect_on_send_if_closed:
-                self._reconnect(timeout_ms=timeout_ms, metadata=metadata)
-            else:
-                raise SessionClosedError(
-                    "WebSocket session is closed and reconnect_on_send_if_closed is disabled.",
-                    context={"operation": "send", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-                )
-
-        outbound_payload, opcode, frame_mode = self._prepare_outbound_frame(payload, envelope)
-        bytes_sent = self._ws.send(outbound_payload, opcode=opcode)
-        sent_at = utc_timestamp()
-
-        frame_snapshot = {
-            "direction": "outbound",
-            "message_id": envelope.get("message_id"),
-            "correlation_id": envelope.get("correlation_id"),
-            "content_type": envelope.get("content_type"),
-            "frame_mode": frame_mode,
-            "payload_size": len(payload),
-            "sent_at": sent_at,
-            "metadata": normalize_metadata(metadata),
-        }
-        if self.capture_sent_messages:
-            self._message_history.append(json_safe(frame_snapshot))
-
-        return {
-            "queued": True,
-            "bytes_sent": bytes_sent,
-            "frame_mode": frame_mode,
-            "content_type": envelope.get("content_type"),
-            "sent_at": sent_at,
-            "history_depth": len(self._message_history),
-        }
-
-    def _receive_impl(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        if self._inbound_queue:
-            return self._inbound_queue.popleft()
-
-        if self._ws is None or not self._socket_is_connected():
-            if self.reconnect_on_receive_if_closed:
-                self._reconnect(timeout_ms=timeout_ms, metadata=metadata)
-            else:
-                raise SessionClosedError(
-                    "WebSocket session is closed and reconnect_on_receive_if_closed is disabled.",
-                    context={"operation": "receive", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-                )
-
-        self._ws.settimeout(timeout_ms / 1000.0)
-        try:
-            frame = self._ws.recv()
-        except websocket.WebSocketTimeoutException as exc:
-            raise DeliveryTimeoutError(
-                "Timed out while waiting for a WebSocket message.",
-                context={
-                    "operation": "receive",
-                    "endpoint": self.session.endpoint,
-                    "channel": self.channel,
-                    "protocol": self.protocol,
-                    "timeout_ms": timeout_ms,
-                },
-                cause=exc,
-            ) from exc
-        except websocket.WebSocketConnectionClosedException as exc:
-            raise SessionClosedError(
-                "WebSocket connection closed during receive().",
-                context={"operation": "receive", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-                cause=exc,
-            ) from exc
-
-        normalized = self._frame_to_message(frame, metadata)
-        if self.capture_received_messages:
-            self._message_history.append(
-                json_safe(
-                    {
-                        "direction": "inbound",
-                        "message_id": normalized.get("message_id"),
-                        "correlation_id": normalized.get("correlation_id"),
-                        "content_type": normalized.get("content_type"),
-                        "payload_size": normalized.get("payload_size"),
-                        "received_at": normalized.get("received_at"),
-                        "metadata": normalize_metadata(metadata),
-                    }
-                )
-            )
-        return normalized
-
-    def _ack_impl(
-        self,
-        *,
-        message_id: str,
-        correlation_id: Optional[str],
-        metadata: Mapping[str, Any],
-    ) -> Mapping[str, Any] | None:
-        if self.ack_mode == "disabled":
-            raise AdapterCapabilityError(
-                "WebSocket ack support is disabled by configuration.",
-                context={"operation": "ack", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-            )
-        if self.ack_mode == "synthetic":
-            return {
-                "acknowledged": True,
-                "ack_mode": "synthetic",
-                "message_id": message_id,
-                "correlation_id": correlation_id,
-                "metadata": normalize_metadata(metadata),
-            }
-        payload = {
-            "type": "ack",
-            "message_id": message_id,
-            "correlation_id": correlation_id,
-            "metadata": normalize_metadata(metadata),
-            "sent_at": utc_timestamp(),
-        }
-        self._send_control_payload(payload)
-        return {"acknowledged": True, "ack_mode": "frame", "message_id": message_id, "correlation_id": correlation_id}
-
-    def _nack_impl(
-        self,
-        *,
-        message_id: str,
-        correlation_id: Optional[str],
-        reason: Optional[str],
-        metadata: Mapping[str, Any],
-    ) -> Mapping[str, Any] | None:
-        if self.nack_mode == "disabled":
-            raise AdapterCapabilityError(
-                "WebSocket nack support is disabled by configuration.",
-                context={"operation": "nack", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-            )
-        if self.nack_mode == "synthetic":
-            return {
-                "nacked": True,
-                "nack_mode": "synthetic",
-                "message_id": message_id,
-                "correlation_id": correlation_id,
-                "reason": reason,
-                "metadata": normalize_metadata(metadata),
-            }
-        payload = {
-            "type": "nack",
-            "message_id": message_id,
-            "correlation_id": correlation_id,
-            "reason": reason,
-            "metadata": normalize_metadata(metadata),
-            "sent_at": utc_timestamp(),
-        }
-        self._send_control_payload(payload)
-        return {
-            "nacked": True,
-            "nack_mode": "frame",
-            "message_id": message_id,
-            "correlation_id": correlation_id,
-            "reason": reason,
-        }
-
-    def _close_impl(self, *, reason: Optional[str], metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        closed_endpoint = self._connected_url or self.session.endpoint
-        if self._ws is not None:
-            try:
-                self._ws.close(
-                    status=self.close_status_code,
-                    reason=(reason or "").encode("utf-8"),
-                    timeout=self.close_timeout_seconds,
-                )
-            finally:
-                self._ws = None
-        self._parsed_endpoint = None
-        self._connected_url = None
-        self._last_subprotocol = None
-        return {
-            "closed": True,
-            "endpoint": closed_endpoint,
-            "reason": reason,
-            "metadata": normalize_metadata(metadata),
-        }
-
-    # ------------------------------------------------------------------
-    # Adapter state and metadata helpers
-    # ------------------------------------------------------------------
-    @property
-    def capabilities(self) -> AdapterCapabilities:
-        capabilities = super().capabilities
-        capabilities.supports_streaming = self._get_bool_config("supports_streaming", True)
-        capabilities.supports_bidirectional_streaming = self._get_bool_config("supports_bidirectional_streaming", True)
-        capabilities.supports_ack = self.ack_mode != "disabled"
-        capabilities.supports_nack = self.nack_mode != "disabled"
-        capabilities.supports_headers = True
-        capabilities.supports_tls = True
-        capabilities.supports_receive = True
-        capabilities.supports_request_reply = False
-        capabilities.auth_modes = tuple(self._get_sequence_config("auth_modes", self.DEFAULT_WEBSOCKET_AUTH_MODES))
-        capabilities.content_types = tuple(self._get_sequence_config("content_types", self.DEFAULT_WEBSOCKET_CONTENT_TYPES))
-        capabilities.metadata = merge_mappings(
-            capabilities.metadata,
-            normalize_metadata(self.websocket_adapter_config.get("capabilities_metadata")),
-            {
-                "transport_family": "websocket",
-                "subprotocols": list(self.subprotocols),
-                "ack_mode": self.ack_mode,
-                "nack_mode": self.nack_mode,
-            },
-        )
-        return capabilities
-
-    def ping(self, *, payload: Optional[str] = None, timeout_ms: Optional[Any] = None) -> Dict[str, Any]:
-        with self._lock:
-            self._ensure_connected(operation="ping")
-            resolved_timeout = coerce_timeout_ms(timeout_ms, default=self.ping_timeout_ms)
-            try:
-                self._ws.settimeout(resolved_timeout / 1000.0)
-                ping_payload = (payload or self.ping_payload).encode("utf-8")
-                started_at = monotonic()
-                self._ws.ping(ping_payload)
-                latency_ms = round((monotonic() - started_at) * 1000.0, 3)
-                self._mark_activity(latency_ms=latency_ms)
-                self._sync_health_memory(metadata={"ping": True, "latency_ms": latency_ms})
-                return {
-                    "adapter_name": self.adapter_name,
-                    "protocol": self.protocol,
-                    "channel": self.channel,
-                    "endpoint": self.session.endpoint,
-                    "pinged": True,
-                    "latency_ms": latency_ms,
-                    "payload": payload or self.ping_payload,
-                }
-            except Exception as exc:
-                normalized = normalize_network_exception(
-                    exc,
-                    operation="ping",
-                    endpoint=self.session.endpoint,
-                    channel=self.channel,
-                    protocol=self.protocol,
-                    session_id=self.session.session_id,
-                )
-                self._handle_operation_failure(normalized, operation="ping", endpoint=self.session.endpoint)
-                raise normalized from exc
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _frame_to_message(self, frame: Any, metadata: Mapping[str, Any]) -> Dict[str, Any]:
-        received_at = utc_timestamp()
-        if isinstance(frame, bytes):
-            payload = frame
-            content_type = "application/octet-stream"
-            payload_size = len(frame)
-        elif isinstance(frame, str):
-            payload = frame
-            payload_size = len(frame.encode("utf-8"))
-            content_type = self._infer_inbound_content_type(frame)
-        else:
-            payload = json_safe(frame)
-            payload_size = estimate_payload_size(payload)
-            content_type = "application/json"
-
-        return {
-            "message_id": generate_message_id(prefix="recv_websocket"),
-            "correlation_id": generate_correlation_id(prefix="corr_websocket"),
-            "payload": payload,
-            "content_type": content_type,
-            "payload_size": payload_size,
-            "received_at": received_at,
-            "metadata": normalize_metadata(metadata),
-        }
-
-    def _prepare_outbound_frame(self, payload: bytes, envelope: Mapping[str, Any]) -> Tuple[bytes | str, int, str]:
-        content_type = str(envelope.get("content_type") or "application/octet-stream").strip().lower()
-        send_mode = self.default_send_mode
-        if send_mode == "auto":
-            if content_type == "application/octet-stream":
-                send_mode = "binary"
-            else:
-                send_mode = "text"
-
-        if send_mode == "binary":
-            return payload, websocket.ABNF.OPCODE_BINARY, "binary"
-
-        try:
-            text_payload = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return payload, websocket.ABNF.OPCODE_BINARY, "binary"
-        return text_payload, websocket.ABNF.OPCODE_TEXT, "text"
-
-    def _send_control_payload(self, payload: Mapping[str, Any]) -> None:
-        if self._ws is None or not self._socket_is_connected():
-            raise SessionClosedError(
-                "Cannot send control payload over a closed WebSocket session.",
-                context={"operation": "control_send", "endpoint": self.session.endpoint, "channel": self.channel, "protocol": self.protocol},
-            )
-        encoded = stable_json_dumps(payload)
-        self._ws.send(encoded, opcode=websocket.ABNF.OPCODE_TEXT)
-
-    def _reset_socket(self) -> None:
-        if self._ws is not None:
-            try:
-                self._ws.close(timeout=self.close_timeout_seconds)
-            except Exception:
-                pass
-            finally:
-                self._ws = None
-
-    def _reconnect(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> None:
-        if not self.session.endpoint:
-            raise SessionUnavailableError(
-                "Cannot reconnect WebSocket adapter without a known endpoint.",
-                context={"operation": "reconnect", "channel": self.channel, "protocol": self.protocol},
-            )
-        self._connect_impl(endpoint=self.session.endpoint, timeout_ms=timeout_ms, metadata=metadata)
-        self.session.connected = True
-        self.session.state = "connected"
-        self.health.connected = True
-        self.health.status = "healthy"
-
-    def _socket_is_connected(self) -> bool:
-        return bool(self._ws is not None and getattr(self._ws, "connected", False))
-
-    def _render_websocket_url(self, parsed: ParsedEndpoint) -> str:
-        scheme = parsed.scheme.lower()
-        if scheme == "websocket":
-            scheme = "wss" if self.verify_tls else "ws"
-        if scheme not in _VALID_WS_SCHEMES:
-            raise ProtocolNegotiationError(
-                "WebSocketAdapter only supports ws://, wss://, or websocket:// endpoints.",
-                context={"operation": "connect", "endpoint": parsed.raw, "protocol": self.protocol},
-                details={"scheme": parsed.scheme},
-            )
-        normalized_scheme = "wss" if scheme == "wss" else "ws"
-        return urlunparse((normalized_scheme, parsed.netloc, parsed.path or "/", "", parsed.query or "", parsed.fragment or ""))
-
-    def _build_connection_headers(self, metadata: Mapping[str, Any]) -> Sequence[str]:
-        metadata_headers = ensure_mapping(metadata.get("headers"), field_name="headers", allow_none=True)
-        headers = normalize_headers(merge_mappings(self.extra_headers, metadata_headers), lowercase=False)
-        return [f"{key}: {value}" for key, value in headers.items()]
-
-    def _build_ssl_options(self, parsed: ParsedEndpoint) -> Dict[str, Any]:
-        if parsed.scheme.lower() not in {"wss", "websocket"}:
-            return {}
-        sslopt = dict(self.ssl_options)
-        if not self.verify_tls or self.allow_insecure_tls:
-            sslopt.setdefault("cert_reqs", ssl.CERT_NONE)
-            sslopt.setdefault("check_hostname", False)
-        else:
-            sslopt.setdefault("cert_reqs", ssl.CERT_REQUIRED)
-            sslopt.setdefault("check_hostname", True)
-        return sslopt
-
-    def _resolve_subprotocol(self) -> Optional[str]:
-        if self._ws is None:
-            return None
-        try:
-            return self._ws.getsubprotocol() or getattr(self._ws, "subprotocol", None)
-        except Exception:
-            return getattr(self._ws, "subprotocol", None)
-
-    def _infer_inbound_content_type(self, payload: str) -> str:
-        if not self.auto_detect_json_messages:
-            return "text/plain"
-        text = payload.strip()
-        if not text:
-            return "text/plain"
-        if text.startswith("{") or text.startswith("["):
-            try:
-                json.loads(text)
-                return "application/json"
-            except Exception:
-                return "text/plain"
-        return "text/plain"
-
-    def _get_optional_string_config(self, name: str) -> Optional[str]:
-        value = self.websocket_adapter_config.get(name)
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    def _get_send_mode_config(self, name: str, default: str) -> str:
-        value = str(self.websocket_adapter_config.get(name, default)).strip().lower() or default
-        if value not in {"auto", "text", "binary"}:
-            raise NetworkConfigurationError(
-                "Invalid WebSocket send mode configuration.",
-                context={"operation": "websocket_adapter_config", "channel": self.channel, "protocol": self.protocol},
-                details={"config_key": name, "config_value": value},
-            )
-        return value
-
-    def _get_ack_mode_config(self, name: str, default: str) -> str:
-        value = str(self.websocket_adapter_config.get(name, default)).strip().lower() or default
-        if value not in _VALID_ACK_MODES:
-            raise NetworkConfigurationError(
-                "Invalid WebSocket ack/nack mode configuration.",
-                context={"operation": "websocket_adapter_config", "channel": self.channel, "protocol": self.protocol},
-                details={"config_key": name, "config_value": value},
-            )
-        return value
-
-    def _infer_protocol_from_endpoint(self, endpoint: Optional[str]) -> Optional[str]:
-        if not endpoint:
-            return None
-        text = str(endpoint).strip().lower()
-        if text.startswith("wss://"):
-            return "websocket"
-        if text.startswith("ws://"):
-            return "websocket"
-        return None
-
-
-class _EchoServer:
-    def __init__(self, host: str, port: int) -> None:
-        self.host = host
-        self.port = port
-        self._ready = Event()
-        self._stop = Event()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._server = None
-        self._thread = Thread(target=self._run, daemon=True)
-
-    async def _handler(self, conn) -> None:
-        async for message in conn:
-            await conn.send(message)
-
-    async def _serve(self) -> None:
-        async with websockets.serve(self._handler, self.host, self.port, ping_interval=None):
-            self._ready.set()
-            while not self._stop.is_set():
-                await asyncio.sleep(0.05)
-
-    def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self._serve())
-        finally:
-            self._loop.close()
-
-    def start(self) -> None:
-        self._thread.start()
-        if not self._ready.wait(timeout=5):
-            raise RuntimeError("WebSocket echo server did not start in time.")
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=5)
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        return int(sock.getsockname()[1])
-
-
-def _printer_status(label: str, message: str, level: str = "info") -> None:
-    try:
-        printer.status(label, message, level)
-    except Exception:
-        print(f"[{label}] {message}")
-
-
-if __name__ == "__main__":
-    print("\n=== Running WebSocket Adapter ===\n")
-    _printer_status("TEST", "WebSocket Adapter initialized", "info")
-
-    port = _find_free_port()
-    server = _EchoServer("127.0.0.1", port)
-    server.start()
-    sleep(0.2)
-
-    adapter = WebSocketAdapter(
-        endpoint=f"ws://127.0.0.1:{port}/echo",
-        config={
-            "ping_on_connect": False,
-            "ack_mode": "synthetic",
-            "nack_mode": "synthetic",
-        },
-    )
-
-    try:
-        capabilities = adapter.capabilities.to_dict()
-        connected = adapter.connect(metadata={"env": "test", "region": "local"})
-        sent = adapter.send({"kind": "echo", "value": "hello websocket"}, metadata={"trace": "ws-demo"})
-        received = adapter.recv(metadata={"consumer": "demo"})
-        acked = adapter.ack(received["message_id"], correlation_id=received["correlation_id"], metadata={"result": "ok"})
-        nacked = adapter.nack("msg_ws_demo", correlation_id="corr_ws_demo", reason="synthetic test", metadata={"retryable": True})
-        pinged = adapter.ping(payload="health-check")
-        state_snapshot = adapter.get_state_snapshot()
-        health_snapshot = adapter.get_health_snapshot()
-        memory_health = adapter.memory.get_network_health()
-        closed = adapter.close(reason="demo complete", metadata={"cleanup": True})
-
-        print("Capabilities:", stable_json_dumps(capabilities))
-        print("Connected:", stable_json_dumps(connected))
-        print("Sent:", stable_json_dumps(sent))
-        print("Received:", stable_json_dumps(received))
-        print("Acked:", stable_json_dumps(acked))
-        print("Nacked:", stable_json_dumps(nacked))
-        print("Pinged:", stable_json_dumps(pinged))
-        print("State Snapshot:", stable_json_dumps(state_snapshot))
-        print("Health Snapshot:", stable_json_dumps(health_snapshot))
-        print("Memory Health:", stable_json_dumps(memory_health))
-        print("Closed:", stable_json_dumps(closed))
-
-        assert capabilities["supports_streaming"] is True
-        assert connected["connected"] is True
-        assert sent["payload_size"] > 0
-        assert received["payload"]["kind"] == "echo"
-        assert acked["acknowledged"] is True
-        assert nacked["nacked"] is True
-        assert pinged["pinged"] is True
-        assert state_snapshot["session"]["connected"] is True
-        assert adapter.memory.get("network.session.snapshot")
-        assert adapter.memory.get("network.endpoint.health")
-
-        _printer_status("TEST", "All WebSocket Adapter checks passed", "info")
-        print("\n=== Test ran successfully ===\n")
-    finally:
-        try:
-            if adapter.is_connected():
-                adapter.close(reason="cleanup")
-        except Exception:
-            pass
-        server.stop()
+sensitive_attributes: ["gender", "age_group", "race", "education_level"]
+
+base_agent:
+    defer_initialization: True
+    memory_profile: low
+    network_compression: True
+    max_error_log_size: 50
+    error_similarity_threshold: 0.75
+    max_task_retries: 0
+    task_timeout_seconds: None
+    task_similarity_str_threshold: 0.9
+    jaccard_threshold: 0.5
+    jaccard_min_for_no_shared: 0.7
+    final_key_threshold: 0.7
+    final_value_threshold: 0.7
+    task_similarity_seq_elem_threshold: 0.8
+
+adaptive_agent:
+  state_dim: 10
+  num_actions: 2
+  num_handlers: 3
+  max_episode_steps: 100
+
+  base_learning_interval: 10
+  skill_max_steps: 10
+  skill_batch_size: 32
+  manager_batch_size: 32
+  tuning_window: 100
+  performance_window: 50
+
+  max_task_history: 200
+  max_route_history: 200
+  max_feedback_history: 200
+
+  random_seed: 42
+
+  explore_skills: true
+  explore_actions: true
+  learn_after_task: true
+  auto_behavior_cloning: true
+  auto_dagger_update: true
+  auto_meta_optimize: true
+  auto_save_state: true
+  auto_log_interventions: true
+  sync_tuner_to_skills: true
+  use_global_rl_engine: true
+  share_meta_registry: true
+
+  recovery_reward_threshold: -10.0
+  success_reward_threshold: 0.0
+  correction_bonus: 1.0
+  demonstration_bonus: 2.0
+  feedback_bonus: 0.5
+  route_similarity_threshold: 0.25
+
+  shared_memory_state_ttl: 2592000
+  shared_memory_recovery_ttl: 604800
+  shared_memory_report_ttl: 2592000
+
+  default_task_type: generic
+  task_embedding_strategy: hash_bow
+  report_detail_level: full
+
+  meta_update_frequency: 5
+  auto_behavior_cloning_epochs: 1
+  checkpoint_protocol: 5
+
+  skills: {}
+  handlers: {}
+  env: {}
+
+alignment_agent:
+    safety_buffer: 0.1
+    learning_rate: 0.01
+    momentum: 0.9
+    risk_score:
+    risk_assessment:
+        total_risk: []
+    operation_limiter:
+        max_requests: 10
+        interval: 60
+        penalty: 'cool_down'
+    weight:
+        stat_parity: 0.4
+        equal_opp: 0.4
+        ethics: 0.2
+    corrections: {}
+    alignment_ttl: 604800
+    fail_safe_action_space: []
+    risk_threshold: 0.5
+
+browser_agent:
+    max_retries: 3
+    default_wait: 0.0
+    default_search_engine: "https://www.google.com"
+    headless: true
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    window_size: [1366, 920]
+
+collaborative_agent:
+    risk_threshold: 0.7
+    max_concurrent_tasks: 100
+    load_factor: 0.75
+    optimization_weight_capability: 0.5
+    optimization_weight_load: 0.3
+    optimization_weight_risk: 0.2
+    bayes_prior_alpha: 1.0
+    bayes_prior_beta: 1.0
+    use_collaboration_manager: true
+
+evaluation_agent:
+    risk_threshold: 0.5
+    memory_warning_threshold: 0.7
+    memory_critical_threshold: 0.9
+    model_dir: "src/agents/evaluators/models/"
+    anomaly_detector: "src/agents/evaluators/models/anomaly_detector.joblib"
+    deep_anomaly: "src/agents/evaluators/models/deep_anomaly.pt"
+    initial_hazard_rates:
+        system_failure: 0.000001
+        sensor_failure: 0.00001
+        unexpected_behavior: 0.0001
+    update_interval: 60.0
+    decay_factor: 0.95
+    risk_thresholds:
+        warning: [0.4, 0.7]
+        critical: [0.7, 1.0]
+    risk_adaptation: {}
+    autonomous_tasks:
+        - id: "nav_test"
+    type: "navigation"
+    path: [[0,0], [1,1], [2,2]]
+    optimal_path: [[0,0], [2,2]]
+    completion_time: 10.0
+    energy_consumed: 100
+    collisions: 0
+    success: true
+
+issue_database:
+    host: 'localhost'
+    port: 5432
+    database: 'ai_issues'
+    user: 'user'
+    password: ''
+
+operations_notification:
+    email:
+        enabled: true
+        from: "ai-agent@yourdomain.com"
+        to: "ops@yourdomain.com"
+        subject: "URGENT: AI System Hazard"
+        smtp_host: "smtp.yourdomain.com"
+        smtp_port: 587
+        username: "ai-agent"
+        password: "secure-password"
+        use_tls: true
+
+    webhook:
+        enabled: true
+        url: "https://hooks.slack.com/services/..."
+
+    external_logging:
+        enabled: true
+        url: "https://logging-service.yourdomain.com/ingest"
+
+execution_agent: {}
+
+handler_agent:
+    max_retries: 2
+    circuit_breaker_threshold: 5
+    cooldown_seconds: 30
+    failure_budget_window_seconds: 300
+    checkpoint_max_age_seconds: 600
+    telemetry_buffer_size: 1000
+    evaluator_hooks_enabled: true
+
+knowledge_agent:
+    source: "local_files"
+    is_query: True
+    stopwords: "src/agents/language/templates/stopwords.json"
+    knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
+    use_graph_ontology: True  # False for in-memory
+    ontology_threshold: 500   # Switch to graph DB at this size
+    in_memory_cache: True  # Whether to keep in-memory cache
+    cache_size: 1000
+    bias_threshold: 0.87
+    bias_detection_enabled: True
+    embedding_model: "src/agents/knowledge/models/all-MiniLM-L6-v2"
+    directory_path: "src/agents/knowledge/templates/"
+    similarity_threshold: 0.35
+    use_ontology_expansion: True
+    first_pass: True
+    decay_factor: 0.95
+    context_window: 10
+    knowledge_tag: "knowledge_snippet"
+    ttl: 600
+    retrieval_mode: "hybrid"
+    safety_check_callback: foodie_security.validate_action
+    max_workers: 8
+
+language_agent: {}
+
+learning_agent:
+    rl_algorithm: null
+    embedding_dim: 512
+    strategy_weights: [0.25, 0.25, 0.25, 0.25]
+    prediction_weights: [0.25, 0.25, 0.25, 0.25]
+    maml_task_pool_size: 100
+    rsi_improvement_cycle: 50
+    performance_threshold: 0.7
+    data_change_threshold: 0.15
+    retraining_interval_hours: 24
+    novelty_threshold: 0.3
+    uncertainty_threshold: 0.25
+    embedding_buffer_size: 512
+    performance_history_size: 1000
+    error_history_size: 100
+    state_recency_size: 1000
+    architecture_history_size: 10
+    maml_adaptation_steps: 10
+    task_embedding_dim: 256
+    task_ids: ["dqn", "maml", "rsi", "rl"]
+    batch_size: 32
+    max_episode_steps: 128
+    max_eval_episodes: 3
+    recovery_trigger_threshold: 3
+    deferred_init:
+        max_network_size: 256
+        max_task_pool: 50
+        max_history: 500
+
+network_agent:
+    max_delivery_attempts: 3
+    retry_sleep_enabled: False
+    max_retry_sleep_ms: 1500
+    default_receive_timeout_ms: 5000
+    health_shared_key:
+        network_agent: "health"
+    last_result_shared_key:
+        network_agent: "last_result"
+    history_shared_key:
+        network_agent: "history"
+    max_history: 200
+
+observability_agent:
+    enabled: true
+    default_service: "slai"
+    default_task_name: "agent_workflow"
+    default_trace_operation: "observe"
+    default_incident_status: "open"
+
+    auto_start_trace: true
+    auto_finalize_trace: true
+    enable_trace_span_ingestion: true
+    enable_trace_event_ingestion: true
+    enable_state_transition_ingestion: true
+    enable_log_ingestion: true
+    enable_performance_trace_analysis: true
+    enable_health_snapshots: true
+    enable_kpi_tracking: true
+    enable_shared_context_export: true
+    allow_degraded_reports: true
+
+    max_recent_reports: 100
+    max_recent_errors: 200
+    max_signature_history: 512
+    max_event_records_per_run: 200
+    max_log_records_per_run: 200
+    max_alert_records_per_run: 100
+    max_error_records_per_run: 100
+    max_state_transition_records_per_run: 200
+    max_objective_records_per_run: 50
+    max_related_agents: 16
+
+    alert_dedupe_window_seconds: 1800.0
+    alert_dedupe_repeat_threshold: 3
+    recurring_incident_threshold: 2
+    alert_precision_decay: 1.0
+    degraded_status_levels: ["warning", "critical"]
+    required_trace_context_fields: ["task_name", "agent_name", "operation_name"]
+
+    routing:
+        handler_on_warning: true
+        handler_on_critical: true
+        planning_on_capacity: true
+        safety_on_critical: true
+        evaluation_on_degradation: true
+        handler_agent_names: ["handler", "handler_agent", "HandlerAgent"]
+        planning_agent_names: ["planning", "planning_agent", "PlanningAgent"]
+        safety_agent_names: ["safety", "safety_agent", "SafetyAgent"]
+        evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
+
+perception_agent:
+    device: "cpu"
+    embed_dim: 512
+    masking_ratio: 0.15
+    contrastive_temperature: 0.07
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    adam_betas: [0.9, 0.999]
+    adam_eps: 0.0000001
+    loss_type: 'hybrid'  # mse, contrastive, or hybrid
+    max_scale: 3
+    temperature: 0.1
+    mse_weight: 1.0     # for hybrid loss
+    contrastive_weight: 1.0  # for hybrid loss
+
+planning_agent: {}
+
+privacy_agent: {}
+
+quality_agent:
+    enabled: true
+    default_window: latest
+    stop_on_blocking_structural: true
+    fail_closed_on_subsystem_error: true
+    auto_route_via_workflow: true
+    prefer_workflow_verdict: true
+    include_workflow_findings_in_summary: true
+    include_record_previews_in_shared_memory: false
+    max_shared_record_preview: 5
+    pass_threshold: 0.90
+    warn_threshold: 0.75
+
+    subsystem_order:
+        - structural
+        - statistical
+        - semantic
+
+    subsystem_weights:
+        structural: 0.34
+        statistical: 0.33
+        semantic: 0.33
+
+    bridge_resolution:
+        resolve_handler_from_factory: false
+        resolve_safety_from_factory: false
+        handler_factory_names:
+            - handler_agent
+            - handler
+            - HandlerAgent
+        safety_factory_names:
+            - safety_agent
+            - safety
+            - SafetyAgent
+
+    shared_memory:
+        enabled: true
+        ttl_seconds: 86400
+        publish_notifications: true
+        result_key_prefix: quality_agent.result
+        summary_key_prefix: quality_agent.summary
+        error_key_prefix: quality_agent.error
+        event_channel: quality.events
+
+reader_agent:
+    default_output_format: "txt"
+    output_dir: "output/reader"
+    max_concurrency: 4
+    enable_cache: true
+    recovery_min_quality_score: 0.55
+
+reasoning_agent:
+    learning_rate: 0.01
+    exploration_rate: 0.1
+    tuple_key: ["subject", "predicate", "object"]
+    hypothesis_graph:
+        nodes: {}
+        edges: {}
+        confedence: 0.0
+    language_config_path: "src/agents/language/configs/language_config.yaml"
+    knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
+    glove_path: "data/embeddings/glove.6B.200d.json"
+    ner_tag: None
+    embedding: None
+    decay: 0.8
+    max_iterations: 100
+
+safety_agent:
+    constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
+    audit_level: 2
+    collect_feedback: true
+    enable_learnable_aggregation: true
+    system_models: {}
+    known_hazards: []
+    global_losses: []
+    safety_policies: []
+    architecture_map: {}
+    formal_specs: {}
+    fault_tree_config: {}
+    risk_thresholds:
+        overall_safety: 0.85
+        cyber_risk: 0.7
+        compliance_failure_is_blocker: true
+    secure_memory:
+        default_ttl_seconds: 3600
