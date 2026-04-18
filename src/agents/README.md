@@ -192,6 +192,33 @@ flowchart LR
 
 ---
 
+## Cross-Agent Coordination Flow
+
+```mermaid
+flowchart TD
+    IN[Input/Task/Event] --> DQ[Data Quality Agent]
+    DQ -->|pass/warn/block| PL[PlanningAgent]
+
+    PL --> EX[ExecutionAgent]
+    EX --> OBS[Observability Agent]
+    EX --> PR[Privacy Agent]
+
+    PR -->|allow/modify/block| OUT[Output or Action]
+    OBS --> HANDLER[HandlerAgent]
+    OBS --> SAFE[SafetyAgent]
+
+    DQ --> EVAL[EvaluationAgent]
+    OBS --> EVAL
+    PR --> EVAL
+
+    EVAL --> MEM[(Shared Memory / Metrics)]
+    MEM --> DQ
+    MEM --> OBS
+    MEM --> PR
+```
+
+---
+
 ## 7) Configuration and assets pattern
 
 Most domain folders use a consistent structure:
