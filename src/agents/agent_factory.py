@@ -40,10 +40,12 @@ class AgentFactory:
         'reasoning': {'module_path': 'src.agents.reasoning_agent', 'class_name': 'ReasoningAgent'},
         'safety': {'module_path': 'src.agents.safety_agent', 'class_name': 'SafetyAgent'},
         'observability': {'module_path': 'src.agents.observability_agent', 'class_name': 'ObservabilityAgent'},
+        'network': {'module_path': 'src.agents.network_agent', 'class_name': 'NetworkAgent'},
     }
     _agent_aliases: Dict[str, str] = {
         "web": "browser",
         "obs": "observability",
+        "net": "network",
     }
     _agent_dependency_profiles: Dict[str, Dict[str, Any]] = {
         "browser": {"torch_required": False, "notes": "Selenium/browser stack only."},
@@ -53,6 +55,7 @@ class AgentFactory:
         "language": {"torch_required": False, "notes": "Lightweight language mode available without torch."},
         "evaluation": {"torch_required": False, "notes": "Core evaluation works without deep anomaly torch module."},
         "observability": {"torch_required": False, "notes": "Observability orchestration is telemetry-first and torch-free."},
+        "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
         "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
