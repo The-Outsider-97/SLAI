@@ -5,6 +5,7 @@ import random
 import gymnasium as gym
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -152,6 +153,10 @@ class StockTradingEnv(gym.Env):
             if payloads:
                 return self._validate_dataframe(pd.DataFrame(payloads))
 
+        fetched = self._fetch_symbol_history()
+        if fetched is not None and not fetched.empty:
+            return self._validate_dataframe(fetched)
+
         if not self.allow_synthetic_data:
             raise DataUnavailableError(f'No historical market data available for {self.symbol}.', context=self._context('load_historical_data'))
 
@@ -169,6 +174,28 @@ class StockTradingEnv(gym.Env):
             'symbol': self.symbol,
         })
         return self._validate_dataframe(sim_df)
+
+    def _fetch_symbol_history(self) -> pd.DataFrame:
+        lookback_days = max(self.max_steps + 260, 365)
+        try:
+            history = yf.Ticker(self.symbol).history(period=f"{lookback_days}d", interval="1d", auto_adjust=False)
+        except Exception as exc:
+            logger.debug("Live historical fetch failed for %s: %s", self.symbol, exc)
+            return pd.DataFrame()
+        if history is None or history.empty:
+            return pd.DataFrame()
+        df = history.reset_index().rename(
+            columns={
+                'Date': 'date',
+                'Open': 'open',
+                'High': 'high',
+                'Low': 'low',
+                'Close': 'close',
+                'Volume': 'volume',
+            }
+        )
+        df['symbol'] = self.symbol
+        return df[['date', 'open', 'high', 'low', 'close', 'volume', 'symbol']]
 
     def _compute_technical_indicators(self) -> pd.DataFrame:
         df = self.data.copy()
