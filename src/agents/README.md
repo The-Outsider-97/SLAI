@@ -37,6 +37,11 @@ flowchart TD
     Factory --> AD[AdaptiveAgent]
     Factory --> H[HandlerAgent]
     Factory --> B[BrowserAgent]
+    Factory --> O[ObservabilityAgent]
+    Factory --> RE[ReaderAgent]
+    Factory --> Q[QualityAgent]
+    Factory --> PR[PrivacyAgent]
+    Factory --> N[NetworkAgent]
 
     C <--> Shared[(Collaborative Shared Memory)]
     P <--> Shared
@@ -52,6 +57,11 @@ flowchart TD
     AD <--> Shared
     H <--> Shared
     B <--> Shared
+    O <--> Shared
+    RE <--> Shared
+    Q <--> Shared
+    PR <--> Shared
+    N <--> Shared
 
     E --> Actions[Execution actions]
     V --> Reports[Evaluation outputs]
@@ -82,9 +92,14 @@ The package exposes two complementary layers:
 - `learning_agent.py`
 - `perception_agent.py`
 - `planning_agent.py`
+- `privacy_agent.py`
+- `quality_agent.py`
+- `reader_agent.py`
 - `qnn_agent.py`
 - `reasoning_agent.py`
 - `safety_agent.py`
+- `network_agent.py`
+- `observability_agent.py`
 
 ### Core orchestration files
 
@@ -110,8 +125,12 @@ The package exposes two complementary layers:
 | `knowledge/` | Knowledge management and sync | cache, ontology manager, monitor/governor utilities |
 | `language/` | NLP/NLU/NLG processing | tokenization/rules, grammar, context, templates/resources |
 | `learning/` | Learning algorithms and environments | DQN/RSI/MAML modules, strategy selectors, env wrappers |
+| `network/` | Agent-to-agent and external network operations | adapters, stream handling, reliability, lifecycle, policy, metrics |
+| `observability/` | Runtime telemetry, tracing, and diagnostics | observability memory, tracing, intelligence, contract checks |
 | `perception/` | Input encoding/decoding and memory | encoders, decoders, model modules, perception memory |
 | `planning/` | Planning and heuristic search | schedulers, planners, heuristic selector, monitoring |
+| `privacy/` | Data governance and privacy controls | consent, retention, minimization, ID/pseudonymization, auditability |
+| `quality/` | Output and workflow quality assurance | semantic/statistical/structural quality checks, workflow control |
 | `reasoning/` | Probabilistic + symbolic reasoning | rule engine, probabilistic models, validation, networks |
 | `safety/` | Runtime safety and secure operation | guard/compliance modules, cyber safety, secure memory |
 
