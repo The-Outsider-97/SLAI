@@ -112,13 +112,15 @@ class FinanceAgent(nn.Module):
         self.knowledge_cache = KnowledgeCache()
         self.agent_factory = AgentFactory(config={"knowledge_agent": {"cache": self.knowledge_cache}})
 
-        # Integrates: evaluation, planning, execution, knowledge, learning, reasoning, handler
+        # Integrates: evaluation, planning, execution, knowledge, learning, reasoning, handler, observability, network
         self.evaluation_agent = self.agent_factory.create("evaluation", self.shared_memory)
         self.planning_agent = self.agent_factory.create("planning", self.shared_memory)
         self.execution_agent = self.agent_factory.create("execution", self.shared_memory)
         self.knowledge_agent = self.agent_factory.create("knowledge", self.shared_memory)
         self.reasoning_agent = self.agent_factory.create("reasoning", self.shared_memory)
         self.handler_agent = self.agent_factory.create("handler", self.shared_memory)
+        self.observability_agent = self.agent_factory.create("observability", self.shared_memory)
+        self.network_agent = self.agent_factory.create("network", self.shared_memory)
 
         self.default_symbol = self.agent_config.get("default_symbol", "AAPL")
         self.symbols = symbols or [{"symbol": self.default_symbol, "name": "Primary"}]
@@ -174,15 +176,69 @@ class FinanceAgent(nn.Module):
         self._run_initial_backtest()
         self._sync_portfolio_state()
 
+    def _publish_observability_event(self, *, symbol: str, operation_name: str,
+        severity: str = "info",
+        message: str = "",
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Emit a lightweight structured event to ObservabilityAgent when available."""
+        if self.observability_agent is None:
+            return
+        payload = {
+            "task_name": "finance_cycle",
+            "agent_name": "finance_agent",
+            "operation_name": operation_name,
+            "events": [
+                {
+                    "event_type": operation_name,
+                    "severity": severity,
+                    "agent_name": "finance_agent",
+                    "symbol": symbol,
+                    "message": message or operation_name,
+                    "context": dict(context or {}),
+                }
+            ],
+        }
+        try:
+            if hasattr(self.observability_agent, "perform_task"):
+                self.observability_agent.perform_task(payload)
+        except Exception as exc:
+            logger.debug("Observability event publish skipped: %s", exc)
+
+    def _fetch_network_health(self, symbol: str) -> Dict[str, Any]:
+        """
+        Pull network health from NetworkAgent to improve transport diagnostics
+        around market-data-heavy cycles.
+        """
+        snapshot: Dict[str, Any] = {"status": "unavailable", "agent": "network_agent"}
+        if self.network_agent is None:
+            return snapshot
+        try:
+            if hasattr(self.network_agent, "perform_task"):
+                result = self.network_agent.perform_task({"operation": "health"})
+            elif hasattr(self.network_agent, "get_network_health"):
+                result = self.network_agent.get_network_health()
+            else:
+                result = {}
+            if isinstance(result, dict):
+                snapshot.update(result)
+            self.shared_memory.put("network_health", {"symbol": symbol, **snapshot}, ttl=120)
+        except Exception as exc:
+            snapshot = {"status": "error", "agent": "network_agent", "error": str(exc)}
+            logger.debug("Network health snapshot failed: %s", exc)
+        return snapshot
+
     # -------------------------
     # Cross-agent integration
     # -------------------------
     def _build_cycle_context(self, symbol: str) -> Dict[str, Any]:
         """Builds a normalized context payload shared with planning/reasoning/handler."""
+        network_health = self._fetch_network_health(symbol)
         context = {
             "symbol": symbol,
             "timestamp": datetime.utcnow().isoformat(),
             "market_regime": self.market_regime,
+            "network_health": network_health,
             "goals": self.financial_goals,
             "portfolio": {
                 "cash": self.cash,
@@ -886,10 +942,23 @@ class FinanceAgent(nn.Module):
     def run_cycle(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         symbol = (symbol or self.symbol).upper()
         cycle_ts = datetime.utcnow().isoformat()
+        self._publish_observability_event(
+            symbol=symbol,
+            operation_name="cycle_start",
+            message="Finance cycle started",
+            context={"timestamp": cycle_ts},
+        )
 
         if not self._is_market_open() and not bool(self.agent_config.get("allow_after_hours", False)):
             result = {"status": "skipped", "reason": "market_closed", "symbol": symbol, "time": cycle_ts}
             self.shared_memory.put("last_cycle", result, ttl=120)
+            self._publish_observability_event(
+                symbol=symbol,
+                operation_name="cycle_skipped",
+                severity="warning",
+                message="Market closed; cycle skipped",
+                context=result,
+            )
             return result
 
         self.collect_and_process_data(symbol)
