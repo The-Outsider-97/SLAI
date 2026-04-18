@@ -49,3 +49,18 @@ nstep:
 reservoir:
   capacity: 100000
   seed: null
+
+network_buffer:
+  capacity: 2048
+  fairness_strategy: weighted_round_robin
+  default_fairness_key: global
+  drop_strategy: drop_oldest
+  eviction_policy: fifo
+  random_early_drop_min_fill: 0.8
+  random_early_drop_max_probability: 0.4
+  high_watermark_ratio: 0.9
+  low_watermark_ratio: 0.6
+  default_ttl_seconds: null
+  max_per_key_inflight: 0
+  max_dequeue_batch: 64
+  fairness_weights: {}
