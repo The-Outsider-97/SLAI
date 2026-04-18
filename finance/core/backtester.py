@@ -5,9 +5,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from pandas import Series
+from itertools import product
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from prettytable import PrettyTable
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.feature_selection import SelectKBest, f_regression
@@ -167,15 +169,15 @@ class Backtester:
                 logger.warning("Skipping malformed batch at index=%s", idx)
                 continue
             for symbol, item_data in batch_payload.items():
-                if isinstance(item_data, Mapping):
-                    price = item_data.get("price")
-                    volume = item_data.get("volume", 0.0)
-                elif isinstance(item_data, (int, float)):
-                    price = item_data
-                    volume = 0.0
-                else:
-                    continue
                 try:
+                    price = item_data.get("price")
+                    if price is None:
+                        continue
+                    try:
+                        price = float(price)
+                    except (TypeError, ValueError):
+                        continue
+                    volume = float(item_data.get("volume", 0.0))
                     rows.append({
                         "timestamp": float(batch_timestamp),
                         "datetime": datetime.fromtimestamp(float(batch_timestamp)),
@@ -225,7 +227,7 @@ class Backtester:
 
     def _add_features(self, df: pd.DataFrame) -> pd.DataFrame:
         enriched = df.copy()
-        close = pd.to_numeric(enriched["close"], errors="coerce")
+        close: Series = pd.to_numeric(enriched["close"], errors="coerce")
         volume = pd.to_numeric(enriched["volume"], errors="coerce").fillna(0.0)
         enriched["return_1"] = close.pct_change()
         for lag in [1, 2, 3, 5, 10]:
@@ -580,7 +582,7 @@ class Backtester:
         return result
 
     def _aggregate_metrics(self) -> Dict[str, float]:
-        aggregated = {key: float(np.mean(values)) if values else 0.0 for key, values in self.metrics.items()}
+        aggregated: Dict[str, Any] = {key: float(np.mean(values)) if values else 0.0 for key, values in self.metrics.items()}
         if self.portfolio_history:
             aggregated["initial_portfolio_value"] = float(self.portfolio_history[0]["value"])
             aggregated["final_portfolio_value"] = float(self.portfolio_history[-1]["value"])
@@ -601,7 +603,7 @@ class Backtester:
     def walk_forward_test(self, historical_data: pd.DataFrame) -> Dict[str, float]:
         data = self._prepare_historical_data(historical_data)
         symbol = str(data["symbol"].mode().iloc[0])
-        data = data[data["symbol"].astype(str).str.upper() == symbol.upper()].copy().sort_values("datetime").reset_index(drop=True)
+        data = data[data["symbol"].astype(str).str.upper() == symbol.upper()].copy().sort_values(by="datetime").reset_index(drop=True)
         data = self._add_features(data)
         if len(data) < self.train_window + self.test_window + 5:
             raise DataUnavailableError("Historical data is insufficient for configured windows.", context=self._context("walk_forward_test", symbol=symbol, rows=len(data)))
@@ -618,6 +620,7 @@ class Backtester:
 
         for start in range(0, len(data) - self.train_window - self.test_window + 1, self.test_window):
             train_data = data.iloc[start:start + self.train_window].copy()
+            assert isinstance(train_data, pd.DataFrame)
             test_data = data.iloc[start + self.train_window:start + self.train_window + self.test_window].copy()
             if train_data.empty or test_data.empty:
                 continue
@@ -630,6 +633,7 @@ class Backtester:
             test_portfolio_values: List[float] = [portfolio_value]
 
             for idx, (_, point) in enumerate(test_data.iterrows()):
+                point: pd.Series = point
                 point = point.copy()
                 if self.strategy == "prediction_based":
                     signal = self._prediction_based_signal(point, prediction_threshold)
@@ -696,6 +700,85 @@ class Backtester:
             self.store_last_metrics(dict(metrics))
             self._safe_memory_add(data=dict(metrics), data_type="backtest_metrics", tags=[f"backtest_env_{getattr(env, 'symbol', 'unknown')}", "environment"], priority="high", metadata={"symbol": getattr(env, "symbol", None)})
         return dict(metrics)
+
+    def optimize_parameters(self, historical_data: pd.DataFrame, param_grid: Mapping[str, Sequence[Any]]) -> Dict[str, float]:
+        if not isinstance(param_grid, Mapping) or not param_grid:
+            raise ValidationError("param_grid must be a non-empty mapping.", context=self._context("optimize_parameters"))
+        baseline: Dict[str, float] = {
+            "position_size": float(self.position_size),
+            "stop_loss": float(self.stop_loss),
+            "take_profit": float(self.take_profit),
+        }
+        data = self._prepare_historical_data(historical_data)
+        enriched = self._add_features(data)
+        min_rows = self.train_window + self.test_window + 5
+        if len(enriched) < min_rows:
+            logger.warning(
+                "Skipping parameter optimization: rows=%s is below required minimum=%s.",
+                len(enriched),
+                min_rows,
+            )
+            return baseline
+
+        keys: List[str] = []
+        values: List[List[Any]] = []
+        for key, options in param_grid.items():
+            if key not in baseline:
+                logger.debug("Ignoring unsupported optimization key=%s", key)
+                continue
+            cleaned = [value for value in options if value is not None]
+            if not cleaned:
+                continue
+            keys.append(key)
+            values.append(cleaned)
+        if not keys:
+            logger.warning("No valid optimization keys found; retaining baseline parameters.")
+            return baseline
+
+        best_params = dict(baseline)
+        best_score: Tuple[float, float] = (-float("inf"), -float("inf"))
+        original = dict(baseline)
+
+        for combo in product(*values):
+            candidate = dict(best_params)
+            for idx, key in enumerate(keys):
+                candidate[key] = float(combo[idx])
+            if not (0.0 < candidate["position_size"] <= 1.0):
+                logger.debug("Skipping invalid candidate position_size=%s", candidate["position_size"])
+                continue
+            if candidate["stop_loss"] <= 0.0 or candidate["take_profit"] <= 0.0:
+                logger.debug("Skipping invalid risk candidate stop_loss=%s take_profit=%s", candidate["stop_loss"], candidate["take_profit"])
+                continue
+
+            self.position_size = float(candidate["position_size"])
+            self.stop_loss = float(candidate["stop_loss"])
+            self.take_profit = float(candidate["take_profit"])
+
+            try:
+                metrics = self.walk_forward_test(data)
+                score = (
+                    float(metrics.get("total_return", -float("inf"))),
+                    float(metrics.get("sharpe_ratio", -float("inf"))),
+                )
+                if score > best_score:
+                    best_score = score
+                    best_params = dict(candidate)
+            except Exception as exc:
+                logger.debug("Optimization candidate failed for %s due to %s", candidate, exc)
+                continue
+
+        self.position_size = float(original["position_size"])
+        self.stop_loss = float(original["stop_loss"])
+        self.take_profit = float(original["take_profit"])
+
+        logger.info(
+            "Optimization selected parameters | position_size=%.4f stop_loss=%.4f take_profit=%.4f score=%s",
+            best_params["position_size"],
+            best_params["stop_loss"],
+            best_params["take_profit"],
+            best_score,
+        )
+        return best_params
 
     def _policy_action_from_observation(self, observation: np.ndarray) -> int:
         if observation is None or len(observation) == 0:
