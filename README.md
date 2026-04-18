@@ -37,6 +37,11 @@ graph TD
     AF --> SA[Safety Agent]
     AF --> EV[Evaluation Agent]
     AF --> AL[Alignment Agent]
+    AF --> OB[Observability Agent]
+    AF --> RE[Reader Agent]
+    AF --> QL[Quality Agent]
+    AF --> PR[Privacy Agent]
+    AF --> NW[Network Agent]
 
     P --> ORCH[Task Orchestration]
     K --> ORCH
@@ -69,6 +74,14 @@ graph TD
 SLAI begins when a user request or external event reaches the **Collaborative Agent**, which coordinates execution through the **Agent Factory + Registry**. The factory activates specialized agents (perception, knowledge, planning, reasoning, execution, and language) so each stage of understanding and task handling is performed by a focused component.
 
 Outputs from these core agents are merged by **Task Orchestration**, producing a unified intermediate result. Before any user-visible response is released, this result is passed through a dedicated **Safety + Alignment Gate**, informed by both the **Safety Agent** and **Alignment Agent** to enforce policy, risk controls, and behavioral constraints.
+
+The latest agent expansion adds focused support for:
+
+- **Observability Agent** for telemetry, tracing, and runtime diagnostics.
+- **Reader Agent** for parsing and recovering structured/unstructured documents.
+- **Quality Agent** for semantic, structural, and statistical quality checks.
+- **Privacy Agent** for consent, retention, minimization, and auditability controls.
+- **Network Agent** for stream/reliability/policy orchestration across distributed components.
 
 After gating, the result proceeds to **Evaluation & Scoring**, where quality and correctness are assessed with support from the **Evaluation Agent**. The system then emits the **Final Response / Action**.
 
