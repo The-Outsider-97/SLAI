@@ -246,12 +246,12 @@ graph TD
 ```mermaid
 flowchart LR
     A[Producer emits transition] --> B[buffer_validation.TransitionValidator]
-    B --> C[nstep_buffer.NStepBuffer (optional)]
+    B --> C[nstep_buffer.NStepBuffer - optional]
     C --> D{Buffer choice}
 
-    D --> E[replay_buffer.ReplayBuffer\n(uniform)]
-    D --> F[distributed_replay_buffer\n(uniform/prioritized/reward/agent_balanced)]
-    D --> G[reservoir_buffer\n(streaming reservoir)]
+    D --> E[replay_buffer.ReplayBuffer\n-uniform]
+    D --> F[distributed_replay_buffer\n-uniform/prioritized/reward/agent_balanced]
+    D --> G[reservoir_buffer\n-streaming reservoir]
 
     E --> H[Sample batch]
     F --> H
