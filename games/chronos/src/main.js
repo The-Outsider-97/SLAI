@@ -40,6 +40,7 @@ let selfPlayStatusInterval = null;
 let selfPlayFrameInterval = null;
 let selfPlayStatusEl = null;
 let selfPlayFrameEl = null;
+let selfPlayVisualMode = false;
 
 mountPageBackgroundLights();
 
@@ -641,6 +642,11 @@ function renderBoard() {
   }
 
   // 3. Render Units (Animated)
+  if (selfPlayVisualMode) {
+    unitLayer.innerHTML = '';
+    return;
+  }
+
   const activeUnitIds = new Set();
   const pct = 100 / CONFIG.board.size;
 
@@ -1484,6 +1490,8 @@ function renderSelfPlayFrame(framePayload) {
   if (!selfPlayFrameEl) return;
   const frameContainer = framePayload?.frame?.frame;
   if (!frameContainer) {
+    selfPlayVisualMode = false;
+    render();
     selfPlayFrameEl.textContent = 'No frame yet.';
     return;
   }
@@ -1499,6 +1507,60 @@ function renderSelfPlayFrame(framePayload) {
     '',
     lines || 'No active units.',
   ].join('\n');
+
+  renderSelfPlayBoardFrame(frameContainer);
+}
+
+function symbolForSelfPlayType(type) {
+  const normalized = String(type || '').toLowerCase();
+  if (normalized.startsWith('strat')) return 'S';
+  if (normalized.startsWith('ward')) return 'W';
+  if (normalized.startsWith('scout')) return 'S';
+  return normalized ? normalized[0].toUpperCase() : '?';
+}
+
+function renderSelfPlayBoardFrame(frameContainer) {
+  if (!frameContainer || !Array.isArray(frameContainer.units)) return;
+
+  const boardSize = Number(frameContainer.board_size) || CONFIG.board.size;
+  if (boardSize !== CONFIG.board.size) {
+    applyBoardSize(boardSize);
+    renderBoardCoordinates();
+  }
+
+  selfPlayVisualMode = true;
+  renderBoard();
+
+  const unitLayer = document.getElementById('unit-layer');
+  if (!unitLayer) return;
+  const pct = 100 / CONFIG.board.size;
+
+  const staleSelfPlayUnits = unitLayer.querySelectorAll('[data-selfplay-unit="1"]');
+  staleSelfPlayUnits.forEach((node) => node.remove());
+
+  frameContainer.units.forEach((unit) => {
+    const row = Number(unit.r);
+    const col = Number(unit.c);
+    if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+    if (row < 0 || col < 0 || row >= CONFIG.board.size || col >= CONFIG.board.size) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute('data-selfplay-unit', '1');
+    wrapper.className = 'absolute flex items-center justify-center transition-all duration-300 ease-in-out z-40 pointer-events-none';
+    wrapper.style.left = `${col * pct}%`;
+    wrapper.style.top = `${row * pct}%`;
+    wrapper.style.width = `${pct}%`;
+    wrapper.style.height = `${pct}%`;
+
+    const inner = document.createElement('div');
+    const isP0 = Number(unit.owner) === 0;
+    inner.className = `w-4/5 h-4/5 rounded-full flex items-center justify-center relative border-4 border-piece-border ${
+      isP0 ? 'piece-p1' : 'piece-p2'
+    }`;
+    inner.innerHTML = `<div class="center-dot w-1/2 h-1/2 rounded-full bg-black flex items-center justify-center text-white font-bold text-[10px] shadow-inner">${symbolForSelfPlayType(unit.type)}</div>`;
+    wrapper.appendChild(inner);
+    unitLayer.appendChild(wrapper);
+  });
 }
 
 async function pollSelfPlayStatus() {
