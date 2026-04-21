@@ -89,6 +89,9 @@ class ChronosAI:
 
         self.match_log_path = project_root / "logs" / "chronos_matches.jsonl"
         self.learning_store_path = project_root / "logs" / "chronos_learning_state.json"
+        self._learning_state_mtime: float = 0.0
+        self._learning_state_loaded = False
+
 
         self.stats: dict[str, Any] = {
             "games_played": 0,
@@ -122,7 +125,6 @@ class ChronosAI:
         logger.info("Chronos AI initialized with SLAI adaptive/knowledge/planning/execution/learning agents")
 
     # ------------------------------ public API ------------------------------
-
     def health(self) -> dict[str, Any]:
         return {
             "agent_status": "ready",
@@ -139,6 +141,8 @@ class ChronosAI:
     def get_move(self, game_state: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(game_state, dict):
             return None
+
+        self._sync_learning_state_if_changed()
 
         phase = game_state.get("phase")
         if phase == "strategos_decision":
@@ -193,6 +197,7 @@ class ChronosAI:
             return False
 
         try:
+            self._sync_learning_state_if_changed()
             enriched_payload = {
                 **payload,
                 "logged_at": datetime.utcnow().isoformat(),
@@ -499,7 +504,9 @@ class ChronosAI:
                 if opening_rate < 0.35:
                     score -= min(6.0, (0.35 - opening_rate) * 20.0)
 
-        score += random.uniform(0.0, 2.5 + adaptive_profile.exploration)
+        experience_games = int(self.stats.get("games_played", 0) or 0)
+        exploration_decay = max(0.35, 1.0 - min(0.6, experience_games / 2000.0))
+        score += random.uniform(0.0, (2.5 + adaptive_profile.exploration) * exploration_decay)
 
         return score, "; ".join(reasons)
 
@@ -869,16 +876,82 @@ class ChronosAI:
             return
         try:
             payload = json.loads(self.learning_store_path.read_text(encoding="utf-8"))
-            self.stats.update(payload.get("stats", {}))
-            self.action_weights.update(payload.get("action_weights", {}))
-            self.zone_weights.update(payload.get("zone_weights", {}))
-            self.move_signature_weights.update(payload.get("move_signature_weights", {}))
+            if not isinstance(payload, dict):
+                return
+
+            loaded_stats = payload.get("stats", {})
+            if isinstance(loaded_stats, dict):
+                self.stats.update(
+                    {
+                        "games_played": max(0, int(loaded_stats.get("games_played", self.stats["games_played"]) or 0)),
+                        "wins": max(0, int(loaded_stats.get("wins", self.stats["wins"]) or 0)),
+                        "losses": max(0, int(loaded_stats.get("losses", self.stats["losses"]) or 0)),
+                        "draws": max(0, int(loaded_stats.get("draws", self.stats["draws"]) or 0)),
+                        "average_reward": float(loaded_stats.get("average_reward", self.stats["average_reward"]) or 0.0),
+                        "average_final_score": float(
+                            loaded_stats.get("average_final_score", self.stats["average_final_score"]) or 0.0
+                        ),
+                        "last_result": loaded_stats.get("last_result"),
+                        "last_updated": loaded_stats.get("last_updated"),
+                    }
+                )
+
+            self.action_weights = self._sanitize_numeric_mapping(payload.get("action_weights"), -8.0, 12.0)
+            loaded_zone_weights = self._sanitize_numeric_mapping(payload.get("zone_weights"), -6.0, 10.0)
+            for zone in ("core", "near_core", "perimeter"):
+                self.zone_weights[zone] = loaded_zone_weights.get(zone, self.zone_weights.get(zone, 0.0))
+            self.move_signature_weights = self._sanitize_numeric_mapping(
+                payload.get("move_signature_weights"),
+                -10.0,
+                10.0,
+            )
+
             loaded_opening_stats = payload.get("opening_signature_stats", {})
             if isinstance(loaded_opening_stats, dict):
-                self.opening_signature_stats.update(loaded_opening_stats)
+                sanitized_opening_stats: dict[str, dict[str, int]] = {}
+                for signature, stats in loaded_opening_stats.items():
+                    if not isinstance(signature, str) or not isinstance(stats, dict):
+                        continue
+                    sanitized_opening_stats[signature] = {
+                        "games": max(0, int(stats.get("games", 0) or 0)),
+                        "wins": max(0, int(stats.get("wins", 0) or 0)),
+                        "losses": max(0, int(stats.get("losses", 0) or 0)),
+                    }
+                self.opening_signature_stats = sanitized_opening_stats
+
             loaded_adaptive_state = payload.get("adaptive_state", {})
             if isinstance(loaded_adaptive_state, dict):
-                self.adaptive_state.update(loaded_adaptive_state)
+                self.adaptive_state["pace_preference"] = float(
+                    loaded_adaptive_state.get("pace_preference", self.adaptive_state["pace_preference"]) or 0.0
+                )
+                self.adaptive_state["risk_appetite"] = float(
+                    loaded_adaptive_state.get("risk_appetite", self.adaptive_state["risk_appetite"]) or 0.0
+                )
+                self.adaptive_state["opponent_aggression"] = float(
+                    loaded_adaptive_state.get("opponent_aggression", self.adaptive_state["opponent_aggression"]) or 0.0
+                )
+                self.adaptive_state["opponent_claim_pressure"] = float(
+                    loaded_adaptive_state.get(
+                        "opponent_claim_pressure",
+                        self.adaptive_state["opponent_claim_pressure"],
+                    )
+                    or 0.0
+                )
+                self.adaptive_state["opponent_focus_core"] = float(
+                    loaded_adaptive_state.get("opponent_focus_core", self.adaptive_state["opponent_focus_core"]) or 0.0
+                )
+                self.adaptive_state["confidence"] = max(
+                    0.1,
+                    min(0.95, float(loaded_adaptive_state.get("confidence", self.adaptive_state["confidence"]) or 0.5)),
+                )
+                self.adaptive_state["last_stance"] = str(
+                    loaded_adaptive_state.get("last_stance", self.adaptive_state["last_stance"])
+                )
+                loaded_history = loaded_adaptive_state.get("history", [])
+                if isinstance(loaded_history, list):
+                    self.adaptive_state["history"] = [entry for entry in loaded_history if isinstance(entry, dict)][-100:]
+            self._learning_state_loaded = True
+            self._learning_state_mtime = self.learning_store_path.stat().st_mtime
         except Exception as error:  # noqa: BLE001
             logger.warning("Failed to load Chronos learning state: %s", error)
 
@@ -895,8 +968,39 @@ class ChronosAI:
                 "updated_at": datetime.utcnow().isoformat(),
             }
             self.learning_store_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._learning_state_loaded = True
+            self._learning_state_mtime = self.learning_store_path.stat().st_mtime
         except Exception as error:  # noqa: BLE001
             logger.warning("Failed to persist Chronos learning state: %s", error)
+
+    def _sync_learning_state_if_changed(self) -> None:
+        if not self.learning_store_path.exists():
+            return
+        try:
+            current_mtime = self.learning_store_path.stat().st_mtime
+        except OSError:
+            return
+        if not self._learning_state_loaded or current_mtime > self._learning_state_mtime:
+            self._load_learning_state()
+
+    def _sanitize_numeric_mapping(
+        self,
+        payload: Any,
+        lower: float,
+        upper: float,
+    ) -> dict[str, float]:
+        if not isinstance(payload, dict):
+            return {}
+        sanitized: dict[str, float] = {}
+        for key, value in payload.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            sanitized[key] = max(lower, min(upper, numeric))
+        return sanitized
 
     # ------------------------------ state helpers ---------------------------
 
