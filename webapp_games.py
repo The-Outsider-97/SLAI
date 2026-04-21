@@ -33,9 +33,6 @@ SESSION_COOKIE = "r_games_session"
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
-from src.agents.agent_factory import AgentFactory
-from src.agents.collaborative.shared_memory import SharedMemory
-from src.agents.planning.planning_types import Task, TaskType
 from logs.logger import get_logger, PrettyPrinter
 from games.train_chronos_agents import ChronosTrainingSimulator
 
@@ -492,6 +489,57 @@ class GameRuntime:
                     return {"available": bool(frame), "frame": frame}
             return {"available": False}
 
+    @staticmethod
+    def _load_json(path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def training_status(self) -> dict[str, Any]:
+        logs_dir = ROOT / "logs"
+        checkpoint_path = logs_dir / "chronos_training_checkpoint.json"
+        summary_path = logs_dir / "chronos_training_summary.json"
+
+        checkpoint = self._load_json(checkpoint_path)
+        summary = self._load_json(summary_path)
+
+        completed_episodes = int(
+            checkpoint.get("completed_episodes", summary.get("completed_episodes", 0)) or 0
+        )
+        meta = checkpoint.get("meta", {}) if isinstance(checkpoint.get("meta"), dict) else {}
+        total_episodes = int(meta.get("episodes", summary.get("episodes", 0)) or 0)
+        progress = round((completed_episodes / total_episodes) * 100.0, 2) if total_episodes > 0 else 0.0
+
+        checkpoint_mtime = checkpoint_path.stat().st_mtime if checkpoint_path.exists() else 0.0
+        seconds_since_update = max(0.0, time.time() - checkpoint_mtime) if checkpoint_mtime else None
+        active = (
+            seconds_since_update is not None
+            and seconds_since_update <= 15.0
+            and completed_episodes < total_episodes
+        )
+
+        return {
+            "available": bool(checkpoint or summary),
+            "active": bool(active),
+            "completed_episodes": completed_episodes,
+            "total_episodes": total_episodes,
+            "progress_percent": progress,
+            "depth": int(meta.get("depth", summary.get("depth", 0)) or 0),
+            "counter_playouts": int(meta.get("playouts", summary.get("counter_playouts", 0)) or 0),
+            "explored_states": int(summary.get("explored_states", 0) or 0),
+            "counter_evals": int(summary.get("counter_evals", 0) or 0),
+            "wins": summary.get("wins", {}),
+            "losses": summary.get("losses", {}),
+            "draw_like": summary.get("draw_like", {}),
+            "seconds_since_update": None if seconds_since_update is None else round(seconds_since_update, 2),
+            "checkpoint_path": str(checkpoint_path),
+            "summary_path": str(summary_path),
+        }
+
 runtime = GameRuntime()
 
 
@@ -665,6 +713,9 @@ class RequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/ai/selfplay/frame":
             self._send_json(runtime.selfplay_frame(self.session_id))
+            return
+        if self.path == "/api/ai/training-status":
+            self._send_json(runtime.training_status())
             return
 
         if self.path == "/":
