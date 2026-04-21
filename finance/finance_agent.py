@@ -4,6 +4,7 @@ import calendar
 import os
 import threading
 import time
+import uuid
 import numpy as np
 import pandas as pd
 import pytz
@@ -121,6 +122,13 @@ class FinanceAgent(nn.Module):
         self.handler_agent = self.agent_factory.create("handler", self.shared_memory)
         self.observability_agent = self.agent_factory.create("observability", self.shared_memory)
         self.network_agent = self.agent_factory.create("network", self.shared_memory)
+        self.network_posture_cfg = {
+            "degraded_error_ratio": float(self.agent_config.get("network_degraded_error_ratio", 0.30)),
+            "critical_error_ratio": float(self.agent_config.get("network_critical_error_ratio", 0.60)),
+            "degraded_p95_latency_ms": float(self.agent_config.get("network_degraded_p95_latency_ms", 1500.0)),
+            "critical_p95_latency_ms": float(self.agent_config.get("network_critical_p95_latency_ms", 3500.0)),
+        }
+        self._latest_network_posture: Dict[str, Any] = {"status": "unknown", "allow_new_trades": True, "risk_multiplier": 1.0}
 
         self.default_symbol = self.agent_config.get("default_symbol", "AAPL")
         self.symbols = symbols or [{"symbol": self.default_symbol, "name": "Primary"}]
@@ -176,7 +184,12 @@ class FinanceAgent(nn.Module):
         self._run_initial_backtest()
         self._sync_portfolio_state()
 
-    def _publish_observability_event(self, *, symbol: str, operation_name: str,
+    def _publish_observability_event(
+        self,
+        *,
+        symbol: str,
+        cycle_id: Optional[str] = None,
+        operation_name: str,
         severity: str = "info",
         message: str = "",
         context: Optional[Mapping[str, Any]] = None,
@@ -194,6 +207,7 @@ class FinanceAgent(nn.Module):
                     "severity": severity,
                     "agent_name": "finance_agent",
                     "symbol": symbol,
+                    "cycle_id": cycle_id,
                     "message": message or operation_name,
                     "context": dict(context or {}),
                 }
@@ -204,6 +218,52 @@ class FinanceAgent(nn.Module):
                 self.observability_agent.perform_task(payload)
         except Exception as exc:
             logger.debug("Observability event publish skipped: %s", exc)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _derive_network_posture(self, health_snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+        metrics = health_snapshot.get("metrics") if isinstance(health_snapshot.get("metrics"), Mapping) else {}
+        global_metrics = metrics.get("global") if isinstance(metrics, Mapping) and isinstance(metrics.get("global"), Mapping) else {}
+        latency_metrics = global_metrics.get("latency_ms") if isinstance(global_metrics.get("latency_ms"), Mapping) else {}
+
+        total_events = max(0.0, self._safe_float(global_metrics.get("total_events"), 0.0))
+        failure_total = max(0.0, self._safe_float(global_metrics.get("failure_total"), 0.0))
+        error_ratio = (failure_total / total_events) if total_events > 0 else 0.0
+        p95_latency_ms = self._safe_float(latency_metrics.get("p95"), 0.0)
+
+        status = "healthy"
+        allow_new_trades = True
+        risk_multiplier = 1.0
+
+        if (
+            error_ratio >= self.network_posture_cfg["critical_error_ratio"]
+            or p95_latency_ms >= self.network_posture_cfg["critical_p95_latency_ms"]
+        ):
+            status = "critical"
+            allow_new_trades = False
+            risk_multiplier = 0.40
+        elif (
+            error_ratio >= self.network_posture_cfg["degraded_error_ratio"]
+            or p95_latency_ms >= self.network_posture_cfg["degraded_p95_latency_ms"]
+        ):
+            status = "degraded"
+            allow_new_trades = True
+            risk_multiplier = 0.75
+
+        return {
+            "status": status,
+            "allow_new_trades": allow_new_trades,
+            "risk_multiplier": risk_multiplier,
+            "error_ratio": round(error_ratio, 6),
+            "total_events": int(total_events),
+            "failure_total": int(failure_total),
+            "p95_latency_ms": round(p95_latency_ms, 3),
+        }
 
     def _fetch_network_health(self, symbol: str) -> Dict[str, Any]:
         """
@@ -222,10 +282,22 @@ class FinanceAgent(nn.Module):
                 result = {}
             if isinstance(result, dict):
                 snapshot.update(result)
+            posture = self._derive_network_posture(snapshot)
+            snapshot["posture"] = posture
+            self._latest_network_posture = posture
             self.shared_memory.put("network_health", {"symbol": symbol, **snapshot}, ttl=120)
+            self.shared_memory.put("network_posture", {"symbol": symbol, **posture}, ttl=120)
+            if posture["status"] in {"degraded", "critical"}:
+                self.finance_memory.add_financial_data(
+                    data={"symbol": symbol, "network_posture": posture, "ts": datetime.utcnow().isoformat()},
+                    data_type="network_posture",
+                    tags=["network", f"symbol_{symbol}", posture["status"]],
+                    priority="high" if posture["status"] == "critical" else "medium",
+                )
         except Exception as exc:
             snapshot = {"status": "error", "agent": "network_agent", "error": str(exc)}
             logger.debug("Network health snapshot failed: %s", exc)
+            self._latest_network_posture = {"status": "error", "allow_new_trades": False, "risk_multiplier": 0.5}
         return snapshot
 
     # -------------------------
@@ -239,6 +311,7 @@ class FinanceAgent(nn.Module):
             "timestamp": datetime.utcnow().isoformat(),
             "market_regime": self.market_regime,
             "network_health": network_health,
+            "network_posture": dict(self._latest_network_posture),
             "goals": self.financial_goals,
             "portfolio": {
                 "cash": self.cash,
@@ -771,6 +844,7 @@ class FinanceAgent(nn.Module):
         sentiment = float(self.trend_analyzer.get_latest_sentiment(self.symbol))
         if sentiment > float(self.financial_goals["sentiment_risk"]["threshold"]):
             risk_factor *= float(self.financial_goals["sentiment_risk"]["risk_factor"])
+        risk_factor *= float(self._latest_network_posture.get("risk_multiplier", 1.0))
 
         return max(0.1, min(2.0, risk_factor))
 
@@ -942,11 +1016,13 @@ class FinanceAgent(nn.Module):
     def run_cycle(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         symbol = (symbol or self.symbol).upper()
         cycle_ts = datetime.utcnow().isoformat()
+        cycle_id = f"{symbol}-{uuid.uuid4().hex[:12]}"
         self._publish_observability_event(
             symbol=symbol,
+            cycle_id=cycle_id,
             operation_name="cycle_start",
             message="Finance cycle started",
-            context={"timestamp": cycle_ts},
+            context={"timestamp": cycle_ts, "cycle_id": cycle_id},
         )
 
         if not self._is_market_open() and not bool(self.agent_config.get("allow_after_hours", False)):
@@ -954,14 +1030,40 @@ class FinanceAgent(nn.Module):
             self.shared_memory.put("last_cycle", result, ttl=120)
             self._publish_observability_event(
                 symbol=symbol,
+                cycle_id=cycle_id,
                 operation_name="cycle_skipped",
                 severity="warning",
                 message="Market closed; cycle skipped",
                 context=result,
             )
             return result
-
-        self.collect_and_process_data(symbol)
+        stage_started = time.perf_counter()
+        try:
+            data = self.collect_and_process_data(symbol)
+            if not data:
+                self._publish_observability_event(
+                    symbol=symbol,
+                    cycle_id=cycle_id,
+                    operation_name="cycle_data_empty",
+                    severity="warning",
+                    message="Data collection returned empty result",
+                    context={"symbol": symbol, "cycle_id": cycle_id},
+                )
+        except Exception as exc:
+            self._publish_observability_event(
+                symbol=symbol,
+                cycle_id=cycle_id,
+                operation_name="cycle_data_error",
+                severity="critical",
+                message="Data collection failed",
+                context={"error": str(exc), "cycle_id": cycle_id},
+            )
+            raise
+        self.shared_memory.put(
+            "finance_cycle_stage:data",
+            {"symbol": symbol, "cycle_id": cycle_id, "duration_ms": round((time.perf_counter() - stage_started) * 1000.0, 3)},
+            ttl=300,
+        )
 
         try:
             snippets = self.trend_analyzer.sentiment_scraper.get_sentiment_snippets(symbol)
@@ -977,9 +1079,32 @@ class FinanceAgent(nn.Module):
         context = self._build_cycle_context(symbol)
         context = self._knowledge_enrich_context(context)
         context = self._reason_market_context(context)
+        context["cycle_id"] = cycle_id
 
         hybrid_signal = self._generate_hybrid_signal(symbol)
         signal = hybrid_signal.get("signal", "hold")
+        posture = context.get("network_posture", {})
+        if posture.get("allow_new_trades") is False:
+            signal = "hold"
+            self.shared_memory.put(
+                "trade_signal_forced_hold",
+                {
+                    "symbol": symbol,
+                    "cycle_id": cycle_id,
+                    "reason": "network_posture_block",
+                    "network_posture": posture,
+                    "ts": cycle_ts,
+                },
+                ttl=180,
+            )
+            self._publish_observability_event(
+                symbol=symbol,
+                cycle_id=cycle_id,
+                operation_name="network_trade_block",
+                severity="warning",
+                message="Signal forced to HOLD due to critical network posture",
+                context={"network_posture": posture},
+            )
         context["learning"] = {
             "hybrid_signal": signal,
             "signal_source": hybrid_signal.get("source", "unknown"),
@@ -1042,11 +1167,20 @@ class FinanceAgent(nn.Module):
         result = {
             "status": "ok",
             "symbol": symbol,
+            "cycle_id": cycle_id,
             "time": cycle_ts,
             "portfolio_value": self._get_total_portfolio_value(),
             "monthly_pnl": self.monthly_pnl,
             "market_regime": self.market_regime,
+            "network_posture": context.get("network_posture", {}),
         }
+        self._publish_observability_event(
+            symbol=symbol,
+            cycle_id=cycle_id,
+            operation_name="cycle_complete",
+            message="Finance cycle completed",
+            context=result,
+        )
         self.finance_memory.add_financial_data(
             data=result,
             data_type="cycle_result",
