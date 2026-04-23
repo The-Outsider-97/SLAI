@@ -6,12 +6,11 @@ import torch.nn.functional as F
 
 from typing import Dict, List, Optional, Tuple
 
-from ...base.utils.activation_engine import he_init
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.common import TensorOps, Parameter
 from ..modules.transformer import Transformer
 from ..perception_memory import PerceptionMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Vision Decoder")
 printer = PrettyPrinter
