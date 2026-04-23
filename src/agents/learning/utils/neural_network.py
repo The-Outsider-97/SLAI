@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .config_loader import load_global_config, get_config_section
-from ...base.utils.activation_engine import (Activation, Linear,
+from ...base.modules.activation_engine import (Activation, Linear,
                                              ReLU, Sigmoid, Softmax, Tanh)
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Neural Network")
 printer = PrettyPrinter
