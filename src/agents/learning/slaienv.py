@@ -8,11 +8,11 @@ import gymnasium as gym
 from collections import namedtuple
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..base.utils.physics_constraints import PhysicsEngine, PhysicsConfig
+from ..base.modules.physics_constraints import PhysicsEngine, PhysicsConfig
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.policy_network import NoveltyDetector
 from .learning_memory import LearningMemory, Transition
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Learning Environment")
 printer = PrettyPrinter
