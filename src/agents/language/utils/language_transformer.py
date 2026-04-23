@@ -6,9 +6,9 @@ import torch.nn.functional as F
 
 from typing import List, Tuple, Optional, Dict, Any
 
-from src.agents.language.utils.config_loader import load_global_config, get_config_section
-from src.agents.base.utils.base_transformer import BaseTransformer
-from logs.logger import get_logger, PrettyPrinter
+from .config_loader import load_global_config, get_config_section
+from ...base.modules.base_transformer import BaseTransformer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Language Transformer")
 printer = PrettyPrinter

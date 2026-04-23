@@ -8,9 +8,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Union, Optional, Any
 
-from src.agents.language.utils.config_loader import load_global_config, get_config_section
-from src.agents.base.utils.base_tokenizer import BaseTokenizer
-from logs.logger import get_logger, PrettyPrinter
+from .config_loader import load_global_config, get_config_section
+from ...base.modules.base_tokenizer import BaseTokenizer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Language Tokenizer")
 printer = PrettyPrinter
