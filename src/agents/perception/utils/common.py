@@ -7,11 +7,8 @@ from typing import Optional, List, Tuple, Dict, Any, Union
 from pathlib import Path
 
 from .config_loader import load_global_config, get_config_section
-from ...base.utils.activation_engine import (
-    gelu_tensor, swish_tensor, mish_tensor, sigmoid_tensor,
-    he_init, lecun_normal, xavier_uniform, xavier_normal
-)
-from logs.logger import get_logger, PrettyPrinter
+from ...base.modules.activation_engine import gelu_tensor, swish_tensor, mish_tensor, sigmoid_tensor
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Common")
 printer = PrettyPrinter

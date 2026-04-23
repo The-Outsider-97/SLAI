@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from typing import Optional, List, Dict, Any
 
 from .config_loader import load_global_config, get_config_section
-from ...base.utils.activation_engine import get_activation
+from ...base.modules.activation_engine import get_activation
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Task Heads")
