@@ -11,8 +11,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from .config_loader import load_global_config, get_config_section
 from .evaluation_errors import (ConfigLoadError, MetricCalculationError,
                                 OperationalError, ValidationFailureError)
-from ...base.utils.base_transformer import BaseTransformer
-from logs.logger import get_logger, PrettyPrinter
+from ...base.modules.base_transformer import BaseTransformer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Evaluation Transformer")
 printer = PrettyPrinter
