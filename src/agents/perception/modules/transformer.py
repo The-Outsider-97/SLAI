@@ -16,8 +16,8 @@ from .attention import (
 )
 from .feedforward import FeedForward
 from ..perception_memory import PerceptionMemory
-from ...base.utils.base_transformer import BaseTransformer
-from logs.logger import get_logger, PrettyPrinter
+from ...base.modules.base_transformer import BaseTransformer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Transformer")
 printer = PrettyPrinter

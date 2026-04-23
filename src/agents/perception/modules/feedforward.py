@@ -7,11 +7,11 @@ from typing import Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.common import TensorOps, Parameter
-from ...base.utils.activation_engine import (
+from ...base.modules.activation_engine import (
     get_activation,
     he_init, lecun_normal, xavier_uniform, xavier_normal
 )
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("FeedForward")
 printer = PrettyPrinter

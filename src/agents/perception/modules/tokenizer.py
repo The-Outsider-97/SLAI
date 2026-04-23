@@ -8,8 +8,8 @@ from typing import List, Dict, Union, Optional, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.common import TensorOps, Parameter
-from ...base.utils.base_tokenizer import BaseTokenizer
-from logs.logger import get_logger, PrettyPrinter
+from ...base.modules.base_tokenizer import BaseTokenizer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Tokenizer")
 printer = PrettyPrinter
