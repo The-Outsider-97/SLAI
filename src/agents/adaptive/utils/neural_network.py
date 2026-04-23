@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...base.utils.activation_engine import (
+from ...base.modules.activation_engine import (
     ELU,
     GELU,
     LeakyReLU,
@@ -28,7 +28,7 @@ from ...base.utils.activation_engine import (
 )
 from .adaptive_errors import *
 from .config_loader import load_global_config, get_config_section
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Adaptive Neural Network")
 printer = PrettyPrinter
@@ -1328,6 +1328,47 @@ class ActorCriticNetwork(AdaptiveNetworkBase):
 
         return log_probs, critic_out.squeeze(-1), entropy
 
+    def get_actor_parameters(self) -> List[nn.Parameter]:
+        params: List[nn.Parameter] = []
+        seen: set[int] = set()
+
+        def add_from(module: Optional[nn.Module]) -> None:
+            if module is None:
+                return
+            for parameter in module.parameters():
+                ident = id(parameter)
+                if ident not in seen:
+                    params.append(parameter)
+                    seen.add(ident)
+
+        if self.shared_base and getattr(self, "base_network", None) is not None:
+            add_from(self.base_network)
+        add_from(self.actor)
+        if getattr(self, "action_std", None) is not None:
+            ident = id(self.action_std)
+            if ident not in seen:
+                params.append(self.action_std)
+                seen.add(ident)
+        return params
+
+    def get_critic_parameters(self) -> List[nn.Parameter]:
+        params: List[nn.Parameter] = []
+        seen: set[int] = set()
+
+        def add_from(module: Optional[nn.Module]) -> None:
+            if module is None:
+                return
+            for parameter in module.parameters():
+                ident = id(parameter)
+                if ident not in seen:
+                    params.append(parameter)
+                    seen.add(ident)
+
+        if self.shared_base and getattr(self, "base_network", None) is not None:
+            add_from(self.base_network)
+        add_from(self.critic)
+        return params
+
     def get_model_summary(self) -> Dict[str, Any]:
         return {
             "class_name": self.__class__.__name__,
@@ -1430,9 +1471,7 @@ if __name__ == "__main__":
         printer.status("TEST", f"NeuralNetwork summary: {network.get_model_summary()}", "success")
 
         test_input = np.random.randn(network.input_dim).astype(np.float32)
-        network.eval()
         forward_output = network.forward(test_input)
-        network.train()
         printer.status("TEST", f"Forward output shape: {tuple(forward_output.shape)}", "success")
 
         training_data = _build_synthetic_dataset(network, max(16, network.batch_size * 2))
