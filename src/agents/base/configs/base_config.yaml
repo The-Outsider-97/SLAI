@@ -1,0 +1,334 @@
+src_vocab_size: 50000
+tgt_vocab_size: 50000
+bpe_model_path: "data/bpe_200d_50k_model.json"
+bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
+
+
+base_error:
+  default_severity: medium
+  include_traceback: true
+
+
+base_memory:
+  default_namespace: default
+  max_entries: 10000
+  max_entries_per_namespace: 2500
+  default_ttl_seconds: null
+  cleanup_interval_seconds: 60
+  enable_history: true
+  history_limit: 500
+  enable_persistence: false
+  auto_persist: false
+  auto_load_persistence: false
+  persistence_path: data/base_memory_snapshot.json
+  enable_fingerprints: true
+  enforce_capacity_on_write: true
+  export_redact_secrets: false
+  snapshot_pretty: true
+  max_query_results: 100
+  eviction_policy: least_recently_used
+
+
+base_transformer:
+  src_vocab_size: 50000
+  tgt_vocab_size: 50000
+  d_model: 512
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
+  activation: relu
+  layer_norm_eps: 1.0e-05
+  batch_first: true
+  norm_first: false
+  max_len: 5000
+  pad_token_id: 0
+  bos_token_id: 1
+  eos_token_id: 2
+  tie_embeddings: false
+  tie_output_projection: true
+  enable_memory_integration: false
+  memory_namespace: base_transformer
+  record_history: true
+  history_limit: 200
+  checkpoint_pretty: true
+  label_smoothing: 0.0
+  clip_grad: 1.0
+  lr: 0.0001
+  betas:
+  - 0.9
+  - 0.98
+  eps: 1.0e-09
+  weight_decay: 0.0001
+  inference_max_len: 50
+  inference_temperature: 1.0
+  inference_do_sample: false
+  inference_top_k: 0
+
+
+inference:
+  max_len: 50
+  sos_token: 1
+  eos_token: 2
+  temperature: 1.0
+
+
+forward:
+  src_mask: None
+  tgt_mask: None
+  memory_mask: None
+  src_key_padding_mask: None
+  tgt_key_padding_mask: None
+  memory_key_padding_mask: None
+
+
+base_tokenizer:
+  src_vocab_size: 50000
+  max_vocab_size: 50000
+  min_frequency: 2
+  bpe_model_path: "data/bpe_200d_50k_model.json"
+  bpe_vocab_path: "data/bpe_200d_50k_vocab.json"
+  pad_token: "[PAD]"
+  unk_token: "[UNK]"
+  bos_token: "[BOS]"
+  eos_token: "[EOS]"
+  mask_token: "[MASK]"
+  special_tokens: null
+  lowercase: true
+  unicode_normalization_form: "NFKC"
+  remove_control_characters: true
+  squeeze_whitespace: true
+  track_token_counts: true
+  allow_dynamic_vocab_growth: true
+  record_history: true
+  history_limit: 200
+  enable_memory_integration: false
+  memory_namespace: "base_tokenizer"
+  snapshot_pretty: true
+  default_max_length: 128
+  default_padding: "max_length"
+  default_truncation: true
+  default_add_special_tokens: true
+  default_return_tensors: null
+  return_attention_mask: true
+  return_special_tokens_mask: false
+  return_tokens: false
+
+
+encode:
+  max_length: None
+  padding: "max_length"
+  truncation: True
+  add_special_tokens: True
+  return_tensors: None
+  src_mask: None
+  src_key_padding_mask: None
+
+
+decode:
+  skip_special_tokens: True
+  clean_up_tokenization_spaces: True
+  tgt_mask: None
+  memory_mask: None
+  tgt_key_padding_mask: None
+  memory_key_padding_mask: None
+
+
+lm_store:
+  enable_memory_tracking: true
+  default_category: "performance"
+  max_history_size: 1000
+  max_records_per_metric: 250
+  max_active_trackers: 2048
+  auto_prune_empty_categories: true
+  enable_snapshots: true
+  auto_snapshot: false
+  snapshot_pretty: true
+  snapshot_path: "data/light_metric_store_snapshot.json"
+  summary_sort_by: "average"
+
+
+issue_handler:
+  enable_history: true
+  history_limit: 250
+  enable_shared_memory_learning: true
+  shared_memory_error_key_prefix: "errors"
+  error_similarity_threshold: 0.72
+  max_retry_attempts: 3
+  max_solution_attempts: 3
+  runtime_retry_delay_seconds: 1.0
+  memory_trim_ratio: 0.5
+  timeout_simplified_dict_items: 3
+  unicode_strip_non_ascii: true
+  enable_traceback_capture: true
+  export_redact_secrets: false
+  max_error_message_length: 500
+  network_backoff_initial_delay: 1.0
+  network_backoff_multiplier: 2.0
+  network_backoff_max_delay: 30.0
+  network_backoff_jitter_ratio: 0.0
+  resource_wait_schedule: [2.0, 5.0, 10.0]
+
+
+lazy_agent:
+  max_init_attempts: 3
+  enable_init_logging: true
+  timeout_seconds: 30.0
+  retry_initial_delay: 0.5
+  retry_multiplier: 2.0
+  retry_max_delay: 5.0
+  capture_tracebacks: true
+  enable_internal_memory: false
+  memory_namespace: "lazy_agent"
+  record_access_history: true
+  history_limit: 100
+  allow_reset: true
+  strict_none_return: true
+  enable_proxy_call: true
+
+
+chemistry_constraints:
+  dt: 0.02
+  activity_floor: 1.0e-12
+  numeric_tolerance: 1.0e-12
+  enable_history: true
+  history_limit: 200
+  species_map:
+    A: 0
+    B: 1
+    C: 2
+    D: 3
+    Cat: 4
+    temperature: 5
+    H+: 6
+    volume: 7
+  reaction_stoichiometry:
+    A: -1.0
+    B: -1.0
+    C: 1.0
+    D: 1.0
+  reaction_orders_fwd: {}
+  reaction_orders_rev: {}
+  k_fwd_params:
+    A0: 1.0
+    Ea: 40000.0
+  k_rev_params:
+    A0: 0.1
+    Ea: 42000.0
+  enable_catalysis: true
+  catalyst_species: "Cat"
+  catalyst_min_active_conc: 1.0e-9
+  catalyst_concentration_factor: 0.25
+  catalyst_params:
+    Ea_reduction_factor_fwd: 0.8
+    Ea_reduction_factor_rev: 0.8
+  enable_ph_modulation: true
+  ph_species: "H+"
+  ph_optimum: 7.0
+  ph_sensitivity: 0.35
+  ph_min: 0.0
+  ph_max: 14.0
+  delta_H_reaction: 0.0
+  system_properties:
+    density_solution_kg_L: 1.0
+    cp_solution_J_kg_K: 4184.0
+  min_temperature_K: 0.0
+  max_temperature_K: 5000.0
+  min_volume_L: 1.0e-9
+  max_volume_L: 1.0e9
+  solubility_limits: {}
+  clip_negative_concentrations: true
+  max_concentration_mol_L: 1.0e6
+  enforce_mass_balance: false
+  auto_correct_mass_balance: false
+  element_matrix: {}
+  initial_total_moles: {}
+  mass_balance_tolerance: 1.0e-6
+
+
+physics_constraints:
+  gravity: 9.80665
+  friction_coeff: 0.02
+  rotational_friction: 0.01
+  wind_strength: 0.0
+  wind_direction: 0.0
+  wind_turbulence_ratio: 0.1
+  drag_coeff: 0.01
+  terminal_velocity: 50.0
+  min_speed_for_drag: 0.01
+  elasticity: 0.8
+  tangential_damping: 0.2
+  boundary_margin: 0.01
+  corner_threshold: 0.05
+  max_angular_velocity: 5.0
+  default_mass: 1.0
+  default_charge: 0.0
+  enable_tunneling: false
+  tunneling_probability: 0.05
+  barrier_positions: [-8.0, 8.0]
+  barrier_width: 0.1
+  enable_relativistic: true
+  relativistic_threshold: 0.1
+  relativistic_safety_factor: 0.999999
+  enable_electromagnetic: false
+  electric_field: [0.0, 10.0]
+  magnetic_field: 0.5
+  dt: 0.02
+  enable_history: true
+  history_limit: 200
+  random_seed: null
+
+
+input_sanitizer:
+  unicode_normalization_form: "NFKC"
+  strip_control_characters: true
+  strip_null_bytes: true
+  squeeze_whitespace: true
+  strip_edges: true
+  escape_html: true
+  lowercase: false
+  allow_newlines: false
+  preserve_tabs: false
+  max_text_length: 4096
+  filename_max_length: 128
+  max_container_items: 1000
+  max_recursion_depth: 8
+  record_history: true
+  history_limit: 200
+  reject_on_suspicious_patterns: false
+  default_allow_null: false
+  sanitize_keys: true
+  default_paranoid_mode: false
+  paranoid_escape_quotes: true
+  allowed_text_pattern: null
+  replacement_map: {}
+  suspicious_patterns:
+    - '(?i)<script\b'
+    - '(?i)javascript:'
+    - '(?i)on[a-z]+\s*='
+    - '(?i)<iframe\b'
+    - '(?i)<object\b'
+
+
+numpy_encoder:
+  array_format: "tagged"
+  encode_scalar_metadata: false
+  encode_datetime_as: "iso"
+  encode_timedelta_as: "int"
+  handle_non_finite: "string"
+  include_array_dtype: true
+  include_array_shape: true
+  include_array_size: false
+  serialize_callables: true
+  serialize_custom_objects: true
+  custom_object_strategy: "dict"
+  decode_tagged_payloads: true
+  record_history: true
+  history_limit: 200
+  max_history_detail_length: 240
+  max_array_preview_items: 25
+  strict_numpy_only: false
+  ensure_ascii_default: false
+  sort_keys_default: true
+  indent_default: null
