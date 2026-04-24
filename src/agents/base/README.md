@@ -15,8 +15,9 @@ It supports:
 - lazy component initialization for expensive resources
 - lightweight metric tracking and value recording
 - issue recovery orchestration and known-issue handlers
-- centralized configuration loading and validation utilities
-- shared utility helpers (sanitization, constraints, encoding, etc.)
+- centralized configuration loading and validation utilities (`utils/`)
+- reusable domain-agnostic helper modules for sanitization/constraints/encoding (`modules/`)
+- foundational memory abstractions (`base_memory.py`)
 
 ---
 
@@ -25,23 +26,31 @@ It supports:
 ```text
 base/
 ├── __init__.py
+├── README.md
+├── base_memory.py
+├── issue_handler.py
 ├── lazy_agent.py
 ├── light_metric_store.py
-├── issue_handler.py
 ├── configs/
 │   ├── agents_config.yaml
 │   └── base_config.yaml
+├── modules/
+│   ├── __init__.py
+│   ├── activation_engine.py
+│   ├── base_tokenizer.py
+│   ├── base_transformer.py
+│   ├── biology_constraints.py
+│   ├── chemistry_constraints.py
+│   ├── input_sanitizer.py
+│   ├── math_science.py
+│   ├── numpy_encoder.py
+│   └── physics_constraints.py
 └── utils/
-    ├── activation_engine.py
-    ├── base_transformer.py
-    ├── base_tokenizer.py
-    ├── chemistry_constraints.py
+    ├── __init__.py
+    ├── base_errors.py
+    ├── base_helpers.py
     ├── config_loader.py
-    ├── input_sanitizer.py
-    ├── main_config_loader.py
-    ├── math_science.py
-    ├── numpy_encoder.py
-    └── physics_constraints.py
+    └── main_config_loader.py
 ```
 
 > Note: `BaseAgent` itself lives in `src/agents/base_agent.py` and imports key modules from this directory (for example: `LazyAgent`, `LightMetricStore`, `IssueHandler`, and config/error helpers).
@@ -79,7 +88,7 @@ Error recovery is now layered:
 
 This layered approach improves resilience while keeping subclass implementations simple.
 
-### 4) Config + utility loaders (`utils/main_config_loader.py`, etc.)
+### 4) Config + support utilities (`utils/main_config_loader.py`, etc.)
 
 `BaseAgent` reads `base_agent` config values through shared loaders and validates thresholds/ranges centrally.
 
