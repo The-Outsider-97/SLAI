@@ -185,6 +185,15 @@ ethics = EthicalConstraints()
 
 ---
 
+
+## Additional utility documentation
+
+For channel-specific human-oversight integration details, see:
+
+- [`utils/CHANNELS.md`](./utils/CHANNELS.md)
+
+---
+
 ## Notes for maintainers
 
 - Keep config-backed defaults in sync with `configs/alignment_config.yaml`.
