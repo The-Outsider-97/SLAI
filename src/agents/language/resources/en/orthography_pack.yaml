@@ -1,0 +1,5193 @@
+# Orthography Resource Pack (English)
+# -----------------------------------------------------------------------------
+# Consolidates normalization.yaml and typo_patterns.json into a single resource
+# pack for OrthographyProcessor, SpellChecker, and a future LanguageResourceManager.
+# Keep this file as data: paths/toggles remain in language_config.yaml; large
+# orthographic resources live here.
+# -----------------------------------------------------------------------------
+
+metadata:
+  name: orthography_pack
+  language: en
+  locale_default: en-US
+  version: 1.0.0
+  status: production_ready_resource_pack
+  created_at: '2026-04-28T09:16:33Z'
+  description: Consolidated orthography resources for normalization, contraction handling, locale-aware spelling variants,
+    typo candidate generation, and safe early-stage text cleanup.
+  source_files:
+  - normalization.yaml
+  - typo_patterns.json
+  replaces_standalone_files:
+  - normalization.yaml
+  - typo_patterns.json
+  intended_consumers:
+  - OrthographyProcessor
+  - SpellChecker
+  - LanguageResourceManager
+schema:
+  format: language_resource_pack
+  pack_type: orthography
+  schema_version: '1.0'
+  requires:
+    normalization_rule_fields:
+    - id
+    - category
+    - source
+    - target
+    - enabled
+    - risk_level
+    - autocorrect_allowed
+    - confidence
+    typo_pattern_fields:
+    - id
+    - category
+    - pattern
+    - replacement
+    - enabled
+    - risk_level
+    - candidate_only
+runtime_policy:
+  preserve_source_spans: true
+  preserve_case: true
+  preserve_whitespace: true
+  normalize_unicode: true
+  unicode_form: NFKC
+  normalize_quote_chars: true
+  normalize_dash_chars: true
+  collapse_whitespace: false
+  remove_control_chars: true
+  normalize_spacing_around_punctuation: true
+  default_autocorrect_threshold: 0.86
+  low_confidence_threshold: 0.62
+  max_context_window: 3
+  max_input_chars: 200000
+  max_token_length: 96
+  application_order:
+  - protect_terms
+  - unicode_normalization
+  - quote_dash_normalization
+  - control_character_removal
+  - exact_normalization_rules
+  - contraction_expansion
+  - locale_spelling_variants
+  - spell_checker_candidate_generation
+  - typo_candidate_generation
+  - compound_handling
+  - punctuation_spacing
+  - restore_case_and_spans
+tokenization:
+  token_pattern: '[A-Za-z]+(?:[''’][A-Za-z]+)*(?:-[A-Za-z]+)*|\d+(?:[.,:/-]\d+)*|\S'
+  word_like_pattern: ^[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*$
+  ignore_patterns:
+  - ^https?://
+  - ^www\.
+  - ^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$
+  - ^[_\W]+$
+  - ^\d+(?:[.,:/-]\d+)*$
+  - ^\[[A-Z_]+\]$
+  protected_terms:
+  - SLAI
+  - GAIA
+  - NLU
+  - NLG
+  - NLP
+  - API
+  - JSON
+  - YAML
+  - BPE
+normalization:
+  enabled: true
+  notes:
+  - Rules are grouped by category so the processor can apply different confidence and safety policies.
+  - standard_to_informal_variant rules are retained for generation/style awareness but disabled for input normalization by
+    default.
+  - Locale spelling variants should be applied only when enable_locale_normalization is true and a target locale is configured.
+  category_policy:
+    common_misspelling:
+      enabled: true
+      autocorrect_allowed: true
+      requires_word_boundary: true
+    contraction_expansion:
+      enabled: true
+      autocorrect_allowed: true
+      requires_word_boundary: true
+    abbreviation_expansion:
+      enabled: true
+      autocorrect_allowed: true
+      requires_word_boundary: true
+    symbol_expansion:
+      enabled: true
+      autocorrect_allowed: true
+      requires_word_boundary: false
+    informal_to_standard:
+      enabled: true
+      autocorrect_allowed: true
+      requires_word_boundary: true
+    standard_to_informal_variant:
+      enabled: false
+      autocorrect_allowed: false
+      use_case: NLG style control only
+    locale_spelling_variant:
+      enabled: true
+      autocorrect_allowed: false
+      requires_locale: true
+    spacing_or_compound_normalization:
+      enabled: true
+      autocorrect_allowed: false
+      requires_phrase_boundary: true
+    archaic_modernization:
+      enabled: true
+      autocorrect_allowed: false
+      requires_context_confirmation: true
+  rules_by_category:
+    locale_spelling_variant:
+      colour: color
+      flavour: flavor
+      humour: humor
+      behaviour: behavior
+      neighbour: neighbor
+      centre: center
+      metre: meter
+      theatre: theater
+      fibre: fiber
+      litre: liter
+      analyse: analyze
+      catalyse: catalyze
+      paralyse: paralyze
+      organise: organize
+      recognise: recognize
+      criticise: criticize
+      emphasise: emphasize
+      apologise: apologize
+      specialise: specialize
+      realise: realize
+      travelled: traveled
+      travelling: traveling
+      cancelled: canceled
+      cancelling: canceling
+      fuelled: fueled
+      fuelling: fueling
+      jewellery: jewelry
+      grey: gray
+      dialogue: dialog
+      analogue: analog
+      catalogue: catalog
+      manoeuvre: maneuver
+      defence: defense
+      licence: license
+      offence: offense
+      pretence: pretense
+      pyjamas: pajamas
+      plough: plow
+      sceptical: skeptical
+      mould: mold
+      gaol: jail
+      programme: program
+      aeroplane: airplane
+      tyre: tire
+      cheque: check
+      draught: draft
+      advisor: adviser
+      amongst: among
+      whilst: while
+      amidst: amid
+      yoghurt: yogurt
+      donut: doughnut
+      normalise: normalize
+      optimise: optimize
+      visualise: visualize
+      customise: customize
+      standardise: standardize
+      initialise: initialize
+      authorise: authorize
+      summarise: summarize
+      utilise: utilize
+      gratefull: grateful
+      misspell: mispell
+      mispell: misspell
+      occurrence: occurrence
+      occurence: occurrence
+      questionaire: questionnaire
+      sence: sense
+      suprise: surprise
+      temperture: temperature
+      untill: until
+    common_misspelling:
+      paediatric: pediatric
+      foetus: fetus
+      oesophagus: esophagus
+      oestrogen: estrogen
+      anaemia: anemia
+      leukaemia: leukemia
+      encyclopaedia: encyclopedia
+      practice: practise
+      smoulder: smolder
+      ageing: aging
+      judgement: judgment
+      acknowledgement: acknowledgment
+      whisky: whiskey
+      alright: all right
+      capitalisation: capitalization
+      serialisation: serialization
+      virtualisation: virtualization
+      disc: disk
+      accomodate: accommodate
+      acheive: achieve
+      adress: address
+      agressive: aggressive
+      apparant: apparent
+      arguement: argument
+      beleive: believe
+      benifit: benefit
+      buisness: business
+      calender: calendar
+      cemetary: cemetery
+      commitee: committee
+      commited: committed
+      completly: completely
+      concious: conscious
+      curiousity: curiosity
+      definately: definitely
+      dilema: dilemma
+      dissapoint: disappoint
+      embarass: embarrass
+      enviroment: environment
+      existance: existence
+      experiance: experience
+      familar: familiar
+      Febuary: February
+      finaly: finally
+      florescent: fluorescent
+      foriegn: foreign
+      fourty: forty
+      freind: friend
+      goverment: government
+      grammer: grammar
+      gaurd: guard
+      happend: happened
+      harrass: harass
+      hieght: height
+      wierd: weird
+      independant: independent
+      intrest: interest
+      irresistable: irresistible
+      knowlege: knowledge
+      libary: library
+      maintainance: maintenance
+      millenium: millennium
+      miniscule: minuscule
+      mischeivous: mischievous
+      neccessary: necessary
+      nieghbor: neighbor
+      noticable: noticeable
+      occured: occurred
+      ommitted: omitted
+      pavillion: pavilion
+      peice: piece
+      percieve: perceive
+      persistant: persistent
+      possesssion: possession
+      prefered: preferred
+      priviledge: privilege
+      proffesor: professor
+      pronounciation: pronunciation
+      publically: publicly
+      recieve: receive
+      recomend: recommend
+      refered: referred
+      relevent: relevant
+      restaraunt: restaurant
+      rythm: rhythm
+      seperate: separate
+      succesful: successful
+      tommorow: tomorrow
+      truely: truly
+      vacum: vacuum
+      vehical: vehicle
+      visable: visible
+      Wenesday: Wednesday
+      writting: writing
+      yeild: yield
+    standard_to_informal_variant:
+      though: tho
+      through: thru
+      night: nite
+      light: lite
+      queue: cue
+      okay: ok
+    informal_to_standard:
+      gonna: going to
+      wanna: want to
+      gotta: got to
+      kinda: kind of
+      sorta: sort of
+      lemme: let me
+      gimme: give me
+      cuz: because
+      cos: because
+      coz: because
+      nite: night
+      lite: light
+      tho: though
+      thru: through
+    abbreviation_expansion:
+      btw: by the way
+      fyi: for your information
+      aka: also known as
+      asap: as soon as possible
+      lol: laugh out loud
+      brb: be right back
+      omg: oh my god
+      idk: i don't know
+      ily: i love you
+      pls: please
+      plz: please
+      thx: thanks
+      tnx: thanks
+      u: you
+      r: are
+      ur: your
+      y: why
+      '2': to
+      approx.: approximately
+      dept.: department
+      e.g.: for example
+      eg: for example
+      etc.: et cetera
+      i.e.: that is
+      ie: that is
+      no.: number
+      vs.: versus
+      vs: versus
+      dr.: doctor
+      mr.: mister
+      mrs.: missus
+      ms.: miss
+    spacing_or_compound_normalization:
+      e-mail: email
+      web site: website
+      on-line: online
+      user name: username
+      cell phone: cellphone
+      good bye: goodbye
+      any way: anyway
+      every day: everyday
+      some time: sometime
+      log in: login
+      set up: setup
+      check out: checkout
+      make up: makeup
+      work out: workout
+      sign up: signup
+      can not: cannot
+      et cetera: and so on
+    archaic_modernization:
+      whom: who
+      thou: you
+      thy: your
+      thee: you
+      hath: has
+      doth: does
+      art: are
+      oft: often
+      ere: before
+      aught: anything
+      naught: nothing
+    symbol_expansion:
+      '&': and
+      '%': percent
+      +: plus
+    contraction_expansion:
+      aren't: are not
+      can't: cannot
+      couldn't: could not
+      didn't: did not
+      doesn't: does not
+      don't: do not
+      hadn't: had not
+      hasn't: has not
+      haven't: have not
+      he'd: he would
+      he'll: he will
+      he's: he is
+      i'd: i would
+      i'll: i will
+      i'm: i am
+      i've: i have
+      isn't: is not
+      it's: it is
+      let's: let us
+      mightn't: might not
+      mustn't: must not
+      shan't: shall not
+      she'd: she would
+      she'll: she will
+      she's: she is
+      shouldn't: should not
+      that's: that is
+      there's: there is
+      they'd: they would
+      they'll: they will
+      they're: they are
+      they've: they have
+      wasn't: was not
+      we'd: we would
+      we'll: we will
+      we're: we are
+      we've: we have
+      weren't: were not
+      what'll: what will
+      what're: what are
+      what's: what is
+      what've: what have
+      where's: where is
+      who'd: who would
+      who'll: who will
+      who're: who are
+      who's: who is
+      who've: who have
+      won't: will not
+      wouldn't: would not
+      you'd: you would
+      you'll: you will
+      you're: you are
+      you've: you have
+  rules:
+  - id: orth.norm.locale_spelling_variant.0001
+    category: locale_spelling_variant
+    source: colour
+    target: color
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0002
+    category: locale_spelling_variant
+    source: flavour
+    target: flavor
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0003
+    category: locale_spelling_variant
+    source: humour
+    target: humor
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0004
+    category: locale_spelling_variant
+    source: behaviour
+    target: behavior
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0005
+    category: locale_spelling_variant
+    source: neighbour
+    target: neighbor
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0006
+    category: locale_spelling_variant
+    source: centre
+    target: center
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0007
+    category: locale_spelling_variant
+    source: metre
+    target: meter
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0008
+    category: locale_spelling_variant
+    source: theatre
+    target: theater
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0009
+    category: locale_spelling_variant
+    source: fibre
+    target: fiber
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0010
+    category: locale_spelling_variant
+    source: litre
+    target: liter
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0011
+    category: locale_spelling_variant
+    source: analyse
+    target: analyze
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0012
+    category: locale_spelling_variant
+    source: catalyse
+    target: catalyze
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0013
+    category: locale_spelling_variant
+    source: paralyse
+    target: paralyze
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0014
+    category: locale_spelling_variant
+    source: organise
+    target: organize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0015
+    category: locale_spelling_variant
+    source: recognise
+    target: recognize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0016
+    category: locale_spelling_variant
+    source: criticise
+    target: criticize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0017
+    category: locale_spelling_variant
+    source: emphasise
+    target: emphasize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0018
+    category: locale_spelling_variant
+    source: apologise
+    target: apologize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0019
+    category: locale_spelling_variant
+    source: specialise
+    target: specialize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0020
+    category: locale_spelling_variant
+    source: realise
+    target: realize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0021
+    category: locale_spelling_variant
+    source: travelled
+    target: traveled
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0022
+    category: locale_spelling_variant
+    source: travelling
+    target: traveling
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0023
+    category: locale_spelling_variant
+    source: cancelled
+    target: canceled
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0024
+    category: locale_spelling_variant
+    source: cancelling
+    target: canceling
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0025
+    category: locale_spelling_variant
+    source: fuelled
+    target: fueled
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0026
+    category: locale_spelling_variant
+    source: fuelling
+    target: fueling
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0027
+    category: locale_spelling_variant
+    source: jewellery
+    target: jewelry
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0028
+    category: locale_spelling_variant
+    source: grey
+    target: gray
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0029
+    category: locale_spelling_variant
+    source: dialogue
+    target: dialog
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0030
+    category: locale_spelling_variant
+    source: analogue
+    target: analog
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0031
+    category: locale_spelling_variant
+    source: catalogue
+    target: catalog
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0032
+    category: common_misspelling
+    source: paediatric
+    target: pediatric
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0033
+    category: common_misspelling
+    source: foetus
+    target: fetus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0034
+    category: locale_spelling_variant
+    source: manoeuvre
+    target: maneuver
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0035
+    category: common_misspelling
+    source: oesophagus
+    target: esophagus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0036
+    category: common_misspelling
+    source: oestrogen
+    target: estrogen
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0037
+    category: common_misspelling
+    source: anaemia
+    target: anemia
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0038
+    category: common_misspelling
+    source: leukaemia
+    target: leukemia
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0039
+    category: common_misspelling
+    source: encyclopaedia
+    target: encyclopedia
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0040
+    category: locale_spelling_variant
+    source: defence
+    target: defense
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0041
+    category: locale_spelling_variant
+    source: licence
+    target: license
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0042
+    category: locale_spelling_variant
+    source: offence
+    target: offense
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0043
+    category: locale_spelling_variant
+    source: pretence
+    target: pretense
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0044
+    category: common_misspelling
+    source: practice
+    target: practise
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0045
+    category: locale_spelling_variant
+    source: pyjamas
+    target: pajamas
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0046
+    category: locale_spelling_variant
+    source: plough
+    target: plow
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0047
+    category: locale_spelling_variant
+    source: sceptical
+    target: skeptical
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0048
+    category: locale_spelling_variant
+    source: mould
+    target: mold
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0049
+    category: common_misspelling
+    source: smoulder
+    target: smolder
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0050
+    category: locale_spelling_variant
+    source: gaol
+    target: jail
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0051
+    category: locale_spelling_variant
+    source: programme
+    target: program
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0052
+    category: locale_spelling_variant
+    source: aeroplane
+    target: airplane
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0053
+    category: locale_spelling_variant
+    source: tyre
+    target: tire
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0054
+    category: locale_spelling_variant
+    source: cheque
+    target: check
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0055
+    category: locale_spelling_variant
+    source: draught
+    target: draft
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0056
+    category: common_misspelling
+    source: ageing
+    target: aging
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0057
+    category: common_misspelling
+    source: judgement
+    target: judgment
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0058
+    category: common_misspelling
+    source: acknowledgement
+    target: acknowledgment
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.standard_to_informal_variant.0059
+    category: standard_to_informal_variant
+    source: though
+    target: tho
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.standard_to_informal_variant.0060
+    category: standard_to_informal_variant
+    source: through
+    target: thru
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.standard_to_informal_variant.0061
+    category: standard_to_informal_variant
+    source: night
+    target: nite
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.standard_to_informal_variant.0062
+    category: standard_to_informal_variant
+    source: light
+    target: lite
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.standard_to_informal_variant.0063
+    category: standard_to_informal_variant
+    source: queue
+    target: cue
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.common_misspelling.0064
+    category: common_misspelling
+    source: whisky
+    target: whiskey
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0065
+    category: locale_spelling_variant
+    source: advisor
+    target: adviser
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0066
+    category: locale_spelling_variant
+    source: amongst
+    target: among
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0067
+    category: locale_spelling_variant
+    source: whilst
+    target: while
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0068
+    category: locale_spelling_variant
+    source: amidst
+    target: amid
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0069
+    category: locale_spelling_variant
+    source: yoghurt
+    target: yogurt
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0070
+    category: locale_spelling_variant
+    source: donut
+    target: doughnut
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.standard_to_informal_variant.0071
+    category: standard_to_informal_variant
+    source: okay
+    target: ok
+    enabled: false
+    risk_level: high
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.55
+  - id: orth.norm.common_misspelling.0072
+    category: common_misspelling
+    source: alright
+    target: all right
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.informal_to_standard.0073
+    category: informal_to_standard
+    source: gonna
+    target: going to
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0074
+    category: informal_to_standard
+    source: wanna
+    target: want to
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0075
+    category: informal_to_standard
+    source: gotta
+    target: got to
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0076
+    category: informal_to_standard
+    source: kinda
+    target: kind of
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0077
+    category: informal_to_standard
+    source: sorta
+    target: sort of
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0078
+    category: informal_to_standard
+    source: lemme
+    target: let me
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0079
+    category: informal_to_standard
+    source: gimme
+    target: give me
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0080
+    category: informal_to_standard
+    source: cuz
+    target: because
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0081
+    category: informal_to_standard
+    source: cos
+    target: because
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0082
+    category: informal_to_standard
+    source: coz
+    target: because
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.abbreviation_expansion.0083
+    category: abbreviation_expansion
+    source: btw
+    target: by the way
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0084
+    category: abbreviation_expansion
+    source: fyi
+    target: for your information
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0085
+    category: abbreviation_expansion
+    source: aka
+    target: also known as
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0086
+    category: abbreviation_expansion
+    source: asap
+    target: as soon as possible
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0087
+    category: abbreviation_expansion
+    source: lol
+    target: laugh out loud
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0088
+    category: abbreviation_expansion
+    source: brb
+    target: be right back
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0089
+    category: abbreviation_expansion
+    source: omg
+    target: oh my god
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0090
+    category: abbreviation_expansion
+    source: idk
+    target: i don't know
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0091
+    category: abbreviation_expansion
+    source: ily
+    target: i love you
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0092
+    category: abbreviation_expansion
+    source: pls
+    target: please
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0093
+    category: abbreviation_expansion
+    source: plz
+    target: please
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0094
+    category: abbreviation_expansion
+    source: thx
+    target: thanks
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0095
+    category: abbreviation_expansion
+    source: tnx
+    target: thanks
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0096
+    category: abbreviation_expansion
+    source: u
+    target: you
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0097
+    category: abbreviation_expansion
+    source: r
+    target: are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0098
+    category: abbreviation_expansion
+    source: ur
+    target: your
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0099
+    category: abbreviation_expansion
+    source: y
+    target: why
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0100
+    category: abbreviation_expansion
+    source: '2'
+    target: to
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.informal_to_standard.0101
+    category: informal_to_standard
+    source: nite
+    target: night
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0102
+    category: informal_to_standard
+    source: lite
+    target: light
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0103
+    category: informal_to_standard
+    source: tho
+    target: though
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.informal_to_standard.0104
+    category: informal_to_standard
+    source: thru
+    target: through
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.86
+  - id: orth.norm.locale_spelling_variant.0105
+    category: locale_spelling_variant
+    source: normalise
+    target: normalize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0106
+    category: locale_spelling_variant
+    source: optimise
+    target: optimize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0107
+    category: locale_spelling_variant
+    source: visualise
+    target: visualize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0108
+    category: locale_spelling_variant
+    source: customise
+    target: customize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0109
+    category: locale_spelling_variant
+    source: standardise
+    target: standardize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0110
+    category: locale_spelling_variant
+    source: initialise
+    target: initialize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0111
+    category: common_misspelling
+    source: capitalisation
+    target: capitalization
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0112
+    category: common_misspelling
+    source: serialisation
+    target: serialization
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0113
+    category: common_misspelling
+    source: virtualisation
+    target: virtualization
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0114
+    category: locale_spelling_variant
+    source: authorise
+    target: authorize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0115
+    category: locale_spelling_variant
+    source: summarise
+    target: summarize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0116
+    category: locale_spelling_variant
+    source: utilise
+    target: utilize
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0117
+    category: common_misspelling
+    source: disc
+    target: disk
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.spacing_or_compound_normalization.0118
+    category: spacing_or_compound_normalization
+    source: e-mail
+    target: email
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0119
+    category: spacing_or_compound_normalization
+    source: web site
+    target: website
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0120
+    category: spacing_or_compound_normalization
+    source: on-line
+    target: online
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0121
+    category: spacing_or_compound_normalization
+    source: user name
+    target: username
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0122
+    category: spacing_or_compound_normalization
+    source: cell phone
+    target: cellphone
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0123
+    category: spacing_or_compound_normalization
+    source: good bye
+    target: goodbye
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0124
+    category: spacing_or_compound_normalization
+    source: any way
+    target: anyway
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0125
+    category: spacing_or_compound_normalization
+    source: every day
+    target: everyday
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0126
+    category: spacing_or_compound_normalization
+    source: some time
+    target: sometime
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0127
+    category: spacing_or_compound_normalization
+    source: log in
+    target: login
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0128
+    category: spacing_or_compound_normalization
+    source: set up
+    target: setup
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0129
+    category: spacing_or_compound_normalization
+    source: check out
+    target: checkout
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0130
+    category: spacing_or_compound_normalization
+    source: make up
+    target: makeup
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0131
+    category: spacing_or_compound_normalization
+    source: work out
+    target: workout
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0132
+    category: spacing_or_compound_normalization
+    source: sign up
+    target: signup
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.spacing_or_compound_normalization.0133
+    category: spacing_or_compound_normalization
+    source: can not
+    target: cannot
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.archaic_modernization.0134
+    category: archaic_modernization
+    source: whom
+    target: who
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0135
+    category: archaic_modernization
+    source: thou
+    target: you
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0136
+    category: archaic_modernization
+    source: thy
+    target: your
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0137
+    category: archaic_modernization
+    source: thee
+    target: you
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0138
+    category: archaic_modernization
+    source: hath
+    target: has
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0139
+    category: archaic_modernization
+    source: doth
+    target: does
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0140
+    category: archaic_modernization
+    source: art
+    target: are
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0141
+    category: archaic_modernization
+    source: oft
+    target: often
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0142
+    category: archaic_modernization
+    source: ere
+    target: before
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0143
+    category: archaic_modernization
+    source: aught
+    target: anything
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.archaic_modernization.0144
+    category: archaic_modernization
+    source: naught
+    target: nothing
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.8
+  - id: orth.norm.common_misspelling.0145
+    category: common_misspelling
+    source: accomodate
+    target: accommodate
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0146
+    category: common_misspelling
+    source: acheive
+    target: achieve
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0147
+    category: common_misspelling
+    source: adress
+    target: address
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0148
+    category: common_misspelling
+    source: agressive
+    target: aggressive
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0149
+    category: common_misspelling
+    source: apparant
+    target: apparent
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0150
+    category: common_misspelling
+    source: arguement
+    target: argument
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0151
+    category: common_misspelling
+    source: beleive
+    target: believe
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0152
+    category: common_misspelling
+    source: benifit
+    target: benefit
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0153
+    category: common_misspelling
+    source: buisness
+    target: business
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0154
+    category: common_misspelling
+    source: calender
+    target: calendar
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0155
+    category: common_misspelling
+    source: cemetary
+    target: cemetery
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0156
+    category: common_misspelling
+    source: commitee
+    target: committee
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0157
+    category: common_misspelling
+    source: commited
+    target: committed
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0158
+    category: common_misspelling
+    source: completly
+    target: completely
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0159
+    category: common_misspelling
+    source: concious
+    target: conscious
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0160
+    category: common_misspelling
+    source: curiousity
+    target: curiosity
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0161
+    category: common_misspelling
+    source: definately
+    target: definitely
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0162
+    category: common_misspelling
+    source: dilema
+    target: dilemma
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0163
+    category: common_misspelling
+    source: dissapoint
+    target: disappoint
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0164
+    category: common_misspelling
+    source: embarass
+    target: embarrass
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0165
+    category: common_misspelling
+    source: enviroment
+    target: environment
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0166
+    category: common_misspelling
+    source: existance
+    target: existence
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0167
+    category: common_misspelling
+    source: experiance
+    target: experience
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0168
+    category: common_misspelling
+    source: familar
+    target: familiar
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0169
+    category: common_misspelling
+    source: Febuary
+    target: February
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0170
+    category: common_misspelling
+    source: finaly
+    target: finally
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0171
+    category: common_misspelling
+    source: florescent
+    target: fluorescent
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0172
+    category: common_misspelling
+    source: foriegn
+    target: foreign
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0173
+    category: common_misspelling
+    source: fourty
+    target: forty
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0174
+    category: common_misspelling
+    source: freind
+    target: friend
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0175
+    category: common_misspelling
+    source: goverment
+    target: government
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0176
+    category: common_misspelling
+    source: grammer
+    target: grammar
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0177
+    category: locale_spelling_variant
+    source: gratefull
+    target: grateful
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0178
+    category: common_misspelling
+    source: gaurd
+    target: guard
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0179
+    category: common_misspelling
+    source: happend
+    target: happened
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0180
+    category: common_misspelling
+    source: harrass
+    target: harass
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0181
+    category: common_misspelling
+    source: hieght
+    target: height
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0182
+    category: common_misspelling
+    source: wierd
+    target: weird
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0183
+    category: common_misspelling
+    source: independant
+    target: independent
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0184
+    category: common_misspelling
+    source: intrest
+    target: interest
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0185
+    category: common_misspelling
+    source: irresistable
+    target: irresistible
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0186
+    category: common_misspelling
+    source: knowlege
+    target: knowledge
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0187
+    category: common_misspelling
+    source: libary
+    target: library
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0188
+    category: common_misspelling
+    source: maintainance
+    target: maintenance
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0189
+    category: common_misspelling
+    source: millenium
+    target: millennium
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0190
+    category: common_misspelling
+    source: miniscule
+    target: minuscule
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0191
+    category: common_misspelling
+    source: mischeivous
+    target: mischievous
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0192
+    category: locale_spelling_variant
+    source: misspell
+    target: mispell
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0193
+    category: locale_spelling_variant
+    source: mispell
+    target: misspell
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0194
+    category: common_misspelling
+    source: neccessary
+    target: necessary
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0195
+    category: common_misspelling
+    source: nieghbor
+    target: neighbor
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0196
+    category: common_misspelling
+    source: noticable
+    target: noticeable
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0197
+    category: common_misspelling
+    source: occured
+    target: occurred
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0198
+    category: locale_spelling_variant
+    source: occurrence
+    target: occurrence
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0199
+    category: locale_spelling_variant
+    source: occurence
+    target: occurrence
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0200
+    category: common_misspelling
+    source: ommitted
+    target: omitted
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0201
+    category: common_misspelling
+    source: pavillion
+    target: pavilion
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0202
+    category: common_misspelling
+    source: peice
+    target: piece
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0203
+    category: common_misspelling
+    source: percieve
+    target: perceive
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0204
+    category: common_misspelling
+    source: persistant
+    target: persistent
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0205
+    category: common_misspelling
+    source: possesssion
+    target: possession
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0206
+    category: common_misspelling
+    source: prefered
+    target: preferred
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0207
+    category: common_misspelling
+    source: priviledge
+    target: privilege
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0208
+    category: common_misspelling
+    source: proffesor
+    target: professor
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0209
+    category: common_misspelling
+    source: pronounciation
+    target: pronunciation
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0210
+    category: common_misspelling
+    source: publically
+    target: publicly
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0211
+    category: locale_spelling_variant
+    source: questionaire
+    target: questionnaire
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0212
+    category: common_misspelling
+    source: recieve
+    target: receive
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0213
+    category: common_misspelling
+    source: recomend
+    target: recommend
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0214
+    category: common_misspelling
+    source: refered
+    target: referred
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0215
+    category: common_misspelling
+    source: relevent
+    target: relevant
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0216
+    category: common_misspelling
+    source: restaraunt
+    target: restaurant
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0217
+    category: common_misspelling
+    source: rythm
+    target: rhythm
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0218
+    category: locale_spelling_variant
+    source: sence
+    target: sense
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0219
+    category: common_misspelling
+    source: seperate
+    target: separate
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0220
+    category: common_misspelling
+    source: succesful
+    target: successful
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0221
+    category: locale_spelling_variant
+    source: suprise
+    target: surprise
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.locale_spelling_variant.0222
+    category: locale_spelling_variant
+    source: temperture
+    target: temperature
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0223
+    category: common_misspelling
+    source: tommorow
+    target: tomorrow
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0224
+    category: common_misspelling
+    source: truely
+    target: truly
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.locale_spelling_variant.0225
+    category: locale_spelling_variant
+    source: untill
+    target: until
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.88
+  - id: orth.norm.common_misspelling.0226
+    category: common_misspelling
+    source: vacum
+    target: vacuum
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0227
+    category: common_misspelling
+    source: vehical
+    target: vehicle
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0228
+    category: common_misspelling
+    source: visable
+    target: visible
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0229
+    category: common_misspelling
+    source: Wenesday
+    target: Wednesday
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0230
+    category: common_misspelling
+    source: writting
+    target: writing
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.common_misspelling.0231
+    category: common_misspelling
+    source: yeild
+    target: yield
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.93
+  - id: orth.norm.symbol_expansion.0232
+    category: symbol_expansion
+    source: '&'
+    target: and
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.symbol_expansion.0233
+    category: symbol_expansion
+    source: '%'
+    target: percent
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.symbol_expansion.0234
+    category: symbol_expansion
+    source: +
+    target: plus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0235
+    category: abbreviation_expansion
+    source: approx.
+    target: approximately
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0236
+    category: abbreviation_expansion
+    source: dept.
+    target: department
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0237
+    category: abbreviation_expansion
+    source: e.g.
+    target: for example
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0238
+    category: abbreviation_expansion
+    source: eg
+    target: for example
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0239
+    category: abbreviation_expansion
+    source: etc.
+    target: et cetera
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.spacing_or_compound_normalization.0240
+    category: spacing_or_compound_normalization
+    source: et cetera
+    target: and so on
+    enabled: true
+    risk_level: medium
+    autocorrect_allowed: false
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.84
+  - id: orth.norm.abbreviation_expansion.0241
+    category: abbreviation_expansion
+    source: i.e.
+    target: that is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0242
+    category: abbreviation_expansion
+    source: ie
+    target: that is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0243
+    category: abbreviation_expansion
+    source: no.
+    target: number
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0244
+    category: abbreviation_expansion
+    source: vs.
+    target: versus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0245
+    category: abbreviation_expansion
+    source: vs
+    target: versus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0246
+    category: abbreviation_expansion
+    source: dr.
+    target: doctor
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0247
+    category: abbreviation_expansion
+    source: mr.
+    target: mister
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0248
+    category: abbreviation_expansion
+    source: mrs.
+    target: missus
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.abbreviation_expansion.0249
+    category: abbreviation_expansion
+    source: ms.
+    target: miss
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0250
+    category: contraction_expansion
+    source: aren't
+    target: are not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0251
+    category: contraction_expansion
+    source: can't
+    target: cannot
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0252
+    category: contraction_expansion
+    source: couldn't
+    target: could not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0253
+    category: contraction_expansion
+    source: didn't
+    target: did not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0254
+    category: contraction_expansion
+    source: doesn't
+    target: does not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0255
+    category: contraction_expansion
+    source: don't
+    target: do not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0256
+    category: contraction_expansion
+    source: hadn't
+    target: had not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0257
+    category: contraction_expansion
+    source: hasn't
+    target: has not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0258
+    category: contraction_expansion
+    source: haven't
+    target: have not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0259
+    category: contraction_expansion
+    source: he'd
+    target: he would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0260
+    category: contraction_expansion
+    source: he'll
+    target: he will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0261
+    category: contraction_expansion
+    source: he's
+    target: he is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0262
+    category: contraction_expansion
+    source: i'd
+    target: i would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0263
+    category: contraction_expansion
+    source: i'll
+    target: i will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0264
+    category: contraction_expansion
+    source: i'm
+    target: i am
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0265
+    category: contraction_expansion
+    source: i've
+    target: i have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0266
+    category: contraction_expansion
+    source: isn't
+    target: is not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0267
+    category: contraction_expansion
+    source: it's
+    target: it is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0268
+    category: contraction_expansion
+    source: let's
+    target: let us
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0269
+    category: contraction_expansion
+    source: mightn't
+    target: might not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0270
+    category: contraction_expansion
+    source: mustn't
+    target: must not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0271
+    category: contraction_expansion
+    source: shan't
+    target: shall not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0272
+    category: contraction_expansion
+    source: she'd
+    target: she would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0273
+    category: contraction_expansion
+    source: she'll
+    target: she will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0274
+    category: contraction_expansion
+    source: she's
+    target: she is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0275
+    category: contraction_expansion
+    source: shouldn't
+    target: should not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0276
+    category: contraction_expansion
+    source: that's
+    target: that is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0277
+    category: contraction_expansion
+    source: there's
+    target: there is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0278
+    category: contraction_expansion
+    source: they'd
+    target: they would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0279
+    category: contraction_expansion
+    source: they'll
+    target: they will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0280
+    category: contraction_expansion
+    source: they're
+    target: they are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0281
+    category: contraction_expansion
+    source: they've
+    target: they have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0282
+    category: contraction_expansion
+    source: wasn't
+    target: was not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0283
+    category: contraction_expansion
+    source: we'd
+    target: we would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0284
+    category: contraction_expansion
+    source: we'll
+    target: we will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0285
+    category: contraction_expansion
+    source: we're
+    target: we are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0286
+    category: contraction_expansion
+    source: we've
+    target: we have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0287
+    category: contraction_expansion
+    source: weren't
+    target: were not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0288
+    category: contraction_expansion
+    source: what'll
+    target: what will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0289
+    category: contraction_expansion
+    source: what're
+    target: what are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0290
+    category: contraction_expansion
+    source: what's
+    target: what is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0291
+    category: contraction_expansion
+    source: what've
+    target: what have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0292
+    category: contraction_expansion
+    source: where's
+    target: where is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0293
+    category: contraction_expansion
+    source: who'd
+    target: who would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0294
+    category: contraction_expansion
+    source: who'll
+    target: who will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0295
+    category: contraction_expansion
+    source: who're
+    target: who are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0296
+    category: contraction_expansion
+    source: who's
+    target: who is
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0297
+    category: contraction_expansion
+    source: who've
+    target: who have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0298
+    category: contraction_expansion
+    source: won't
+    target: will not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0299
+    category: contraction_expansion
+    source: wouldn't
+    target: would not
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0300
+    category: contraction_expansion
+    source: you'd
+    target: you would
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0301
+    category: contraction_expansion
+    source: you'll
+    target: you will
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0302
+    category: contraction_expansion
+    source: you're
+    target: you are
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+  - id: orth.norm.contraction_expansion.0303
+    category: contraction_expansion
+    source: you've
+    target: you have
+    enabled: true
+    risk_level: low
+    autocorrect_allowed: true
+    preserve_case: true
+    match: exact_token_or_phrase
+    confidence: 0.98
+locale_variants:
+  enabled: true
+  default_target_locale: en-US
+  allowed_locales:
+  - en-US
+  - en-GB
+  strategy: exact_word_map_only
+  disallow_global_suffix_replacement: true
+  en-US:
+    preferred_forms:
+      colour: color
+      flavour: flavor
+      humour: humor
+      behaviour: behavior
+      neighbour: neighbor
+      centre: center
+      metre: meter
+      theatre: theater
+      fibre: fiber
+      litre: liter
+      analyse: analyze
+      catalyse: catalyze
+      paralyse: paralyze
+      organise: organize
+      recognise: recognize
+      criticise: criticize
+      emphasise: emphasize
+      apologise: apologize
+      specialise: specialize
+      realise: realize
+      travelled: traveled
+      travelling: traveling
+      cancelled: canceled
+      cancelling: canceling
+      fuelled: fueled
+      fuelling: fueling
+      jewellery: jewelry
+      grey: gray
+      dialogue: dialog
+      analogue: analog
+      catalogue: catalog
+      manoeuvre: maneuver
+      defence: defense
+      licence: license
+      offence: offense
+      pretence: pretense
+      pyjamas: pajamas
+      plough: plow
+      sceptical: skeptical
+      mould: mold
+      gaol: jail
+      programme: program
+      aeroplane: airplane
+      tyre: tire
+      cheque: check
+      draught: draft
+      advisor: adviser
+      amongst: among
+      whilst: while
+      amidst: amid
+      yoghurt: yogurt
+      donut: doughnut
+      normalise: normalize
+      optimise: optimize
+      visualise: visualize
+      customise: customize
+      standardise: standardize
+      initialise: initialize
+      authorise: authorize
+      summarise: summarize
+      utilise: utilize
+      gratefull: grateful
+      misspell: mispell
+      mispell: misspell
+      occurrence: occurrence
+      occurence: occurrence
+      questionaire: questionnaire
+      sence: sense
+      suprise: surprise
+      temperture: temperature
+      untill: until
+  en-GB:
+    preferred_forms:
+      color: colour
+      flavor: flavour
+      humor: humour
+      behavior: behaviour
+      neighbor: neighbour
+      center: centre
+      meter: metre
+      theater: theatre
+      fiber: fibre
+      liter: litre
+      analyze: analyse
+      catalyze: catalyse
+      paralyze: paralyse
+      organize: organise
+      recognize: recognise
+      criticize: criticise
+      emphasize: emphasise
+      apologize: apologise
+      specialize: specialise
+      realize: realise
+      traveled: travelled
+      traveling: travelling
+      canceled: cancelled
+      canceling: cancelling
+      fueled: fuelled
+      fueling: fuelling
+      jewelry: jewellery
+      analog: analogue
+      catalog: catalogue
+      maneuver: manoeuvre
+      defense: defence
+      license: licence
+      offense: offence
+      pretense: pretence
+      pajamas: pyjamas
+      plow: plough
+      skeptical: sceptical
+      mold: mould
+      jail: gaol
+      program: programme
+      airplane: aeroplane
+      tire: tyre
+      check: cheque
+      draft: draught
+      normalize: normalise
+      optimize: optimise
+      visualize: visualise
+      customize: customise
+      standardize: standardise
+      initialize: initialise
+      authorize: authorise
+      summarize: summarise
+      utilize: utilise
+      grateful: gratefull
+      mispell: misspell
+      misspell: mispell
+      occurrence: occurence
+      questionnaire: questionaire
+      sense: sence
+      surprise: suprise
+      temperature: temperture
+      until: untill
+contractions:
+  enabled: true
+  expand_by_default: true
+  map:
+    aren't: are not
+    can't: cannot
+    couldn't: could not
+    didn't: did not
+    doesn't: does not
+    don't: do not
+    hadn't: had not
+    hasn't: has not
+    haven't: have not
+    he'd: he would
+    he'll: he will
+    he's: he is
+    i'd: i would
+    i'll: i will
+    i'm: i am
+    i've: i have
+    isn't: is not
+    it's: it is
+    let's: let us
+    mightn't: might not
+    mustn't: must not
+    shan't: shall not
+    she'd: she would
+    she'll: she will
+    she's: she is
+    shouldn't: should not
+    that's: that is
+    there's: there is
+    they'd: they would
+    they'll: they will
+    they're: they are
+    they've: they have
+    wasn't: was not
+    we'd: we would
+    we'll: we will
+    we're: we are
+    we've: we have
+    weren't: were not
+    what'll: what will
+    what're: what are
+    what's: what is
+    what've: what have
+    where's: where is
+    who'd: who would
+    who'll: who will
+    who're: who are
+    who's: who is
+    who've: who have
+    won't: will not
+    wouldn't: would not
+    you'd: you would
+    you'll: you will
+    you're: you are
+    you've: you have
+typo_candidate_generation:
+  enabled: true
+  candidate_only_by_default: true
+  never_directly_replace_without_spellchecker_validation: true
+  regex_flags:
+  - IGNORECASE
+  - UNICODE
+  max_typo_variants: 2500
+  max_candidates: 2500
+  candidate_length_window: 3
+  candidate_prefix_length: 1
+  patterns:
+  - id: orth.typo.boundary_typo_variant.0001
+    category: boundary_typo_variant
+    pattern: ie$
+    replacement: ei
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0002
+    category: boundary_typo_variant
+    pattern: ei$
+    replacement: ie
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0003
+    category: boundary_typo_variant
+    pattern: ou$
+    replacement: uo
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0004
+    category: boundary_typo_variant
+    pattern: uo$
+    replacement: ou
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0005
+    category: boundary_typo_variant
+    pattern: au$
+    replacement: ua
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0006
+    category: boundary_typo_variant
+    pattern: ua$
+    replacement: au
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0007
+    category: repetition_or_transposition
+    pattern: ([aeiou])\1
+    replacement: \1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: contains_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0008
+    category: repetition_or_transposition
+    pattern: ([a-z])\1+
+    replacement: \1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: contains_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0009
+    category: repetition_or_transposition
+    pattern: (.)\1(.)\2
+    replacement: \1\2
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: contains_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0010
+    category: boundary_typo_variant
+    pattern: ^kn
+    replacement: n
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: prefix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0011
+    category: boundary_typo_variant
+    pattern: ^gn
+    replacement: n
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: prefix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0012
+    category: boundary_typo_variant
+    pattern: ^wr
+    replacement: r
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: prefix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.phonetic_variant.0013
+    category: phonetic_variant
+    pattern: ph
+    replacement: f
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0014
+    category: orthographic_variant
+    pattern: f(?!e)
+    replacement: ph
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.boundary_typo_variant.0015
+    category: boundary_typo_variant
+    pattern: ght$
+    replacement: t
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.phonetic_variant.0016
+    category: phonetic_variant
+    pattern: gh
+    replacement: ''
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.boundary_typo_variant.0017
+    category: boundary_typo_variant
+    pattern: mb$
+    replacement: m
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0018
+    category: boundary_typo_variant
+    pattern: ck$
+    replacement: c
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0019
+    category: repetition_or_transposition
+    pattern: c([ei])
+    replacement: s\1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.repetition_or_transposition.0020
+    category: repetition_or_transposition
+    pattern: s([ei])
+    replacement: c\1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.boundary_typo_variant.0021
+    category: boundary_typo_variant
+    pattern: x$
+    replacement: ct
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0022
+    category: boundary_typo_variant
+    pattern: v$
+    replacement: f
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0023
+    category: boundary_typo_variant
+    pattern: ise$
+    replacement: ize
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0024
+    category: boundary_typo_variant
+    pattern: ize$
+    replacement: ise
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0025
+    category: boundary_typo_variant
+    pattern: yse$
+    replacement: yze
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0026
+    category: boundary_typo_variant
+    pattern: yze$
+    replacement: yse
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0027
+    category: boundary_typo_variant
+    pattern: re$
+    replacement: er
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0028
+    category: boundary_typo_variant
+    pattern: er$
+    replacement: re
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0029
+    category: boundary_typo_variant
+    pattern: or$
+    replacement: er
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0030
+    category: boundary_typo_variant
+    pattern: le$
+    replacement: al
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0031
+    category: boundary_typo_variant
+    pattern: al$
+    replacement: le
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0032
+    category: boundary_typo_variant
+    pattern: el$
+    replacement: le
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0033
+    category: boundary_typo_variant
+    pattern: il$
+    replacement: ile
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0034
+    category: boundary_typo_variant
+    pattern: able$
+    replacement: ible
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0035
+    category: boundary_typo_variant
+    pattern: ible$
+    replacement: able
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0036
+    category: boundary_typo_variant
+    pattern: ent$
+    replacement: ant
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0037
+    category: boundary_typo_variant
+    pattern: ant$
+    replacement: ent
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0038
+    category: boundary_typo_variant
+    pattern: ance$
+    replacement: ence
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0039
+    category: boundary_typo_variant
+    pattern: ence$
+    replacement: ance
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0040
+    category: boundary_typo_variant
+    pattern: ary$
+    replacement: ery
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0041
+    category: boundary_typo_variant
+    pattern: ery$
+    replacement: ary
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0042
+    category: boundary_typo_variant
+    pattern: ory$
+    replacement: ary
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0043
+    category: boundary_typo_variant
+    pattern: ful$
+    replacement: full
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0044
+    category: boundary_typo_variant
+    pattern: full$
+    replacement: ful
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0045
+    category: boundary_typo_variant
+    pattern: ll$
+    replacement: l
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0046
+    category: boundary_typo_variant
+    pattern: l$
+    replacement: ll
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0047
+    category: repetition_or_transposition
+    pattern: ([^e])e$
+    replacement: \1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0048
+    category: repetition_or_transposition
+    pattern: ([aeiou])([^aeiou])$
+    replacement: \1\2e
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0049
+    category: repetition_or_transposition
+    pattern: ([^c])ie$
+    replacement: \1y
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0050
+    category: repetition_or_transposition
+    pattern: ([cs])h$
+    replacement: \1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.repetition_or_transposition.0051
+    category: repetition_or_transposition
+    pattern: ([td])h$
+    replacement: \1
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0052
+    category: boundary_typo_variant
+    pattern: tion$
+    replacement: sion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0053
+    category: boundary_typo_variant
+    pattern: sion$
+    replacement: tion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0054
+    category: boundary_typo_variant
+    pattern: cian$
+    replacement: tion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.phonetic_variant.0055
+    category: phonetic_variant
+    pattern: ough
+    replacement: o
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0056
+    category: orthographic_variant
+    pattern: ould
+    replacement: ud
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.orthographic_variant.0057
+    category: orthographic_variant
+    pattern: ould
+    replacement: od
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.repetition_or_transposition.0058
+    category: repetition_or_transposition
+    pattern: ([aeiou])r([e$])
+    replacement: \1er
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.repetition_or_transposition.0059
+    category: repetition_or_transposition
+    pattern: ([aeiou])l([e$])
+    replacement: \1le
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.boundary_typo_variant.0060
+    category: boundary_typo_variant
+    pattern: tion$
+    replacement: xion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0061
+    category: boundary_typo_variant
+    pattern: xion$
+    replacement: tion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0062
+    category: boundary_typo_variant
+    pattern: ssion$
+    replacement: tion
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0063
+    category: boundary_typo_variant
+    pattern: dge$
+    replacement: j
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0064
+    category: boundary_typo_variant
+    pattern: j$
+    replacement: dge
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0065
+    category: boundary_typo_variant
+    pattern: c$
+    replacement: k
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0066
+    category: boundary_typo_variant
+    pattern: k$
+    replacement: c
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0067
+    category: boundary_typo_variant
+    pattern: ch$
+    replacement: tch
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0068
+    category: boundary_typo_variant
+    pattern: tch$
+    replacement: ch
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.phonetic_variant.0069
+    category: phonetic_variant
+    pattern: eigh
+    replacement: ay
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.orthographic_variant.0070
+    category: orthographic_variant
+    pattern: ay
+    replacement: eigh
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.phonetic_variant.0071
+    category: phonetic_variant
+    pattern: sc
+    replacement: s
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.phonetic_variant.0072
+    category: phonetic_variant
+    pattern: wh
+    replacement: w
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0073
+    category: orthographic_variant
+    pattern: w
+    replacement: wh
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0074
+    category: orthographic_variant
+    pattern: sh
+    replacement: ch
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0075
+    category: orthographic_variant
+    pattern: ch
+    replacement: sh
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.boundary_typo_variant.0076
+    category: boundary_typo_variant
+    pattern: s$
+    replacement: z
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0077
+    category: boundary_typo_variant
+    pattern: z$
+    replacement: s
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0078
+    category: boundary_typo_variant
+    pattern: y$
+    replacement: ie
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0079
+    category: boundary_typo_variant
+    pattern: ie$
+    replacement: y
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0080
+    category: boundary_typo_variant
+    pattern: ly$
+    replacement: li
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0081
+    category: boundary_typo_variant
+    pattern: li$
+    replacement: ly
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.orthographic_variant.0082
+    category: orthographic_variant
+    pattern: ck
+    replacement: k
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0083
+    category: orthographic_variant
+    pattern: k
+    replacement: ck
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0084
+    category: orthographic_variant
+    pattern: dge
+    replacement: g
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.orthographic_variant.0085
+    category: orthographic_variant
+    pattern: g
+    replacement: dge
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.boundary_typo_variant.0086
+    category: boundary_typo_variant
+    pattern: mn$
+    replacement: m
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0087
+    category: boundary_typo_variant
+    pattern: bt$
+    replacement: t
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0088
+    category: boundary_typo_variant
+    pattern: mb$
+    replacement: m
+    enabled: false
+    duplicate_of_existing: true
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0089
+    category: boundary_typo_variant
+    pattern: gn$
+    replacement: n
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.phonetic_variant.0090
+    category: phonetic_variant
+    pattern: wr
+    replacement: r
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0091
+    category: orthographic_variant
+    pattern: rh
+    replacement: r
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0092
+    category: orthographic_variant
+    pattern: ae
+    replacement: e
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0093
+    category: orthographic_variant
+    pattern: oe
+    replacement: e
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0094
+    category: orthographic_variant
+    pattern: ou
+    replacement: ow
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0095
+    category: orthographic_variant
+    pattern: ow
+    replacement: ou
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.boundary_typo_variant.0096
+    category: boundary_typo_variant
+    pattern: sc$
+    replacement: s
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0097
+    category: boundary_typo_variant
+    pattern: gue$
+    replacement: g
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.orthographic_variant.0098
+    category: orthographic_variant
+    pattern: gue
+    replacement: g
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.boundary_typo_variant.0099
+    category: boundary_typo_variant
+    pattern: que$
+    replacement: k
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.orthographic_variant.0100
+    category: orthographic_variant
+    pattern: que
+    replacement: k
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.boundary_typo_variant.0101
+    category: boundary_typo_variant
+    pattern: our$
+    replacement: or
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0102
+    category: boundary_typo_variant
+    pattern: or$
+    replacement: our
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.locale_or_suffix_variant.0103
+    category: locale_or_suffix_variant
+    pattern: ise
+    replacement: ice
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.locale_or_suffix_variant.0104
+    category: locale_or_suffix_variant
+    pattern: ice
+    replacement: ise
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.boundary_typo_variant.0105
+    category: boundary_typo_variant
+    pattern: ture$
+    replacement: cher
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0106
+    category: boundary_typo_variant
+    pattern: cher$
+    replacement: ture
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0107
+    category: boundary_typo_variant
+    pattern: age$
+    replacement: ij
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0108
+    category: boundary_typo_variant
+    pattern: ij$
+    replacement: age
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0109
+    category: boundary_typo_variant
+    pattern: ise$
+    replacement: ace
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0110
+    category: boundary_typo_variant
+    pattern: ace$
+    replacement: ise
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0111
+    category: boundary_typo_variant
+    pattern: ce$
+    replacement: se
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.boundary_typo_variant.0112
+    category: boundary_typo_variant
+    pattern: se$
+    replacement: ce
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: low
+    candidate_only: true
+    autocorrect_allowed: true
+    match: suffix_regex
+    max_applications_per_token: 2
+    confidence_hint: 0.8
+  - id: orth.typo.locale_or_suffix_variant.0113
+    category: locale_or_suffix_variant
+    pattern: se
+    replacement: ze
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.orthographic_variant.0114
+    category: orthographic_variant
+    pattern: ze
+    replacement: se
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.phonetic_variant.0115
+    category: phonetic_variant
+    pattern: ough
+    replacement: ow
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.phonetic_variant.0116
+    category: phonetic_variant
+    pattern: ough
+    replacement: uf
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.phonetic_variant.0117
+    category: phonetic_variant
+    pattern: ight
+    replacement: ite
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.orthographic_variant.0118
+    category: orthographic_variant
+    pattern: ite
+    replacement: ight
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: medium
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.66
+  - id: orth.typo.orthographic_variant.0119
+    category: orthographic_variant
+    pattern: ear
+    replacement: eer
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+  - id: orth.typo.locale_or_suffix_variant.0120
+    category: locale_or_suffix_variant
+    pattern: eer
+    replacement: ear
+    enabled: true
+    duplicate_of_existing: false
+    risk_level: high
+    candidate_only: true
+    autocorrect_allowed: false
+    match: contains_regex
+    max_applications_per_token: 1
+    confidence_hint: 0.45
+compound_handling:
+  enabled: true
+  min_compound_length: 8
+  split_only_when_all_parts_known: true
+  preserve_original_when_ambiguous: true
+  autocorrect_allowed: false
+validation:
+  compile_regex_on_load: true
+  reject_invalid_regex_when_strict: true
+  reject_empty_sources: true
+  reject_empty_targets_for_normalization: true
+  allow_empty_replacement_for_typo_candidate_generation: true
+  deduplicate_patterns: true
+  track_rule_id_in_edits: true
+test_vectors:
+- input: I cant beleive this programme is tommorow.
+  target_locale: en-US
+  expected_contains:
+  - cannot
+  - believe
+  - program
+  - tomorrow
+- input: I'm gonna check the theatre schedule asap.
+  target_locale: en-US
+  expected_contains:
+  - i am
+  - going to
+  - theater
+  - as soon as possible
+- input: The colour and flavour changed.
+  target_locale: en-US
+  expected_contains:
+  - color
+  - flavor
+- input: SLAI API returns JSON.
+  expected_unchanged_terms:
+  - SLAI
+  - API
+  - JSON
+migration:
+  language_config_hint:
+    orthography_processor:
+      orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+      normalization_map_path: null
+      locale_variants_path: null
+      contraction_map_path: null
+    spell_checker:
+      orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+      typo_patterns_path: null
+  deprecated_standalone_files:
+  - normalization.yaml
+  - typo_patterns.json

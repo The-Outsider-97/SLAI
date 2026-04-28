@@ -1,0 +1,706 @@
+metadata:
+  name: dialogue_pack
+  language: en
+  version: 1.0.0
+  schema_version: '1.0'
+  created: '2026-04-28'
+  description: Dialogue-state resource pack for follow-up detection, context carryover, reference resolution, clarification
+    handling, and conversation-window policies.
+  sources:
+  - path: resources/follow_up_patterns.json
+    merged_into: follow_up_detection.patterns
+  status: production_ready
+runtime_policy:
+  enabled: true
+  locale: en-US
+  case_sensitive: false
+  normalize_unicode: true
+  collapse_whitespace: true
+  record_matches: true
+  emit_diagnostics: true
+  safe_default: no_follow_up
+  minimum_follow_up_confidence: 0.62
+  minimum_strong_follow_up_confidence: 0.82
+  max_pattern_matches_per_utterance: 5
+context_window_policy:
+  default_history_window: 6
+  max_history_window: 20
+  entity_history_window: 12
+  topic_history_window: 10
+  summary_after_turns: 12
+  max_summary_chars: 1800
+  include_slots: true
+  include_recent_entities: true
+  include_unresolved_issues: true
+  include_environment_state: true
+  include_grammar_issues: false
+  include_orthography_edits: false
+  privacy:
+    redact_sensitive_values: true
+    redact_emails: true
+    redact_phone_numbers: true
+    redact_urls: false
+follow_up_detection:
+  enabled: true
+  strategy: regex_plus_context_score
+  score_weights:
+    pattern_confidence: 0.45
+    recency: 0.2
+    topic_overlap: 0.15
+    entity_overlap: 0.1
+    slot_overlap: 0.05
+    unresolved_issue_bonus: 0.05
+  negative_cues:
+  - id: follow_up.negative.new_topic
+    pattern: \b(?:new topic|different question|unrelated|switching topics|forget that|never mind)\b
+    confidence_penalty: 0.55
+  - id: follow_up.negative.start_over
+    pattern: \b(?:start over|from scratch|reset|ignore earlier|forget earlier)\b
+    confidence_penalty: 0.75
+  patterns:
+  - id: follow_up.001
+    enabled: true
+    category: topic_return
+    pattern: (?:going|getting)\s+back\s+to
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.002
+    enabled: true
+    category: explicit_follow_up
+    pattern: (?:as\s+we\s+discussed|mentioned)\s+(?:earlier|before)
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.003
+    enabled: true
+    category: prior_context_reference
+    pattern: regarding\s+(?:the\s+)?(?:previous|earlier)\s+(?:point|discussion)
+    description: references a previous, earlier, or prior part of the dialogue
+    confidence: 0.8
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.004
+    enabled: true
+    category: explicit_follow_up
+    pattern: following\s+up\s+on\s+(?:our\s+)?(?:previous|earlier)\s+
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.005
+    enabled: true
+    category: speaker_reference
+    pattern: (?:about|regarding)\s+that\s+(?:thing|topic)\s+you\s+mentioned
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.006
+    enabled: true
+    category: speaker_reference
+    pattern: you\s+were\s+saying\s+(?:something\s+)?about
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.007
+    enabled: true
+    category: speaker_reference
+    pattern: (?:earlier|previously)\s+you\s+said
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.008
+    enabled: true
+    category: semantic_link
+    pattern: in\s+relation\s+to\s+our\s+previous\s+
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.009
+    enabled: true
+    category: semantic_link
+    pattern: expanding\s+on\s+what\s+we\s+
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.010
+    enabled: true
+    category: semantic_link
+    pattern: building\s+upon\s+the\s+(?:earlier|previous)
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.011
+    enabled: true
+    category: semantic_link
+    pattern: connect(?:ing)?\s+this\s+to\s+our\s+
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.012
+    enabled: true
+    category: continuation
+    pattern: continuing\s+our\s+discussion\s+about
+    description: continues an active or recently active conversational thread
+    confidence: 0.84
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.013
+    enabled: true
+    category: topic_return
+    pattern: returning\s+to\s+the\s+subject\s+of
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.014
+    enabled: true
+    category: speaker_reference
+    pattern: you\s+brought\s+up\s+(?:earlier|before)
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.015
+    enabled: true
+    category: prior_context_reference
+    pattern: that\s+(?:idea|point)\s+from\s+before
+    description: references a previous, earlier, or prior part of the dialogue
+    confidence: 0.8
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.016
+    enabled: true
+    category: prior_context_reference
+    pattern: as\s+I\s+was\s+saying\s+earlier
+    description: references a previous, earlier, or prior part of the dialogue
+    confidence: 0.8
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.017
+    enabled: true
+    category: topic_return
+    pattern: to\s+circle\s+back\s+to
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.018
+    enabled: true
+    category: subject_prefix_reference
+    pattern: re:\s*(.+)
+    description: explicit subject-line follow-up marker; captures referenced subject when present
+    confidence: 0.92
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: true
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.019
+    enabled: true
+    category: continuation
+    pattern: continuing\s+where\s+we\s+left\s+off
+    description: continues an active or recently active conversational thread
+    confidence: 0.84
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.020
+    enabled: true
+    category: topic_return
+    pattern: tying\s+this\s+back\s+to
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.021
+    enabled: true
+    category: speaker_reference
+    pattern: you\s+asked\s+me\s+about\s+earlier
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.022
+    enabled: true
+    category: speaker_reference
+    pattern: the\s+thing\s+you\s+told\s+me\s+about
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.023
+    enabled: true
+    category: prior_context_reference
+    pattern: we\s+were\s+talking\s+about\s+(?:earlier|before)
+    description: references a previous, earlier, or prior part of the dialogue
+    confidence: 0.8
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.024
+    enabled: true
+    category: semantic_link
+    pattern: related\s+to\s+what\s+we\s+discussed
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.025
+    enabled: true
+    category: explicit_follow_up
+    pattern: as\s+per\s+our\s+previous\s+conversation
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.026
+    enabled: true
+    category: generic_follow_up
+    pattern: about\s+that\s+(?:thing|matter)\s+from\s+
+    description: generic follow-up expression
+    confidence: 0.72
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.027
+    enabled: true
+    category: explicit_follow_up
+    pattern: to\s+follow\s+up\s+on\s+our\s+
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.028
+    enabled: true
+    category: continuation
+    pattern: picking\s+up\s+where\s+we\s+stopped
+    description: continues an active or recently active conversational thread
+    confidence: 0.84
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.029
+    enabled: true
+    category: generic_follow_up
+    pattern: in\s+reference\s+to\s+our\s+
+    description: generic follow-up expression
+    confidence: 0.72
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.030
+    enabled: true
+    category: explicit_follow_up
+    pattern: as\s+discussed\s+previously
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.031
+    enabled: true
+    category: topic_return
+    pattern: returning\s+to\s+the\s+previous\s+
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.032
+    enabled: true
+    category: speaker_reference
+    pattern: you\s+mentioned\s+(?:something\s+)?about
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.033
+    enabled: true
+    category: generic_follow_up
+    pattern: that\s+subject\s+we\s+were\s+on
+    description: generic follow-up expression
+    confidence: 0.72
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.034
+    enabled: true
+    category: continuation
+    pattern: continuing\s+the\s+thread\s+about
+    description: continues an active or recently active conversational thread
+    confidence: 0.84
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.035
+    enabled: true
+    category: explicit_follow_up
+    pattern: as\s+per\s+your\s+earlier\s+comment
+    description: explicitly states that the utterance is a follow-up
+    confidence: 0.88
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.036
+    enabled: true
+    category: topic_return
+    pattern: to\s+revisit\s+our\s+previous\s+
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.037
+    enabled: true
+    category: continuation
+    pattern: in\s+continuation\s+of\s+our\s+
+    description: continues an active or recently active conversational thread
+    confidence: 0.84
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.038
+    enabled: true
+    category: speaker_reference
+    pattern: you\s+had\s+said\s+something\s+about
+    description: refers to something the assistant or user previously mentioned
+    confidence: 0.82
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.039
+    enabled: true
+    category: semantic_link
+    pattern: linking\s+this\s+to\s+the\s+prior\s+
+    description: links the current utterance to prior context semantically
+    confidence: 0.78
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: medium
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+  - id: follow_up.040
+    enabled: true
+    category: topic_return
+    pattern: back\s+to\s+the\s+(?:original|initial)\s+topic
+    description: returns to a previous or original topic
+    confidence: 0.86
+    case_sensitive: false
+    requires_prior_turn: true
+    captures_reference: false
+    priority: high
+    action: retrieve_relevant_context
+    metadata:
+      source: follow_up_patterns.json
+reference_resolution:
+  enabled: true
+  resolution_order:
+  - explicit_capture
+  - pending_slot
+  - recent_entity
+  - active_topic
+  - last_user_turn
+  - last_agent_turn
+  - conversation_summary
+  ambiguous_reference_terms:
+  - that
+  - this
+  - it
+  - those
+  - these
+  - the previous one
+  - the earlier one
+  - that thing
+  - that topic
+  - that point
+  - same thing
+  - same topic
+  max_candidates: 8
+  minimum_candidate_score: 0.35
+  score_weights:
+    recency: 0.3
+    entity_match: 0.25
+    topic_match: 0.2
+    slot_match: 0.15
+    speaker_relevance: 0.1
+  on_ambiguous_reference: ask_clarifying_question
+  on_missing_antecedent: treat_as_new_turn_with_warning
+topic_management:
+  enabled: true
+  active_topic_ttl_turns: 8
+  topic_shift_threshold: 0.68
+  topic_continue_threshold: 0.45
+  topic_return_threshold: 0.52
+  topic_shift_cues:
+  - id: topic_shift.001
+    pattern: \b(?:by the way|another question|different question|separate topic|on another note)\b
+    confidence: 0.78
+  - id: topic_shift.002
+    pattern: \b(?:switching topics|change of subject|unrelated question)\b
+    confidence: 0.92
+  topic_return_cues:
+  - id: topic_return.001
+    pattern: \b(?:back to|returning to|circle back to|revisiting)\b
+    confidence: 0.86
+clarification_policy:
+  enabled: true
+  max_clarification_attempts: 3
+  low_confidence_intent_threshold: 0.42
+  low_confidence_entity_threshold: 0.5
+  missing_required_slot_action: ask_for_slot
+  ambiguous_reference_action: ask_targeted_clarification
+  fallback_prompts:
+    ambiguous_follow_up: Which earlier point do you want to continue from?
+    missing_reference: What should I connect this to from our earlier conversation?
+    missing_slot: Could you provide {slot_name}?
+    low_confidence_intent: Could you rephrase that so I can understand your request better?
+dialogue_memory_policy:
+  enabled: true
+  write_user_turns: true
+  write_agent_turns: true
+  write_detected_followups: true
+  write_resolved_references: true
+  record_salience: true
+  default_turn_salience: 0.5
+  follow_up_turn_salience_boost: 0.2
+  unresolved_issue_salience_boost: 0.3
+  max_memory_records_per_turn: 6
+nlg_context_policy:
+  enabled: true
+  context_packet_fields:
+  - active_topic
+  - recent_turns
+  - slots
+  - entities
+  - unresolved_issues
+  - follow_up_state
+  - environment_state
+  max_recent_turns_for_nlg: 4
+  max_entities_for_nlg: 12
+  max_slots_for_nlg: 16
+  include_follow_up_reason: true
+diagnostics:
+  issue_codes:
+    ambiguous_follow_up: CTX.FOLLOWUP.AMBIGUOUS_REFERENCE
+    missing_antecedent: CTX.FOLLOWUP.MISSING_ANTECEDENT
+    topic_shift_detected: CTX.TOPIC.SHIFT_DETECTED
+    context_window_truncated: CTX.CONTEXT.TRUNCATED
+    missing_required_slot: CTX.SLOT.MISSING_REQUIRED
+  severity_defaults:
+    ambiguous_follow_up: warning
+    missing_antecedent: warning
+    topic_shift_detected: info
+    context_window_truncated: info
+    missing_required_slot: warning
+test_vectors:
+- input: To circle back to the tokenizer issue, can we simplify that?
+  expected_follow_up: true
+  expected_category: topic_return
+- input: Following up on our previous discussion, what should we do next?
+  expected_follow_up: true
+  expected_category: explicit_follow_up
+- input: By the way, what is the weather tomorrow?
+  expected_follow_up: false
+  expected_topic_shift: true
+- input: 're: language cache config'
+  expected_follow_up: true
+  expected_capture: language cache config
+- input: That thing you mentioned earlier sounds useful.
+  expected_follow_up: true
+  expected_action: resolve_reference_or_clarify
+migration:
+  retire_standalone_files:
+  - follow_up_patterns.json
+  language_config_updates:
+    dialogue_context.dialogue_pack_path: src/agents/language/resources/en/dialogue_pack.yaml
+    dialogue_context.follow_up_patterns_path: null
+  loader_notes:
+  - Load this pack once through the language resource manager or DialogueContext.
+  - Compile follow_up_detection.patterns at startup and fail softly with diagnostics for invalid regex entries.
+  - Use context_window_policy and nlg_context_policy instead of scattering window sizes through DialogueContext and NLGEngine.

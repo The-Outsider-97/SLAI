@@ -1,0 +1,1943 @@
+# -----------------------------------------------------------------------------
+# Language Syntax Pack (English)
+# -----------------------------------------------------------------------------
+# Consolidates POS aliases, Penn Treebank compatibility mappings, stopwords,
+# lexical syntax classes, punctuation classes, and legacy chunk/phrase patterns.
+# This pack replaces standalone pos_map.json, pos_patterns.json, and stopwords.json.
+# -----------------------------------------------------------------------------
+
+schema: language.syntax_pack.v1
+version: "1.0.0"
+locale: en
+created: "2026-04-28"
+description: "Production syntax resource pack for the language-agent subsystem. Consolidates POS aliases, Penn-to-Universal tag mapping, stopwords, lexical syntax classes, punctuation classes, and legacy chunk/phrase patterns."
+sources:
+  pos_map: pos_map.json
+  stopwords: stopwords.json
+  phrase_patterns: pos_patterns.json
+load_policy:
+  strict_schema: true
+  deduplicate_lists: true
+  normalize_case: true
+  primary_tagset: universal_dependencies
+  legacy_tagset_support:
+    - penn_treebank
+  unknown_pos_tag: X
+  emit_diagnostics: true
+  fail_on_invalid_regex: false
+  preserve_legacy_patterns: true
+tagsets:
+  universal_dependencies:
+    allowed_tags:
+      - ADJ
+      - ADP
+      - ADV
+      - AUX
+      - CCONJ
+      - DET
+      - INTJ
+      - NOUN
+      - NUM
+      - PART
+      - PRON
+      - PROPN
+      - PUNCT
+      - SCONJ
+      - SYM
+      - VERB
+      - X
+    description: "Primary POS tagset used by NLP, Rules, Grammar, and NLU modules."
+  penn_treebank:
+    description: Compatibility tagset for imported phrase/chunk patterns.
+    to_universal:
+      CC: CCONJ
+      CD: NUM
+      DT: DET
+      EX: PRON
+      FW: X
+      IN: ADP
+      JJ: ADJ
+      JJR: ADJ
+      JJS: ADJ
+      LS: X
+      MD: AUX
+      NN: NOUN
+      NNS: NOUN
+      NNP: PROPN
+      NNPS: PROPN
+      PDT: DET
+      POS: PART
+      PRP: PRON
+      PRP$: PRON
+      RB: ADV
+      RBR: ADV
+      RBS: ADV
+      RP: PART
+      SYM: SYM
+      TO: PART
+      UH: INTJ
+      VB: VERB
+      VBD: VERB
+      VBG: VERB
+      VBN: VERB
+      VBP: VERB
+      VBZ: VERB
+      WDT: DET
+      WP: PRON
+      WP$: PRON
+      WRB: ADV
+      ",": PUNCT
+      ".": PUNCT
+      ":": PUNCT
+      "(": PUNCT
+      ")": PUNCT
+      "``": PUNCT
+      "''": PUNCT
+      "$": SYM
+      "#": SYM
+pos_aliases:
+  source_aliases:
+    noun: NOUN
+    propn: PROPN
+    verb: VERB
+    aux: AUX
+    adjective: ADJ
+    adverb: ADV
+    numeral: NUM
+    determiner: DET
+    pronoun: PRON
+    preposition: ADP
+    conjunction: CCONJ
+    subord: SCONJ
+    particle: PART
+    interjection: INTJ
+    symbol: SYM
+    punct: PUNCT
+  expanded_aliases:
+    adj: ADJ
+    adjective: ADJ
+    adp: ADP
+    prep: ADP
+    preposition: ADP
+    adv: ADV
+    adverb: ADV
+    aux: AUX
+    auxiliary: AUX
+    cc: CCONJ
+    conj: CCONJ
+    coordinating_conjunction: CCONJ
+    det: DET
+    determiner: DET
+    intj: INTJ
+    interjection: INTJ
+    n: NOUN
+    noun: NOUN
+    num: NUM
+    number: NUM
+    numeral: NUM
+    part: PART
+    particle: PART
+    pron: PRON
+    pronoun: PRON
+    proper_noun: PROPN
+    propn: PROPN
+    punct: PUNCT
+    punctuation: PUNCT
+    sconj: SCONJ
+    subord: SCONJ
+    subordinating_conjunction: SCONJ
+    sym: SYM
+    symbol: SYM
+    v: VERB
+    verb: VERB
+    x: X
+    unknown: X
+  universal_to_default_penn:
+    ADJ: JJ
+    ADP: IN
+    ADV: RB
+    AUX: MD
+    CCONJ: CC
+    DET: DT
+    INTJ: UH
+    NOUN: NN
+    NUM: CD
+    PART: RP
+    PRON: PRP
+    PROPN: NNP
+    PUNCT: "."
+    SCONJ: IN
+    SYM: SYM
+    VERB: VB
+    X: FW
+stopwords:
+  enabled: true
+  case_sensitive: false
+  items:
+    - a
+    - an
+    - the
+    - is
+    - are
+    - was
+    - were
+    - be
+    - been
+    - being
+    - have
+    - has
+    - had
+    - do
+    - does
+    - did
+    - will
+    - would
+    - should
+    - can
+    - could
+    - may
+    - might
+    - must
+    - and
+    - but
+    - or
+    - nor
+    - for
+    - so
+    - yet
+    - in
+    - "on"
+    - at
+    - by
+    - from
+    - to
+    - with
+    - about
+    - above
+    - after
+    - again
+    - against
+    - all
+    - am
+    - as
+    - because
+    - before
+    - below
+    - between
+    - both
+    - each
+    - few
+    - further
+    - he
+    - her
+    - here
+    - hers
+    - herself
+    - him
+    - himself
+    - his
+    - how
+    - i
+    - if
+    - into
+    - it
+    - its
+    - itself
+    - just
+    - me
+    - more
+    - most
+    - my
+    - myself
+    - "no"
+    - not
+    - now
+    - of
+    - "off"
+    - once
+    - only
+    - other
+    - our
+    - ours
+    - ourselves
+    - out
+    - over
+    - own
+    - same
+    - she
+    - since
+    - some
+    - still
+    - such
+    - than
+    - that
+    - their
+    - theirs
+    - them
+    - themselves
+    - then
+    - there
+    - these
+    - they
+    - this
+    - those
+    - through
+    - too
+    - under
+    - until
+    - up
+    - very
+    - we
+    - what
+    - when
+    - where
+    - which
+    - while
+    - who
+    - whom
+    - why
+    - won
+    - you
+    - your
+    - yours
+    - yourself
+    - yourselves
+  metadata:
+    source: stopwords.json
+    count: 128
+    usage:
+      - NLP stopword flagging
+      - intent keyword filtering
+      - context summarization weighting
+lexical_classes:
+  articles:
+    - a
+    - an
+    - the
+  demonstratives:
+    - this
+    - that
+    - these
+    - those
+  quantifiers:
+    - all
+    - any
+    - both
+    - each
+    - either
+    - enough
+    - every
+    - few
+    - many
+    - more
+    - most
+    - much
+    - neither
+    - several
+    - some
+  personal_pronouns:
+    - i
+    - me
+    - you
+    - he
+    - him
+    - she
+    - her
+    - it
+    - we
+    - us
+    - they
+    - them
+  possessive_pronouns:
+    - my
+    - mine
+    - your
+    - yours
+    - his
+    - her
+    - hers
+    - its
+    - our
+    - ours
+    - their
+    - theirs
+  reflexive_pronouns:
+    - myself
+    - yourself
+    - yourselves
+    - himself
+    - herself
+    - itself
+    - ourselves
+    - themselves
+  relative_pronouns:
+    - who
+    - whom
+    - whose
+    - which
+    - that
+  interrogatives:
+    - who
+    - what
+    - when
+    - where
+    - why
+    - how
+    - which
+    - whom
+    - whose
+  coordinating_conjunctions:
+    - and
+    - but
+    - or
+    - nor
+    - for
+    - so
+    - yet
+  subordinating_conjunctions:
+    - after
+    - although
+    - as
+    - because
+    - before
+    - if
+    - once
+    - since
+    - than
+    - that
+    - though
+    - unless
+    - until
+    - when
+    - whenever
+    - where
+    - whereas
+    - wherever
+    - while
+  common_prepositions:
+    - about
+    - above
+    - across
+    - after
+    - against
+    - along
+    - among
+    - around
+    - at
+    - before
+    - behind
+    - below
+    - beneath
+    - beside
+    - between
+    - by
+    - during
+    - for
+    - from
+    - in
+    - inside
+    - into
+    - near
+    - of
+    - "off"
+    - "on"
+    - onto
+    - over
+    - through
+    - to
+    - toward
+    - under
+    - until
+    - up
+    - with
+    - within
+    - without
+  auxiliaries:
+    - am
+    - are
+    - be
+    - been
+    - being
+    - can
+    - could
+    - did
+    - do
+    - does
+    - had
+    - has
+    - have
+    - is
+    - may
+    - might
+    - must
+    - shall
+    - should
+    - was
+    - were
+    - will
+    - would
+  modals:
+    - can
+    - could
+    - may
+    - might
+    - must
+    - shall
+    - should
+    - will
+    - would
+  negators:
+    - "no"
+    - not
+    - never
+    - "n't"
+    - "none"
+    - neither
+    - nor
+  particles:
+    - not
+    - "n't"
+    - to
+    - up
+    - down
+    - in
+    - out
+    - "on"
+    - "off"
+    - away
+    - back
+    - over
+    - through
+  existentials:
+    - there
+pronoun_features:
+  i:
+    person: 1
+    number: singular
+    case: subject
+  me:
+    person: 1
+    number: singular
+    case: object
+  we:
+    person: 1
+    number: plural
+    case: subject
+  us:
+    person: 1
+    number: plural
+    case: object
+  you:
+    person: 2
+    number: ambiguous
+    case: subject_or_object
+  he:
+    person: 3
+    number: singular
+    gender: masculine
+    case: subject
+  him:
+    person: 3
+    number: singular
+    gender: masculine
+    case: object
+  she:
+    person: 3
+    number: singular
+    gender: feminine
+    case: subject
+  her:
+    person: 3
+    number: singular
+    gender: feminine
+    case: object_or_possessive
+  it:
+    person: 3
+    number: singular
+    gender: neuter
+    case: subject_or_object
+  they:
+    person: 3
+    number: plural_or_singular
+    gender: neutral
+    case: subject
+  them:
+    person: 3
+    number: plural_or_singular
+    gender: neutral
+    case: object
+punctuation:
+  sentence_terminal:
+    - "."
+    - "!"
+    - "?"
+    - "…"
+  clause_boundary:
+    - ","
+    - ";"
+    - ":"
+    - "—"
+    - "–"
+  quotes:
+    - "\""
+    - "'"
+    - "“"
+    - "”"
+    - "‘"
+    - "’"
+  brackets:
+    - "("
+    - ")"
+    - "["
+    - "]"
+    - "{"
+    - "}"
+  apostrophes:
+    - "'"
+    - "’"
+  hyphens:
+    - "-"
+    - "‐"
+    - "‑"
+    - "–"
+    - "—"
+chunking_policy:
+  enabled: true
+  source_tagset: penn_treebank
+  converted_tagset: universal_dependencies
+  max_pattern_length: 5
+  overlap_resolution: longest_then_highest_confidence_then_priority
+  emit_low_confidence_matches: true
+  minimum_confidence: 0.5
+  notes:
+    - "Patterns are chunk/phrase patterns, not raw POS tagging rules."
+    - Prefer Universal POS internally; Penn tags are retained for compatibility.
+phrase_patterns:
+  -
+    id: syntax.noun_phrase.simple_noun_phrase_det_noun
+    enabled: true
+    category: noun_phrase
+    name: Simple Noun Phrase (Det + Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - NN
+    universal_pattern:
+      - DET
+      - NOUN
+    example_tags:
+      - DT
+      - NN
+    example_text: the cat
+    description: A determiner followed by a singular noun.
+    confidence: 0.76
+    priority: 1
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.simple_noun_phrase_det_plural_noun
+    enabled: true
+    category: noun_phrase
+    name: Simple Noun Phrase (Det + Plural Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - NNS
+    universal_pattern:
+      - DET
+      - NOUN
+    example_tags:
+      - DT
+      - NNS
+    example_text: some dogs
+    description: A determiner followed by a plural noun.
+    confidence: 0.76
+    priority: 2
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_det_adj_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Det + Adj + Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - JJ
+      - NN
+    universal_pattern:
+      - DET
+      - ADJ
+      - NOUN
+    example_tags:
+      - DT
+      - JJ
+      - NN
+    example_text: a red car
+    description: "Determiner, adjective, and singular noun."
+    confidence: 0.76
+    priority: 3
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_det_adj_plural_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Det + Adj + Plural Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - JJ
+      - NNS
+    universal_pattern:
+      - DET
+      - ADJ
+      - NOUN
+    example_tags:
+      - DT
+      - JJ
+      - NNS
+    example_text: the small houses
+    description: "Determiner, adjective, and plural noun."
+    confidence: 0.76
+    priority: 4
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_adj_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Adj + Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - JJ
+      - NN
+    universal_pattern:
+      - ADJ
+      - NOUN
+    example_tags:
+      - JJ
+      - NN
+    example_text: blue sky
+    description: Adjective modifying a singular noun.
+    confidence: 0.76
+    priority: 5
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_adj_plural_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Adj + Plural Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - JJ
+      - NNS
+    universal_pattern:
+      - ADJ
+      - NOUN
+    example_tags:
+      - JJ
+      - NNS
+    example_text: happy children
+    description: Adjective modifying a plural noun.
+    confidence: 0.76
+    priority: 6
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.proper_noun_singular
+    enabled: true
+    category: noun_phrase
+    name: Proper Noun (Singular)
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+    universal_pattern:
+      - PROPN
+    example_tags:
+      - NNP
+    example_text: John
+    description: A single proper noun.
+    confidence: 0.76
+    priority: 7
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.proper_noun_phrase_multi_word
+    enabled: true
+    category: noun_phrase
+    name: "Proper Noun Phrase (Multi-word)"
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+      - NNP
+    universal_pattern:
+      - PROPN
+      - PROPN
+    example_tags:
+      - NNP
+      - NNP
+    example_text: New York
+    description: "Two consecutive proper nouns, often forming a single entity name."
+    confidence: 0.76
+    priority: 8
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.proper_noun_phrase_extended
+    enabled: true
+    category: noun_phrase
+    name: Proper Noun Phrase (Extended)
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+      - NNP
+      - NNP
+    universal_pattern:
+      - PROPN
+      - PROPN
+      - PROPN
+    example_tags:
+      - NNP
+      - NNP
+      - NNP
+    example_text: John F. Kennedy
+    description: Three consecutive proper nouns.
+    confidence: 0.76
+    priority: 9
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_with_possessive
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase with Possessive
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - NN
+      - POS
+      - NN
+    universal_pattern:
+      - DET
+      - NOUN
+      - PART
+      - NOUN
+    example_tags:
+      - DT
+      - NN
+      - POS
+      - NN
+    example_text: "the dog's bone"
+    description: "Noun phrase showing possession (e.g., the cat's toy)."
+    confidence: 0.76
+    priority: 10
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_with_proper_noun_possessive
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase with Proper Noun Possessive
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+      - POS
+      - NN
+    universal_pattern:
+      - PROPN
+      - PART
+      - NOUN
+    example_tags:
+      - NNP
+      - POS
+      - NN
+    example_text: "Mary's car"
+    description: "Proper noun showing possession (e.g., John's book)."
+    confidence: 0.76
+    priority: 11
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_noun_noun_compound_noun
+    enabled: true
+    category: noun_phrase
+    name: "Noun Phrase (Noun + Noun - Compound Noun)"
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - NN
+    universal_pattern:
+      - NOUN
+      - NOUN
+    example_tags:
+      - NN
+      - NN
+    example_text: computer screen
+    description: Two nouns forming a compound noun.
+    confidence: 0.76
+    priority: 12
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_noun_plural_noun_compound_noun
+    enabled: true
+    category: noun_phrase
+    name: "Noun Phrase (Noun + Plural Noun - Compound Noun)"
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - NNS
+    universal_pattern:
+      - NOUN
+      - NOUN
+    example_tags:
+      - NN
+      - NNS
+    example_text: apple trees
+    description: "Singular noun followed by plural, possibly a compound."
+    confidence: 0.76
+    priority: 13
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_number_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Number + Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - CD
+      - NNS
+    universal_pattern:
+      - NUM
+      - NOUN
+    example_tags:
+      - CD
+      - NNS
+    example_text: three apples
+    description: A cardinal number followed by a plural noun.
+    confidence: 0.76
+    priority: 14
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.noun_phrase_number_adj_noun
+    enabled: true
+    category: noun_phrase
+    name: Noun Phrase (Number + Adj + Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - CD
+      - JJ
+      - NNS
+    universal_pattern:
+      - NUM
+      - ADJ
+      - NOUN
+    example_tags:
+      - CD
+      - JJ
+      - NNS
+    example_text: five red balloons
+    description: "Cardinal number, adjective, and plural noun."
+    confidence: 0.76
+    priority: 15
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_simple_present_3rd_person
+    enabled: true
+    category: verb_phrase
+    name: "Verb Phrase (Simple Present - 3rd Person)"
+    source_tagset: penn_treebank
+    pattern:
+      - VBZ
+    universal_pattern:
+      - VERB
+    example_tags:
+      - VBZ
+    example_text: runs
+    description: A verb in 3rd person singular present tense.
+    confidence: 0.76
+    priority: 16
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_simple_present_non_3rd_person
+    enabled: true
+    category: verb_phrase
+    name: "Verb Phrase (Simple Present - Non-3rd Person)"
+    source_tagset: penn_treebank
+    pattern:
+      - VBP
+    universal_pattern:
+      - VERB
+    example_tags:
+      - VBP
+    example_text: run
+    description: "A verb in non-3rd person singular present tense."
+    confidence: 0.76
+    priority: 17
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_past_tense
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Past Tense)
+    source_tagset: penn_treebank
+    pattern:
+      - VBD
+    universal_pattern:
+      - VERB
+    example_tags:
+      - VBD
+    example_text: ran
+    description: A verb in past tense.
+    confidence: 0.76
+    priority: 18
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_present_participle_gerund
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Present Participle/Gerund)
+    source_tagset: penn_treebank
+    pattern:
+      - VBG
+    universal_pattern:
+      - VERB
+    example_tags:
+      - VBG
+    example_text: running
+    description: A verb as a gerund or present participle.
+    confidence: 0.76
+    priority: 19
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_past_participle
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Past Participle)
+    source_tagset: penn_treebank
+    pattern:
+      - VBN
+    universal_pattern:
+      - VERB
+    example_tags:
+      - VBN
+    example_text: eaten
+    description: A verb as a past participle.
+    confidence: 0.76
+    priority: 20
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_modal_verb
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Modal + Verb)
+    source_tagset: penn_treebank
+    pattern:
+      - MD
+      - VB
+    universal_pattern:
+      - AUX
+      - VERB
+    example_tags:
+      - MD
+      - VB
+    example_text: can run
+    description: A modal verb followed by a base form verb.
+    confidence: 0.76
+    priority: 21
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_modal_adverb_verb
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Modal + Adverb + Verb)
+    source_tagset: penn_treebank
+    pattern:
+      - MD
+      - RB
+      - VB
+    universal_pattern:
+      - AUX
+      - ADV
+      - VERB
+    example_tags:
+      - MD
+      - RB
+      - VB
+    example_text: will surely go
+    description: "Modal, adverb, then base verb."
+    confidence: 0.76
+    priority: 22
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_to_verb_infinitive
+    enabled: true
+    category: verb_phrase
+    name: "Verb Phrase (To + Verb - Infinitive)"
+    source_tagset: penn_treebank
+    pattern:
+      - TO
+      - VB
+    universal_pattern:
+      - PART
+      - VERB
+    example_tags:
+      - TO
+      - VB
+    example_text: to eat
+    description: "'to' followed by a base form verb (infinitive)."
+    confidence: 0.76
+    priority: 23
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_verb_adverb
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Verb + Adverb)
+    source_tagset: penn_treebank
+    pattern:
+      - VBZ
+      - RB
+    universal_pattern:
+      - VERB
+      - ADV
+    example_tags:
+      - VBZ
+      - RB
+    example_text: runs quickly
+    description: Verb (3rd person singular) followed by an adverb.
+    confidence: 0.76
+    priority: 24
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_verb_particle
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Verb + Particle)
+    source_tagset: penn_treebank
+    pattern:
+      - VBP
+      - RP
+    universal_pattern:
+      - VERB
+      - PART
+    example_tags:
+      - VBP
+      - RP
+    example_text: look up
+    description: Verb followed by a particle (phrasal verb).
+    confidence: 0.76
+    priority: 25
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_progressive_aspect
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Progressive Aspect)
+    source_tagset: penn_treebank
+    pattern:
+      - VBZ
+      - VBG
+    universal_pattern:
+      - VERB
+      - VERB
+    example_tags:
+      - VBZ
+      - VBG
+    example_text: is singing
+    description: "Verb 'to be' (3rd person) + present participle (e.g., is running)."
+    confidence: 0.76
+    priority: 26
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_perfect_aspect
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Perfect Aspect)
+    source_tagset: penn_treebank
+    pattern:
+      - VBP
+      - VBN
+    universal_pattern:
+      - VERB
+      - VERB
+    example_tags:
+      - VBP
+      - VBN
+    example_text: have seen
+    description: "Verb 'to have' (non-3rd person) + past participle (e.g., have eaten)."
+    confidence: 0.76
+    priority: 27
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_modal_perfect_aspect
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Modal + Perfect Aspect)
+    source_tagset: penn_treebank
+    pattern:
+      - MD
+      - VB
+      - VBN
+    universal_pattern:
+      - AUX
+      - VERB
+      - VERB
+    example_tags:
+      - MD
+      - VB
+      - VBN
+    example_text: might have finished
+    description: "Modal + 'have' + past participle (e.g., should have gone)."
+    confidence: 0.76
+    priority: 28
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.verb_phrase_transitive_verb_np
+    enabled: true
+    category: verb_phrase
+    name: Verb Phrase (Transitive Verb + NP)
+    source_tagset: penn_treebank
+    pattern:
+      - VBD
+      - DT
+      - NN
+    universal_pattern:
+      - VERB
+      - DET
+      - NOUN
+    example_tags:
+      - VBD
+      - DT
+      - NN
+    example_text: ate the apple
+    description: Past tense verb followed by a determiner and noun (direct object).
+    confidence: 0.76
+    priority: 29
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.prepositional_phrase.prepositional_phrase_prep_np
+    enabled: true
+    category: prepositional_phrase
+    name: Prepositional Phrase (Prep + NP)
+    source_tagset: penn_treebank
+    pattern:
+      - IN
+      - DT
+      - NN
+    universal_pattern:
+      - ADP
+      - DET
+      - NOUN
+    example_tags:
+      - IN
+      - DT
+      - NN
+    example_text: in the house
+    description: Preposition followed by a determiner and noun.
+    confidence: 0.76
+    priority: 30
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.prepositional_phrase_prep_proper_noun
+    enabled: true
+    category: noun_phrase
+    name: Prepositional Phrase (Prep + Proper Noun)
+    source_tagset: penn_treebank
+    pattern:
+      - IN
+      - NNP
+    universal_pattern:
+      - ADP
+      - PROPN
+    example_tags:
+      - IN
+      - NNP
+    example_text: to London
+    description: Preposition followed by a proper noun.
+    confidence: 0.76
+    priority: 31
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.prepositional_phrase.prepositional_phrase_prep_pronoun
+    enabled: true
+    category: prepositional_phrase
+    name: Prepositional Phrase (Prep + Pronoun)
+    source_tagset: penn_treebank
+    pattern:
+      - IN
+      - PRP
+    universal_pattern:
+      - ADP
+      - PRON
+    example_tags:
+      - IN
+      - PRP
+    example_text: for him
+    description: Preposition followed by a personal pronoun.
+    confidence: 0.76
+    priority: 32
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.adjectival_phrase_adv_adj
+    enabled: true
+    category: syntax_pattern
+    name: Adjectival Phrase (Adv + Adj)
+    source_tagset: penn_treebank
+    pattern:
+      - RB
+      - JJ
+    universal_pattern:
+      - ADV
+      - ADJ
+    example_tags:
+      - RB
+      - JJ
+    example_text: very happy
+    description: Adverb modifying an adjective.
+    confidence: 0.68
+    priority: 33
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.adjectival_phrase_adv_comparative_adj
+    enabled: true
+    category: syntax_pattern
+    name: Adjectival Phrase (Adv + Comparative Adj)
+    source_tagset: penn_treebank
+    pattern:
+      - RB
+      - JJR
+    universal_pattern:
+      - ADV
+      - ADJ
+    example_tags:
+      - RB
+      - JJR
+    example_text: much bigger
+    description: Adverb modifying a comparative adjective.
+    confidence: 0.68
+    priority: 34
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.adjectival_phrase_adv_superlative_adj
+    enabled: true
+    category: syntax_pattern
+    name: Adjectival Phrase (Adv + Superlative Adj)
+    source_tagset: penn_treebank
+    pattern:
+      - RB
+      - JJS
+    universal_pattern:
+      - ADV
+      - ADJ
+    example_tags:
+      - RBS
+      - JJS
+    example_text: most beautiful
+    description: Adverb modifying a superlative adjective.
+    confidence: 0.68
+    priority: 35
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.adjectival_phrase_comparative_adj_prep
+    enabled: true
+    category: syntax_pattern
+    name: Adjectival Phrase (Comparative Adj + Prep)
+    source_tagset: penn_treebank
+    pattern:
+      - JJR
+      - IN
+    universal_pattern:
+      - ADJ
+      - ADP
+    example_tags:
+      - JJR
+      - IN
+    example_text: taller than
+    description: "Comparative adjective followed by a preposition (e.g., 'than')."
+    confidence: 0.68
+    priority: 36
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.adverbial_phrase.adverbial_phrase_adv_adv
+    enabled: true
+    category: adverbial_phrase
+    name: Adverbial Phrase (Adv + Adv)
+    source_tagset: penn_treebank
+    pattern:
+      - RB
+      - RB
+    universal_pattern:
+      - ADV
+      - ADV
+    example_tags:
+      - RB
+      - RB
+    example_text: very quickly
+    description: "Two adverbs, where the first modifies the second."
+    confidence: 0.68
+    priority: 37
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.clause_sentence.clause_subject_verb
+    enabled: true
+    category: clause_sentence
+    name: "Clause (Subject-Verb)"
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+      - VBD
+    universal_pattern:
+      - PROPN
+      - VERB
+    example_tags:
+      - NNP
+      - VBD
+    example_text: Alice slept
+    description: Proper noun subject and a past tense verb.
+    confidence: 0.68
+    priority: 38
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.clause_sentence.clause_pronoun_subject_verb
+    enabled: true
+    category: clause_sentence
+    name: "Clause (Pronoun Subject-Verb)"
+    source_tagset: penn_treebank
+    pattern:
+      - PRP
+      - VBD
+    universal_pattern:
+      - PRON
+      - VERB
+    example_tags:
+      - PRP
+      - VBD
+    example_text: She sang
+    description: Pronoun subject and a past tense verb.
+    confidence: 0.68
+    priority: 39
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.clause_sentence.clause_subject_verb_object
+    enabled: true
+    category: clause_sentence
+    name: "Clause (Subject-Verb-Object)"
+    source_tagset: penn_treebank
+    pattern:
+      - NNP
+      - VBD
+      - NNP
+    universal_pattern:
+      - PROPN
+      - VERB
+      - PROPN
+    example_tags:
+      - NNP
+      - VBD
+      - NNP
+    example_text: John met Mary
+    description: "Proper noun subject, verb, and proper noun object."
+    confidence: 0.68
+    priority: 40
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.clause_sentence.clause_subject_verb_pp
+    enabled: true
+    category: clause_sentence
+    name: "Clause (Subject-Verb-PP)"
+    source_tagset: penn_treebank
+    pattern:
+      - PRP
+      - VBD
+      - IN
+      - DT
+      - NN
+    universal_pattern:
+      - PRON
+      - VERB
+      - ADP
+      - DET
+      - NOUN
+    example_tags:
+      - PRP
+      - VBD
+      - IN
+      - DT
+      - NN
+    example_text: He went to the store
+    description: "Pronoun subject, verb, and a prepositional phrase."
+    confidence: 0.68
+    priority: 41
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.adverbial_phrase.clause_subject_verb_adverb
+    enabled: true
+    category: adverbial_phrase
+    name: "Clause (Subject-Verb-Adverb)"
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - NN
+      - VBZ
+      - RB
+    universal_pattern:
+      - DET
+      - NOUN
+      - VERB
+      - ADV
+    example_tags:
+      - DT
+      - NN
+      - VBZ
+      - RB
+    example_text: The bird sings loudly
+    description: "Noun phrase subject, verb, and adverb."
+    confidence: 0.68
+    priority: 42
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.sentence_type.question_modal_subject_verb
+    enabled: true
+    category: sentence_type
+    name: "Question (Modal-Subject-Verb)"
+    source_tagset: penn_treebank
+    pattern:
+      - MD
+      - PRP
+      - VB
+    universal_pattern:
+      - AUX
+      - PRON
+      - VERB
+    example_tags:
+      - MD
+      - PRP
+      - VB
+    example_text: Can you swim
+    description: "Modal, pronoun subject, and base verb forming a question."
+    confidence: 0.68
+    priority: 43
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.sentence_type.question_wh_verb_subject
+    enabled: true
+    category: sentence_type
+    name: "Question (Wh-Verb-Subject)"
+    source_tagset: penn_treebank
+    pattern:
+      - WP
+      - VBZ
+      - PRP
+    universal_pattern:
+      - PRON
+      - VERB
+      - PRON
+    example_tags:
+      - WP
+      - VBZ
+      - PRP
+    example_text: Who is he
+    description: "Wh-pronoun, verb 'to be', and pronoun subject."
+    confidence: 0.68
+    priority: 44
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.sentence_type.question_wh_modal_subject_verb
+    enabled: true
+    category: sentence_type
+    name: "Question (Wh-Modal-Subject-Verb)"
+    source_tagset: penn_treebank
+    pattern:
+      - WRB
+      - MD
+      - PRP
+      - VB
+    universal_pattern:
+      - ADV
+      - AUX
+      - PRON
+      - VERB
+    example_tags:
+      - WRB
+      - MD
+      - PRP
+      - VB
+    example_text: When can they start
+    description: "Wh-adverb, modal, pronoun subject, and base verb."
+    confidence: 0.68
+    priority: 45
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.coordinated_nouns
+    enabled: true
+    category: syntax_pattern
+    name: Coordinated Nouns
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - CC
+      - NN
+    universal_pattern:
+      - NOUN
+      - CCONJ
+      - NOUN
+    example_tags:
+      - NN
+      - CC
+      - NN
+    example_text: cats and dogs
+    description: Two nouns coordinated by a conjunction.
+    confidence: 0.68
+    priority: 46
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.coordinated_adjectives
+    enabled: true
+    category: syntax_pattern
+    name: Coordinated Adjectives
+    source_tagset: penn_treebank
+    pattern:
+      - JJ
+      - CC
+      - JJ
+    universal_pattern:
+      - ADJ
+      - CCONJ
+      - ADJ
+    example_tags:
+      - JJ
+      - CC
+      - JJ
+    example_text: big and strong
+    description: Two adjectives coordinated by a conjunction.
+    confidence: 0.68
+    priority: 47
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.coordinated_verbs
+    enabled: true
+    category: syntax_pattern
+    name: Coordinated Verbs
+    source_tagset: penn_treebank
+    pattern:
+      - VBP
+      - CC
+      - VBP
+    universal_pattern:
+      - VERB
+      - CCONJ
+      - VERB
+    example_tags:
+      - VBP
+      - CC
+      - VBP
+    example_text: run and jump
+    description: Two verbs coordinated by a conjunction.
+    confidence: 0.68
+    priority: 48
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.syntax_pattern.list_of_nouns
+    enabled: true
+    category: syntax_pattern
+    name: List of Nouns
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - ","
+      - NN
+      - CC
+      - NN
+    universal_pattern:
+      - NOUN
+      - PUNCT
+      - NOUN
+      - CCONJ
+      - NOUN
+    example_tags:
+      - NN
+      - ","
+      - NN
+      - CC
+      - NN
+    example_text: "apples, bananas, and oranges"
+    description: "A comma-separated list of nouns with a final conjunction."
+    confidence: 0.68
+    priority: 49
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.voice_construction.passive_voice_simple
+    enabled: true
+    category: voice_construction
+    name: Passive Voice (Simple)
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - VBZ
+      - VBN
+    universal_pattern:
+      - NOUN
+      - VERB
+      - VERB
+    example_tags:
+      - NN
+      - VBZ
+      - VBN
+    example_text: the report is written
+    description: "Noun, form of 'to be', and past participle (e.g., the cake is eaten)."
+    confidence: 0.68
+    priority: 50
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.voice_construction.passive_voice_with_agent
+    enabled: true
+    category: voice_construction
+    name: Passive Voice with Agent
+    source_tagset: penn_treebank
+    pattern:
+      - NN
+      - VBZ
+      - VBN
+      - IN
+      - NNP
+    universal_pattern:
+      - NOUN
+      - VERB
+      - VERB
+      - ADP
+      - PROPN
+    example_tags:
+      - DT
+      - NN
+      - VBZ
+      - VBN
+      - IN
+      - NNP
+    example_text: The song was sung by Elvis
+    description: "Passive construction followed by 'by' and an agent."
+    confidence: 0.68
+    priority: 51
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.noun_phrase.adjective_as_noun_the_adj
+    enabled: true
+    category: noun_phrase
+    name: Adjective as Noun (The + Adj)
+    source_tagset: penn_treebank
+    pattern:
+      - DT
+      - JJS
+    universal_pattern:
+      - DET
+      - ADJ
+    example_tags:
+      - DT
+      - JJS
+    example_text: the poorest
+    description: "Determiner 'the' followed by a superlative adjective, often referring to a group (e.g., the best)."
+    confidence: 0.76
+    priority: 52
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.verb_phrase.adverb_modifying_verb_phrase
+    enabled: true
+    category: verb_phrase
+    name: Adverb modifying Verb Phrase
+    source_tagset: penn_treebank
+    pattern:
+      - RB
+      - VBG
+    universal_pattern:
+      - ADV
+      - VERB
+    example_tags:
+      - RB
+      - VBG
+    example_text: quickly running
+    description: Adverb modifying a gerund/present participle.
+    confidence: 0.76
+    priority: 53
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+  -
+    id: syntax.existential_construction.existential_there
+    enabled: true
+    category: existential_construction
+    name: Existential There
+    source_tagset: penn_treebank
+    pattern:
+      - EX
+      - VBZ
+      - DT
+      - NN
+    universal_pattern:
+      - PRON
+      - VERB
+      - DET
+      - NOUN
+    example_tags:
+      - EX
+      - VBZ
+      - DT
+      - NN
+    example_text: There is a solution
+    description: "Starts with 'there' (existential), followed by a form of 'to be' and a noun phrase."
+    confidence: 0.68
+    priority: 54
+    metadata:
+      source: pos_patterns.json
+      migration_note: Legacy chunk/Penn pattern retained; universal_pattern provided for updated NLP/grammar modules.
+validation:
+  required_sections:
+    - tagsets
+    - pos_aliases
+    - stopwords
+    - lexical_classes
+    - punctuation
+    - phrase_patterns
+  required_pattern_fields:
+    - id
+    - category
+    - pattern
+    - universal_pattern
+    - confidence
+  test_vectors:
+    -
+      text: the red car
+      penn_tags:
+        - DT
+        - JJ
+        - NN
+      expected_category: noun_phrase
+    -
+      text: New York
+      penn_tags:
+        - NNP
+        - NNP
+      expected_category: noun_phrase
+    -
+      text: is running
+      penn_tags:
+        - VBZ
+        - VBG
+      expected_category: verb_phrase
+    -
+      text: in the city
+      penn_tags:
+        - IN
+        - DT
+        - NN
+      expected_category: prepositional_phrase
+    -
+      text: There is a solution
+      penn_tags:
+        - EX
+        - VBZ
+        - DT
+        - NN
+      expected_category: existential_construction
+migration:
+  retired_files:
+    - pos_map.json
+    - pos_patterns.json
+    - stopwords.json
+  language_config_keys:
+    nlp.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+    grammar_processor.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+    language_rules.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml

@@ -1,0 +1,1310 @@
+metadata:
+  name: language_config
+  version: '3.0'
+  status: production
+  language: en
+  default_locale: en-US
+  updated_for_layout: src/agents/language
+
+
+paths:
+  language_root: src/agents/language
+  config_dir: src/agents/language/config
+  library_dir: src/agents/language/library
+  resources_dir: src/agents/language/resources
+  locale_resources_dir: src/agents/language/resources/en
+  domain_resources_dir: src/agents/language/resources/domains
+  templates_dir: src/agents/language/templates
+  locale_templates_dir: src/agents/language/templates/en
+  artifacts_dir: src/agents/language/artifacts
+  checkpoints_dir: src/agents/language/checkpoints
+  cache_dir: src/agents/language/cache
+  memory_dir: src/agents/language/memory
+  sessions_dir: src/agents/language/sessions
+language: en
+locale: en-US
+allowed_locales:
+- en-US
+- en-GB
+wordlist_path: src/agents/language/library/wordlist_en.txt
+main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+bpe_model_path: data/bpe_200d_50k_model.json
+bpe_vocab_path: data/bpe_200d_50k_vocab.json
+
+
+resource_packs:
+  manifest_path: src/agents/language/resources/en/resource_manifest.yaml
+  orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+  morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+  sentiment_pack_path: src/agents/language/resources/en/sentiment_pack.yaml
+  dialogue_pack_path: src/agents/language/resources/en/dialogue_pack.yaml
+  nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
+  domain_packs:
+    finance_sentiment_pack_path: src/agents/language/resources/domains/finance_sentiment_pack.yaml
+
+
+templates:
+  nlg_templates_path: src/agents/language/templates/en/nlg_templates.yaml
+
+
+resource_loading:
+  mode: pack_first
+  strict_loading: false
+  validate_on_startup: true
+  cache_resources: true
+  reload_on_mtime_change: false
+  locale_fallback_order:
+  - en-US
+  - en-GB
+  - en
+  retired_standalone_files:
+  - irregular_verbs.json
+  - irregular_nouns.json
+  - pos_map.json
+  - stopwords.json
+  - gender_list.json
+  - normalization.yaml
+  - typo_patterns.json
+  - intent_patterns.json
+  - entity_patterns.json
+  - modality_markers.json
+  - verbose_phrases.json
+  - discourse_markers.json
+  - follow_up_patterns.json
+
+
+language_agent:
+  enabled: true
+  pipeline_order:
+  - orthography
+  - nlp
+  - grammar
+  - nlu
+  - dialogue_context_pre_nlg
+  - nlg
+  - dialogue_context_post_nlg
+  pass_precomputed_nlp_to_grammar: true
+  pass_precomputed_nlp_to_nlu: true
+  pass_grammar_result_to_nlu: true
+  pass_dialogue_context_to_nlg: true
+  fail_open_on_recoverable_language_errors: true
+  diagnostics_enabled: true
+  max_input_chars: 200000
+
+
+pipeline_contract:
+  preserve_source_text: true
+  preserve_normalized_text: true
+  preserve_spans: true
+  preserve_edits: true
+  preserve_diagnostics: true
+  nlp_token_contract: word_level_linguistic_tokens
+  model_token_contract: bpe_subword_tokens
+
+
+language_tokenizer:
+  version: '2.1'
+  algorithm: bpe
+  bpe_model_path: data/bpe_200d_50k_model.json
+  bpe_vocab_path: data/bpe_200d_50k_vocab.json
+  artifact_dir: src/agents/language/artifacts/tokenizer
+  target_vocab_size: 50000
+  max_merges: 50000
+  min_frequency: 2
+  end_of_word_suffix: </w>
+  continuation_prefix: ''
+  unknown_policy: char_fallback
+  add_end_of_word: true
+  preserve_punctuation_tokens: true
+  fallback_to_char_tokenization: true
+  allow_dynamic_vocab_growth: false
+  track_offsets: true
+  emit_diagnostics: true
+  strict_loading: false
+  save_pretty: true
+  max_input_chars: 200000
+  max_token_chars: 256
+  history_limit: 200
+  training_history_limit: 20
+  text_preview_length: 240
+  pre_tokenize_pattern: (?:\[[A-Z_]+\])|(?:\p{L}+(?:['’]\p{L}+)*)|(?:\p{N}+(?:[\.,:/-]\p{N}+)*)|(?:[\p{Extended_Pictographic}\p{Emoji_Presentation}])|(?:[^\s])
+  normalization_rules:
+    lowercase: true
+    casefold: false
+    form: NFKC
+    normalize_quotes: false
+    normalize_dashes: false
+    collapse_whitespace: true
+    remove_control_chars: true
+  encode_defaults:
+    add_special_tokens: true
+    padding: false
+    truncation: false
+    max_length: null
+    return_attention_mask: true
+    return_special_tokens_mask: true
+    return_offsets_mapping: true
+    return_token_metadata: true
+    return_tokens: true
+    return_tensors: null
+  decode_defaults:
+    skip_special_tokens: true
+    clean_up_tokenization_spaces: true
+
+
+language_transformer:
+  version: '2.0'
+  task_type: generation
+  history_limit: 200
+  dropout: 0.2
+  base_overrides:
+    src_vocab_size: 50000
+    tgt_vocab_size: 50000
+    d_model: 256
+    nhead: 8
+    num_encoder_layers: 4
+    num_decoder_layers: 4
+    dim_feedforward: 1024
+    dropout: 0.2
+    max_position_embeddings: 512
+    batch_first: true
+    norm_first: false
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 2
+    tie_embeddings: false
+    tie_output_projection: false
+    inference_max_len: 100
+    inference_temperature: 1.0
+    inference_do_sample: false
+    inference_top_k: 0
+  generation:
+    max_length: 100
+    min_length: 1
+    temperature: 1.0
+    top_k: 0
+    do_sample: false
+    repetition_penalty: 1.0
+    no_repeat_ngram_size: 0
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 2
+  beam_search:
+    beam_width: 5
+    length_penalty: 0.6
+  evaluation:
+    ignore_index: 0
+  checkpointing:
+    default_dir: src/agents/language/checkpoints
+    strict: true
+  initialization:
+    apply_language_initialization: false
+    embedding_std: 0.02
+    output_std: 0.02
+  test_overrides:
+    src_vocab_size: 128
+    tgt_vocab_size: 128
+    d_model: 32
+    nhead: 4
+    num_encoder_layers: 1
+    num_decoder_layers: 1
+    dim_feedforward: 64
+    max_position_embeddings: 64
+
+
+language_cache:
+  version: '2.0'
+  max_size: 1000
+  expiry_seconds: 3600
+  strategy_name: LRU
+  strategy: LRU
+  cache_path: src/agents/language/cache/language_cache.pkl.gz
+  metadata_export_path: src/agents/language/cache/language_cache_metadata.json
+  enable_compression: true
+  enable_encryption: false
+  strict_persistence: false
+  load_on_init: true
+  autosave: true
+  save_interval_seconds: 300
+  prune_expired_on_save: true
+  serialization_protocol: 5
+  clone_on_read: false
+  detach_tensors: true
+  tensor_storage_device: cpu
+  hash_algorithm: sha256
+  hash_length: 32
+  normalize_text_keys: true
+  key_namespace: language
+  store_text_preview: true
+  text_preview_length: 256
+  embedding_cache:
+    persist_embeddings: true
+    embedding_ttl_seconds: 86400
+    similarity_top_k: 5
+    similarity_min_score: 0.0
+  summary_cache:
+    persist_summaries: true
+    summary_max_size: 1000
+    summary_ttl_seconds: 86400
+  object_cache:
+    persist_objects: true
+    object_max_size: 1000
+    object_ttl_seconds: 3600
+
+
+language_memory:
+  version: '2.0'
+  memory_path: src/agents/language/memory/language_memory.pkl.gz
+  metadata_export_path: src/agents/language/memory/language_memory_metadata.json
+  max_records: 10000
+  max_records_per_scope: 3000
+  max_turns: 500
+  retain_last_turns: 50
+  max_tags: 32
+  max_entities: 64
+  max_text_length: 12000
+  default_scope: session
+  default_ttl_seconds: null
+  turn_ttl_seconds: 604800
+  fact_ttl_seconds: null
+  preference_ttl_seconds: null
+  slot_ttl_seconds: 86400
+  summary_ttl_seconds: 604800
+  issue_ttl_seconds: 86400
+  recall_top_k: 10
+  recall_min_score: 0.0
+  normalize_keys: true
+  key_namespace: language_memory
+  salience_decay_half_life_seconds: 86400
+  recency_weight: 0.22
+  salience_weight: 0.18
+  confidence_weight: 0.16
+  lexical_weight: 0.18
+  tag_weight: 0.08
+  kind_weight: 0.06
+  scope_weight: 0.04
+  key_weight: 0.04
+  entity_weight: 0.02
+  intent_weight: 0.02
+  load_on_init: true
+  autosave: true
+  save_interval_seconds: 300
+  prune_expired_on_save: true
+  enable_compression: true
+  enable_encryption: false
+  strict_persistence: false
+  serialization_protocol: 5
+  allowed_roles:
+  - user
+  - assistant
+  - agent
+  - system
+  - tool
+  - unknown
+
+
+spell_checker:
+  enabled: true
+  language: en
+  locale: en-US
+  orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+  structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  wordlist_path: src/agents/language/library/wordlist_en.txt
+  typo_patterns_path: null
+  strict_loading: false
+  case_sensitive: false
+  casefold: true
+  preserve_case: true
+  min_word_length: 2
+  max_word_length: 64
+  ignore_words: []
+  ignore_patterns:
+  - ^https?://
+  - ^www\.
+  - ^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$
+  - ^[_\W]+$
+  - ^\d+(?:[.,:/-]\d+)*$
+  - ^\[[A-Z_]+\]$
+  max_suggestions: 5
+  max_candidates: 2500
+  max_typo_variants: 2500
+  max_edit_distance: 2.0
+  candidate_length_window: 3
+  candidate_prefix_length: 1
+  min_candidate_score: 0.0
+  auto_correct_threshold: 0.86
+  suggestion_strategies:
+  - typo_patterns
+  - edit_distance
+  - phonetic
+  - keyboard
+  score_weights:
+    edit: 0.38
+    phonetic: 0.18
+    keyboard: 0.14
+    frequency: 0.1
+    prefix: 0.1
+    shape: 0.05
+    length: 0.05
+  insertion_cost: 1.0
+  deletion_cost: 1.0
+  default_substitution_cost: 1.5
+  enable_phonetic: true
+  phonetic_algorithm: soundex
+  enable_keyboard: true
+  enable_frequency: true
+  enable_typo_patterns: true
+  insertion_characters: aeiourstln
+  enable_compound_check: true
+  enable_hyphenated_check: true
+  include_related_terms: false
+  additional_words:
+  - tokenizer
+  - orthography
+  - lemmatization
+  - subword
+  - nlu
+  - nlg
+  - SLAI
+
+
+orthography_processor:
+  version: '2.0'
+  enabled: true
+  language: en
+  locale: en-US
+  allowed_locales:
+  - en-US
+  - en-GB
+  orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+  normalization_map_path: null
+  contraction_map_path: null
+  locale_variants_path: null
+  protected_terms_path: null
+  enable_auto_correction: true
+  auto_correction_confidence: 0.86
+  low_confidence_threshold: 0.62
+  enable_contraction_expansion: true
+  enable_compound_handling: true
+  enable_locale_normalization: true
+  enable_spelling_correction: true
+  preserve_case: true
+  preserve_whitespace: true
+  normalize_unicode: true
+  normalize_quotes: true
+  normalize_dashes: true
+  collapse_whitespace: false
+  remove_control_chars: true
+  normalize_spacing_around_punctuation: true
+  record_history: true
+  log_errors: true
+  strict_loading: false
+  enable_memory: false
+  history_limit: 200
+  max_context_window: 3
+  max_input_chars: 200000
+  max_token_length: 96
+  max_suggestions: 5
+  min_compound_length: 8
+  token_pattern: \b[\w][\w'’.-]*\b|[^\w\s]
+  word_like_pattern: ^[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+)*$
+  ignore_patterns:
+  - ^https?://
+  - ^www\.
+  - ^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$
+  - ^\d+(?:[.,:/-]\d+)*$
+  - ^\[[A-Z_]+\]$
+  protected_terms:
+  - SLAI
+  - NLU
+  - NLG
+  - BPE
+  - API
+  - GPU
+  - CPU
+
+
+language_rules:
+  version: '2.0'
+  structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  load_structured_wordlist: true
+  enable_morphology: true
+  enable_wordlist_morphology: true
+  enable_regular_inference: true
+  enable_dependency_rules: true
+  enable_relation_deduplication: true
+  infer_verbs_from_wordlist_when_pos_missing: false
+  default_relation_confidence: 0.74
+  low_confidence_threshold: 0.45
+  max_tokens: 512
+  history_limit: 200
+  record_history: true
+  max_wordlist_verb_lemmas: 50000
+  blocked_verb_candidate_suffixes:
+  - ness
+  - tion
+  - ment
+  - ity
+  - ism
+  verb_exception_forms:
+    be:
+      present_singular:
+      - is
+      present_plural:
+      - are
+      past_simple:
+      - was
+      - were
+      past_participle:
+      - been
+      present_participle:
+      - being
+      confidence: 0.99
+    have:
+      present_singular:
+      - has
+      present_plural:
+      - have
+      past_simple:
+      - had
+      past_participle:
+      - had
+      present_participle:
+      - having
+      confidence: 0.99
+    do:
+      present_singular:
+      - does
+      present_plural:
+      - do
+      past_simple:
+      - did
+      past_participle:
+      - done
+      present_participle:
+      - doing
+      confidence: 0.99
+    go:
+      present_singular:
+      - goes
+      present_plural:
+      - go
+      past_simple:
+      - went
+      past_participle:
+      - gone
+      present_participle:
+      - going
+      confidence: 0.99
+  possessive_pronouns:
+  - my
+  - your
+  - his
+  - her
+  - its
+  - our
+  - their
+  copula_verbs:
+  - be
+  - am
+  - is
+  - are
+  - was
+  - were
+  - been
+  - being
+  - seem
+  - seems
+  - seemed
+  - appear
+  - appears
+  - appeared
+  passive_aux_verbs:
+  - be
+  - am
+  - is
+  - are
+  - was
+  - were
+  - been
+  - being
+  modal_aux_verbs:
+  - can
+  - could
+  - may
+  - might
+  - must
+  - shall
+  - should
+  - will
+  - would
+  do_aux_verbs:
+  - do
+  - does
+  - did
+  negation_particles:
+  - not
+  - n't
+  - never
+  - 'no'
+  relative_pronouns:
+  - who
+  - whom
+  - whose
+  - which
+  - that
+  adverbial_subordinators:
+  - when
+  - while
+  - before
+  - after
+  - since
+  - until
+  - because
+  - if
+  - unless
+  - although
+  - as
+  - though
+  clausal_complement_markers:
+  - that
+  - if
+  - whether
+  common_particles:
+  - up
+  - down
+  - in
+  - out
+  - 'on'
+  - 'off'
+  - away
+  - back
+  - over
+  - through
+  discourse_words:
+  - well
+  - so
+  - however
+  - anyway
+  - actually
+  - please
+  - 'yes'
+  - 'no'
+  temporal_nouns:
+  - today
+  - yesterday
+  - tomorrow
+  - morning
+  - afternoon
+  - evening
+  - night
+  - week
+  - month
+  - year
+  - monday
+  - tuesday
+  - wednesday
+  - thursday
+  - friday
+  - saturday
+  - sunday
+  temporal_prepositions:
+  - 'on'
+  - in
+  - at
+  - during
+  - before
+  - after
+  - since
+  - until
+  locative_prepositions:
+  - in
+  - 'on'
+  - at
+  - near
+  - under
+  - over
+  - beside
+  - by
+  - inside
+  - outside
+  predeterminers:
+  - all
+  - both
+  - half
+  - such
+  fixed_expressions:
+  - - of
+    - course
+  - - at
+    - least
+  - - in
+    - fact
+  - - such
+    - as
+  - - for
+    - example
+
+
+nlp:
+  version: '2.0'
+  language: en
+  locale: en-US
+  syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  sentiment_pack_path: src/agents/language/resources/en/sentiment_pack.yaml
+  structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  stopwords_list_path: null
+  pos_patterns_path: null
+  irregular_verbs_path: null
+  irregular_nouns_path: null
+  entity_patterns_path: null
+  sentiment_lexicon_path: null
+  enable_dependency_rules: true
+  enable_entity_extraction: true
+  enable_coreference: true
+  enable_sarcasm_detection: true
+  enable_memory: false
+  track_model_tokens: false
+  record_history: true
+  history_limit: 200
+  max_input_chars: 200000
+  max_tokens: 2048
+  max_sentence_tokens: 256
+  coref_lookback_sentences: 2
+  sentence_end_pattern: (?<=[.!?])\s+
+  token_pattern: \b[\w]+(?:['’][\w]+)?\b|[^\w\s]
+  default_unknown_pos: X
+  default_word_pos: NOUN
+  collapse_whitespace: true
+  pos_patterns:
+  - pattern: ^[.,!?;:()\[\]{}"\']$
+    tag: PUNCT
+  - pattern: ^\d+(?:[.,]\d+)?$
+    tag: NUM
+  - pattern: .*ly$
+    tag: ADV
+  - pattern: .*(ing|ed)$
+    tag: VERB
+  - pattern: .*(tion|sion|ment|ness|ity)$
+    tag: NOUN
+  - pattern: .*(al|ous|ful|less|able|ible)$
+    tag: ADJ
+  stopwords: []
+  person_names: []
+  sarcasm_phrases:
+  - oh great
+  - yeah right
+  - big surprise
+  - perfect, just perfect
+  - what a shocker
+
+
+grammar_processor:
+  version: '2.0'
+  language: en
+  locale: en-US
+  syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  pos_map_path: null
+  main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  strict_input_contract: false
+  record_history: true
+  history_limit: 200
+  max_sentences: 128
+  max_tokens_per_sentence: 256
+  default_issue_confidence: 0.78
+  enable_dependency_enrichment: true
+  enable_dependency_integrity: true
+  enable_sentence_completeness: true
+  enable_fragment_detection: true
+  enable_subject_verb_agreement: true
+  enable_article_usage: true
+  enable_determiner_number: true
+  enable_negation_auxiliary: true
+  enable_repetition_check: true
+  treat_fragments_as_errors: false
+  minimum_fragment_content_tokens: 2
+  allowed_repetitions: 2
+  allow_singular_they: true
+  auxiliaries_requiring_base:
+  - do
+  - does
+  - did
+  - will
+  - would
+  - can
+  - could
+  - may
+  - might
+  - must
+  - shall
+  - should
+  article_ignore_pos:
+  - PROPN
+  - NUM
+  - PUNCT
+  - SYM
+  - X
+  mass_nouns:
+  - water
+  - information
+  - advice
+  - equipment
+  - furniture
+  - research
+  - software
+  - traffic
+  plural_only_nouns:
+  - scissors
+  - pants
+  - trousers
+  - clothes
+  - thanks
+  plural_exceptions:
+    series: series
+    species: species
+    sheep: sheep
+    deer: deer
+  pronoun_features:
+    i:
+      person: 1
+      number: singular
+    you:
+      person: 2
+      number: ambiguous
+    he:
+      person: 3
+      number: singular
+    she:
+      person: 3
+      number: singular
+    it:
+      person: 3
+      number: singular
+    we:
+      person: 1
+      number: plural
+    they:
+      person: 3
+      number: plural
+
+
+nlu:
+  version: '3.1'
+  semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+  sentiment_pack_path: src/agents/language/resources/en/sentiment_pack.yaml
+  domain_sentiment_packs:
+    finance: src/agents/language/resources/domains/finance_sentiment_pack.yaml
+  structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
+  wordlist_path: src/agents/language/library/wordlist_en.txt
+  custom_intent_patterns_path: null
+  custom_entity_patterns_path: null
+  modality_markers_path: null
+  sentiment_lexicon_path: null
+  morphology_rules_path: null
+  default_intent: unknown
+  fallback_intent: unknown
+  low_confidence_threshold: 0.45
+  intent_margin_threshold: 0.12
+  min_entity_confidence: 0.35
+  enable_wordlist_entities: true
+  enable_nlp_entities: true
+  enable_context_intents: true
+  accept_precomputed_nlp: true
+  use_shared_nlp_engine: true
+  instantiate_nlp_engine: false
+  initialize_tokenizer: false
+  initialize_transformer: false
+  history_limit: 200
+  diagnostics_limit: 500
+  wordlist_cache_size: 10000
+  glove_path: null
+  glove_synonym_threshold: 0.65
+  glove_top_synonyms: 3
+  intent_patterns:
+    greeting:
+      triggers:
+      - hello
+      - hi
+      - hey
+      - good morning
+      - good afternoon
+      - good evening
+      - howdy
+      speech_act: expressive
+      priority: 10
+      weight: 1.0
+    farewell:
+      triggers:
+      - bye
+      - goodbye
+      - see you later
+      - talk to you later
+      - farewell
+      - take care
+      speech_act: expressive
+      priority: 10
+      weight: 1.0
+    affirmation:
+      triggers:
+      - 'yes'
+      - yep
+      - yeah
+      - sure
+      - okay
+      - sounds good
+      - confirm
+      - absolutely
+      speech_act: assertive
+      priority: 8
+      weight: 0.95
+    denial:
+      triggers:
+      - 'no'
+      - nope
+      - nah
+      - not really
+      - negative
+      - cancel
+      speech_act: assertive
+      priority: 8
+      weight: 0.95
+    gratitude:
+      triggers:
+      - thanks
+      - thank you
+      - much appreciated
+      - thanks a lot
+      - cheers
+      speech_act: expressive
+      priority: 10
+      weight: 1.0
+    weather_inquiry:
+      triggers:
+      - what's the weather like
+      - tell me the weather
+      - weather forecast
+      - temperature in
+      patterns:
+      - 'weather(?: forecast)?(?: for| in)? .+'
+      - 'is it going to rain(?: in)? .+'
+      required_entities:
+      - LOCATION
+      speech_act: directive
+      priority: 20
+      weight: 1.1
+    time_request:
+      triggers:
+      - what time is it
+      - current time please
+      - do you have the time
+      - tell me the time
+      speech_act: directive
+      priority: 10
+      weight: 1.0
+    date_request:
+      triggers:
+      - what's the date today
+      - what is today's date
+      - current date
+      - what day is it
+      speech_act: directive
+      priority: 10
+      weight: 1.0
+    definition_request:
+      triggers:
+      - what is
+      - define
+      - what does
+      - tell me about
+      patterns:
+      - what is (?P<TERM>.+)
+      - define (?P<TERM>.+)
+      - what does (?P<TERM>.+) mean
+      required_entities:
+      - TERM
+      speech_act: directive
+      priority: 12
+      weight: 1.0
+    help_request:
+      triggers:
+      - help
+      - can you help
+      - i need assistance
+      - support
+      - what can you do
+      - assist me
+      speech_act: directive
+      priority: 10
+      weight: 1.0
+  entity_patterns:
+    LOCATION:
+      patterns:
+      - Paris|London|New York|Tokyo|Berlin|Rome|California|Germany|Main Street|near me
+      validation: location
+      confidence: 0.84
+      priority: 8
+    DATE_TIME:
+      patterns:
+      - today|tomorrow|yesterday|next week|last month|this evening|tonight|now|\d{4}-\d{2}-\d{2}
+      validation: temporal
+      confidence: 0.85
+      priority: 10
+    TIME:
+      patterns:
+      - '[0-2]?[0-9]:[0-5][0-9](?:\s?[AP]M)?'
+      - \d{1,2}\s?(?:am|pm|AM|PM)
+      validation: temporal
+      confidence: 0.9
+      priority: 10
+    DURATION:
+      patterns:
+      - \d+\s+(?:minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)
+      validation: duration
+      confidence: 0.88
+      priority: 9
+    NUMBER:
+      patterns:
+      - -?\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|a couple|a few
+      validation: quantity
+      confidence: 0.86
+      priority: 6
+    TERM:
+      patterns:
+      - '[A-Za-z][A-Za-z0-9_ -]{1,80}'
+      validation: broad_text
+      confidence: 0.55
+      priority: 1
+  modality_markers:
+    epistemic:
+    - certainly
+    - probably
+    - possibly
+    - apparently
+    - maybe
+    - perhaps
+    - likely
+    - unlikely
+    deontic:
+    - must
+    - should
+    - ought
+    - permitted
+    - allowed
+    - forbidden
+    - required
+    - need
+    - shall
+    - have to
+    dynamic:
+    - can
+    - could
+    - able
+    - capable
+    - unable
+    - cannot
+    - could not
+    alethic:
+    - necessarily
+    - possibly
+    - contingently
+    - impossibly
+    - 'true'
+    - 'false'
+    interrogative:
+    - who
+    - what
+    - when
+    - where
+    - why
+    - how
+    - which
+    - whether
+    - if
+    imperative:
+    - please
+    - kindly
+    - urgently
+    - immediately
+    - do
+    - go
+    - stop
+    - request
+    - ensure
+    - make sure
+    - let's
+    conditional:
+    - if
+    - unless
+    - provided
+    - assuming
+    - whenever
+    - while
+    - given
+    - suppose
+    - in case
+  sentiment:
+    positive:
+      good: 0.7
+      great: 0.9
+      excellent: 1.0
+      thanks: 0.5
+      helpful: 0.6
+      love: 0.9
+    negative:
+      bad: -0.7
+      terrible: -1.0
+      wrong: -0.6
+      hate: -0.9
+      problem: -0.5
+      issue: -0.4
+    negators:
+    - not
+    - never
+    - 'no'
+    - n't
+    intensifiers:
+      very: 1.25
+      really: 1.2
+      extremely: 1.5
+      slightly: 0.7
+
+
+dialogue_context:
+  version: '2.0'
+  dialogue_pack_path: src/agents/language/resources/en/dialogue_pack.yaml
+  memory_limit: 20
+  message_limit: 200
+  threshold: 0.7
+  required_slots: []
+  include_summary: true
+  include_history: true
+  include_slots: true
+  include_unresolved: true
+  include_intents: true
+  include_preferences: true
+  include_environment: false
+  enable_summarization: true
+  enable_memory: true
+  enable_cache: true
+  enable_persistence: true
+  enable_topic_detection: true
+  enable_follow_up_detection: true
+  default_history_window: 8
+  default_turn_window: 4
+  max_context_chars: 6000
+  text_preview_length: 240
+  default_initial_history:
+  - 'System: Hello! How can I assist you today?'
+  initial_history: []
+  default_initial_summary: The conversation has just begun.
+  initial_summary: null
+  initial_environment_state:
+    current_topic: general
+    user_id: null
+    conversation_phase: opening
+    modality: text
+    urgency_level: 1
+  default_initial_environment_state:
+    session_id: null
+    user_preferences: {}
+    last_intent: null
+  follow_up_patterns_path: null
+  follow_up_patterns:
+  - (?:going|getting)\s+back\s+to
+  - (?:as\s+we\s+discussed|mentioned)\s+(?:earlier|before)
+  - following\s+up\s+on
+  - to\s+circle\s+back\s+to
+  - continuing\s+where\s+we\s+left\s+off
+  role_aliases:
+    assistant: agent
+    bot: agent
+    ai: agent
+  slot_validation_rules:
+    destination:
+      type: string
+      allowed_values: []
+    travel_dates:
+      type: date_range
+  strict_slots: false
+  auto_register_entities_as_slots: true
+  topic_detection:
+    similarity_threshold: 0.65
+    lookback_window: 4
+    min_text_length: 3
+  summarization:
+    retain_last_messages: 2
+    summary_update_strategy: accumulate
+    max_summary_length: 500
+    cache_namespace: dialogue_context
+  persistence:
+    auto_save_interval: 300
+    default_save_path: src/agents/language/sessions/dialogue_context.json
+    pretty: true
+    redact: false
+  temporal:
+    session_timeout: 1800
+    time_reference_format: ISO
+
+
+nlg:
+  version: '3.0'
+  generation_mode: template
+  templates_path: src/agents/language/templates/en/nlg_templates.yaml
+  nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
+  semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+  verbose_phrases: null
+  modality_markers_path: null
+  coherence_checker: {}
+  strict_loading: false
+  record_history: true
+  history_limit: 200
+  random_seed: null
+  enable_memory: false
+  low_confidence_threshold: 0.6
+  very_low_confidence_threshold: 0.35
+  positive_sentiment_threshold: 0.5
+  negative_sentiment_threshold: -0.5
+  prepend_modality_markers: false
+  prepend_speech_act_markers: false
+  style:
+    formality: 0.55
+    verbosity: 1.0
+    verbosity_mode: default
+    allow_slang: false
+    max_contractions: 3
+    truncation_length: 35
+    informal_prefix_probability: 0.15
+    verbose_prefix_probability: 0.25
+    informal_phrases:
+    - No worries.
+    - Got it.
+    verbose_phrases:
+      default:
+      - 'For additional context:'
+      - 'To elaborate further:'
+      - 'In more concrete terms:'
+      technical:
+      - 'From an implementation perspective:'
+      - 'Architecturally:'
+      friendly:
+      - 'Here is the key idea:'
+      - 'Let me break that down:'
+  verbose_phrases_inline:
+    default:
+    - 'For additional context:'
+    - 'To elaborate further:'
+    - 'In more concrete terms:'
+    technical:
+    - 'From an implementation perspective:'
+    - 'Architecturally:'
+    friendly:
+    - 'Here is the key idea:'
+    - 'Let me break that down:'
+  modality_markers:
+    epistemic:
+    - probably
+    - possibly
+    - likely
+    - I think
+    deontic:
+    - should
+    - must
+    - need to
+    dynamic:
+    - can
+    - could
+    - is able to
+    conditional:
+    - if
+    - provided that
+  validation:
+    min_words: 1
+    max_words: 160
+    max_characters: 2000
+    blocked_patterns:
+    - as an AI language model
+    - I cannot answer that
+  inline_templates:
+    default:
+      responses:
+      - I'm not sure how to respond to that yet.
+      - Could you clarify what you mean?
+    greeting:
+      triggers:
+      - hello
+      - hi
+      - hey
+      responses:
+      - Hello! How can I help you today?
+      - Hi there. What would you like to work on?
+    farewell:
+      triggers:
+      - bye
+      - goodbye
+      - see you
+      responses:
+      - Goodbye! Let me know if you need anything else.
+    gratitude:
+      triggers:
+      - thanks
+      - thank you
+      responses:
+      - You're welcome.
+    clarification_request:
+      responses:
+      - I want to make sure I understand correctly. Are you asking about {pending_intent|'your request'}?
+
+
+neural_generation:
+  max_retries: 2
+  fallback_after_retries: true
+  max_tokens: 512
+  temperature: 0.7
+  min_words: 1
+  max_words: 160
+
+
+dialogue_policy:
+  low_confidence_threshold: 0.6
+  clarification_intent: clarification_request
+  fallback_intent: unknown
+  max_clarification_attempts: 2
+
+
+clarification_request:
+  template: 'I want to make sure I understand correctly. Are you asking about
+
+    {pending_intent} with {mentioned_entities|''these details''}?
+
+    Please confirm or clarify.
+
+    '
+  conditions:
+  - context.unresolved_issues contains low_confidence_intent
+
+
+domain_resources:
+  enabled_domains: []
+  available_domains:
+    finance:
+      sentiment_pack_path: src/agents/language/resources/domains/finance_sentiment_pack.yaml
+      enable_when_intents:
+      - finance_analysis
+      - market_summary
+      - financial_document_review
+
+
+style:
+  formality: 0.55
+  verbosity: 1.0
+  verbosity_mode: default

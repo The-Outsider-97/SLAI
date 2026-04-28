@@ -1,0 +1,284 @@
+metadata:
+  name: resource_manifest
+  language: en
+  version: 1.0.0
+  schema_version: '1.0'
+  created: '2026-04-28'
+  status: production_ready
+  description: Canonical registry for language-agent resource packs, domain overlays, templates, retired standalone files,
+    and module ownership.
+  intended_consumers:
+  - LanguageResourceManager
+  - LanguageAgent
+  - module startup validators
+  - test suites
+directory_layout:
+  config: src/agents/language/config/language_config.yaml
+  resources_en: src/agents/language/resources/en/
+  resources_domains: src/agents/language/resources/domains/
+  templates_en: src/agents/language/templates/en/
+loading_policy:
+  load_once: true
+  cache_resources: true
+  validate_schema_on_load: true
+  validate_checksums: warn
+  missing_required_resource: error
+  missing_optional_resource: warning
+  hot_reload:
+    enabled: false
+    strategy: mtime_and_checksum
+  locale_resolution_order:
+  - requested_locale
+  - language_default
+  - en
+resources:
+- id: orthography_pack.en
+  path: src/agents/language/resources/en/orthography_pack.yaml
+  type: resource_pack
+  pack_type: orthography
+  language: en
+  owner_modules:
+  - OrthographyProcessor
+  - SpellChecker
+  replaces:
+  - normalization.yaml
+  - typo_patterns.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: 4557e09ec940d26454aaea6849d760e785c8478b4cc5da385ab903374e417e2d
+  size_bytes: 139029
+  status: available
+- id: syntax_pack.en
+  path: src/agents/language/resources/en/syntax_pack.yaml
+  type: resource_pack
+  pack_type: syntax
+  language: en
+  owner_modules:
+  - NLPEngine
+  - GrammarProcessor
+  - Rules
+  replaces:
+  - pos_map.json
+  - pos_patterns.json
+  - stopwords.json
+  - gender_list.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: 6a364d6b064e76ccaaedf9f4b788637cdf9cbd6527a13ac5d5723159a0ca8398
+  size_bytes: 44378
+  status: available
+- id: morphology_pack.en
+  path: src/agents/language/resources/en/morphology_pack.yaml
+  type: resource_pack
+  pack_type: morphology
+  language: en
+  owner_modules:
+  - Rules
+  - NLPEngine
+  - GrammarProcessor
+  replaces:
+  - morphology_rules.json
+  - irregular_nouns.json
+  - irregular_verbs.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: 64a31123103d46478c560a8dc0047bd09d633a47368325ab278e364c5aeb24d0
+  size_bytes: 84887
+  status: available
+- id: semantics_pack.en
+  path: src/agents/language/resources/en/semantics_pack.yaml
+  type: resource_pack
+  pack_type: semantics
+  language: en
+  owner_modules:
+  - NLUEngine
+  - NLGEngine
+  - DialogueContext
+  replaces:
+  - intent_patterns.json
+  - entity_patterns.json
+  - modality_markers.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: a50fffc2d2e267a63ec477d76e5ba48ae0495dd0b238fb52e514e19a82912e76
+  size_bytes: 40007
+  status: available
+- id: sentiment_pack.en
+  path: src/agents/language/resources/en/sentiment_pack.yaml
+  type: resource_pack
+  pack_type: sentiment
+  language: en
+  owner_modules:
+  - NLUEngine
+  - NLPEngine
+  - DialogueContext
+  replaces:
+  - sentiment_lexicon.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: bbb60adedd6a9a669c58ab141bdd48e1aa8e4d62a4102299c2393ea7b32a4d9b
+  size_bytes: 39763
+  status: available
+- id: dialogue_pack.en
+  path: src/agents/language/resources/en/dialogue_pack.yaml
+  type: resource_pack
+  pack_type: dialogue
+  language: en
+  owner_modules:
+  - DialogueContext
+  - LanguageAgent
+  - NLGEngine
+  replaces:
+  - follow_up_patterns.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: a427defe95896b9d38dfe4c61c9cb09f6d6d6a44057a441ec4ff5ea2b8937366
+  size_bytes: 22336
+  status: available
+- id: nlg_pack.en
+  path: src/agents/language/resources/en/nlg_pack.yaml
+  type: resource_pack
+  pack_type: nlg
+  language: en
+  owner_modules:
+  - NLGEngine
+  replaces:
+  - discourse_markers.json
+  - verbose_phrases.json
+  - politeness_strategies.yaml
+  required: true
+  checksum:
+    algorithm: sha256
+    value: 73257d8119915b59d0585f1603dcabed430d511824deb7ebbf0d7786949f91ab
+  size_bytes: 152479
+  status: available
+- id: finance_sentiment_pack.en
+  path: src/agents/language/resources/domains/finance_sentiment_pack.yaml
+  type: domain_overlay
+  pack_type: sentiment_domain_overlay
+  language: en
+  domain: finance
+  owner_modules:
+  - NLUEngine
+  - LanguageResourceManager
+  replaces:
+  - loughran_mcdonald_lexicon.json
+  required: false
+  checksum:
+    algorithm: sha256
+    value: 26c0598bdc6f224dc093dc2b17f8eb729c6e3363e23eee8854ac3c021bebd39d
+  size_bytes: 2633
+  status: available
+- id: nlg_templates.en
+  path: src/agents/language/templates/en/nlg_templates.yaml
+  type: template_pack
+  pack_type: nlg_templates
+  language: en
+  owner_modules:
+  - NLGEngine
+  replaces:
+  - nlg_templates_en.json
+  required: true
+  checksum:
+    algorithm: sha256
+    value: 73f3ac11c85b5621b9d5a5855b7a807722a3e255f622439baf635338e15e02f5
+  size_bytes: 18049
+  status: available
+retired_standalone_files:
+  delete_after_migration:
+  - normalization.yaml
+  - typo_patterns.json
+  - pos_map.json
+  - pos_patterns.json
+  - stopwords.json
+  - gender_list.json
+  - morphology_rules.json
+  - irregular_nouns.json
+  - irregular_verbs.json
+  - intent_patterns.json
+  - entity_patterns.json
+  - modality_markers.json
+  - sentiment_lexicon.json
+  - follow_up_patterns.json
+  - discourse_markers.json
+  - verbose_phrases.json
+  - politeness_strategies.yaml
+  - loughran_mcdonald_lexicon.json
+  move_or_convert:
+    nlg_templates_en.json: src/agents/language/templates/en/nlg_templates.yaml
+    language_config.yaml: src/agents/language/config/language_config.yaml
+module_resource_map:
+  OrthographyProcessor:
+  - orthography_pack.en
+  SpellChecker:
+  - orthography_pack.en
+  Rules:
+  - syntax_pack.en
+  - morphology_pack.en
+  NLPEngine:
+  - syntax_pack.en
+  - morphology_pack.en
+  - sentiment_pack.en
+  GrammarProcessor:
+  - syntax_pack.en
+  - morphology_pack.en
+  NLUEngine:
+  - semantics_pack.en
+  - sentiment_pack.en
+  - finance_sentiment_pack.en
+  DialogueContext:
+  - dialogue_pack.en
+  - semantics_pack.en
+  - sentiment_pack.en
+  NLGEngine:
+  - nlg_pack.en
+  - semantics_pack.en
+  - nlg_templates.en
+  LanguageAgent:
+  - orthography_pack.en
+  - syntax_pack.en
+  - morphology_pack.en
+  - semantics_pack.en
+  - sentiment_pack.en
+  - dialogue_pack.en
+  - nlg_pack.en
+  - nlg_templates.en
+config_path_hints:
+  orthography_processor.orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+  spell_checker.orthography_pack_path: src/agents/language/resources/en/orthography_pack.yaml
+  nlp.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  nlp.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  nlp.sentiment_pack_path: src/agents/language/resources/en/sentiment_pack.yaml
+  language_rules.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  language_rules.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  grammar_processor.syntax_pack_path: src/agents/language/resources/en/syntax_pack.yaml
+  grammar_processor.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  nlu.semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+  nlu.sentiment_pack_path: src/agents/language/resources/en/sentiment_pack.yaml
+  nlu.domain_sentiment_pack_paths.finance: src/agents/language/resources/domains/finance_sentiment_pack.yaml
+  dialogue_context.dialogue_pack_path: src/agents/language/resources/en/dialogue_pack.yaml
+  nlg.nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
+  nlg.templates_path: src/agents/language/templates/en/nlg_templates.yaml
+validation:
+  manifest_checks:
+  - every required resource exists
+  - every resource has a unique id
+  - checksums are sha256
+  - owner modules are known language subsystem modules
+  - retired files are not referenced directly by language_config.yaml after migration
+  known_pack_types:
+  - orthography
+  - syntax
+  - morphology
+  - semantics
+  - sentiment
+  - dialogue
+  - nlg
+  - sentiment_domain_overlay
+  - nlg_templates
