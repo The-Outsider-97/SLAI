@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.1.0"
 
 """
 Production-ready Language Agent.
