@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import gzip
 import logging
 import os, sys
@@ -12,15 +13,18 @@ import statistics
 import atexit
 import shutil
 import pprint
-import msvcrt
+if os.name == 'nt':
+    import msvcrt
+else:
+    msvcrt = None
 import uuid
+import pynvml
 
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from collections import deque
 from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.utils.system_optimizer import SystemOptimizer
+    from src.utils.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
 
 sys.stdout.isatty = lambda: True
 
@@ -252,28 +256,26 @@ log_queue = queue.Queue()
 _logger_initialized = False
 
 class ColorFormatter(logging.Formatter):
+    """Formatter that adds color to the level name only."""
+    _level_colors = {
+        logging.WARNING:  STYLES['yellow'],
+        logging.ERROR:    STYLES['red'],
+        logging.CRITICAL: STYLES['magenta'],
+        # All other levels (DEBUG, INFO) use no extra color (default white)
+    }
 
-    def format(self, record):
-        if not sys.stdout.isatty():
-            return super().format(record)
-        level = record.levelname
-        message = record.getMessage()
-
-        if "initializ" in message.lower():
-            color = COLOR_CODES['BLUE']
-        elif "load" in message.lower() and record.levelno < logging.WARNING:
-            color = COLOR_CODES['GREEN']
-        elif record.levelno >= logging.CRITICAL:
-            color = COLOR_CODES['RED']
-        elif record.levelno >= logging.WARNING:
-            color = COLOR_CODES['YELLOW']
-        elif record.levelno >= logging.ERROR:
-            color = STYLES['Orange1']
-        else:
-            color = COLOR_CODES['RESET']
-
-        formatted = f"{record.levelname}:{record.name}:{message}"
-        return f"{color}{formatted}{COLOR_CODES['RESET']}"
+    def format(self, record: logging.LogRecord) -> str:
+        # Save original levelname
+        original_levelname = record.levelname
+        # Determine color
+        color = self._level_colors.get(record.levelno, '')
+        if color and sys.stdout.isatty():
+            record.levelname = f"{color}{original_levelname}{STYLES['reset']}"
+        # Let the parent formatter do the rest (timestamp, name, message)
+        result = super().format(record)
+        # Restore original levelname to avoid side effects
+        record.levelname = original_levelname
+        return result
 
 class QueueLogHandler(logging.Handler):
     def __init__(self, q: queue.Queue, batch_size: int = 10, flush_interval: int = 5) -> None:
@@ -321,23 +323,24 @@ def get_logger(name: str) -> logging.Logger:
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
-        # File handler
+        # File handler (no colors)
         file_handler = RotatingHandler(
             'logs/app.log', 
             maxBytes=1000000, 
             backupCount=5, 
-            delay=True  # Defer file opening until first log
+            delay=True
         )
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(file_handler)
 
-        # Console handler with colors
+        # Console handler with colored level names
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s'))
+        console_formatter = ColorFormatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+        console_handler.setFormatter(console_formatter)
         root_logger.addHandler(console_handler)
 
-        # Queue handler
+        # Queue handler (no colors)
         handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
@@ -489,9 +492,11 @@ class RotatingHandler(RotatingFileHandler):
                 continue
             gz_path = path + '.gz'
             try:
+                # Explicit chunked copy to avoid type confusion and memory spikes
                 with open(path, 'rb') as f_in:
                     with gzip.open(gz_path, 'wb') as f_out:
-                        shutil.copyfileobj(f_in, f_out)
+                        while chunk := f_in.read(64 * 1024):   # 64 KiB chunks
+                            f_out.write(chunk) # pyright: ignore[reportArgumentType]
                 os.remove(path)
             except Exception as e:
                 logging.getLogger("RotatingHandler").error(f"Compression error for {path}: {e}")
@@ -511,6 +516,18 @@ class ResourceLogger:
         except:
             pass
 
+    def _get_gpu_usage(self):
+        if not self._gpu_initialized:
+            self._initialize_gpu()
+            return 0.0
+            
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return util.gpu
+        except:
+            return 0.0
+    
     def collect_metrics(self) -> dict:
         self.record_event()
 
@@ -530,18 +547,6 @@ class ResourceLogger:
             return current
         return alpha * current + (1-alpha) * self.cpu_history[-1]
 
-    def _get_gpu_usage(self):
-        if not self._gpu_initialized:
-            self._initialize_gpu()
-            return 0.0
-            
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            return util.gpu
-        except:
-            return 0.0
-    
     def _calc_throughput(self) -> float:
         """
         Calculate average throughput (events per second) based on recorded (timestamp, count) entries.
