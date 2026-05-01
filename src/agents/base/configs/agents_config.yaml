@@ -403,21 +403,147 @@ reasoning_agent:
     decay: 0.8
     max_iterations: 100
 
+
 safety_agent:
-    constitutional_rules_path: "src/agents/safety/templates/constitutional_rules.json"
-    audit_level: 2
-    collect_feedback: true
-    enable_learnable_aggregation: true
-    system_models: {}
-    known_hazards: []
-    global_losses: []
-    safety_policies: []
-    architecture_map: {}
-    formal_specs: {}
-    fault_tree_config: {}
-    risk_thresholds:
-        overall_safety: 0.85
-        cyber_risk: 0.7
-        compliance_failure_is_blocker: true
-    secure_memory:
-        default_ttl_seconds: 3600
+  enabled: true
+  schema_version: safety_agent.v3
+  constitutional_rules_path: src/agents/safety/templates/constitutional_rules.json
+  max_constitution_bytes: 1048576
+  max_input_text_length: 12000
+  audit_level: 2
+  collect_feedback: true
+  enable_learnable_aggregation: false
+  fail_closed_on_component_error: true
+  sanitization_depth: full
+  empty_assessment_risk: 0.5
+  assessment_history_limit: 500
+  audit_trail_limit: 1000
+  components:
+    safety_guard:
+      enabled: true
+    cyber_safety:
+      enabled: true
+    adaptive_security:
+      enabled: true
+    reward_model:
+      enabled: true
+    attention_monitor:
+      enabled: true
+    compliance_checker:
+      enabled: true
+    secure_stpa:
+      enabled: true
+  risk_thresholds:
+    overall_safety: 0.85
+    cyber_risk: 0.7
+    review_threshold: 0.45
+    block_threshold: 0.75
+    compliance_failure_is_blocker: true
+  aggregation_weights:
+    safety_guard: 0.3
+    cyber_safety: 0.2
+    adaptive_security: 0.15
+    reward_model: 0.2
+    attention_monitor: 0.05
+    compliance: 0.05
+    constitutional: 0.05
+    secure_stpa: 0.1
+  task_thresholds:
+    general: 0.75
+    cyber_security: 0.8
+    privacy: 0.85
+    execution: 0.85
+    user_creation: 0.8
+  shared_memory:
+    enabled: true
+    key_prefix: safety_agent
+    store_assessments: true
+    store_audit_events: true
+    assessment_ttl_seconds: 604800
+    validation_ttl_seconds: 604800
+    audit_ttl_seconds: 2592000
+    feedback_ttl_seconds: 2592000
+    posture_ttl_seconds: 604800
+  compliance:
+    evaluate_on_task: false
+    evaluate_every_n_calls: 0
+  posture:
+    include_compliance: true
+    assessment_sample_size: 25
+  action_validation:
+    stpa_match_threshold: 0.7
+    require_human_review_above: 0.45
+    block_above: 0.75
+  constitutional:
+    block_on_violation: true
+    redact_on_violation: true
+    block_message: '[SAFETY_BLOCK] Output violates constitutional safety policy.'
+    default_keywords:
+    - self-harm
+    - credential
+    - pii
+    - unauthorized
+    - discriminate
+    - violence
+    - harassment
+    - malware
+    - secret
+    checks:
+    - rule_id: SAFETY-SELF-HARM
+      category: safety
+      severity: critical
+      description: Blocks explicit self-harm encouragement or facilitation.
+      patterns:
+      - \bkill yourself\b
+      - \bend my life\b
+      - \bsuicide instructions\b
+    - rule_id: PRIVACY-CREDENTIALS
+      category: privacy_security
+      severity: high
+      description: Flags raw credential or secret disclosure in agent output/action
+        text.
+      patterns:
+      - (?i)\b(api[_-]?key|password|secret|token)\s*[:=]
+    - rule_id: SECURITY-BYPASS
+      category: security
+      severity: high
+      description: Flags requests or actions attempting to bypass safety/security
+        controls.
+      patterns:
+      - (?i)ignore\s+(all\s+)?previous\s+instructions
+      - (?i)jailbreak
+      - (?i)disable\s+safety
+  incident_response:
+    default:
+    - Contain operation
+    - Preserve audit evidence
+    - Route for human review
+    privacy:
+    - Isolate affected data path
+    - Notify privacy owner
+    - Preserve redacted audit evidence
+    safety:
+    - Block unsafe operation
+    - Escalate to safety owner
+    - Review related prompts/actions
+    cyber_security:
+    - Quarantine suspicious artifact
+    - Correlate cyber findings
+    - Escalate to security owner
+  feedback:
+    min_samples_for_retrain: 25
+    store_feedback: true
+  adversarial_patterns:
+  - (?i)ignore\s+(all\s+)?previous\s+instructions
+  - (?i)developer\s+mode
+  - (?i)jailbreak
+  - (?i)system\s+prompt
+  system_boundary: Safety Agent orchestration boundary
+  architecture_map: {}
+  system_models: {}
+  known_hazards: []
+  global_losses: []
+  safety_policies: []
+  formal_specs: {}
+  fault_tree_config: {}
+
