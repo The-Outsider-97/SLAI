@@ -1,0 +1,303 @@
+{
+    "principles": [
+      "Enforce Least Privilege: Grant only necessary permissions.",
+      "Input Validation and Sanitization: Treat all input as untrusted. Validate, sanitize, and encode.",
+      "Secure Configuration Management: Harden configurations, remove defaults, and regularly review.",
+      "Regular Security Auditing and Monitoring: Continuously monitor for and audit security posture.",
+      "Defense in Depth: Employ multiple layers of security controls.",
+      "Secure Defaults: Design systems to be secure by default.",
+      "Fail Securely: Ensure systems fail in a state that maintains security.",
+      "Separation of Duties: Distribute critical tasks among multiple individuals or processes.",
+      "Protect Data in Transit and at Rest: Encrypt sensitive data during transmission and storage.",
+      "Implement Strong Authentication and Session Management: Use robust methods for verifying identity and managing sessions.",
+      "Keep Software and Systems Updated: Regularly patch and update all components to address known vulnerabilities.",
+      "Principle of Least Astonishment: Secure designs should behave in predictable ways.",
+      "Threat Modeling (e.g., STRIDE): Proactively identify and mitigate potential threats.",
+      "Security by Design: Integrate security considerations throughout the entire development lifecycle.",
+      "Regularly Back Up Critical Data: Ensure data can be recovered in case of an incident.",
+      "Minimize Attack Surface: Reduce the number of exposed entry points and functionalities.",
+      "Error Handling and Logging: Implement secure error handling and comprehensive logging.",
+      "Use Strong Cryptography: Employ vetted cryptographic algorithms and protocols correctly."
+    ],
+    "patterns": [
+      {
+        "name": "Generic Sensitive Keyword Exposure",
+        "regex_list": [
+          "(?:api_?key|auth_?token|access_?token|client_?secret|session_?key|bearer_?token|jwt_?token|secret_?key|private_?key)\\s*[:=]\\s*['\"]?([A-Za-z0-9\\-_\\.~+/=]{20,})['\"]?",
+          "['\"]?(?:api_?key|auth_?token|access_?token|client_?secret|session_?key|bearer_?token|jwt_?token|secret_?key|private_?key)['\"]?\\s*[:=]\\s*['\"]?([A-Za-z0-9\\-_\\.~+/=]{20,})['\"]?"
+        ],
+        "severity": 0.9
+      },
+      {
+        "name": "AWS Credentials Exposure",
+        "regex_list": [
+          "['\"]?AWS_ACCESS_KEY_ID['\"]?\\s*[:=]\\s*['\"]?(AKIA[0-9A-Z]{16})['\"]?",
+          "['\"]?AWS_SECRET_ACCESS_KEY['\"]?\\s*[:=]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?",
+          "['\"]?aws_access_key_id['\"]?\\s*[:=]\\s*['\"]?(AKIA[0-9A-Z]{16})['\"]?",
+          "['\"]?aws_secret_access_key['\"]?\\s*[:=]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
+        ],
+        "severity": 0.95
+      },
+      {
+        "name": "Google Cloud (GCP) Credentials Exposure",
+        "regex_list": [
+          "AIza[0-9A-Za-z\\-_]{35}",
+          "['\"]?google_api_key['\"]?\\s*[:=]\\s*['\"]?(AIza[0-9A-Za-z\\-_]{35})['\"]?",
+          "ya29\\.[0-9A-Za-z\\-_]+"
+        ],
+        "severity": 0.95
+      },
+      {
+        "name": "Azure Credentials Exposure",
+        "regex_list": [
+          "['\"]?AZURE_CLIENT_ID['\"]?\\s*[:=]\\s*['\"]?([a-f0-9\\-]{36})['\"]?",
+          "['\"]?AZURE_CLIENT_SECRET['\"]?\\s*[:=]\\s*['\"]?([A-Za-z0-9\\-_\\.~]{40,})['\"]?"
+        ],
+        "severity": 0.95
+      },
+      {
+        "name": "SSH Private Key Exposure",
+        "regex_list": [
+          "-----BEGIN (?:RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----",
+          "ssh-(?:rsa|dss|ed25519|ecdsa-sha2-nistp256)\\s+AAAA[A-Za-z0-9+/=]+"
+        ],
+        "severity": 1.0
+      },
+      {
+        "name": "Password in Cleartext or Common Variable",
+        "regex_list": [
+          "(?:password|passwd|secret|pwd|passphrase)\\s*[:=]\\s*['\"]?([^'\"\\s]{4,})['\"]?",
+          "DATABASE_URL\\s*[:=]\\s*['\"]?(?:postgres|mysql|mongodb(?:\\+srv)?)://[^:]+:([^@]+)@.+['\"]?"
+        ],
+        "severity": 0.8
+      },
+      {
+        "name": "Weak Password Pattern",
+        "regex_list": [
+          "\\b(?:password|123456|12345678|qwerty|admin|root|123123|111111|abcdef|sunshine|p@ssword)\\b",
+          "(\\w)\\1{4,}",
+          "^(?:0123|1234|2345|3456|4567|5678|6789|7890|qwer|asdf|zxcv|rewq|fdsa|vcxz)+$",
+          "^(?:january|february|march|april|may|june|july|august|september|october|november|december)$"
+        ],
+        "severity": 0.6
+      },
+      {
+        "name": "Default Credentials Pattern",
+        "regex_list": [
+          "(?:user(?:name)?|login|usr)\\s*[:=]\\s*['\"]?(?:admin|root|administrator|guest|test|user)['\"]?",
+          "password\\s*[:=]\\s*['\"]?(?:admin|root|password|secret|1234|default|changeme|guest|test|user)['\"]?"
+        ],
+        "severity": 0.7
+      },
+      {
+        "name": "SQL Injection Indicators",
+        "regex_list": [
+          "('|--|#|;)\\s*(?:\\bOR\\b|\\bUNION\\b|\\bSELECT\\b|\\bINSERT\\b|\\bUPDATE\\b|\\bDELETE\\b|\\bDROP\\b|\\bSLEEP\\s*\\(|\\bWAITFOR\\s+DELAY\\b)",
+          "\\b(UNION(\\s+ALL)?\\s+SELECT)\\b",
+          "\\b(SELECT\\s+.*\\s+FROM\\s+.*\\s+WHERE)\\b",
+          "1\\s*=\\s*1",
+          "'\\s*or\\s*'\\d+'\\s*=\\s*'\\d+"
+        ],
+        "severity": 0.9
+      },
+      {
+        "name": "Cross-Site Scripting (XSS) Indicators",
+        "regex_list": [
+          "<script(?:[^>]*)>[\\s\\S]*?</script>",
+          "<img\\s+[^>]*src\\s*=\\s*['\"]?javascript:",
+          "<[^>]+(?:onerror|onload|onmouseover|onclick|onfocus|onblur|oninput|onchange|ondrag|ondrop|oncopy|oncut|onpaste)\\s*=",
+          "href\\s*=\\s*['\"]?javascript:",
+          "data:[^;]*;base64,[^'\"]*(?:<script|<img)",
+          "eval\\((?:[^)]*\\bdocument\\b[^)]*)\\)",
+          "document\\.write\\("
+        ],
+        "severity": 0.8
+      },
+      {
+        "name": "Command Injection Indicators",
+        "regex_list": [
+          "(&&|\\|\\||;|%0A|%0D|\\n|\\r|`|\\$\\(|\\$\\{)",
+          "\\b(?:ping|cat|ls|dir|rm|cp|mv|nc|netcat|sh|bash|powershell|cmd|exec|system|os\\.system)\\s+[^;]*[;&|`]"
+        ],
+        "severity": 0.95
+      },
+      {
+        "name": "Log Injection / Forging Indicators",
+        "regex_list": [
+          "(\\n|\\r|%0a|%0d|%00)[^\\n\\r]*(?:login|password|session|token|user|creditcard|ssn)",
+          "User-Agent:[^\\n\\r]*(\\n|\\r|%0a|%0d)"
+        ],
+        "severity": 0.7
+      },
+      {
+        "name": "LDAP Injection Indicators",
+        "regex_list": [
+          "\\*\\)\\s*\\(|\\(\\s*\\*\\)|\\)\\(|\\(cn=\\*\\)",
+          "[\\(\\|&!]"
+        ],
+        "severity": 0.8
+      },
+      {
+        "name": "XPath Injection Indicators",
+        "regex_list": [
+          "'\\s*or\\s*'\\d+'\\s*=\\s*'\\d+",
+          "'\\s*or\\s*'\\w+'\\s*=\\s*'\\w+",
+          "//user\\[name\\(normalize-space\\(\\.\\)\\)='\\w+' and password\\(normalize-space\\(\\.\\)\\)='\\w+'\\]"
+        ],
+        "severity": 0.8
+      },
+      {
+        "name": "Server-Side Template Injection (SSTI) Indicators",
+        "regex_list": [
+          "\\{\\{[^}]*\\}\\}",
+          "<%(?:=|-)?[^%>]*%>",
+          "\\$\\{[^}]*\\}",
+          "#\\{[^}]*\\}",
+          "\\[\\[(?:@|~|\\*|#|\\$)?{(.*?)}\\]\\]"
+        ],
+        "severity": 0.85
+      },
+      {
+        "name": "Debug Mode or Development Environment Enabled",
+        "regex_list": [
+          "debug\\s*[:=]\\s*(?:true|1|on|yes)",
+          "environment\\s*[:=]\\s*['\"]?(?:dev|development|test|staging)['\"]?",
+          "FLASK_ENV\\s*=\\s*development",
+          "NODE_ENV\\s*=\\s*development"
+        ],
+        "severity": 0.5
+      },
+      {
+        "name": "Directory Listing Enabled",
+        "regex_list": [
+          "Index of /",
+          "Options\\s+\\+Indexes"
+        ],
+        "severity": 0.4
+      },
+      {
+        "name": "Overly Permissive CORS Policy",
+        "regex_list": [
+          "Access-Control-Allow-Origin:\\s*\\*",
+          "Access-Control-Allow-Credentials:\\s*true\\s*(?:[\\n\\r].*Access-Control-Allow-Origin:\\s*\\*)?"
+        ],
+        "severity": 0.7
+      },
+      {
+        "name": "Exposed .git or .svn Directory",
+        "regex_list": [
+          "\\b\\.git/config\\b",
+          "\\b\\.svn/entries\\b",
+          "URL:.*\\.git"
+        ],
+        "severity": 0.6
+      },
+      {
+        "name": "Server Version Disclosure",
+        "regex_list": [
+          "Server:\\s*(Apache|nginx|IIS|lighttpd)/[\\d\\.]+",
+          "X-Powered-By:\\s*(PHP|ASP\\.NET|Node\\.js|Express|Ruby|Python)/[\\d\\.]+"
+        ],
+        "severity": 0.3
+      },
+      {
+        "name": "Potentially Dangerous Code Execution Functions",
+        "regex_list": [
+          "\\beval\\s*\\(",
+          "\\bexec\\s*\\(",
+          "\\bos\\.system\\s*\\(",
+          "\\bsubprocess\\.(?:call|run|Popen)\\s*\\(",
+          "\\bshell_exec\\s*\\(",
+          "\\bpopen\\s*\\(",
+          "\\bpickle\\.loads\\s*\\(",
+          "readObject\\s*\\("
+        ],
+        "severity": 0.7
+      },
+      {
+        "name": "Use of Weak Hashing Algorithms for Security",
+        "regex_list": [
+          "\\b(?:MD5|SHA1)\\(.*(?:password|secret|token).*",
+          "hashlib\\.(?:md5|sha1)\\s*\\("
+        ],
+        "severity": 0.6
+      },
+      {
+        "name": "Use of ECB Mode in Cryptography (Insecure)",
+        "regex_list": [
+          "Cipher\\.getInstance\\s*\\(['\"]AES/ECB/",
+          "modes\\.ECB\\s*\\("
+        ],
+        "severity": 0.7
+      },
+      {
+        "name": "Hardcoded Cryptographic Keys",
+        "regex_list": [
+          "(?:enc(?:ryption)?_key|signing_key|cipher_key|aes_key)\\s*[:=]\\s*['\"]([A-Fa-f0-9]{16,}|[A-Za-z0-9+/=]{16,})['\"]"
+        ],
+        "severity": 0.8
+      },
+      {
+        "name": "Stack Trace or Detailed Error Message Leakage",
+        "regex_list": [
+          "Traceback \\(most recent call last\\):",
+          "java\\.lang\\.[A-Za-z]+Exception:",
+          "Exception in thread \"main\"",
+          "Fatal error:.*on line \\d+",
+          "at ([A-Za-z0-9_]+\\.)+[A-Za-z0-9_]+",
+          "Microsoft .NET Framework Version:",
+          "DEBUG\\s*:"
+        ],
+        "severity": 0.5
+      },
+      {
+        "name": "Internal Path or Hostname Disclosure",
+        "regex_list": [
+          "/(?:usr|var|opt|etc|home)/[\\w\\-/.]+",
+          "C:\\\\[\\w\\\\]+",
+          "\\b(?:localhost|127\\.0\\.0\\.1|192\\.168\\.\\d{1,3}\\.\\d{1,3}|10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3})\\b"
+        ],
+        "severity": 0.4
+      },
+      {
+        "name": "Security Comments or TODOs",
+        "regex_list": [
+          "(//|#|--|<!--|/\\*)\\s*(?:TODO|FIXME|HACK|XXX|SECURITY|VULNERABILITY|PASSWORD|SECRET|TEMP CREDENTIALS|BACKDOOR)"
+        ],
+        "severity": 0.3
+      },
+      {
+        "name": "HTTP URLs for Sensitive Operations",
+        "regex_list": [
+          "<form[^>]+action\\s*=\\s*['\"]http://[^'\"]+['\"]",
+          "fetch\\s*\\(\\s*['\"]http://",
+          "axios\\.(?:get|post|put|delete)\\s*\\(\\s*['\"]http://"
+        ],
+        "severity": 0.6
+      },
+      {
+        "name": "Potential User Enumeration",
+        "regex_list": [
+          "user(?:name)? (?:not found|does not exist|is invalid)",
+          "invalid password for user"
+        ],
+        "severity": 0.4
+      },
+      {
+        "name": "XML External Entity (XXE) Indicators",
+        "regex_list": [
+            "<!ENTITY\\s+[\\w\\-]+\\s+SYSTEM",
+            "<!DOCTYPE\\s+[\\w\\-]+\\s+\\[\\s*<!ENTITY"
+        ],
+        "severity": 0.9
+      },
+      {
+        "name": "Server-Side Request Forgery (SSRF) Indicators in Code/Config",
+        "regex_list": [
+          "(?:url|uri|endpoint|host|target)\\s*[:=]\\s*['\"]?(?:localhost|127\\.0\\.0\\.1|metadata\\.google\\.internal|169\\.254\\.169\\.254)['\"]?",
+          "requests\\.(?:get|post)\\s*\\([^,)]*['\"](?:http://localhost|http://127\\.0\\.0\\.1|http://169\\.254\\.169\\.254)"
+        ],
+        "severity": 0.7
+      }
+    ]
+  }

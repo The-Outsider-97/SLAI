@@ -1,0 +1,711 @@
+{
+  "adam_global_timestep": 15,
+  "binary_threshold": 0.5,
+  "config_used": {
+    "adagrad_epsilon": 1e-07,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-07,
+    "binary_threshold": 0.5,
+    "default_activation_alpha": 0.01,
+    "default_bn_epsilon": 1e-05,
+    "default_bn_momentum": 0.9,
+    "default_dropout_rate": 0.1,
+    "default_use_batch_norm": true,
+    "deterministic_seed": 1337,
+    "enabled": true,
+    "environment": "production",
+    "fail_on_non_finite": true,
+    "gradient_clip_value": 1.0,
+    "initialization_method_default": "he_normal",
+    "layers": [
+      {
+        "activation": "relu",
+        "batch_norm": true,
+        "dropout": 0.2,
+        "init": "he_normal",
+        "neurons": 16
+      },
+      {
+        "activation": "relu",
+        "batch_norm": true,
+        "dropout": 0.1,
+        "init": "he_normal",
+        "neurons": 8
+      },
+      {
+        "activation": "sigmoid",
+        "neurons": 1
+      }
+    ],
+    "learning_rate_ceiling": 1.0,
+    "learning_rate_floor": 1e-08,
+    "loss_function_name": "cross_entropy",
+    "max_batch_size": 4096,
+    "max_epochs": 10000,
+    "max_training_samples": 250000,
+    "model_family": "native_mlp",
+    "momentum_coefficient": 0.9,
+    "optimizer_name": "adam",
+    "persistence": {
+      "atomic_write": true,
+      "include_optimizer_state": true,
+      "include_training_history": true,
+      "max_model_file_bytes": 10485760,
+      "model_dir": "src/agents/safety/models",
+      "require_signature_on_load": true,
+      "signature_hash_algorithm": "sha256",
+      "signature_salt": "GAIA-NEURAL-NETWORK-SIGNATURE-SALT",
+      "write_backup": true
+    },
+    "problem_type": "binary_classification",
+    "save_best_requires_validation": false,
+    "schema_version": "safety_neural_network.model.v3",
+    "set_seed_on_init": true,
+    "shuffle_training_data": true,
+    "strict_numerics": true,
+    "telemetry": {
+      "enabled": true,
+      "history_limit": 500,
+      "include_layer_stats": true,
+      "log_every_n_epochs": 10,
+      "redact_payloads": true
+    },
+    "weight_decay_lambda": 1e-05
+  },
+  "initialization_method_default": "he_normal",
+  "last_training_summary": {
+    "best_validation_loss": 0.39794348413674213,
+    "early_stopped": false,
+    "epochs_completed": 3,
+    "epochs_requested": 3,
+    "final_loss": 0.5018759382601327,
+    "finished_at": "2026-04-30T18:52:00.527385Z",
+    "model_fingerprint": "b6b4fb7507105f31d1224bae16231b46",
+    "run_id": "nnrun_hvbaVl1ONgqRUubwBUscCg",
+    "samples_seen": 120,
+    "started_at": "2026-04-30T18:52:00.509196Z"
+  },
+  "layer_config_original": [
+    {
+      "activation": "relu",
+      "batch_norm": false,
+      "dropout": 0.0,
+      "init": "he_normal",
+      "neurons": 6
+    },
+    {
+      "activation": "relu",
+      "batch_norm": false,
+      "dropout": 0.0,
+      "init": "he_normal",
+      "neurons": 3
+    },
+    {
+      "activation": "sigmoid",
+      "neurons": 1
+    }
+  ],
+  "loss_function_name": "cross_entropy",
+  "model_fingerprint": "b6b4fb7507105f31d1224bae16231b46",
+  "model_id": "nn_2wQ_R9xCl-XXjt07js3MtQ",
+  "module_version": "3.0.0",
+  "num_inputs": 4,
+  "optimizer_name": "adam",
+  "problem_type": "binary_classification",
+  "saved_at": "2026-04-30T18:52:00.569768Z",
+  "schema_version": "safety_neural_network.model.v3",
+  "signature": "b4f5b010ff5cf07300d10af0149f5232f03e773cef330f8a8934a08263634d91",
+  "trained_weights_biases": [
+    {
+      "activation_alpha": 0.01,
+      "activation_name": "relu",
+      "bn_beta": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bn_epsilon": 1e-05,
+      "bn_gamma": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "bn_momentum": 0.9,
+      "dropout_rate": 0.0,
+      "initialization_method": "he_normal",
+      "neurons": [
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.1690188897345756,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.017139664682362048,
+            "m_weights": [
+              0.0010842485278296776,
+              0.0025957363802757926,
+              -3.8751276534145665e-06,
+              0.010755448468166206
+            ],
+            "v_bias": 9.740248227619808e-06,
+            "v_weights": [
+              9.335655402069564e-08,
+              7.056876145808435e-07,
+              3.628005804686449e-13,
+              3.924645188179033e-06
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -0.7254316294531923,
+            -0.6432870401379042,
+            -0.5159094097111764,
+            0.599600345410632
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.07283509542473834,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.010067075150022402,
+            "m_weights": [
+              0.009322018130542582,
+              0.004306772398302185,
+              0.010068374872785012,
+              0.0017776950286243598
+            ],
+            "v_bias": 5.23064587670712e-06,
+            "v_weights": [
+              4.6547737900410725e-06,
+              8.473973065148034e-07,
+              5.231444312427515e-06,
+              1.859242208322231e-07
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            0.27937092826310056,
+            -0.6552433909265758,
+            0.35881054103021487,
+            -1.5800902986552123
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.09776529332390256,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.010876426482051775,
+            "m_weights": [
+              0.008442822873901938,
+              0.007425090421407322,
+              -2.3316459925069046e-06,
+              0.0006036017552241699
+            ],
+            "v_bias": 4.903528740576179e-06,
+            "v_weights": [
+              2.954680340543642e-06,
+              2.285283527936066e-06,
+              2.220764495209281e-13,
+              1.5103981519947077e-08
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            0.4587089881044547,
+            -0.04294239344611618,
+            -0.847306897145786,
+            -1.316942260644324
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.1476574248048153,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": -0.0035712002063748977,
+            "m_weights": [
+              -0.003688130380111845,
+              -0.0013937960013383857,
+              -0.0037152327952119585,
+              0.0010431934888559709
+            ],
+            "v_bias": 9.419339032930541e-05,
+            "v_weights": [
+              4.993998516333968e-05,
+              1.922089740149619e-05,
+              6.93670368868739e-05,
+              5.470915886341004e-05
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            0.12824181395780118,
+            -0.8259767011946938,
+            0.8302902879204184,
+            0.3301671646662484
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": 0.07102700561373759,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": -0.0003481797298783355,
+            "m_weights": [
+              -2.3238692256259193e-05,
+              -0.00017450128892718754,
+              -0.0003473104436861042,
+              -0.0001687291934827442
+            ],
+            "v_bias": 8.721100343055574e-09,
+            "v_weights": [
+              3.4624856426364816e-11,
+              2.214235169188258e-09,
+              8.698416278539383e-09,
+              2.017029413633411e-09
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -1.0292589912629126,
+            0.7285756434416544,
+            0.3275102171574409,
+            -0.9880309259397024
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": 0.11752022116253144,
+          "initialization_method": "he_normal",
+          "num_inputs": 4,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": -0.045252833338424,
+            "m_weights": [
+              -0.03942336687975769,
+              -0.021366038030946177,
+              -0.04524100461890585,
+              -0.030488436541341202
+            ],
+            "v_bias": 0.00025550673810984485,
+            "v_weights": [
+              0.00017226447103037295,
+              5.7927600296362026e-05,
+              0.00025546734192250214,
+              0.00019070501723223755
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -0.49140921180616287,
+            -0.2849066276770751,
+            1.3704949445149086,
+            -0.20377823936910633
+          ]
+        }
+      ],
+      "num_inputs_per_neuron": 4,
+      "num_neurons": 6,
+      "running_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "running_variance": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "use_batch_norm": false
+    },
+    {
+      "activation_alpha": 0.01,
+      "activation_name": "relu",
+      "bn_beta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bn_epsilon": 1e-05,
+      "bn_gamma": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "bn_momentum": 0.9,
+      "dropout_rate": 0.0,
+      "initialization_method": "he_normal",
+      "neurons": [
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.0006987557979040086,
+          "initialization_method": "he_normal",
+          "num_inputs": 6,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.013725121699708371,
+            "m_weights": [
+              5.553204969420843e-07,
+              -2.024560437304132e-05,
+              -3.821894877122191e-07,
+              -0.007376265409001643,
+              0.00013171402206680922,
+              -0.010356365860706934
+            ],
+            "v_bias": 0.00016374035668563724,
+            "v_weights": [
+              4.5935951978403757e-08,
+              1.600248591256256e-08,
+              2.1511819394990098e-13,
+              4.536992047729866e-05,
+              6.082652283675656e-07,
+              4.468081778104757e-05
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -0.4475567146446428,
+            -0.9800549758774039,
+            -0.01679304659580513,
+            0.38176888204844917,
+            -0.08710121727604958,
+            0.4487976285636611
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": 0.42812921534127396,
+          "initialization_method": "he_normal",
+          "num_inputs": 6,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": -0.04197876555722638,
+            "m_weights": [
+              -0.0007220176026425772,
+              -1.72163166052422e-07,
+              0.0017239118868508385,
+              0.00018324196713406587,
+              -3.9694940572802986e-08,
+              0.00014043409909270834
+            ],
+            "v_bias": 0.0015347453718182013,
+            "v_weights": [
+              3.0883297058233755e-06,
+              3.498080891486876e-13,
+              4.23034986933078e-06,
+              9.504771128024557e-05,
+              2.4268030074068274e-13,
+              1.0768643333224191e-05
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -0.1648618318141385,
+            -0.010387398003101974,
+            0.14634038007837954,
+            0.02582582145977115,
+            -0.0011118328499309445,
+            -0.800571306357135
+          ]
+        },
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "relu",
+          "bias": -0.10772515030146594,
+          "initialization_method": "he_normal",
+          "num_inputs": 6,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.0890966866504703,
+            "m_weights": [
+              -0.003327760029352041,
+              0.0010566538798711072,
+              -4.405861045924506e-07,
+              0.08445197644623315,
+              5.814899468810929e-06,
+              0.04073511276298517
+            ],
+            "v_bias": 0.00031185383454412604,
+            "v_weights": [
+              5.041849081428827e-06,
+              1.0865058865941708e-07,
+              8.405522624665407e-15,
+              0.000240216460445156,
+              8.150463096320406e-13,
+              4.2915934136468046e-05
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            -0.1825158686574826,
+            -0.3305482735278255,
+            -0.013157163527390797,
+            0.518859747488082,
+            0.751029877827834,
+            -0.6297468873988235
+          ]
+        }
+      ],
+      "num_inputs_per_neuron": 6,
+      "num_neurons": 3,
+      "running_mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "running_variance": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "use_batch_norm": false
+    },
+    {
+      "activation_alpha": 0.01,
+      "activation_name": "sigmoid",
+      "bn_beta": [
+        0.0
+      ],
+      "bn_epsilon": 1e-05,
+      "bn_gamma": [
+        1.0
+      ],
+      "bn_momentum": 0.9,
+      "dropout_rate": 0.0,
+      "initialization_method": "he_normal",
+      "neurons": [
+        {
+          "activation_alpha": 0.01,
+          "activation_name": "sigmoid",
+          "bias": -0.28086808072342645,
+          "initialization_method": "he_normal",
+          "num_inputs": 3,
+          "optimizer_state": {
+            "cache_bias": 0.0,
+            "cache_weights": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "m_bias": 0.011590929801659126,
+            "m_weights": [
+              -0.005969807582281205,
+              0.008629650432444902,
+              -1.3765543690851886e-05
+            ],
+            "v_bias": 0.0011989715145210638,
+            "v_weights": [
+              6.144823085265207e-05,
+              5.630138602744915e-05,
+              1.5682994689464635e-05
+            ],
+            "velocity_bias": 0.0,
+            "velocity_weights": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "weights": [
+            0.6121578463748584,
+            -1.5803860547430117,
+            -1.1396975481781653
+          ]
+        }
+      ],
+      "num_inputs_per_neuron": 3,
+      "num_neurons": 1,
+      "running_mean": [
+        0.0
+      ],
+      "running_variance": [
+        1.0
+      ],
+      "use_batch_norm": false
+    }
+  ],
+  "training_history": [
+    {
+      "epoch": 1,
+      "learning_rate": 0.01,
+      "loss": 0.675687561922312,
+      "samples": 40,
+      "stopped": false,
+      "timestamp": "2026-04-30T18:52:00.512271Z",
+      "validation_accuracy": 0.8,
+      "validation_loss": 0.5639231316151294
+    },
+    {
+      "epoch": 2,
+      "learning_rate": 0.01,
+      "loss": 0.5536402822080859,
+      "samples": 40,
+      "stopped": false,
+      "timestamp": "2026-04-30T18:52:00.518371Z",
+      "validation_accuracy": 0.8,
+      "validation_loss": 0.452809970973564
+    },
+    {
+      "epoch": 3,
+      "learning_rate": 0.01,
+      "loss": 0.5018759382601327,
+      "samples": 40,
+      "stopped": false,
+      "timestamp": "2026-04-30T18:52:00.524880Z",
+      "validation_accuracy": 0.9,
+      "validation_loss": 0.39794348413674213
+    }
+  ]
+}
