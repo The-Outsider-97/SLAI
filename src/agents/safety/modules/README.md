@@ -1,56 +1,102 @@
-# Safety Modules Reference
+# Safety Modules Pipeline & Contracts
 
-This directory-level reference documents the modules orchestrated by `SafetyAgent`.
+This document provides a detailed module-level companion to `src/agents/safety/README.md`.
 
-## Module inventory
+## Orchestration contract summary
 
-| Module | File | Role in pipeline |
+The Safety Agent expects each module to provide **structured, machine-readable** output so that risk can be aggregated consistently.
+
+Minimum expected shape (conceptually):
+
+- `risk_score` (0.0 to 1.0 where applicable)
+- findings/details payloads
+- optional recommendation/decision fields
+
+---
+
+## Module responsibilities
+
+| Module | Primary responsibility | Typical contribution to aggregation |
 |---|---|---|
-| SafetyGuard | `src/agents/safety/safety_guard.py` | Sanitizes and may block unsafe content before deeper analysis. |
-| CyberSafetyModule | `src/agents/safety/cyber_safety.py` | Detects cyber risks via rules, signatures, heuristics, and event-anomaly logic. |
-| AdaptiveSecurity | `src/agents/safety/adaptive_security.py` | Specialized checks for phishing and URL/email-oriented attack surfaces. |
-| RewardModel | `src/agents/safety/reward_model.py` | Produces ethical/safety scores used in final gating decisions. |
-| AttentionMonitor (optional) | `src/agents/safety/attention_monitor.py` | Analyzes attention matrices for anomaly or alignment-related concerns. |
-| SecureSTPA | `src/agents/safety/utils/secure_stpa.py` | Performs STPA-style unsafe control action analysis for action validation. |
-| ComplianceChecker | `src/agents/safety/compliance_checker.py` | Policy/compliance verification module for governance-style checks. |
-| SecureMemory | `src/agents/safety/secure_memory.py` | Stores security-relevant events and supports traceability/auditing. |
+| `SafetyGuard` | Early sanitization + immediate unsafe-content interception | Can force early blocking path, contributes guard-level risk context |
+| `CyberSafetyModule` | Threat pattern/signature/context analysis | High-signal cyber risk score and findings |
+| `AdaptiveSecurity` | URL/email phishing and transport-surface checks | Additional targeted cyber indicators |
+| `RewardModel` | Policy/ethics-alignment scoring | Composite reward/safety score -> mapped risk |
+| `AttentionMonitor` (optional) | Attention anomaly/alignment signals | Optional risk bump when anomalous |
+| `ComplianceChecker` | Compliance posture checks | May introduce warnings/blockers depending on status |
+| `SecureSTPA` | Unsafe control action and system-hazard reasoning | Action-validation risk and governance evidence |
 
 ---
 
-## CyberSafetyModule deep dive
+## Assessment pipeline details (`perform_task`)
 
-`CyberSafetyModule` contributes both **content-level** and **event-level** defenses.
+```mermaid
+sequenceDiagram
+    participant U as Upstream Caller
+    participant SA as SafetyAgent
+    participant SG as SafetyGuard
+    participant CS as CyberSafetyModule
+    participant AS as AdaptiveSecurity
+    participant RM as RewardModel
+    participant AM as AttentionMonitor
+    participant CC as ComplianceChecker
 
-### 1) Content-level analysis (`analyze_input`)
+    U->>SA: perform_task(data, context)
+    SA->>SG: analyze_input(sanitized_text)
+    SG-->>SA: guard_report
 
-- Converts input to string/JSON-safe representation.
-- Runs configurable rule pattern matching:
-  - Sensitive keyword leakage patterns
-  - Weak credential/password patterns
-  - Injection-like patterns
-- Runs vulnerability signature matching (CVE-style signatures).
-- Applies context heuristics (`code_review`, `config_file`, `api_request`).
-- Returns:
-  - `risk_score`
-  - `findings`
-  - `recommendations`
-
-### 2) Event-level analysis (`analyze_event_stream`)
-
-- Maintains rolling event history.
-- Calculates statistical anomaly signals (z-score style).
-- Tracks sequence rarity patterns per entity/user/IP.
-- Supports optional QNN-inspired vector scoring path.
-- Produces an anomaly score and thresholded decision.
+    alt guard blocks
+        SA-->>U: decision=block (bounded response)
+    else continue
+        SA->>CS: analyze_input(...)
+        CS-->>SA: cyber risk/findings
+        SA->>AS: analyze_email/analyze_url (when applicable)
+        AS-->>SA: phishing/security report
+        SA->>RM: evaluate(...)
+        RM-->>SA: composite score
+        opt attention data available
+            SA->>AM: analyze_attention(...)
+            AM-->>SA: attention risk
+        end
+        SA->>CC: check_compliance(...)
+        CC-->>SA: status/findings
+        SA->>SA: constitutional checks + weighted aggregation
+        SA-->>U: SafetyAssessment {allow|review|block}
+    end
+```
 
 ---
 
-## Integration expectations
+## Action-validation pipeline details (`validate_action`)
 
-When extending safety modules:
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant SA as SafetyAgent
+    participant CS as CyberSafetyModule
+    participant RM as RewardModel
+    participant STPA as SecureSTPA
 
-1. Keep module outputs structured and machine-readable.
-2. Add explicit threshold semantics in config and docs.
-3. Preserve graceful degradation for optional dependencies.
-4. Update top-level `src/agents/safety/README.md` orchestration diagrams.
-5. Ensure template/config files remain consistent with module assumptions.
+    C->>SA: validate_action(action_params, action_context)
+    SA->>CS: analyze_input(action payload)
+    CS-->>SA: cyber risk
+    SA->>RM: evaluate(action payload)
+    RM-->>SA: reward/composite score
+    SA->>STPA: action/system hazard checks
+    STPA-->>SA: unsafe control findings
+    SA->>SA: constitutional checks + corrections + decision
+    SA-->>C: ActionValidationResult
+```
+
+---
+
+## Notes for maintainers
+
+1. Keep module outputs stable; if a field changes, update aggregation logic and docs together.
+2. Keep threshold names/config alignment synchronized with code.
+3. Preserve fail-closed behavior for critical module errors unless deliberately reconfigured.
+4. When adding a new module, update:
+   - top-level safety README,
+   - this module pipeline doc,
+   - config defaults and tests.
+
