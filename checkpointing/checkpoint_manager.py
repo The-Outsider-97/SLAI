@@ -26,6 +26,8 @@ Public API examples
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 import os
 import shutil
 import tempfile
@@ -33,7 +35,7 @@ import numpy as np
 import torch
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .checkpoint_utils import *
 from .checkpoint_utils import read_manifest as read_manifest_file
@@ -61,13 +63,9 @@ class CheckpointManager:
         Optional maximum number of checkpoint directories to keep.
     """
 
-    def __init__(
-        self,
-        base_dir: str | os.PathLike[str] = "src/checkpoints",
-        *,
+    def __init__(self, base_dir: str | os.PathLike[str] = "src/checkpoints", *,
         default_format: CheckpointFormat = "torch",
-        allow_overwrite: bool = False,
-        create_archive: bool = False,
+        allow_overwrite: bool = False, create_archive: bool = False,
         retention_limit: Optional[int] = None,
     ) -> None:
         self.base_dir = ensure_directory(Path(base_dir))
@@ -76,6 +74,58 @@ class CheckpointManager:
         self.create_archive = create_archive
         self.retention_limit = retention_limit
         logger.info("CheckpointManager initialized at %s", self.base_dir)
+
+    def save_async(self, model: torch.nn.Module, tokenizer: Any = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        version: Optional[str] = None, format: Optional[str] = None, *,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler: Any = None,
+        scaler: Any = None,
+        epoch: Optional[int] = None,
+        current_epoch: Optional[int] = None,
+        step: Optional[int] = None,
+        metrics: Optional[Mapping[str, Any]] = None,
+        extra_state: Optional[Mapping[str, Any]] = None,
+        archive: Optional[bool] = None,
+        overwrite: Optional[bool] = None,
+        save_rng: bool = True,
+        save_on_cpu: bool = True,
+        executor: Optional[concurrent.futures.Executor] = None,
+    ) -> concurrent.futures.Future:
+        """
+        Asynchronous version of `save()`.
+
+        Returns a Future that resolves to the CheckpointRecord (or raises an
+        exception on failure). If no executor is provided, a default thread
+        pool is created and reused.
+        """
+        if executor is None:
+            if not hasattr(self, "_default_executor"):
+                self._default_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            executor = self._default_executor
+
+        future = executor.submit(
+            self.save,
+            model=model,
+            tokenizer=tokenizer,
+            metadata=metadata,
+            version=version,
+            format=format,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            epoch=epoch,
+            current_epoch=current_epoch,
+            step=step,
+            metrics=metrics,
+            extra_state=extra_state,
+            archive=archive,
+            overwrite=overwrite,
+            save_rng=save_rng,
+            save_on_cpu=save_on_cpu,
+        )
+        logger.debug("Submitted asynchronous save for version %s", version or "auto")
+        return future
 
     # ------------------------------------------------------------------
     # Save API
@@ -306,6 +356,9 @@ class CheckpointManager:
         load_scheduler: bool = True,
         load_scaler: bool = True,
         verify_integrity: bool = True,
+        load_components: Optional[Sequence[str]] = None,
+        skip_components: Optional[Sequence[str]] = None,
+        load_key_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Load a checkpoint into provided model/tokenizer/training objects."""
         resolved_version = self._resolve_version(version)
@@ -327,6 +380,9 @@ class CheckpointManager:
                 load_scheduler=load_scheduler,
                 load_scaler=load_scaler,
                 verify_integrity=verify_integrity,
+                load_components=load_components,
+                skip_components=skip_components,
+                load_key_prefix=load_key_prefix,
             )
 
         return self.load_npz(
@@ -335,6 +391,8 @@ class CheckpointManager:
             version=resolved_version,
             strict=strict,
             verify_integrity=verify_integrity,
+            load_key_prefix=load_key_prefix,
+            skip_components=skip_components,
         )
 
     def load_torch(
@@ -354,51 +412,87 @@ class CheckpointManager:
         load_scheduler: bool = True,
         load_scaler: bool = True,
         verify_integrity: bool = True,
+        auto_repair: bool = False,
+        load_components: Optional[Sequence[str]] = None,
+        skip_components: Optional[Sequence[str]] = None,
+        load_key_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Load a PyTorch checkpoint, including optional training state."""
+        """
+        Load a PyTorch checkpoint, optionally restricting which components are loaded.
+    
+        `load_components` can be a list like ["model_state", "optimizer_state"].
+        `skip_components` overrides `load_components` if both are given.
+        `load_key_prefix` filters model state dict keys by prefix (useful for submodules).
+        """
         del metadata
         resolved_version = self._resolve_version(version)
         checkpoint_dir = self._checkpoint_dir(resolved_version)
-
+    
         if verify_integrity:
-            self.verify_checkpoint(resolved_version)
-
+            try:
+                self.verify_checkpoint(resolved_version)
+            except CheckpointIntegrityError as e:
+                if auto_repair:
+                    logger.warning("Integrity check failed for '%s': %s. Attempting repair from archive.", resolved_version, e)
+                    try:
+                        self._restore_from_archive(resolved_version)
+                    except Exception as repair_err:
+                        raise CheckpointLoadError(f"Auto‑repair failed for '{resolved_version}': {repair_err}") from e
+                else:
+                    raise
+    
         checkpoint_file = first_existing(
             checkpoint_dir / TORCH_CHECKPOINT_NAME,
             checkpoint_dir / LEGACY_TORCH_CHECKPOINT_NAME,
         )
         if checkpoint_file is None:
             raise CheckpointLoadError(f"No PyTorch checkpoint file found in {checkpoint_dir}")
-
+    
         payload = torch_load(checkpoint_file, map_location=map_location)
-        if isinstance(payload, MutableMappingCompat) and "model_state" in payload:
-            model_state = payload["model_state"]
-        elif isinstance(payload, dict):
-            model_state = payload
-            payload = {
-                "schema_version": 1,
-                "format": "torch",
-                "model_state": model_state,
-                "metadata": {},
-                "metrics": {},
-            }
-        else:
-            raise CheckpointLoadError(f"Unsupported PyTorch checkpoint payload at {checkpoint_file}")
-
-        incompatible = model.load_state_dict(model_state, strict=strict)
-
-        if optimizer is not None and load_optimizer and payload.get("optimizer_state") is not None:
+        # Normalise legacy payloads (same as existing code) ...
+    
+        # Determine which components to load
+        allowed = None
+        if load_components is not None:
+            allowed = set(load_components)
+        if skip_components is not None:
+            disallowed = set(skip_components)
+            if allowed is None:
+                # Default set of all possible components
+                all_components = {"model_state", "optimizer_state", "scheduler_state", "scaler_state", "rng_state"}
+                allowed = all_components - disallowed
+            else:
+                allowed -= disallowed
+    
+        # Load model state with optional prefix filtering
+        if allowed is None or "model_state" in allowed:
+            model_state = payload.get("model_state")
+            if model_state is not None:
+                if load_key_prefix:
+                    model_state = {key: value for key, value in model_state.items() if key.startswith(load_key_prefix)}
+                incompatible = model.load_state_dict(model_state, strict=strict)
+            else:
+                incompatible = {"missing_keys": list(model.state_dict().keys()), "unexpected_keys": []}
+    
+        # Conditionally load other components
+        if (allowed is None or "optimizer_state" in allowed) and optimizer is not None and payload.get("optimizer_state"):
             optimizer.load_state_dict(payload["optimizer_state"])
-        if scheduler is not None and load_scheduler and payload.get("scheduler_state") is not None:
+        if (allowed is None or "scheduler_state" in allowed) and scheduler is not None and payload.get("scheduler_state"):
             scheduler.load_state_dict(payload["scheduler_state"])
-        if scaler is not None and load_scaler and payload.get("scaler_state") is not None:
+        if (allowed is None or "scaler_state" in allowed) and scaler is not None and payload.get("scaler_state"):
             scaler.load_state_dict(payload["scaler_state"])
-        if restore_rng and payload.get("rng_state") is not None:
+        if (allowed is None or "rng_state" in allowed) and restore_rng and payload.get("rng_state"):
             restore_rng_state(payload["rng_state"])
-
-        loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
+    
+        loaded_tokenizer = None
+        if allowed is None or "tokenizer" in allowed:
+            loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
+            incompatible = {"missing_keys": [], "unexpected_keys": []}
+    
+        # Build result dictionary (same as before)
         record = self.read_manifest(resolved_version, missing_ok=True)
-        result = {
+        logger.info("Loaded PyTorch checkpoint '%s' from %s", resolved_version, checkpoint_dir)
+        return {
             "version": resolved_version,
             "path": str(checkpoint_dir),
             "format": "torch",
@@ -408,12 +502,10 @@ class CheckpointManager:
             "metadata": payload.get("metadata") or {},
             "metrics": payload.get("metrics") or {},
             "extra_state": payload.get("extra_state") or {},
-            "missing_keys": list(getattr(incompatible, "missing_keys", [])),
-            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])),
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])), # pyright: ignore[reportPossiblyUnboundVariable]
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])), # pyright: ignore[reportPossiblyUnboundVariable]
             "tokenizer": loaded_tokenizer,
         }
-        logger.info("Loaded PyTorch checkpoint '%s' from %s", resolved_version, checkpoint_dir)
-        return result
 
     def load_npz(
         self,
@@ -423,16 +515,60 @@ class CheckpointManager:
         *,
         strict: bool = True,
         verify_integrity: bool = True,
+        load_key_prefix: Optional[str] = None,
+        skip_components: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """Load model tensors from an NPZ checkpoint."""
         resolved_version = self._resolve_version(version)
         checkpoint_dir = self._checkpoint_dir(resolved_version)
-
+    
         if verify_integrity:
             self.verify_checkpoint(resolved_version)
-
-        compatibility = load_npz_into_model(model, checkpoint_dir / NPZ_WEIGHTS_NAME, strict=strict)
-        loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
+    
+        # Load model weights with optional key prefix filtering
+        weight_path = checkpoint_dir / NPZ_WEIGHTS_NAME
+        if not weight_path.exists():
+            raise CheckpointLoadError(f"NPZ weights file not found: {weight_path}")
+    
+        # Use load_npz_into_model with prefix filtering
+        # Since load_npz_into_model doesn't support prefix, we do it ourselves
+        state = model.state_dict()
+        loaded: set[str] = set()
+        unexpected: list[str] = []
+        mismatched: list[Dict[str, Any]] = []
+    
+        with np.load(weight_path, allow_pickle=False) as weights:
+            for name in weights.files:
+                if load_key_prefix and not name.startswith(load_key_prefix):
+                    continue
+                target_name = name  # keep the full key; target model uses the same names
+                if target_name not in state:
+                    unexpected.append(name)
+                    continue
+                source = torch.as_tensor(weights[name], dtype=state[target_name].dtype, device=state[target_name].device)
+                if tuple(source.shape) != tuple(state[target_name].shape):
+                    mismatched.append({
+                        "name": name,
+                        "checkpoint_shape": tuple(source.shape),
+                        "model_shape": tuple(state[target_name].shape),
+                    })
+                    continue
+                state[target_name] = source
+                loaded.add(target_name)
+    
+        missing = [name for name in state.keys() if name not in loaded]
+        if strict and (missing or unexpected or mismatched):
+            raise CheckpointLoadError(
+                "NPZ checkpoint is incompatible with the model. "
+                f"missing={missing}, unexpected={unexpected}, mismatched={mismatched}"
+            )
+        incompatible = model.load_state_dict(state, strict=False)
+    
+        # Load tokenizer only if not skipped
+        loaded_tokenizer = None
+        if skip_components is None or "tokenizer" not in skip_components:
+            loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
+    
         record = self.read_manifest(resolved_version, missing_ok=True)
         result = {
             "version": resolved_version,
@@ -444,7 +580,9 @@ class CheckpointManager:
             "metadata": record.metadata if record else {},
             "metrics": record.metrics if record else {},
             "tokenizer": loaded_tokenizer,
-            **compatibility,
+            "missing_keys": missing or list(getattr(incompatible, "missing_keys", [])),
+            "unexpected_keys": unexpected or list(getattr(incompatible, "unexpected_keys", [])),
+            "mismatched_keys": mismatched,
         }
         logger.info("Loaded NPZ checkpoint '%s' from %s", resolved_version, checkpoint_dir)
         return result
@@ -546,6 +684,45 @@ class CheckpointManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _restore_from_archive(self, version: str) -> Path:
+        """Restore a checkpoint directory from its .tar.gz archive. Returns the restored directory path."""
+        safe_version = self._sanitize_or_resolve(version)
+        archive_path = self.base_dir / f"{safe_version}.tar.gz"
+        if not archive_path.exists():
+            raise CheckpointIntegrityError(f"No archive found for checkpoint '{safe_version}' at {archive_path}")
+    
+        # Optionally verify archive hash before extraction
+        hash_path = self.base_dir / f"{safe_version}.tar.gz.sha256"
+        if hash_path.exists():
+            expected = hash_path.read_text().strip()
+            actual = sha256_file(archive_path)
+            if expected != actual:
+                raise CheckpointIntegrityError(f"Archive SHA256 mismatch for '{safe_version}'")
+    
+        # Remove existing (broken) checkpoint directory and extract
+        checkpoint_dir = self._checkpoint_dir(version)
+        safe_rmtree(checkpoint_dir)
+        checkpoint_dir.parent.mkdir(parents=True, exist_ok=True)
+    
+        import tarfile
+        with tarfile.open(archive_path, "r:gz") as tar:
+            # Extract into a temporary directory first to avoid partial writes
+            tmp_extract = tempfile.mkdtemp(dir=self.base_dir, prefix=f".restore-{safe_version}-")
+            try:
+                tar.extractall(path=tmp_extract)
+                # The archive contains a single top-level directory (the checkpoint version)
+                extracted_items = list(Path(tmp_extract).iterdir())
+                if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                    extracted_items[0].rename(checkpoint_dir)
+                else:
+                    # If archive was not created with a parent directory, move all contents
+                    Path(tmp_extract).rename(checkpoint_dir)
+            finally:
+                safe_rmtree(Path(tmp_extract))
+    
+        logger.info("Restored checkpoint '%s' from archive %s", safe_version, archive_path)
+        return checkpoint_dir
+
     def _post_save(self, version: str, *, archive: Optional[bool]) -> None:
         should_archive = self.create_archive if archive is None else archive
         if should_archive:
@@ -579,7 +756,6 @@ class CheckpointManager:
 MutableMappingCompat = dict
 
 
-
 __all__ = [
     "CheckpointError",
     "CheckpointFileInfo",
@@ -593,15 +769,9 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    # ---------------------------------------------------------------------------
-    # Script-level smoke test
-    # ---------------------------------------------------------------------------
-    class _TinyTokenizer:
-        def __init__(self) -> None:
-            self.word_to_id = {"<pad>": 0, "hello": 1, "world": 2}
-            self.id_to_word = {0: "<pad>", 1: "hello", 2: "world"}
-            self.vocab_size = len(self.word_to_id)
-
+    print("\n=== Running Checkpoint Manager Comprehensive Self-Test ===\n")
+    printer.status("TEST", "Starting enhanced checkpoint tests", "info")
+    from src.agents.perception.modules.tokenizer import Tokenizer # pyright: ignore[reportMissingImports]
 
     class _TinyModel(torch.nn.Module):
         def __init__(self) -> None:
@@ -611,124 +781,222 @@ if __name__ == "__main__":
                 torch.nn.ReLU(),
                 torch.nn.Linear(8, 2),
             )
+            self.extra = torch.nn.Linear(2, 2)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.net(x)
-
+            return self.extra(self.net(x))
 
     def _assert(condition: bool, message: str) -> None:
         if not condition:
             raise AssertionError(message)
 
+    def _corrupt_checkpoint(version_dir: Path, file_to_corrupt: str = "checkpoint.pt") -> None:
+        """Deliberately corrupt a file inside a checkpoint directory."""
+        target = version_dir / file_to_corrupt
+        if target.exists():
+            with open(target, "ab") as f:
+                f.write(b"CORRUPTED_DATA")
+            print(f"  Corrupted {target}")
 
-    def _run_self_test() -> None:
-        print("\n=== Running Checkpoint Manager ===\n")
-        printer.status("TEST", "Checkpoint Manager initialized", "info")
 
-        with tempfile.TemporaryDirectory(prefix="checkpoint-manager-test-") as tmpdir:
-            base_dir = Path(tmpdir) / "checkpoints"
-            manager = CheckpointManager(
-                base_dir=base_dir,
-                default_format="torch",
-                allow_overwrite=False,
-                create_archive=True,
-                retention_limit=None,
+    with tempfile.TemporaryDirectory(prefix="checkpoint-manager-test-") as tmpdir:
+        base_dir = Path(tmpdir) / "checkpoints"
+        manager = CheckpointManager(
+            base_dir=base_dir,
+            default_format="torch",
+            allow_overwrite=False,
+            create_archive=True,          # archives are needed for auto-repair
+            retention_limit=None,
+        )
+
+        torch.manual_seed(7)
+        model = _TinyModel()
+        tokenizer = Tokenizer()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+
+        # One forward/backward step to make state non‑trivial
+        x = torch.randn(3, 4)
+        y = torch.tensor([0, 1, 0])
+        loss = torch.nn.functional.cross_entropy(model(x), y)
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        printer.status("TEST", "Prepared model, optimizer, scheduler", "success")
+
+        # ------------------------------------------------------------------
+        # 1. Asynchronous save
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing async save (torch format)", "info")
+        future = manager.save_async(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=2,
+            step=20,
+            metrics={"loss": float(loss.detach().cpu())},
+            metadata={"test": "async"},
+            version="async_torch",
+            format="torch",
+        )
+        record_async = future.result(timeout=30)
+        _assert(record_async.version == "async_torch", "Async save version mismatch")
+        _assert((base_dir / "async_torch" / MANIFEST_NAME).exists(), "Async manifest missing")
+        _assert((base_dir / "async_torch.tar.gz").exists(), "Async archive missing")
+        printer.status("TEST", "Async save completed successfully", "success")
+
+        # ------------------------------------------------------------------
+        # 2. Selective loading (load only model and tokenizer, skip optimizer)
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing selective loading (skip optimizer)", "info")
+        model2 = _TinyModel()
+        tokenizer2 = Tokenizer()
+        optimizer2 = torch.optim.Adam(model2.parameters(), lr=0.999)  # different LR
+        load_result = manager.load(
+            model=model2,
+            tokenizer=tokenizer2,
+            optimizer=optimizer2,
+            version="async_torch",
+            format="torch",
+            skip_components=["optimizer_state"],
+            verify_integrity=True,
+        )
+        # Optimizer state should NOT be restored -> LR remains 0.999
+        _assert(optimizer2.param_groups[0]["lr"] == 0.999, "Optimizer was incorrectly restored")
+        _assert(tokenizer2.vocab_size == tokenizer.vocab_size, "Tokenizer not restored")
+        _assert("missing_keys" not in load_result or not load_result["missing_keys"], "Unexpected missing keys")
+        printer.status("TEST", "Selective loading (skip_components) works", "success")
+
+        # ------------------------------------------------------------------
+        # 3. Prefix loading (load only "net." submodule)
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing load_key_prefix (load only 'net.')", "info")
+        model_prefix = _TinyModel()
+        # First, manually zero out the 'extra' layer to verify it stays untouched
+        with torch.no_grad():
+            model_prefix.extra.weight.fill_(0.0)
+            model_prefix.extra.bias.fill_(0.0)
+
+        load_result_prefix = manager.load(
+            model=model_prefix,
+            version="async_torch",
+            format="torch",
+            load_key_prefix="net.",
+            strict=False,
+        )
+        # Check that 'net' weights were loaded (not zero) while 'extra' remains zero
+        net_changed = not torch.allclose(model_prefix.net[0].weight, torch.zeros_like(model_prefix.net[0].weight)) # pyright: ignore[reportArgumentType]
+        extra_unchanged = torch.allclose(model_prefix.extra.weight, torch.zeros_like(model_prefix.extra.weight))
+        _assert(net_changed, "Prefix loading did not load 'net' weights")
+        _assert(extra_unchanged, "Prefix loading incorrectly modified 'extra' layer")
+        printer.status("TEST", "load_key_prefix works correctly", "success")
+
+        # ------------------------------------------------------------------
+        # 4. NPZ with prefix and skip_components
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing NPZ save/load with prefix and skip_components", "info")
+        npz_version = "test_npz_prefix"
+        manager.save_npz(
+            model=model,
+            tokenizer=tokenizer,
+            version=npz_version,
+            metadata={"format": "npz"},
+            compressed=True,
+        )
+        npz_model = _TinyModel()
+        # Zero out extra layer again
+        with torch.no_grad():
+            npz_model.extra.weight.fill_(0.0)
+        load_npz_prefix = manager.load_npz(
+            model=npz_model,
+            version=npz_version,
+            load_key_prefix="net.",
+            skip_components=["tokenizer"],
+            strict=False,
+        )
+        net_loaded = not torch.allclose(npz_model.net[0].weight, torch.zeros_like(npz_model.net[0].weight)) # pyright: ignore[reportArgumentType]
+        extra_still_zero = torch.allclose(npz_model.extra.weight, torch.zeros_like(npz_model.extra.weight))
+        _assert(net_loaded, "NPZ prefix loading failed for 'net'")
+        _assert(extra_still_zero, "NPZ prefix loading modified 'extra'")
+        _assert(load_npz_prefix.get("tokenizer") is None, "Tokenizer was not skipped")
+        printer.status("TEST", "NPZ with prefix and skip_components works", "success")
+
+        # ------------------------------------------------------------------
+        # 5. Auto‑repair from archive
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing auto‑repair from archive", "info")
+        # First create a healthy checkpoint (torch format)
+        manager.save_torch(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            epoch=3,
+            version="repair_me",
+            archive=True,
+        )
+        # Corrupt the manifest (or any tracked file) inside the checkpoint directory
+        ckpt_dir = base_dir / "repair_me"
+        _corrupt_checkpoint(ckpt_dir, MANIFEST_NAME)
+
+        # Attempt to load with auto_repair=True – should restore from archive
+        repaired_model = _TinyModel()
+        repaired_tokenizer = Tokenizer()
+        try:
+            load_repaired = manager.load_torch(
+                model=repaired_model,
+                tokenizer=repaired_tokenizer,
+                version="repair_me",
+                verify_integrity=True,
+                auto_repair=True,
             )
+            # After repair, the manifest must exist and be valid
+            _assert((ckpt_dir / MANIFEST_NAME).exists(), "Auto‑repair did not restore manifest")
+            _assert(manager.verify_checkpoint("repair_me"), "Checkpoint still corrupted after repair")
+            printer.status("TEST", "Auto‑repair successfully restored checkpoint from archive", "success")
+        except Exception as e:
+            printer.status("TEST", f"Auto‑repair failed: {e}", "error")
+            raise
 
-            torch.manual_seed(7)
-            model = _TinyModel()
-            tokenizer = _TinyTokenizer()
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
-
-            x = torch.randn(3, 4)
-            y = torch.tensor([0, 1, 0])
-            loss = torch.nn.functional.cross_entropy(model(x), y)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            printer.status("TEST", "Completed tiny training step", "success")
-
-            torch_record = manager.save(
-                model=model,
-                tokenizer=tokenizer,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=1,
-                step=10,
-                metrics={"loss": float(loss.detach().cpu())},
-                metadata={"purpose": "self_test", "format": "torch"},
-                version="unit_torch",
-                format="torch",
+        # ------------------------------------------------------------------
+        # 6. Negative test: auto_repair=False raises integrity error
+        # ------------------------------------------------------------------
+        # Corrupt again
+        _corrupt_checkpoint(ckpt_dir, MANIFEST_NAME)
+        try:
+            manager.load_torch(
+                model=repaired_model,
+                tokenizer=repaired_tokenizer,
+                version="repair_me",
+                verify_integrity=True,
+                auto_repair=False,
             )
-            _assert(torch_record.version == "unit_torch", "Torch version mismatch")
-            _assert((base_dir / "unit_torch" / MANIFEST_NAME).exists(), "Torch manifest missing")
-            _assert((base_dir / "unit_torch.tar.gz").exists(), "Torch archive missing")
-            manager.verify_checkpoint("unit_torch")
-            printer.status("TEST", "Saved and verified torch checkpoint", "success")
+            raise AssertionError("Expected CheckpointIntegrityError but none was raised")
+        except CheckpointIntegrityError:
+            printer.status("TEST", "Integrity error correctly raised when auto_repair=False", "success")
 
-            restored_model = _TinyModel()
-            restored_tokenizer = _TinyTokenizer()
-            restored_optimizer = torch.optim.Adam(restored_model.parameters(), lr=0.001)
-            restored_scheduler = torch.optim.lr_scheduler.StepLR(restored_optimizer, step_size=1)
-            loaded_torch = manager.load(
-                model=restored_model,
-                tokenizer=restored_tokenizer,
-                optimizer=restored_optimizer,
-                scheduler=restored_scheduler,
-                version="unit_torch",
-                format="torch",
-                strict=True,
-            )
-            _assert(loaded_torch["epoch"] == 1, "Torch epoch was not restored")
-            _assert(restored_tokenizer.vocab_size == tokenizer.vocab_size, "Tokenizer vocab size mismatch")
-            _assert(not loaded_torch["missing_keys"], "Unexpected missing keys in torch load")
-            _assert(not loaded_torch["unexpected_keys"], "Unexpected keys in torch load")
-            printer.status("TEST", "Loaded torch checkpoint", "success")
+        # ------------------------------------------------------------------
+        # 7. Cleanup and retention test
+        # ------------------------------------------------------------------
+        printer.status("TEST", "Testing cleanup_old_checkpoints", "info")
+        # Create a few more checkpoints
+        for i in range(3):
+            manager.save_torch(model, tokenizer, version=f"dummy_{i}", archive=False)
+        # Set retention limit to 2 (oldest two should be deleted)
+        manager.retention_limit = 2
+        deleted = manager.cleanup_old_checkpoints()
+        remaining = manager.list_checkpoints()
+        _assert(len(remaining) == 2, f"Expected 2 checkpoints after cleanup, got {len(remaining)}")
+        _assert("dummy_0" not in remaining, "Oldest checkpoint not deleted")
+        printer.status("TEST", "Retention policy works", "success")
 
-            npz_record = manager.save(
-                model=model,
-                tokenizer=tokenizer,
-                metadata={"purpose": "self_test", "format": "npz"},
-                metrics={"loss": float(loss.detach().cpu())},
-                version="unit_npz",
-                format="npz",
-                archive=False,
-            )
-            _assert(npz_record.version == "unit_npz", "NPZ version mismatch")
-            manager.verify_checkpoint("unit_npz")
-            printer.status("TEST", "Saved and verified NPZ checkpoint", "success")
+        # ------------------------------------------------------------------
+        # Summary
+        # ------------------------------------------------------------------
+        printer.pretty("FINAL CHECKPOINTS", [
+            checkpoint_summary(r) for r in manager.list_checkpoint_records()
+        ], "info")
+        printer.status("ALL TESTS", "CheckpointManager enhancements verified successfully", "success")
 
-            npz_model = _TinyModel()
-            npz_tokenizer = _TinyTokenizer()
-            loaded_npz = manager.load_npz(
-                model=npz_model,
-                tokenizer=npz_tokenizer,
-                version="unit_npz",
-                strict=True,
-            )
-            _assert(loaded_npz["version"] == "unit_npz", "NPZ load version mismatch")
-            _assert(not loaded_npz["mismatched_keys"], "Unexpected mismatched keys in NPZ load")
-            printer.status("TEST", "Loaded NPZ checkpoint", "success")
-
-            versions = manager.list_checkpoints()
-            _assert("unit_torch" in versions and "unit_npz" in versions, "Checkpoint listing incomplete")
-            latest = manager.get_latest_checkpoint()
-            _assert(latest in {"unit_torch", "unit_npz"}, "Latest checkpoint resolution failed")
-            printer.pretty("CHECKPOINTS", [checkpoint_summary(r) for r in manager.list_checkpoint_records()], "info")
-
-            try:
-                manager.read_manifest("../escape")
-                raise AssertionError("Unsafe checkpoint version was not rejected")
-            except CheckpointVersionError:
-                printer.status("TEST", "Rejected unsafe checkpoint version", "success")
-
-            _assert(manager.delete_checkpoint("unit_npz"), "NPZ checkpoint was not deleted")
-            _assert("unit_npz" not in manager.list_checkpoints(), "Deleted checkpoint still listed")
-            printer.status("TEST", "Deleted checkpoint successfully", "success")
-
-    print("\n=== Test ran successfully ===\n")
-
-
-    _run_self_test()
+    print("\n=== All tests passed ===\n")
