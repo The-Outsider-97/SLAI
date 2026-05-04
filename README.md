@@ -6,7 +6,7 @@
 [//]: <![Flow Diagram](component/assets/flow_diagram.png)>
 ## What is SLAI?
 
-SLAI is a modular, distributed AI assistant framework composed of autonomous agents. It decomposes complex tasks into specialized processes handled by modular agents. Each agent is specialized (e.g., perception, planning, reasoning) and collectively they:
+SLAI is a modular, multi-agent AI framework that combines a desktop UI, agent subsystems, monitoring utilities, deployment helpers, and experimental game/finance modules. It decomposes complex tasks into specialized processes handled by modular agents. Each agent is specialized (e.g., perception, planning, reasoning) and collectively they:
 
 - Process multimodal user input (text, voice, images)
 - Retrieve and validate knowledge from memory and external sources
@@ -75,7 +75,7 @@ SLAI begins when a user request or external event reaches the **Collaborative Ag
 
 Outputs from these core agents are merged by **Task Orchestration**, producing a unified intermediate result. Before any user-visible response is released, this result is passed through a dedicated **Safety + Alignment Gate**, informed by both the **Safety Agent** and **Alignment Agent** to enforce policy, risk controls, and behavioral constraints.
 
-The latest agent expansion adds focused support for:
+The repository currently includes dedicated modules for:
 
 - **Observability Agent** for telemetry, tracing, and runtime diagnostics.
 - **Reader Agent** for parsing and recovering structured/unstructured documents.
@@ -184,32 +184,19 @@ Note: If you see an error about execution policy:
    python main.py
    ```
 
+   Notes:
+   - `main.py` launches the PyQt5 desktop interface.
+   - Additional runnable modules exist (for example `finance/app.py`, `games/train_chronos_agents.py`, and multiple agent module demos guarded by `if __name__ == "__main__":`).
 
-## Continuous Integration
-- GitHub Actions workflow runs on each push/PR.
-- To trigger manually:
-  ```bash
-  gh workflow run test.yml
-   ```
 
-   If user experiencing errors at this stage, run this command to install PyTorch inside the virtual environment.
-   CPU-Only Version (lighter):
-
-   ```console
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-   ```
-
-   Confirm Torch Installed:
-
-   ```console
-   pip list
-   ```
-   
-6. Run the Tests (Optional but Recommended):
-
-   ```console
-   pytest tests/
-   ```
+## Continuous Integration and Testing
+- This branch currently includes Python tests under `deployment/test/` (release invariants and CI trigger contract checks).
+- No `.github/workflows/` CI workflow file is present in this snapshot, so CI behavior should be treated as repository-external or pending sync.
+- Run the available tests locally:
+  ```console
+  pytest deployment/test -q
+  ```
+- Some modules rely on optional heavy/proprietary dependencies (e.g., PyQt5, blpapi, TensorFlow, FAISS, Selenium + browser drivers). Install only what you need for your execution path.
 
 ---
 # SLAI: Roadmap to Autonomous Self-Improvement and Refactoring
@@ -244,21 +231,20 @@ SLAI is designed to evolve over time based on the user’s hardware capabilities
 ## Current Features
 
 ### Modular Agent Framework
-- Perception, Planning, Reasoning, Language, SafeAI, RSI, and more.
-- Agents are dynamically routed based on task input.
+- Broad agent coverage exists in `src/agents/` (perception, planning, reasoning, language, safety, alignment, learning, adaptive, privacy, knowledge, network, execution, observability, quality, reader, and collaborative coordination).
+- `agent_factory` and collaboration/routing modules are present, but integration is still partly module-level rather than a single production orchestration runtime.
 
 ### Recursive Self-Improvement (RSI)
-- Rewrites model architecture on stagnated reward.
-- Can insert new layers and modify config files.
-- Hot reloads agents at runtime with backup handling.
+- Learning/adaptive modules include reinforcement and meta-learning utilities, plus tuners and policy selectors.
+- Self-modification/autonomous refactor behavior is currently experimental and not represented as a fully integrated, end-to-end safe code-editing pipeline in this branch.
 
 ### Automated R&D Engine
 - Performs hyperparameter tuning (grid/Bayesian).
 - Can evaluate and select top-performing agents.
 
 ### Learning Agent
-- Implements online learning during runtime.
-- Supports lifelong improvement through training from new inputs.
+- Includes online/continual-learning-oriented components and memory abstractions.
+- Many routines are framework scaffolding or simulation-oriented; treat claims of full autonomy as roadmap-level, not guaranteed production behavior.
 
 ### Safety & Rollback System
 - Backs up Python files before applying RSI modifications.
