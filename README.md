@@ -1,3 +1,4 @@
+
 ![Startup](component/assets/startup.png)
 ---
 
@@ -420,3 +421,4 @@ Developed by [@The-Outsider-97](https://github.com/The-Outsider-97)
 ---
 
 > SLAI is an experiment in building safe, scalable, intelligent systems that learn and grow with every user interaction.
+=======
