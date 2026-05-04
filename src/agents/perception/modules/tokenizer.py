@@ -4,7 +4,7 @@ import re
 import torch
 import unicodedata
 from pathlib import Path
-from typing import List, Dict, Union, Optional, Tuple
+from typing import List, Dict, Mapping, Union, Optional, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.common import TensorOps, Parameter
@@ -148,7 +148,7 @@ class Tokenizer(BaseTokenizer):
         self.bpe_ranks = {pair: i for i, pair in enumerate(bpe_merges)}
         self.bpe_processor = BytePairEncoder(bpe_merges, self.vocab, self.unk_token)
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> List[str]: # pyright: ignore[reportIncompatibleMethodOverride]
         """
         Tokenize text using base tokenization + BPE.
         Overrides base to apply BPE subword segmentation.
@@ -165,6 +165,14 @@ class Tokenizer(BaseTokenizer):
             return subword_tokens
         else:
             return tokens
+        
+    @BaseTokenizer.word_to_id.setter # pyright: ignore[reportAttributeAccessIssue]
+    def word_to_id(self, mapping: Mapping[str, int]) -> None:
+        # Call the parent setter to update self.vocab and self.inverse_vocab
+        super(Tokenizer, type(self)).word_to_id.fset(self, mapping) # pyright: ignore[reportAttributeAccessIssue]
+        # If BPE processor exists, update its word_to_id reference
+        if hasattr(self, 'bpe_processor') and self.bpe_processor is not None:
+            self.bpe_processor.word_to_id = self.vocab
 
     def encode_multi_modal(self, text: Optional[str] = None,
                            image_features: Optional[torch.Tensor] = None,
@@ -220,7 +228,7 @@ class Tokenizer(BaseTokenizer):
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long)
         }
 
-    def encode(self, text: str) -> Dict[str, torch.Tensor]:
+    def encode(self, text: str) -> Dict[str, torch.Tensor]: # pyright: ignore[reportIncompatibleMethodOverride]
         """Encode a single text string."""
         tokens = self.tokenize(text)
         return self._prepare_single_text(tokens)
@@ -238,7 +246,7 @@ class Tokenizer(BaseTokenizer):
             "attention_mask": torch.stack(all_attention_masks)
         }
 
-    def decode(self, token_ids: Union[List[int], torch.Tensor], skip_special_tokens: bool = True) -> str:
+    def decode(self, token_ids: Union[List[int], torch.Tensor], skip_special_tokens: bool = True) -> str: # pyright: ignore[reportIncompatibleMethodOverride]
         """
         Decode token IDs back to text, handling BPE and special tokens.
         """
@@ -261,7 +269,7 @@ class Tokenizer(BaseTokenizer):
 
         return text
 
-    def __call__(self, text: Union[str, List[str]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, text: Union[str, List[str]]) -> Dict[str, torch.Tensor]: # pyright: ignore[reportIncompatibleMethodOverride]
         if isinstance(text, str):
             return self.encode(text)
         elif isinstance(text, list):
