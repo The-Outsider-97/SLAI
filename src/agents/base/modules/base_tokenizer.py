@@ -922,6 +922,46 @@ class BaseTokenizer:
             f"vocab_size={len(self.vocab)} trained={self.is_trained}>"
         )
 
+    # ------------------------------------------------------------------
+    # Properties used by checkpointing (word_to_id, id_to_word, vocab_size)
+    # ------------------------------------------------------------------
+    @property
+    def word_to_id(self) -> Dict[str, int]:
+        """Mapping from token string to integer ID."""
+        return self.vocab
+
+    @word_to_id.setter
+    def word_to_id(self, mapping: Mapping[str, int]) -> None:
+        """Replace the vocabulary with a new mapping."""
+        self.vocab = dict(mapping)
+        self.inverse_vocab = {id_: token for token, id_ in self.vocab.items()}
+        # If you have any token‑pattern cache, invalidate it here (optional)
+        # self._rebuild_token_pattern()   # uncomment if needed
+
+    @property
+    def id_to_word(self) -> Dict[int, str]:
+        """Mapping from integer ID to token string."""
+        return self.inverse_vocab
+
+    @id_to_word.setter
+    def id_to_word(self, mapping: Mapping[int, str]) -> None:
+        """Replace the inverse vocabulary."""
+        self.inverse_vocab = dict(mapping)
+        self.vocab = {token: id_ for id_, token in self.inverse_vocab.items()}
+
+    @property
+    def vocab_size(self) -> int:
+        """Number of tokens in the vocabulary."""
+        return len(self.vocab)
+
+    @vocab_size.setter
+    def vocab_size(self, value: int) -> None:
+        """This setter exists only for compatibility with checkpoint_utils.load_tokenizer.
+        The actual vocabulary size is always derived from self.vocab.
+        """
+        logger.debug("Ignoring explicit vocab_size assignment; size is determined by vocabulary length.")
+        # Do nothing – the value is ignored.
+
 
 # ----------------------------------------------------------------------
 # Test block
