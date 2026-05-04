@@ -1,150 +1,177 @@
-# Language Agent Module
+# Language Stack (`src/agents/language`)
 
-This directory contains SLAI's language stack for **orthography correction**, **grammar analysis**, **NLP feature extraction**, **NLU parsing**, **context tracking**, and **response generation**.
+This package contains the **language subsystem modules** used by `LanguageAgent` (`src/agents/language_agent.py`).
 
-## What lives here
+The recent `LanguageAgent` update (v`2.3.0`) introduces a more explicit, policy-driven pipeline with:
 
-- `orthography_processor.py` — normalizes spelling, handles contraction expansion, and performs context-aware correction.
-- `grammar_processor.py` — inspects tokenized text and returns structured grammar issues.
-- `nlp_engine.py` — tokenization + POS + lemmatization + dependency rules + coreference/sarcasm hooks.
-- `nlu_engine.py` — intent/entity/modality/lexicon extraction plus richer semantic analysis (`EnhancedNLU`).
-- `dialogue_context.py` — conversational memory, slot tracking, summaries, follow-up detection, and persistence.
-- `nlg_engine.py` — template-based and model-assisted surface generation with style controls.
-- `utils/` — tokenizer, transformer, cache, spell checker, config and rule helpers.
-- `configs/language_config.yaml` — central configuration for all language subcomponents.
-- `templates/`, `resources/`, and `library/` — lexical resources, templates, and linguistic rule data.
+- canonical stage names (`StageName`),
+- stage-level failure policy (`StagePolicy`: `continue` / `fail` / `block`),
+- per-turn structured tracing (`PipelineTrace`, `StageRecord`, `PipelineArtifacts`),
+- safer pre/post sanitization flow,
+- clearer health/diagnostic surfaces,
+- and stronger runtime integration with `DialogueContext` and shared memory.
 
 ---
 
-## End-to-end flow
+## Where this package fits
+
+`LanguageAgent` is the coordinator. The modules in this directory perform the actual language work:
+
+- `orthography_processor.py` → spelling/normalization corrections.
+- `nlp_engine.py` → tokenization + dependency extraction.
+- `grammar_processor.py` → grammatical analysis from text/tokens.
+- `nlu_engine.py` → intent/entities/modality/sentiment into a `LinguisticFrame`.
+- `dialogue_context.py` → conversational state, unresolved issues, session memory.
+- `nlg_engine.py` → response realization.
+- `modules/` → reusable lower-level primitives (tokenizer, transformer, spell checker, rules).
+- `utils/` → shared helpers, config loading, linguistic data structures.
+
+---
+
+## Runtime pipeline used by `LanguageAgent`
+
+The language package is orchestrated by `LanguageAgent.process()` in this order:
+
+1. `safety_input`
+2. `orthography`
+3. `nlp`
+4. `grammar`
+5. `nlu`
+6. `dialogue_pre_nlg`
+7. `nlg`
+8. `safety_output`
+9. `dialogue_post_nlg`
+10. `shared_memory` (finalization side effect)
+
+### End-to-end execution flow
+
+```mermaid
+flowchart TD
+    A[User Input] --> B[SafetyGuard input sanitize]
+    B --> C[OrthographyProcessor]
+    C --> D[NLPEngine]
+    D --> E[GrammarProcessor]
+    E --> F[NLUEngine -> LinguisticFrame]
+    F --> G[DialogueContext pre-NLG]
+    G --> H[NLGEngine]
+    H --> I[SafetyGuard output sanitize]
+    I --> J[DialogueContext post-NLG]
+    J --> K[LanguageAgentResponse]
+    K --> L[Pipeline history + trace]
+    K --> M[Shared memory write + event publish]
+```
+
+### Control plane (policies and recoverability)
 
 ```mermaid
 flowchart LR
-    U[User Text] --> O[OrthographyProcessor]
-    O --> G[GrammarProcessor]
-    G --> N[NLPEngine]
-    N --> U2[NLUEngine / EnhancedNLU]
-    U2 --> C[DialogueContext]
-    C --> NLG[NLGEngine]
-    NLG --> R[Assistant Response]
-
-    C --> P[Persistence: save_state/load_state]
-    U2 --> T[Templates + Lexicons]
-    N --> L[Wordlists + POS + Morph Rules]
+    C1[stage_enabled] --> P[Stage executor]
+    C2[stage_failure_policy] --> P
+    C3[fail_closed_on_input_safety] --> P
+    C4[fail_closed_on_output_safety] --> P
+    P --> R1[continue]
+    P --> R2[fail]
+    P --> R3[block]
 ```
 
 ---
 
-## Internal architecture
+## Key integration behavior from the updated agent
 
-```mermaid
-classDiagram
-    class OrthographyProcessor {
-      +normalize(word)
-      +expand_contractions(word)
-      +correct(word, context)
-      +batch_process(text)
-    }
+### 1) Structured pipeline observability
 
-    class GrammarProcessor {
-      +analyze_text(text)
-    }
+Each turn generates:
 
-    class NLPEngine {
-      +process_text(text)
-      +apply_dependency_rules(tokens)
-      +resolve_coreferences(tokens)
-      +detect_sarcasm(text)
-    }
+- `PipelineTrace` (trace id, status, records, warnings, timing),
+- `StageRecord` per stage (duration, policy, error metadata),
+- `PipelineArtifacts` (sanitized text, orthography text, token/dependency counts, grammar/frame summaries),
+- `LanguageAgentResponse` (response text + confidence/intent/status + trace/artifacts metadata).
 
-    class NLUEngine {
-      +parse(text)
-      +get_intents(text)
-      +get_entities(text)
-      +get_modalities(text)
-      +get_lexicons(text)
-      +get_morphologies(text)
-    }
+This gives both runtime and audit visibility without forcing downstream components to parse logs.
 
-    class EnhancedNLU {
-      +set_context_history(history)
-      +analyze_text_fully(text)
-    }
+### 2) Stage-level policy and enable/disable controls
 
-    class DialogueContext {
-      +add_turn(user, assistant)
-      +update_slot(name, value)
-      +get_context_for_prompt()
-      +save_state(path)
-      +load_state(path)
-      +is_follow_up(text)
-    }
+The agent can selectively disable stages (for example grammar/orthography) and can enforce per-stage behavior on failure:
 
-    class NLGEngine {
-      +generate(intent, entities, sentiment, language)
-    }
+- `continue` → warn and proceed,
+- `fail` → raise stage failure,
+- `block` → block request (used especially for safety-critical behavior).
 
-    OrthographyProcessor --> GrammarProcessor
-    GrammarProcessor --> NLPEngine
-    NLPEngine --> NLUEngine
-    NLUEngine <|-- EnhancedNLU
-    EnhancedNLU --> DialogueContext
-    DialogueContext --> NLGEngine
+### 3) Precomputed NLP handoff
+
+When `pass_precomputed_nlp_to_nlu = true`, NLU gets token/dependency artifacts directly from the NLP stage, reducing duplicate analysis and improving consistency between grammar and intent/entity extraction.
+
+### 4) Clarification policy for low confidence
+
+If frame confidence drops below configured threshold (`dialogue_policy.low_confidence_threshold`), unresolved issue state is tracked and a clarification-oriented frame can be emitted before NLG.
+
+### 5) Shared-memory trace persistence
+
+If enabled, final response and trace are written to shared memory keys and optionally published to an event channel.
+
+---
+
+## Configuration boundaries
+
+Keep configuration separated by responsibility:
+
+- `agents_config.yaml` (`language_agent` section):
+  - pipeline order,
+  - stage failure policies,
+  - stage enable flags,
+  - observability toggles,
+  - shared-memory trace/event settings,
+  - dialogue/runtime policy.
+- `language_config.yaml` (under this package):
+  - component-internal behavior for orthography/NLP/NLU/NLG/tokenization/rules/etc.
+
+In short: **agent runtime policy belongs to `language_agent`; language mechanics belong to `language_config.yaml`.**
+
+---
+
+## Public API expectations
+
+The updated coordinator preserves compatibility methods:
+
+- `pipeline(text, session_id=None) -> str`
+- `process(text, session_id=None, **metadata) -> LanguageAgentResponse`
+- `predict(input_data) -> dict`
+- `act(input_data) -> str`
+- `perform_task(input_data) -> dict | str` (configurable structured return)
+- `health_check() -> dict`
+- `diagnostics() -> dict`
+- `clear_context() -> bool`
+
+---
+
+## Package map
+
+```text
+src/agents/language/
+├── README.md
+├── orthography_processor.py
+├── nlp_engine.py
+├── grammar_processor.py
+├── nlu_engine.py
+├── dialogue_context.py
+├── nlg_engine.py
+├── language_memory.py
+├── modules/
+│   ├── README.md
+│   ├── language_tokenizer.py
+│   ├── language_transformer.py
+│   ├── spell_checker.py
+│   └── rules.py
+├── utils/
+├── templates/
+├── resources/
+└── configs/language_config.yaml
 ```
 
 ---
 
-## Configuration map
+## Notes for maintainers
 
-`configs/language_config.yaml` drives module behavior:
-
-- `orthography_processor`: locale policy, auto-correction, contraction and compound behavior.
-- `grammar_processor`: POS mapping resources.
-- `nlp`: irregular verb/noun files, stopwords, POS regexes.
-- `nlu`: intent/entity patterns, lexicons, morphology rules, embedding paths.
-- `nlg`: template path, style/formality/verbosity controls.
-- `dialogue_context`: memory limits, summarization, follow-up rules, persistence defaults.
-- `language_cache`: cache size, TTL, compression/encryption strategy.
-
----
-
-## Typical usage
-
-```python
-from src.agents.language.orthography_processor import OrthographyProcessor
-from src.agents.language.grammar_processor import GrammarProcessor
-from src.agents.language.nlp_engine import NLPEngine
-from src.agents.language.nlu_engine import EnhancedNLU
-from src.agents.language.dialogue_context import DialogueContext
-from src.agents.language.nlg_engine import NLGEngine
-
-text = "can u tell me if teh weather is good tomorrow?"
-
-orth = OrthographyProcessor()
-grammar = GrammarProcessor()
-nlp = NLPEngine()
-nlu = EnhancedNLU()
-ctx = DialogueContext()
-nlg = NLGEngine()
-
-clean = orth.batch_process(text)
-issues = grammar.analyze_text(clean)
-tokens = nlp.process_text(clean)
-analysis = nlu.analyze_text_fully(clean)
-ctx.add_message("user", clean)
-
-reply = nlg.generate(
-    intent=analysis.get("intent", "unknown"),
-    entities=analysis.get("entities", {}),
-    sentiment=analysis.get("sentiment", "neutral"),
-    language="en",
-)
-```
-
----
-
-## Notes
-
-- Most components are resource-driven (JSON/YAML templates), so behavior can be tuned without major code changes.
-- `EnhancedNLU` is the best entry point when you need full semantic output with context-awareness.
-- `DialogueContext` enables long-running, stateful interactions and slot-based workflows.
+- Keep this README aligned with **pipeline stage names in `StageName`** and not with legacy aliases.
+- If stage ordering or policies change in `LanguageAgent`, update the flow diagram and configuration section together.
+- For lower-level module details (tokenizer/transformer/spell/rules), see `src/agents/language/modules/README.md`.

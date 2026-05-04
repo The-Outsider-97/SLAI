@@ -6,6 +6,7 @@ Validation utilities for ReasoningAgent:
 """
 import yaml, json
 import traceback
+import ast
 import time
 
 from pathlib import Path
@@ -56,13 +57,25 @@ class ValidationEngine:
         if not kb_path.exists():
             logger.error(f"Knowledge base file not found: {kb_path}")
             return {}
-            
-        with open(kb_path, 'r') as f:
-            data = json.load(f)
+
+        try:
+            with open(kb_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in knowledge base ({kb_path}): {e}")
+            # Recovery path for legacy files accidentally written as Python literals
+            try:
+                raw_text = kb_path.read_text(encoding='utf-8')
+                data = ast.literal_eval(raw_text)
+                logger.warning("Recovered knowledge base using ast.literal_eval fallback")
+            except Exception:
+                return {}
             
         # Handle different KB formats
         if isinstance(data, dict) and 'knowledge' in data:
             facts = data['knowledge']
+        elif isinstance(data, dict):
+            facts = data.items()
         elif isinstance(data, list):
             facts = data
         else:
@@ -87,6 +100,12 @@ class ValidationEngine:
                     weight = fact[3] if len(fact) >= 4 else 0.5
                     key = (s, p, o)
                     processed_kb[key] = float(weight)
+                elif isinstance(fact, tuple) and len(fact) == 2 and isinstance(fact[0], str):
+                    # Mapping format: {"s||p||o": confidence}
+                    key_str, weight = fact
+                    if "||" in key_str:
+                        s, p, o = key_str.split("||", 2)
+                        processed_kb[(s, p, o)] = float(weight)
             except Exception as e:
                 logger.warning(f"Skipping invalid fact: {fact} - {str(e)}")
                 

@@ -1,0 +1,306 @@
+{
+  "dataset": "Maya Civilization Facts with Sources",
+  "total_facts": 30,
+  "facts":[
+    {
+      "id": 1,
+      "category": "Mathematics",
+      "title": "Invention of Zero",
+      "description": "The Maya independently invented the mathematical concept of zero around 36 BCE, centuries before it was introduced to Europe. They used a shell-shaped glyph to represent it.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Maya Mathematics and the Concept of Zero"
+      }
+    },
+    {
+      "id": 2,
+      "category": "Mathematics",
+      "title": "Base-20 System",
+      "description": "Unlike our base-10 (decimal) system, the Maya used a base-20 (vigesimal) number system, likely derived from counting on all fingers and toes.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Maya Mathematics"
+      }
+    },
+    {
+      "id": 3,
+      "category": "Writing",
+      "title": "Advanced Hieroglyphics",
+      "description": "The Maya had the most sophisticated and highly developed writing system in the pre-Columbian Americas, consisting of hundreds of phonetic symbols and logograms.",
+      "source": {
+        "name": "History.com",
+        "reference": "Maya Civilization: Writing and Hieroglyphics"
+      }
+    },
+    {
+      "id": 4,
+      "category": "Writing",
+      "title": "Bark Paper Books",
+      "description": "They wrote books called codices, made from the inner bark of fig trees. The pages were folded like an accordion and bound with jaguar skin or wooden boards.",
+      "source": {
+        "name": "Library of Congress",
+        "reference": "The Mesoamerican Codices"
+      }
+    },
+    {
+      "id": 5,
+      "category": "History",
+      "title": "Tragic Loss of Literature",
+      "description": "During the Spanish conquest, Bishop Diego de Landa ordered the burning of countless Maya books in 1562. Today, only four known Maya codices remain in existence.",
+      "source": {
+        "name": "Yale University Art Gallery",
+        "reference": "The Maya Codices and the Spanish Conquest"
+      }
+    },
+    {
+      "id": 6,
+      "category": "Society",
+      "title": "Not Extinct",
+      "description": "A common misconception is that the Maya disappeared. In reality, millions of Maya descendants are alive today, primarily living in Mexico, Guatemala, Belize, Honduras, and El Salvador.",
+      "source": {
+        "name": "Smithsonian Magazine",
+        "reference": "The Maya Are Still Here"
+      }
+    },
+    {
+      "id": 7,
+      "category": "Language",
+      "title": "Living Languages",
+      "description": "There is no single 'Mayan language.' Today, there are over 20 distinct Mayan languages still spoken by over 6 million people.",
+      "source": {
+        "name": "Ethnologue",
+        "reference": "Mayan Language Family"
+      }
+    },
+    {
+      "id": 8,
+      "category": "Astronomy",
+      "title": "Complex Calendars",
+      "description": "The Maya used intertwining calendar systems, most notably the 260-day Tzolk'in (sacred calendar) and the 365-day Haab' (solar calendar), which combined to form a 52-year Calendar Round.",
+      "source": {
+        "name": "National Geographic",
+        "reference": "The Maya Calendar System"
+      }
+    },
+    {
+      "id": 9,
+      "category": "Astronomy",
+      "title": "The Long Count",
+      "description": "Their 'Long Count' calendar tracked vast amounts of time. The cycle that ended in December 2012 was simply the end of a b'ak'tun (a period of about 394 years), not a prediction of the world's end.",
+      "source": {
+        "name": "NASA",
+        "reference": "Beyond 2012: Why the World Didn't End"
+      }
+    },
+    {
+      "id": 10,
+      "category": "Astronomy",
+      "title": "Tracking Venus",
+      "description": "Maya astronomers calculated the synodic period of Venus at 584 days, an astonishingly accurate measurement achieved entirely with the naked eye.",
+      "source": {
+        "name": "Archaeology Magazine",
+        "reference": "The Maya Sense of Time and Astronomy"
+      }
+    },
+    {
+      "id": 11,
+      "category": "Architecture",
+      "title": "No Wheels or Metal Tools",
+      "description": "The Maya built massive stone pyramids, palaces, and observatories using stone tools (like flint and obsidian) and immense human labor, without the use of metal tools or the wheel.",
+      "source": {
+        "name": "Encyclopedia Britannica",
+        "reference": "Pre-Columbian Civilizations: Maya Architecture"
+      }
+    },
+    {
+      "id": 12,
+      "category": "Architecture",
+      "title": "Equinox Serpent",
+      "description": "At Chichen Itza, the Temple of Kukulcan (El Castillo) is designed so that during the spring and autumn equinoxes, the sun casts a shadow that looks like a giant snake slithering down the pyramid's steps.",
+      "source": {
+        "name": "National Geographic",
+        "reference": "Chichén Itzá: The Equinox Serpent"
+      }
+    },
+    {
+      "id": 13,
+      "category": "Sports",
+      "title": "The Mesoamerican Ballgame",
+      "description": "The Maya played a high-stakes sport known as Pok-a-Tok using a heavy solid rubber ball. Players could only use their hips, thighs, and chests to keep the ball in the air.",
+      "source": {
+        "name": "The Metropolitan Museum of Art",
+        "reference": "The Mesoamerican Ballgame"
+      }
+    },
+    {
+      "id": 14,
+      "category": "Sports",
+      "title": "Sacrificial Sports",
+      "description": "The ballgame had deep religious significance. In some ceremonial instances, the losing team (or sometimes the winning captain) would be offered as a human sacrifice to the gods.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "The Maya Ballgame and Human Sacrifice"
+      }
+    },
+    {
+      "id": 15,
+      "category": "Economy",
+      "title": "Chocolate Currency",
+      "description": "Cacao beans were incredibly valuable in Maya society and were regularly used as a form of currency for trade and taxes.",
+      "source": {
+        "name": "Smithsonian Magazine",
+        "reference": "The Maya and the History of Chocolate Currency"
+      }
+    },
+    {
+      "id": 16,
+      "category": "Cuisine",
+      "title": "Spicy Chocolate Drink",
+      "description": "The Maya did not eat solid chocolate bars. They consumed it as a bitter, frothy beverage mixed with chili peppers, water, and cornmeal, reserved mostly for the elite.",
+      "source": {
+        "name": "History.com",
+        "reference": "The Sweet History of Chocolate"
+      }
+    },
+    {
+      "id": 17,
+      "category": "Beauty Standards",
+      "title": "Crossed Eyes",
+      "description": "Crossed eyes were considered a mark of profound beauty and nobility. Mothers would hang a bead or object between their babies' eyes to encourage them to cross permanently.",
+      "source": {
+        "name": "Michael D. Coe / Ancient Maya Literature",
+        "reference": "The Maya (9th Edition), Thames & Hudson"
+      }
+    },
+    {
+      "id": 18,
+      "category": "Beauty Standards",
+      "title": "Cranial Deformation",
+      "description": "Noble Maya families bound the heads of their infants between wooden boards to artificially elongate their skulls, resembling an ear of corn, a sacred crop.",
+      "source": {
+        "name": "American Journal of Physical Anthropology",
+        "reference": "Maya Cranial Modification Practices"
+      }
+    },
+    {
+      "id": 19,
+      "category": "Dentistry",
+      "title": "Jeweled Teeth",
+      "description": "Skilled Maya dentists used drills made of obsidian to bore holes into their teeth, which were then inlaid with precious stones like jade, turquoise, or pyrite for aesthetic appeal.",
+      "source": {
+        "name": "National Geographic",
+        "reference": "Ancient Maya Dentistry and Gemstones"
+      }
+    },
+    {
+      "id": 20,
+      "category": "Religion",
+      "title": "Bloodletting Rituals",
+      "description": "Maya royals performed bloodletting rituals—piercing their tongues, lips, or genitals with stingray spines—believing their royal blood nourished the gods and kept the universe in balance.",
+      "source": {
+        "name": "British Museum",
+        "reference": "Maya Bloodletting Rituals"
+      }
+    },
+    {
+      "id": 21,
+      "category": "Politics",
+      "title": "City-States",
+      "description": "The Maya never unified into a single empire like the Aztecs or Incas. Instead, they were a network of independent city-states that traded and frequently warred with one another.",
+      "source": {
+        "name": "History.com",
+        "reference": "Maya Civilization: Rise and Fall"
+      }
+    },
+    {
+      "id": 22,
+      "category": "Engineering",
+      "title": "Advanced Water Management",
+      "description": "Because much of the Yucatan Peninsula lacks surface rivers, the Maya built sophisticated underground cisterns called 'chultunes' and massive reservoirs to catch and store rainwater.",
+      "source": {
+        "name": "Penn Museum",
+        "reference": "Maya Water Management and Engineering"
+      }
+    },
+    {
+      "id": 23,
+      "category": "Health",
+      "title": "Sweat Baths",
+      "description": "The Maya frequently used stone sweat baths (similar to saunas), known as temazcals, to purify their bodies, treat illnesses, and perform spiritual cleansings.",
+      "source": {
+        "name": "Archaeology Magazine",
+        "reference": "Maya Sweat Baths and Temazcals"
+      }
+    },
+    {
+      "id": 24,
+      "category": "Art",
+      "title": "Maya Blue",
+      "description": "They created a vivid, remarkably durable pigment known as 'Maya Blue.' The exact chemical composition resisted fading for centuries, baffling modern scientists until recently.",
+      "source": {
+        "name": "American Chemical Society",
+        "reference": "The Mystery of Maya Blue Pigment"
+      }
+    },
+    {
+      "id": 25,
+      "category": "Agriculture",
+      "title": "The Three Sisters",
+      "description": "Maya agriculture relied heavily on the 'Three Sisters' method of companion planting: growing corn, beans, and squash together so the plants benefited from each other.",
+      "source": {
+        "name": "USDA National Agricultural Library",
+        "reference": "The Three Sisters of Indigenous American Agriculture"
+      }
+    },
+    {
+      "id": 26,
+      "category": "Religion",
+      "title": "Cyclical Creation",
+      "description": "According to Maya mythology, the world was created and destroyed multiple times. They believed humans were currently living in the fourth creation, having finally been successfully crafted from maize (corn).",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Maya Mythology and Creation Myths"
+      }
+    },
+    {
+      "id": 27,
+      "category": "Mythology",
+      "title": "The Popol Vuh",
+      "description": "The Popol Vuh is the most important surviving text of Maya mythology. It details the creation of the world and the epic adventures of the Hero Twins, Hunahpu and Xbalanque.",
+      "source": {
+        "name": "Popol Vuh",
+        "reference": "Translated by Dennis Tedlock, Simon & Schuster"
+      }
+    },
+    {
+      "id": 28,
+      "category": "Weaponry",
+      "title": "Obsidian Blades",
+      "description": "Because they lacked iron or steel, the Maya used obsidian (volcanic glass) to make weapons and cutting tools. Obsidian blades can have edges much sharper than high-quality steel surgical scalpels.",
+      "source": {
+        "name": "Penn Museum",
+        "reference": "Obsidian in the Maya World"
+      }
+    },
+    {
+      "id": 29,
+      "category": "Medicine",
+      "title": "Suturing Wounds",
+      "description": "Maya healers were advanced in medicine, using human hair to suture wounds and expertly setting broken bones using casts made from plants.",
+      "source": {
+        "name": "World History Encyclopedia",
+        "reference": "Maya Medicine and Health"
+      }
+    },
+    {
+      "id": 30,
+      "category": "History",
+      "title": "The Classic Collapse",
+      "description": "Between 800 and 1000 CE, the southern lowland Maya cities were mysteriously abandoned. Modern historians attribute this 'collapse' to a combination of severe drought, overpopulation, and relentless warfare.",
+      "source": {
+        "name": "NASA",
+        "reference": "The Fall of the Maya: Drought and Climate Change"
+      }
+    }
+  ]
+}

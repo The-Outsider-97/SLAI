@@ -1,0 +1,1234 @@
+{
+  "template_name": "browser_security_indicators",
+  "description": "Protective detection indicators for the browser agent security layer. These indicators identify states where the agent should warn, pause, block, or request human oversight. They are not bypass instructions.",
+  "project_path": "scr/agents/browser/templates/indicators.json",
+  "last_reviewed": "2026-04-25",
+  "owner": "browser.security",
+  "defaults": {
+    "enabled": true,
+    "case_sensitive": false,
+    "normalize_whitespace": true,
+    "strip_zero_width_chars": true,
+    "unicode_normalization": "NFKC",
+    "max_text_scan_chars": 250000,
+    "max_evidence_chars": 500,
+    "match_policy": "any",
+    "evidence_policy": "bounded_redacted_snippets",
+    "decision_hints": {
+      "allow": "Continue without interrupting the workflow.",
+      "warn": "Continue only if the caller or policy allows risk-tolerant execution.",
+      "block": "Stop automated action and require explicit human review or an alternate safe path."
+    }
+  },
+  "severity_scale": {
+    "info": {
+      "risk_score": 0.05,
+      "description": "Low-risk signal useful for context."
+    },
+    "low": {
+      "risk_score": 0.15,
+      "description": "Minor risk or weak signal; usually warn only when combined."
+    },
+    "medium": {
+      "risk_score": 0.35,
+      "description": "Meaningful risk or protected interaction; usually warn."
+    },
+    "high": {
+      "risk_score": 0.7,
+      "description": "Strong protective signal; often block depending on policy."
+    },
+    "critical": {
+      "risk_score": 0.95,
+      "description": "Sensitive or unsafe state; block by default."
+    }
+  },
+  "categories": {
+    "captcha": {
+      "enabled": true,
+      "description": "Human-verification and CAPTCHA challenges. The agent should stop or request human oversight rather than trying to bypass the challenge.",
+      "decision": "block",
+      "severity": "high",
+      "risk_score": 0.82,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom",
+        "url"
+      ],
+      "matchers": {
+        "text": [
+          "are you a robot",
+          "automated queries",
+          "automated traffic",
+          "browser verification",
+          "captcha",
+          "CAPTCHA",
+          "challenge page",
+          "checking if the site connection is secure",
+          "checking your browser",
+          "Cloudflare Turnstile",
+          "complete the CAPTCHA",
+          "complete the security check",
+          "complete this challenge",
+          "confirm you are not a robot",
+          "drag the puzzle piece",
+          "enter the code shown",
+          "hCaptcha",
+          "human verification",
+          "I am not a robot",
+          "I'm not a robot",
+          "managed challenge",
+          "please verify",
+          "press and hold",
+          "prove you are human",
+          "prove you're human",
+          "reCAPTCHA",
+          "review the security of your connection",
+          "robot check",
+          "security check",
+          "select all images",
+          "solve the captcha",
+          "turnstile",
+          "type the characters you see",
+          "unusual traffic",
+          "verification required",
+          "verify that you are human",
+          "verify you are human",
+          "verify you're human"
+        ],
+        "css_selectors": [
+          "#challenge-form",
+          ".cf-challenge",
+          ".cf-turnstile",
+          ".g-recaptcha",
+          ".h-captcha",
+          "[aria-label*='captcha' i]",
+          "[class*='captcha' i]",
+          "[data-hcaptcha-widget-id]",
+          "[data-sitekey]",
+          "[data-testid*='captcha' i]",
+          "[id*='captcha' i]",
+          "form[action*='captcha' i]",
+          "iframe[src*='challenges.cloudflare.com']",
+          "iframe[src*='google.com/recaptcha']",
+          "iframe[src*='hcaptcha']",
+          "iframe[src*='recaptcha']",
+          "iframe[title*='captcha' i]",
+          "iframe[title*='recaptcha' i]",
+          "input[name='cf-turnstile-response']",
+          "textarea[name='g-recaptcha-response']",
+          "textarea[name='h-captcha-response']"
+        ],
+        "url_contains": [
+          "/captcha",
+          "challenge-platform",
+          "challenges.cloudflare.com",
+          "hcaptcha",
+          "recaptcha",
+          "turnstile"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Detection is protective only; do not automate challenge solving or evasion."
+      ]
+    },
+    "bot_detection_block": {
+      "enabled": true,
+      "description": "Bot-detection, anti-automation, WAF, and automated-access blocks.",
+      "decision": "block",
+      "severity": "high",
+      "risk_score": 0.78,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom",
+        "url",
+        "headers",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "403 forbidden",
+          "access denied",
+          "Akamai Bot Manager",
+          "anti-bot",
+          "automated access",
+          "automated browser",
+          "automated browsing",
+          "automated traffic",
+          "blocked by security rules",
+          "blocked due to suspicious activity",
+          "bot detection",
+          "bot protection",
+          "bot score",
+          "browser not supported",
+          "Cloudflare Ray ID",
+          "DataDome",
+          "forbidden",
+          "headless browser detected",
+          "Imperva",
+          "Incapsula",
+          "Kasada",
+          "malformed request",
+          "not allowed to access this page",
+          "PerimeterX",
+          "please enable cookies",
+          "please enable JavaScript",
+          "Ray ID",
+          "request blocked",
+          "request rejected",
+          "security policy blocked",
+          "suspicious activity detected",
+          "temporarily blocked",
+          "traffic from your network",
+          "unusual activity from your network",
+          "WAF",
+          "we have detected unusual behavior",
+          "we've detected unusual behavior",
+          "web application firewall",
+          "your request has been blocked"
+        ],
+        "css_selectors": [
+          "#px-captcha",
+          "[class*='challenge' i]",
+          "[class*='datadome' i]",
+          "[class*='perimeterx' i]",
+          "[id*='challenge' i]",
+          "[id*='datadome' i]",
+          "[id*='perimeterx' i]",
+          "script[src*='akamai']",
+          "script[src*='datadome']",
+          "script[src*='kasada']",
+          "script[src*='perimeterx']"
+        ],
+        "url_contains": [
+          "akamai",
+          "bot-manager",
+          "challenge",
+          "datadome",
+          "incapsula",
+          "kasada",
+          "perimeterx"
+        ],
+        "headers": {
+          "server_contains": [
+            "cloudflare",
+            "akamai",
+            "imperva",
+            "incapsula"
+          ],
+          "set_cookie_contains": [
+            "ak_bmsc",
+            "bm_sv",
+            "bm_sz",
+            "_px",
+            "datadome",
+            "visid_incap",
+            "incap_ses"
+          ]
+        },
+        "status_codes": [
+          401,
+          403,
+          406,
+          409,
+          418,
+          429,
+          451,
+          503
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Treat as a site-protection signal, not as a prompt to evade controls."
+      ]
+    },
+    "rate_limit": {
+      "enabled": true,
+      "description": "Rate-limiting and quota exhaustion signals. The agent should back off and avoid repeated requests.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.5,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "headers",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "429",
+          "back off",
+          "exceeded allowed request rate",
+          "HTTP 429",
+          "maximum requests",
+          "over capacity",
+          "please try again later",
+          "quota exceeded",
+          "rate limit",
+          "rate limited",
+          "request limit reached",
+          "request quota exceeded",
+          "retry after",
+          "server busy",
+          "service unavailable",
+          "slow down",
+          "temporarily rate limited",
+          "temporarily unavailable",
+          "throttled",
+          "too many requests",
+          "try again later",
+          "usage limit exceeded",
+          "you are being throttled"
+        ],
+        "headers": {
+          "names": [
+            "retry-after",
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset",
+            "ratelimit-limit",
+            "ratelimit-remaining",
+            "ratelimit-reset"
+          ]
+        },
+        "status_codes": [
+          429,
+          503
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Use configured backoff rather than repeated immediate retries."
+      ]
+    },
+    "login_auth_wall": {
+      "enabled": true,
+      "description": "Login, authentication, SSO, MFA, session-expiry, or account-wall states.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.42,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom",
+        "url",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "2FA",
+          "account required",
+          "authentication required",
+          "authorization required",
+          "check your email",
+          "continue with Google",
+          "continue with Microsoft",
+          "create an account to continue",
+          "enter your code",
+          "log in required",
+          "log in to continue",
+          "login required",
+          "membership required",
+          "MFA",
+          "multi-factor authentication",
+          "not authenticated",
+          "organization access required",
+          "password required",
+          "please log in",
+          "please sign in",
+          "private workspace",
+          "session expired",
+          "sign in to continue",
+          "single sign-on",
+          "SSO required",
+          "subscribe to continue",
+          "two-factor authentication",
+          "verification code",
+          "verify your email",
+          "verify your identity",
+          "your session has expired"
+        ],
+        "css_selectors": [
+          "[data-testid*='login' i]",
+          "[data-testid*='signin' i]",
+          "a[href*='login' i]",
+          "a[href*='signin' i]",
+          "form[action*='login' i]",
+          "form[action*='signin' i]",
+          "input[autocomplete='one-time-code']",
+          "input[name*='password' i]",
+          "input[type='password']"
+        ],
+        "url_contains": [
+          "/account",
+          "/auth",
+          "/login",
+          "/mfa",
+          "/oauth",
+          "/session",
+          "/sign-in",
+          "/signin",
+          "/sso"
+        ],
+        "status_codes": [
+          401,
+          403
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Warn because credentials or user-specific authorization may be required."
+      ]
+    },
+    "permission_access_denied": {
+      "enabled": true,
+      "description": "Permission-denied and authorization failure states that may indicate private or restricted content.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.45,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "401 unauthorized",
+          "403 forbidden",
+          "access forbidden",
+          "access restricted",
+          "administrator approval required",
+          "contact your administrator",
+          "insufficient permissions",
+          "not authorized",
+          "organization restricted",
+          "permission denied",
+          "private document",
+          "private page",
+          "private repository",
+          "request access",
+          "unauthorized",
+          "workspace restricted",
+          "you do not have access",
+          "you don't have access"
+        ],
+        "status_codes": [
+          401,
+          403,
+          451
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Do not attempt to bypass access controls; surface the state to the caller."
+      ]
+    },
+    "unsafe_url_scheme": {
+      "enabled": true,
+      "description": "URL schemes that should not be navigated by an automated browser agent unless explicitly allowed by policy.",
+      "decision": "block",
+      "severity": "high",
+      "risk_score": 0.8,
+      "match_policy": "any",
+      "evidence_types": [
+        "scheme"
+      ],
+      "matchers": {
+        "schemes": [
+          "about",
+          "blob",
+          "chrome",
+          "chrome-extension",
+          "data",
+          "edge",
+          "file",
+          "ftp",
+          "intent",
+          "javascript",
+          "ms-appx",
+          "ms-appx-web",
+          "powershell",
+          "shell",
+          "vbscript",
+          "view-source"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "http and https are the default allowed navigation schemes."
+      ]
+    },
+    "private_network_or_local_target": {
+      "enabled": true,
+      "description": "Localhost, private-network, loopback, link-local, and cloud-metadata targets that can expose internal services or credentials.",
+      "decision": "block",
+      "severity": "critical",
+      "risk_score": 0.92,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex",
+        "domain"
+      ],
+      "matchers": {
+        "text": [
+          "0.0.0.0",
+          "100.100.100.200",
+          "127.0.0.1",
+          "169.254.169.254",
+          "::1",
+          "localhost",
+          "metadata.google.internal"
+        ],
+        "regex": [
+          "(?i)^https?://100\\.100\\.100\\.200(?::|/|$)",
+          "(?i)^https?://10\\.\\d+\\.\\d+\\.\\d+(?::|/|$)",
+          "(?i)^https?://127\\.\\d+\\.\\d+\\.\\d+(?::|/|$)",
+          "(?i)^https?://169\\.254\\.169\\.254(?::|/|$)",
+          "(?i)^https?://169\\.254\\.\\d+\\.\\d+(?::|/|$)",
+          "(?i)^https?://172\\.(1[6-9]|2\\d|3[0-1])\\.\\d+\\.\\d+(?::|/|$)",
+          "(?i)^https?://192\\.168\\.\\d+\\.\\d+(?::|/|$)",
+          "(?i)^https?://\\[?::1\\]?(?::|/|$)",
+          "(?i)^https?://localhost(?::|/|$)",
+          "(?i)^https?://metadata\\.google\\.internal(?::|/|$)"
+        ],
+        "domains": [
+          "ip6-localhost",
+          "ip6-loopback",
+          "localhost",
+          "metadata.google.internal"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Protects against SSRF-style browsing and accidental access to local/internal services."
+      ]
+    },
+    "dangerous_download_or_execution": {
+      "enabled": true,
+      "description": "Executable, script, installer, or package downloads that may execute code or alter the host system.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.68,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "download",
+        "mime_type"
+      ],
+      "matchers": {
+        "text": [
+          "add extension",
+          "browser extension",
+          "chmod +x",
+          "copy and paste this command",
+          "curl | sh",
+          "download executable",
+          "download package",
+          "download started",
+          "enable content",
+          "enable macros",
+          "install extension",
+          "install now",
+          "installer",
+          "open this file",
+          "powershell -enc",
+          "run the script",
+          "run this file",
+          "setup wizard",
+          "wget | sh"
+        ],
+        "file_extensions": [
+          ".apk",
+          ".app",
+          ".appimage",
+          ".bash",
+          ".bat",
+          ".bin",
+          ".cmd",
+          ".com",
+          ".crx",
+          ".deb",
+          ".dmg",
+          ".exe",
+          ".fish",
+          ".hta",
+          ".img",
+          ".ipa",
+          ".iso",
+          ".jar",
+          ".js",
+          ".jse",
+          ".msi",
+          ".msp",
+          ".pkg",
+          ".ps1",
+          ".psm1",
+          ".reg",
+          ".rpm",
+          ".run",
+          ".scr",
+          ".sh",
+          ".vbe",
+          ".vbs",
+          ".wsf",
+          ".xpi",
+          ".zsh"
+        ],
+        "mime_types": [
+          "application/java-archive",
+          "application/octet-stream",
+          "application/vnd.android.package-archive",
+          "application/vnd.microsoft.portable-executable",
+          "application/x-apple-diskimage",
+          "application/x-bat",
+          "application/x-msdos-program",
+          "application/x-msdownload",
+          "application/x-msi",
+          "application/x-sh"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Warn or block depending on product policy; do not execute downloaded content automatically."
+      ]
+    },
+    "credential_or_secret_exposure": {
+      "enabled": true,
+      "description": "Credentials, API keys, access tokens, private keys, session cookies, and other secrets in page content, URLs, forms, or action payloads.",
+      "decision": "block",
+      "severity": "critical",
+      "risk_score": 0.96,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex",
+        "attribute"
+      ],
+      "matchers": {
+        "text": [
+          "access token",
+          "api key",
+          "authorization bearer",
+          "BEGIN EC PRIVATE KEY",
+          "BEGIN OPENSSH PRIVATE KEY",
+          "BEGIN PRIVATE KEY",
+          "BEGIN RSA PRIVATE KEY",
+          "client secret",
+          "credential",
+          "passwd",
+          "password",
+          "private key",
+          "refresh token",
+          "secret key",
+          "service account",
+          "session cookie",
+          "ssh private key"
+        ],
+        "regex": [
+          "(?i)access[_-]?token\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.]{16,}",
+          "(?i)api[_-]?key\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.]{16,}",
+          "(?i)authorization\\s*[:=]\\s*bearer\\s+[A-Za-z0-9_\\-.]{16,}",
+          "(?i)client[_-]?secret\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.]{16,}",
+          "(?i)cookie\\s*[:=]\\s*[^;\\n]{16,}",
+          "(?i)password\\s*[:=]\\s*\\S{6,}",
+          "(?i)refresh[_-]?token\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.]{16,}",
+          "(?i)secret\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.]{16,}",
+          "(?i)session(id)?\\s*[:=]\\s*[A-Za-z0-9_\\-.]{16,}",
+          "-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
+          "AIza[0-9A-Za-z_\\-]{35}",
+          "AKIA[0-9A-Z]{16}",
+          "ASIA[0-9A-Z]{16}",
+          "eyJ[A-Za-z0-9_\\-]+\\.[A-Za-z0-9_\\-]+\\.[A-Za-z0-9_\\-]+",
+          "gh[pousr]_[A-Za-z0-9_]{30,}",
+          "github_pat_[A-Za-z0-9_]{20,}",
+          "rk_live_[A-Za-z0-9]{20,}",
+          "sk-[A-Za-z0-9]{20,}",
+          "sk-live-[A-Za-z0-9]{20,}",
+          "xox[baprs]-[A-Za-z0-9-]{20,}"
+        ],
+        "attributes": {
+          "sensitive_names": [
+            "password",
+            "passwd",
+            "token",
+            "access_token",
+            "refresh_token",
+            "api_key",
+            "apikey",
+            "secret",
+            "client_secret",
+            "authorization",
+            "cookie",
+            "session",
+            "csrf",
+            "xsrf"
+          ]
+        }
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Evidence should be redacted by default. Prefer detection metadata over raw secret values."
+      ]
+    },
+    "payment_financial_data": {
+      "enabled": true,
+      "description": "Payment-card, bank-account, tax, or financial identifiers that should not be logged or replayed.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.7,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex"
+      ],
+      "matchers": {
+        "text": [
+          "bank account",
+          "billing address",
+          "card number",
+          "credit card",
+          "CVC",
+          "CVV",
+          "expiration date",
+          "IBAN",
+          "invoice payment",
+          "routing number",
+          "security code",
+          "SWIFT",
+          "tax id",
+          "VAT number",
+          "wire transfer"
+        ],
+        "regex": [
+          "(?<!\\d)(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{3,4}(?!\\d)",
+          "(?i)cvc\\s*[:=]?\\s*\\d{3,4}",
+          "(?i)cvv\\s*[:=]?\\s*\\d{3,4}",
+          "(?i)iban\\s*[:=]?\\s*[A-Z]{2}\\d{2}[A-Z0-9]{10,30}",
+          "(?i)swift\\s*[:=]?\\s*[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Do not store raw financial identifiers in memory, logs, or test fixtures."
+      ]
+    },
+    "personal_data_pii": {
+      "enabled": true,
+      "description": "Personal data and identity information that may require privacy-preserving handling.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.38,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex"
+      ],
+      "matchers": {
+        "text": [
+          "date of birth",
+          "driver license",
+          "email address",
+          "home address",
+          "medical record",
+          "national insurance number",
+          "passport number",
+          "patient id",
+          "personal address",
+          "phone number",
+          "resident registration number",
+          "social security number",
+          "SSN"
+        ],
+        "regex": [
+          "(?<!\\d)(?:\\+?\\d{1,3}[ .-]?)?(?:\\(?\\d{2,4}\\)?[ .-]?)?\\d{3,4}[ .-]?\\d{4}(?!\\d)",
+          "(?<!\\d)\\d{3}-\\d{2}-\\d{4}(?!\\d)",
+          "(?i)(date of birth|dob)\\s*[:=]?\\s*\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}",
+          "(?i)passport\\s*(number|no\\.)?\\s*[:=]?\\s*[A-Z0-9]{6,12}",
+          "(?i)ssn\\s*[:=]?\\s*\\d{3}-\\d{2}-\\d{4}",
+          "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "PII detection can be noisy; treat as warning unless policy requires blocking."
+      ]
+    },
+    "phishing_social_engineering": {
+      "enabled": true,
+      "description": "Phishing, credential-harvesting, social-engineering, or coercive payment signals.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.67,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex"
+      ],
+      "matchers": {
+        "text": [
+          "account suspended",
+          "act now",
+          "airdrop",
+          "AnyDesk",
+          "claim reward",
+          "confirm your password",
+          "connect your wallet",
+          "enter your password to continue",
+          "gift card",
+          "install remote support",
+          "limited time",
+          "private key",
+          "recovery phrase",
+          "remote access",
+          "screen sharing required",
+          "security alert",
+          "seed phrase",
+          "send cryptocurrency",
+          "TeamViewer",
+          "unusual sign-in attempt",
+          "urgent action required",
+          "verify wallet",
+          "verify your account immediately",
+          "wire money"
+        ],
+        "regex": [
+          "(?i)(seed|recovery) phrase",
+          "(?i)account (suspended|locked|limited)",
+          "(?i)connect (your )?wallet",
+          "(?i)enter (your )?(password|private key|seed phrase)",
+          "(?i)urgent action required"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Warn the caller; avoid entering credentials or payment data into suspicious flows."
+      ]
+    },
+    "crypto_wallet_sensitive_flow": {
+      "enabled": true,
+      "description": "Cryptocurrency wallet, seed phrase, private key, or irreversible transaction prompts.",
+      "decision": "block",
+      "severity": "critical",
+      "risk_score": 0.9,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex"
+      ],
+      "matchers": {
+        "text": [
+          "approve transaction",
+          "blind signing",
+          "bridge assets",
+          "connect wallet",
+          "gas fee",
+          "import wallet",
+          "MetaMask",
+          "mnemonic phrase",
+          "private key",
+          "recovery phrase",
+          "restore wallet",
+          "secret recovery phrase",
+          "seed phrase",
+          "send transaction",
+          "sign message",
+          "swap tokens",
+          "wallet drain",
+          "wallet private key",
+          "WalletConnect"
+        ],
+        "regex": [
+          "(?i)(secret )?recovery phrase",
+          "(?i)approve transaction",
+          "(?i)mnemonic phrase",
+          "(?i)private key",
+          "(?i)seed phrase",
+          "(?i)sign (this )?message"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Block automated entry or signing actions. Human review required."
+      ]
+    },
+    "insecure_form_or_transport": {
+      "enabled": true,
+      "description": "Forms, credential fields, or sensitive inputs over insecure or mixed-content transport.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.72,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom",
+        "url"
+      ],
+      "matchers": {
+        "text": [
+          "certificate error",
+          "connection is not secure",
+          "expired certificate",
+          "insecure form",
+          "mixed content",
+          "NET::ERR_CERT",
+          "not secure",
+          "self-signed certificate",
+          "SSL error",
+          "TLS error",
+          "your information is not private"
+        ],
+        "css_selectors": [
+          "form[action^='http://']",
+          "input[name*='password' i]",
+          "input[type='password']"
+        ],
+        "url_contains": [
+          "http://"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Combine with current page scheme and form action before blocking."
+      ]
+    },
+    "destructive_or_irreversible_action": {
+      "enabled": true,
+      "description": "Browser-visible prompts that indicate deletion, payment, submission, publishing, or irreversible account changes.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.46,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "administrator privileges",
+          "are you sure",
+          "cancel subscription",
+          "cannot be undone",
+          "change password",
+          "close account",
+          "confirm deletion",
+          "confirm purchase",
+          "delete account",
+          "delete permanently",
+          "grant access",
+          "irreversible",
+          "place order",
+          "publish now",
+          "reset password",
+          "revoke access",
+          "send email",
+          "send message",
+          "submit payment",
+          "transfer funds",
+          "wire transfer"
+        ],
+        "css_selectors": [
+          "[aria-label*='confirm' i]",
+          "[aria-label*='delete' i]",
+          "button[class*='danger' i]",
+          "button[id*='delete' i]",
+          "button[name*='delete' i]",
+          "button[type='submit']"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "This is a protective confirmation signal; downstream policy decides whether to pause."
+      ]
+    },
+    "file_upload_sensitive": {
+      "enabled": true,
+      "description": "File-upload controls and prompts that may expose local files or sensitive documents.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.44,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "attach document",
+          "attach file",
+          "choose file",
+          "drag and drop files",
+          "upload bank statement",
+          "upload file",
+          "upload medical record",
+          "upload passport",
+          "upload tax document",
+          "upload your ID"
+        ],
+        "css_selectors": [
+          "[aria-label*='upload' i]",
+          "[class*='upload' i]",
+          "[data-testid*='upload' i]",
+          "input[type='file']"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Avoid automatic local file selection unless explicitly requested and policy-approved."
+      ]
+    },
+    "cookie_consent_or_privacy_banner": {
+      "enabled": true,
+      "description": "Cookie consent, privacy choices, and tracking-preference banners. Usually not unsafe, but useful for automation decisions and user privacy.",
+      "decision": "allow",
+      "severity": "info",
+      "risk_score": 0.08,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "accept all cookies",
+          "consent preferences",
+          "cookie settings",
+          "do not sell or share",
+          "legitimate interest",
+          "manage preferences",
+          "privacy settings",
+          "reject all cookies",
+          "tracking technologies",
+          "we use cookies",
+          "your privacy choices"
+        ],
+        "css_selectors": [
+          "#cookie-banner",
+          "[aria-label*='cookie' i]",
+          "[class*='cookie' i]",
+          "[id*='cookie' i]",
+          "button[aria-label*='Accept' i]",
+          "button[id*='accept' i]"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Privacy banner detection is informational unless the product policy requires a specific choice."
+      ]
+    },
+    "adult_or_sensitive_content_boundary": {
+      "enabled": true,
+      "description": "Age-gated, adult, gambling, weapons, drugs, or other sensitive content boundaries that may require policy checks.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.4,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "18+",
+          "21+",
+          "adult content",
+          "age verification",
+          "ammunition",
+          "bet now",
+          "cannabis",
+          "casino",
+          "confirm you are over",
+          "controlled substances",
+          "explosives",
+          "firearms",
+          "gambling",
+          "nicotine",
+          "prescription required",
+          "sportsbook",
+          "THC",
+          "tobacco",
+          "vape",
+          "weapons"
+        ],
+        "css_selectors": [
+          "[class*='age' i][class*='gate' i]",
+          "[id*='age' i][id*='gate' i]",
+          "button[name*='age' i]"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Signal for product policy evaluation; do not infer illegality from a single weak match."
+      ]
+    },
+    "browser_or_extension_permission_prompt": {
+      "enabled": true,
+      "description": "Browser, OS, or extension permission prompts that may expose device capabilities or user data.",
+      "decision": "warn",
+      "severity": "medium",
+      "risk_score": 0.55,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "access your location",
+          "add extension",
+          "allow notifications",
+          "allow this site",
+          "clipboard access",
+          "extension permissions",
+          "install extension",
+          "open external application",
+          "read from clipboard",
+          "share your screen",
+          "show notifications",
+          "use your camera",
+          "use your location",
+          "use your microphone",
+          "write to clipboard"
+        ],
+        "css_selectors": [
+          "[aria-label*='permission' i]",
+          "[class*='permission' i]"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Automation should not grant sensitive device permissions by default."
+      ]
+    },
+    "malicious_script_or_xss_signal": {
+      "enabled": true,
+      "description": "Visible or URL-level signals of script injection, XSS payloads, or suspicious encoded script execution.",
+      "decision": "block",
+      "severity": "critical",
+      "risk_score": 0.88,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "regex",
+        "url"
+      ],
+      "matchers": {
+        "text": [
+          "<script>",
+          "atob(",
+          "base64_decode",
+          "cmd.exe",
+          "document.cookie",
+          "eval(",
+          "fromCharCode",
+          "javascript:",
+          "localStorage",
+          "onerror=",
+          "onload=",
+          "powershell",
+          "sessionStorage"
+        ],
+        "regex": [
+          "(?i)<script[^>]*>",
+          "(?i)atob\\s*\\(",
+          "(?i)cmd\\.exe",
+          "(?i)document\\.cookie",
+          "(?i)eval\\s*\\(",
+          "(?i)javascript:",
+          "(?i)on(error|load|click|mouseover)\\s*=",
+          "(?i)powershell(\\.exe)?"
+        ],
+        "url_contains": [
+          "%3cscript",
+          "<script",
+          "document.cookie",
+          "javascript:",
+          "onerror=",
+          "onload="
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Primarily protective for navigation/action payloads and reflected content diagnostics."
+      ]
+    },
+    "legal_or_compliance_wall": {
+      "enabled": true,
+      "description": "Legal, terms, compliance, export-control, or consent gates that may require human acknowledgement.",
+      "decision": "warn",
+      "severity": "low",
+      "risk_score": 0.25,
+      "match_policy": "any",
+      "evidence_types": [
+        "text"
+      ],
+      "matchers": {
+        "text": [
+          "accept terms",
+          "CCPA",
+          "compliance",
+          "confidential",
+          "consent required",
+          "data processing agreement",
+          "export control",
+          "GDPR",
+          "HIPAA",
+          "I agree",
+          "legal notice",
+          "NDA",
+          "privacy policy",
+          "restricted data",
+          "terms of service"
+        ]
+      },
+      "false_positive_hints": [],
+      "notes": [
+        "Usually a warning; product policy determines whether automated acknowledgement is allowed."
+      ]
+    }
+  },
+  "loader_contract": {
+    "expected_config_key": "security_features.indicator_template_path",
+    "fallback_config_key": "security_features.indicators",
+    "merge_policy_key": "security_features.indicator_template_merge_policy",
+    "supported_merge_policies": [
+      "template_only",
+      "template_overrides_config",
+      "config_overrides_template",
+      "append_unique"
+    ],
+    "recommended_merge_policy": "template_overrides_config",
+    "category_shape": {
+      "enabled": "bool",
+      "description": "string",
+      "decision": "allow|warn|block",
+      "severity": "info|low|medium|high|critical",
+      "risk_score": "float 0..1",
+      "match_policy": "any|all|weighted",
+      "evidence_types": "list[string]",
+      "matchers": "mapping"
+    }
+  },
+  "testing": {
+    "minimum_required_categories": [
+      "captcha",
+      "bot_detection_block",
+      "rate_limit",
+      "login_auth_wall",
+      "unsafe_url_scheme",
+      "private_network_or_local_target",
+      "credential_or_secret_exposure"
+    ],
+    "recommended_unit_tests": [
+      "loads_as_valid_json",
+      "all_categories_have_decision_severity_and_matchers",
+      "captcha_detects_recaptcha_text_and_selector",
+      "unsafe_url_scheme_blocks_javascript_scheme",
+      "private_network_detects_localhost_and_metadata_endpoint",
+      "sensitive_regex_redacts_detected_evidence",
+      "rate_limit_detects_429_and_retry_after_header"
+    ]
+  }
+}

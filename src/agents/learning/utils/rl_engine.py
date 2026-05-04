@@ -1,12 +1,15 @@
+"""Production-hardened RL utility layer: state processing, exploration, and Q-table optimisation."""
 
-import numpy as np
-import random
+from __future__ import annotations
+
 import math
+import random
+import numpy as np
 
-from typing import Any, Tuple, Dict, OrderedDict, List
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
+from .config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Recursive Learning Engine")
@@ -14,26 +17,41 @@ printer = PrettyPrinter
 
 class StateProcessor:
     """
-    Handles state representation challenges:
-    - Continuous state discretization (Tile Coding)
-    - Feature engineering
-    - Dimensionality reduction
-    - State normalization
-    """
-    
-    def __init__(self, state_size):
-        self.config = load_global_config()
-        self.rle_config = get_config_section('rl_engine')
-        self.state_size = state_size
-        
-        # Get config values directly from loaded config
-        state_processor_config = self.rle_config.get('state_processor', {})
-        self.tiling_resolution = state_processor_config.get('tiling_resolution', 0.1)
-        self.num_tilings = state_processor_config.get('num_tilings', 8)
-        self.feature_engineering = state_processor_config.get('feature_engineering', True)
-        self.feature_weights = np.random.randn(state_size)
+    Numpy-based RL state processor.
 
-        logger.info(f"Recursive Learning Engine Activated!")
+    Keeps the original focus areas:
+    - continuous-state discretisation via tile coding
+    - optional feature engineering
+    - state normalisation
+    """
+
+    def __init__(
+        self,
+        state_size: int,
+        tiling_resolution: Optional[float] = None,
+        num_tilings: Optional[int] = None,
+        feature_engineering: Optional[bool] = None,
+        low: Optional[Sequence[float]] = None,
+        high: Optional[Sequence[float]] = None,
+    ) -> None:
+        self.config = get_config_section("rl_engine") or {}
+        self.processor_config = self.config.get("state_processor", {})
+        self.state_size = int(state_size)
+
+        self.tiling_resolution = float(self.processor_config.get("tiling_resolution", 0.1) if tiling_resolution is None else tiling_resolution)
+        self.num_tilings = int(self.processor_config.get("num_tilings", 8) if num_tilings is None else num_tilings)
+        self.feature_engineering = bool(self.processor_config.get("feature_engineering", True) if feature_engineering is None else feature_engineering)
+
+        self.low = None if low is None else np.asarray(low, dtype=np.float32).reshape(-1)
+        self.high = None if high is None else np.asarray(high, dtype=np.float32).reshape(-1)
+
+        if self.tiling_resolution <= 0.0:
+            raise ValueError("tiling_resolution must be > 0.")
+        if self.num_tilings <= 0:
+            raise ValueError("num_tilings must be > 0.")
+
+        self.feature_weights = np.random.randn(self.state_size).astype(np.float32)
+        logger.info("RL StateProcessor initialized for state size %s.", self.state_size)
     
     def discretize(self, continuous_state: np.ndarray, num_tilings: int = 8) -> tuple:
         """
@@ -112,11 +130,13 @@ class ExplorationStrategies:
     """
     
     def __init__(self, action_space, strategy="epsilon_greedy", temperature=1.0, ucb_c=2.0):
-        self.action_space = action_space
+        self.action_space = list(action_space)
+        self.possible_actions = self.action_space
         self.strategy = strategy
         self.temperature = temperature
         self.ucb_c = ucb_c
         self.state_history = []
+        self.q_table = {} 
     
     def boltzmann(self, q_values):
         # Convert to numpy array and normalize
@@ -156,6 +176,16 @@ class ExplorationStrategies:
             ucb_values[action] = q_value + exploration_bonus
         
         return max(ucb_values, key=ucb_values.get)
+
+    def _get_q_value(self, state, action) -> float:
+        """
+        Return the estimated Q-value for a state-action pair.
+    
+        Falls back to 0.0 when no value has been stored yet.
+        """
+        if not hasattr(self, "q_table"):
+            self.q_table = {}
+        return float(self.q_table.get((state, action), 0.0))
 
 class QTableOptimizer:
     """
@@ -305,7 +335,7 @@ class QTableOptimizer:
             a: idx for a, idx in self.action_index.items()
             if idx in used_actions
         })
-    
+
     def batch_update(self, updates: List[Tuple[tuple, Any, float]], 
                     batch_size: int = 32, 
                     momentum: float = 0.9) -> None:
@@ -339,3 +369,111 @@ class QTableOptimizer:
                 new_value = current_q + self.learning_rate * smoothed_delta
                 self._set_q_value(state, action, new_value)
                 self.update_momentum[(state, action)] = smoothed_delta
+
+    def _normalize_state_key(self, state) -> tuple:
+        if isinstance(state, tuple):
+            return state
+        if isinstance(state, np.ndarray):
+            return tuple(state.tolist())
+        if isinstance(state, list):
+            return tuple(state)
+        return (state,)
+    
+    def _get_q_value(self, state, action) -> float:
+        state = self._normalize_state_key(state)
+        cache_key = (state, action)
+    
+        if cache_key in self.lru_cache:
+            value = self.lru_cache.pop(cache_key)
+            self.lru_cache[cache_key] = value
+            return float(value)
+    
+        value = float(self.state_action_matrix.get(state, {}).get(action, self.DEFAULT_VALUE))
+        self.lru_cache[cache_key] = value
+    
+        if len(self.lru_cache) > self.cache_size:
+            self.lru_cache.popitem(last=False)
+    
+        return value
+    
+    def _set_q_value(self, state, action, value: float) -> None:
+        state = self._normalize_state_key(state)
+        value = float(value)
+    
+        self.state_action_matrix[state][action] = value
+    
+        cache_key = (state, action)
+        if cache_key in self.lru_cache:
+            self.lru_cache.pop(cache_key)
+        self.lru_cache[cache_key] = value
+    
+        if len(self.lru_cache) > self.cache_size:
+            self.lru_cache.popitem(last=False)
+
+if __name__ == "__main__":
+    print("\n=== Running Execution Recursive Learning Engine ===\n")
+    printer.status("TEST", "Starting Recursive Learning Engine tests", "info")
+    size = 300
+    state = np.random.randn(size).astype(np.float32)
+    num = 8
+
+    processor = StateProcessor(state_size=size)
+
+    print("\n* * * * * Phase 1 - State Processor * * * * *\n")
+    print(processor)
+
+    discretize = processor.discretize(continuous_state=state, num_tilings=num)
+    extract = processor.extract_features(raw_state=state)
+
+    printer.pretty("SNAPSHOT", "SUCCESS" if discretize else "FAILURE", "success" if discretize else "error")
+    printer.pretty("RECOVER", "SUCCESS" if extract is not None and len(extract) > 0 else "FAILURE",
+                   "success" if extract is not None and len(extract) > 0 else "error")
+
+    print("\n* * * * * Phase 2 - Exploration Strategies * * * * *\n")
+    space=[0, 1, 2]
+    strategy="epsilon_greedy"
+    temp=1.0
+    ucb_c=2.0
+    values = np.array([1.2, 0.7, -0.1], dtype=np.float32)
+    counts = {
+        ((), 0): 5,
+        ((), 1): 2,
+        ((), 2): 1,
+    }
+    c = 2.0
+
+    explore = ExplorationStrategies(action_space=space, strategy=strategy, temperature=temp, ucb_c=ucb_c)
+    print(explore)
+
+    boltzmann = explore.boltzmann(q_values=values)
+    ucb = explore.ucb(state_action_counts=counts, c=c)
+
+    printer.pretty("CONVERT", "SUCCESS" if boltzmann else "FAILURE", "success" if boltzmann else "error")
+    printer.pretty("Bound", "SUCCESS" if ucb else "FAILURE", "success" if ucb else "error")
+
+    print("\n* * * * * Phase 3 - Q Table Optimizer * * * * *\n")
+    momentum = 0.9
+    bsize = 64
+    csize = 1000
+    lr = 0.1
+    
+    state_key = tuple(state.tolist())   # or use discretize
+    action = 1
+    value = float(values[0])
+    
+    updates = [
+        (state_key, 0, 0.25),
+        (state_key, 1, -0.10),
+        (state_key, 2, 0.40),
+    ]
+    
+    optimitzer = QTableOptimizer(batch_size=bsize, momentum=momentum, cache_size=csize, learning_rate=lr)
+    print(optimitzer)
+    
+    store = optimitzer.compressed_store(state=state_key, action=action, value=value)
+    update = optimitzer.batch_update(updates=updates, batch_size=bsize, momentum=momentum)
+
+    printer.pretty("COMPRESS", "SUCCESS" if store else "FAILURE", "success" if store else "error")
+    printer.pretty("BATCH", "SUCCESS" if update else "FAILURE", "success" if update else "error")
+
+    print("\n=== All tests completed successfully! ===\n")

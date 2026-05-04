@@ -4,6 +4,342 @@ collaboration:
   health_check_interval: 60  # seconds
   thread_pool_workers: 10
 
+
+collaboration_error:
+  retry_attempts: 3
+  retry_backoff_factor: 2.0
+  log_errors: true
+
+
+collaboration_manager:
+  audit_enabled: true
+  audit_key: "collaboration:manager_events"
+  audit_max_events: 1000
+  task_history_limit: 1000
+  status_key: "collaboration:manager_status"
+  publish_status: true
+  stats_key: "agent_stats"
+  auto_discover_agents: true
+  initialize_policy_engine: true
+  initialize_contract_registry: true
+  enforce_load_limit: true
+  max_load_agent_task_multiplier: 5
+  default_task_retries: 1
+  run_task_uses_envelope: true
+  include_task_type_in_payload: false
+  export_pretty_json: true
+  shutdown_wait: true
+  redact_audit_payloads: true
+
+
+policy_engine:
+  enabled: true
+  default_decision: "allow"
+  fail_closed: false
+  allow_duplicate_rule_ids: false
+  stop_on_first_deny: false
+  stop_on_first_review: false
+  max_rules: 1000
+  audit_enabled: true
+  audit_key: "collaboration:policy_events"
+  audit_max_events: 1000
+  include_rule_metadata: true
+  include_unmatched_rules: false
+  redact_evaluation_payloads: true
+  rule_error_effect: "require_review"
+  configured_rules:
+    - rule_id: "deny_critical_risk"
+      description: "Deny tasks at or above the critical collaborative risk threshold."
+      effect: "deny"
+      priority: 10
+      enabled: true
+      stop_processing: true
+      conditions:
+        - path: "task.risk_score"
+          operator: "gte"
+          value: 0.98
+      metadata:
+        source: "collaborative_config"
+        category: "risk_control"
+    - rule_id: "review_high_risk"
+      description: "Require review for high-risk collaborative tasks."
+      effect: "require_review"
+      priority: 20
+      enabled: true
+      conditions:
+        - path: "task.risk_score"
+          operator: "gte"
+          value: 0.85
+      metadata:
+        source: "collaborative_config"
+        category: "risk_control"
+    - rule_id: "review_sensitive_attributes"
+      description: "Require review when task payload includes configured sensitive attributes."
+      effect: "require_review"
+      priority: 30
+      enabled: true
+      condition_match: "any"
+      conditions:
+        - path: "task.age"
+          operator: "exists"
+        - path: "task.gender"
+          operator: "exists"
+      metadata:
+        source: "collaborative_config"
+        category: "sensitive_attribute_control"
+
+
+shared_memory:
+  max_memory_mb: 100
+  max_versions: 10
+  ttl_check_interval: 30  # seconds
+  network_latency: 0.0
+  default_ttl: 3600  # 1 hour default expiration
+  enable_background_cleaner: true
+  async_callbacks: true
+  callback_threads_daemon: true
+  allow_oversized_items: true
+  max_key_repr_length: 256
+  max_intervention_log_entries: 1000
+  snapshot_prefix: "snapshots:"
+  snapshot_source: "collaborative_agent"
+  intervention_log_key: "intervention_logs"
+
+
+registry:
+  version: 1.8
+  health_check_interval: 300
+  require_capabilities: true
+  allow_duplicate_names: false
+  replace_older_versions: true
+  keep_stale_agents_routable: true
+  default_heartbeat_status: "active"
+  audit_enabled: true
+  audit_key: "collaboration:registry_events"
+  audit_max_events: 1000
+  agent_discovery:
+    default_package: "src.agents"
+    excluded_modules: []
+    module_suffix: "_agent"
+    skip_module_suffixes:
+      - ".base_agent"
+      - ".collaborative_agent"
+    require_base_agent_subclass: true
+  instantiation:
+    cache_instances: true
+    pass_shared_memory: true
+    pass_agent_factory: true
+    agent_factory: null
+    default_constructor_kwargs: {}
+  audit:
+    enabled: true
+    key: "collaboration:registry_events"
+    max_events: 1000
+  torch_sensitive_modules:
+    - "src.agents.adaptive_agent"
+    - "src.agents.alignment_agent"
+    - "src.agents.evaluation_agent"
+    - "src.agents.knowledge_agent"
+    - "src.agents.language_agent"
+    - "src.agents.learning_agent"
+    - "src.agents.perception_agent"
+    - "src.agents.planning_agent"
+    - "src.agents.qnn_agent"
+    - "src.agents.reasoning_agent"
+    - "src.agents.safety_agent"
+
+
+reliability:
+  enabled: true
+
+  # Backward-compatible top-level settings consumed by existing managers.
+  failure_threshold: 3
+  recovery_timeout_seconds: 5.0
+  half_open_success_threshold: 1
+  max_backoff_seconds: 2.0
+  jitter_seconds: 0.0
+
+  # Retry policy used by ReliabilityManager when no explicit RetryPolicy is passed.
+  retry_policy:
+    max_attempts: 3
+    backoff_factor: 1.5
+    max_backoff_seconds: 2.0
+    jitter_seconds: 0.0
+    retry_on_circuit_open: false
+    retryable_exception_types: []
+    non_retryable_exception_types:
+      - ValueError
+      - TypeError
+      - KeyError
+      - AssertionError
+    sleep_enabled: true
+
+  # Circuit-breaker behavior used for every per-agent/runtime key.
+  circuit_breaker:
+    failure_threshold: 3
+    recovery_timeout_seconds: 5.0
+    half_open_success_threshold: 1
+    half_open_max_requests: 1
+    failure_window_seconds: null
+    minimum_request_count: 1
+    state_transition_history_limit: 100
+
+  # Operational telemetry and shared-memory publication.
+  audit_enabled: true
+  audit_key: "collaboration:reliability_events"
+  audit_max_events: 1000
+  publish_status: true
+  status_key: "collaboration:reliability_status"
+  execution_history_limit: 1000
+  include_success_events: false
+
+
+task_contracts:
+  enabled: true
+  load_configured_contracts: true
+  fail_open_without_contract: true
+  allow_contract_override: true
+  max_contracts: 1000
+  audit_enabled: true
+  audit_key: "collaboration:task_contract_events"
+  audit_max_events: 1000
+  include_payload_snapshot: false
+  redact_payload_snapshots: true
+  default_allow_unknown_fields: true
+  default_coerce_types: false
+  default_strict_types: true
+  validation_error_raises: false
+
+  # Config-backed contracts are optional. Programmatic contracts registered via
+  # TaskContractRegistry.register_contract remain fully supported.
+  configured_contracts:
+    - task_type: "TranslateAndSummarize"
+      version: "1.0.0"
+      description: "Translate text and produce a bounded summary."
+      tags: ["translation", "summarization"]
+      allow_unknown_fields: false
+      coerce_types: true
+      strict_types: true
+      aliases:
+        language: "target_language"
+      defaults:
+        summary_length: 5
+      fields:
+        text:
+          type: "str"
+          required: true
+          allow_empty: false
+          min_length: 1
+          max_length: 5000
+        target_language:
+          type: "str"
+          required: true
+          choices: ["en", "es", "fr", "de"]
+        summary_length:
+          type: "int"
+          required: false
+          default: 5
+          min_value: 1
+          max_value: 20
+          coerce: true
+        risk_score:
+          type: "number"
+          required: false
+          nullable: true
+          min_value: 0.0
+          max_value: 1.0
+
+    - task_type: "AnalyzeData"
+      version: "1.0.0"
+      description: "Validate data-analysis task payloads before routing."
+      tags: ["analysis", "data"]
+      allow_unknown_fields: false
+      coerce_types: false
+      strict_types: true
+      fields:
+        dataset:
+          type: "dict"
+          required: true
+          allow_empty: false
+        operation:
+          type: "str"
+          required: false
+          default: "analyze"
+          choices: ["analyze", "summarize", "profile", "audit"]
+        risk_score:
+          type: "number"
+          required: false
+          nullable: true
+          constraints:
+            - operator: "gte"
+              value: 0.0
+              message: "risk_score must be at least 0.0"
+            - operator: "lte"
+              value: 1.0
+              message: "risk_score must be at most 1.0"
+
+    - task_type: "ExplainConcept"
+      version: "1.0.0"
+      description: "Validate concept-explanation requests."
+      tags: ["explanation", "knowledge"]
+      allow_unknown_fields: true
+      coerce_types: true
+      strict_types: true
+      fields:
+        concept:
+          type: "str"
+          required: true
+          allow_empty: false
+          min_length: 1
+          max_length: 300
+        audience:
+          type: "str"
+          required: false
+          default: "general"
+          choices: ["beginner", "general", "expert"]
+        max_depth:
+          type: "int"
+          required: false
+          default: 3
+          min_value: 1
+          max_value: 10
+          coerce: true
+
+
+# Production task-router configuration for the collaborative runtime.
+task_router:
+  strategy: "weighted"
+  stats_key: "agent_stats"
+  audit_enabled: true
+  audit_key: "collaboration:task_router_events"
+  audit_max_events: 1000
+  task_events_enabled: true
+  task_events_key: "collaboration:task_events"
+  task_events_max_events: 1000
+  route_history_limit: 1000
+  include_ranking_report: true
+  update_agent_stats: true
+  publish_heartbeats: true
+  require_agent_instance: true
+  execution_method: "execute"
+  fail_fast_on_unavailable: false
+  continue_on_agent_failure: true
+  max_candidate_attempts: null
+  normalize_task_payloads: true
+  contract_validation_enabled: false
+  policy_evaluation_enabled: false
+  deny_on_policy_review: true
+  fail_closed_on_policy_error: false
+  fail_closed_on_contract_error: true
+  record_success_results: false
+  result_preview_length: 500
+  fallback_plan_enabled: false
+  fallback_task_data_key: "fallback_from"
+  status_key: "collaboration:task_router_status"
+  publish_status: true
+  redact_audit_payloads: true
+
+
 task_routing:
   risk_threshold: 0.7
   policy_deny_risk_threshold: 0.98
@@ -24,18 +360,33 @@ task_routing:
     AnalyzeData: ["PreprocessData", "Analyze"]
     ExplainConcept: ["RetrieveFact", "Summarize"]
 
-registry:
-  health_check_interval: 300  # seconds-
-  agent_discovery:
-    default_package: "src.agents"
-    excluded_modules: []
+  router_strategy:
+    # Strategy options: weighted, least_loaded, capability_match, round_robin, random_weighted.
+    strategy: "weighted"
+    stable_tie_breaker: "name"
+    filter_unavailable: false
+    include_diagnostics: true
+    new_agent_success_bias: 1.0
+    max_active_tasks_per_agent: null
+    stale_after_seconds: 300
+    stale_agent_penalty: 0.25
+    unavailable_score_penalty: 10000.0
+    random_seed: null
+    audit_enabled: false
+    audit_key: "collaboration:router_strategy_events"
+    audit_max_events: 1000
+    weights:
+      success_rate: 1.0
+      load_penalty: 0.25
+      failure_penalty: 0.35
+      capability_match: 0.50
+      priority: 0.05
+      reliability: 0.40
+      latency_penalty: 0.001
+      freshness: 0.05
+      affinity: 0.25
+      overload_penalty: 1.0
 
-shared_memory:
-  max_memory_mb: 100
-  max_versions: 10
-  ttl_check_interval: 30  # seconds
-  network_latency: 0.0
-  default_ttl: 3600  # 1 hour default expiration
 
 paths:
   alignment_config: "src/agents/alignment/configs/alignment_config.yaml"
@@ -50,10 +401,3 @@ agents:
 replay_config:
   batch_size: 64
   per_beta: 0.6
-
-reliability:
-  failure_threshold: 3
-  recovery_timeout_seconds: 5.0
-  half_open_success_threshold: 1
-  max_backoff_seconds: 2.0
-  jitter_seconds: 0.0

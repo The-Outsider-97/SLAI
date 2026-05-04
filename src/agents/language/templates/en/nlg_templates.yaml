@@ -1,0 +1,2392 @@
+schema: slai.language.nlg_templates.v1
+version: 1.0.0
+locale: en
+status: production_ready
+metadata:
+  name: English NLG Templates
+  description: Canonical response templates for the language agent NLG engine. Large style resources such as discourse markers,
+    politeness strategies, and verbose phrase pools belong in nlg_pack.yaml, not here.
+  created: '2026-04-28'
+  source_files:
+  - nlg_templates_en.json
+  maintainer_notes:
+  - Use canonical intent IDs. Keep aliases here only for migration compatibility.
+  - Templates should be short, safe, and deterministic enough for production fallback generation.
+  - Use {slot|'fallback'} syntax for optional placeholders when supported by the NLG renderer.
+  - Do not store discourse-marker pools or style rewrite rules in this file; keep those in nlg_pack.yaml.
+  last_validated: '2026-04-28'
+  response_count: 140
+  template_count: 43
+loader_contract:
+  root_key: templates
+  template_lookup_order:
+  - exact_intent
+  - alias_to_canonical
+  - category_fallback
+  - default
+  response_selection: weighted_random_with_recent_repetition_guard
+  placeholder_syntax:
+    required: '{slot}'
+    optional_with_fallback: '{slot|''fallback text''}'
+    dotted_path: '{context.user_name|''there''}'
+  compatibility:
+    legacy_json_shape: intent -> {triggers, responses} or intent -> [responses]
+    canonical_yaml_shape: templates -> intent -> template metadata and response variants
+global_policy:
+  default_intent: default
+  default_locale: en-US
+  safe_by_default: true
+  allow_template_side_effects: false
+  max_response_words: 160
+  max_response_characters: 2000
+  block_empty_render: true
+  blocked_patterns:
+  - as an AI language model
+  - cannot answer
+  - cannot respond
+  - Error 404
+  - server's taking a coffee break
+  selection_weights:
+    priority: 0.6
+    style_match: 0.2
+    slot_coverage: 0.15
+    recent_repetition_penalty: 0.05
+intent_aliases:
+  greetings: greeting
+  affirm: affirmation
+  deny: denial
+  request_help: help
+  ask_capability: capability_request
+  bot_challenge: identity_request
+  get_time: time_request
+  get_date: date_request
+  ask_definition: definition_request
+  stop_action: denial
+  error: system_error
+  cancellation_request: denial
+  'yes': affirmation
+  acknowledgement: acknowledgement
+  nlp_error: nlp_error
+  nlu_error: nlu_error
+  nlg_error: nlg_error
+  weather_inquiry: weather_inquiry
+  time_request: time_request
+category_fallbacks:
+  error: system_error
+  emotion: empathy
+  feedback: negative_feedback
+  task: default
+  social: greeting
+  dialogue_control: clarification_request
+  language_feedback: default
+global_placeholders:
+  confidence_qualifier: ''
+  sentiment_marker: ''
+  modality_marker: ''
+  act_type_marker: ''
+  time: ''
+  date: ''
+templates:
+  default:
+    title: Default fallback
+    category: fallback
+    enabled: true
+    canonical_intent: default
+    aliases: []
+    speech_act: directive
+    modality: clarification
+    triggers:
+    - what
+    - can you
+    - do you
+    - why
+    - explain
+    - how
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: default.r001
+      text: I’m not fully sure what you need yet. Could you rephrase or add a little more detail?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: default.r002
+      text: I can help, but I need a bit more context. What would you like me to do?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: default.r003
+      text: Could you clarify your request so I can respond accurately?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: default.r004
+      text: I may be missing the intent behind that. Please give me one more detail to work with.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 80
+      speech_act: directive
+    notes: Used only when NLU cannot produce a supported intent or all intent-specific templates fail.
+  clarification_request:
+    title: Clarification request
+    category: dialogue_control
+    enabled: true
+    canonical_intent: clarification_request
+    aliases: []
+    speech_act: directive
+    modality: interrogative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - pending_intent
+      - mentioned_entities
+      - missing_slot
+      - confidence_qualifier
+      defaults:
+        pending_intent: your request
+        mentioned_entities: the details provided
+        missing_slot: the missing detail
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: clarification_request.r001
+      text: I want to make sure I understand correctly. Are you asking about {pending_intent|'your request'} with {mentioned_entities|'the
+        details provided'}?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: clarification_request.r002
+      text: Could you clarify {missing_slot|'the missing detail'} so I can help with {pending_intent|'your request'}?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: clarification_request.r003
+      text: I’m not fully confident I understood that. Do you mean {pending_intent|'your request'}?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: clarification_request.r004
+      text: Before I continue, please confirm whether this is about {pending_intent|'your request'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+      speech_act: directive
+  greeting:
+    title: Greeting
+    category: social
+    enabled: true
+    canonical_intent: greeting
+    aliases:
+    - greetings
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - hi
+    - how are you
+    - how are you doing
+    - how are things
+    - hello
+    - hey
+    - good morning
+    - morning
+    - good afternoon
+    - greetings
+    - howdy
+    - nice to see you
+    - hey there
+    - good evening
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: greeting.r001
+      text: Hello. How can I help you today?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: greeting.r002
+      text: Hi. What would you like to work on?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: greeting.r003
+      text: Good to hear from you. How can I support you?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: expressive
+    - id: greeting.r004
+      text: Hello. Send me what you need help with, and I’ll take it from there.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+      speech_act: expressive
+    - id: greeting.r005
+      text: Hey. What are we working on today?
+      style: friendly
+      tone: warm
+      enabled: true
+      priority: 60
+      speech_act: expressive
+  farewell:
+    title: Farewell
+    category: social
+    enabled: true
+    canonical_intent: farewell
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - bye
+    - goodbye
+    - see you
+    - later
+    - farewell
+    - catch you
+    - ciao
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: farewell.r001
+      text: Goodbye. Let me know when you need anything else.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: farewell.r002
+      text: Take care. I’ll be here when you’re ready to continue.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: farewell.r003
+      text: Understood. See you next time.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: expressive
+    - id: farewell.r004
+      text: Bye for now. You can return whenever you want to continue.
+      style: friendly
+      tone: warm
+      enabled: true
+      priority: 75
+      speech_act: expressive
+  acknowledgement:
+    title: Acknowledgement
+    category: dialogue_control
+    enabled: true
+    canonical_intent: acknowledgement
+    aliases:
+    - acknowledge
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - okay
+    - got it
+    - understood
+    - alright
+    - cool
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: acknowledgement.r001
+      text: Got it.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: acknowledgement.r002
+      text: Understood.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: acknowledgement.r003
+      text: Noted.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: acknowledgement.r004
+      text: Thanks for the update.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 80
+    - id: acknowledgement.r005
+      text: Acknowledged. What would you like to do next?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 75
+      speech_act: directive
+  affirmation:
+    title: Affirmation
+    category: dialogue_control
+    enabled: true
+    canonical_intent: affirmation
+    aliases:
+    - affirm
+    - 'yes'
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - 'yes'
+    - yep
+    - yeah
+    - sure
+    - okay
+    - sounds good
+    - alright
+    - confirm
+    - indeed
+    - absolutely
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: affirmation.r001
+      text: Confirmed.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: affirmation.r002
+      text: Understood — I’ll proceed with that.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: affirmation.r003
+      text: Great, I’ll continue with that assumption.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+    - id: affirmation.r004
+      text: Thanks for confirming.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+  denial:
+    title: Denial or cancellation
+    category: dialogue_control
+    enabled: true
+    canonical_intent: denial
+    aliases:
+    - deny
+    - 'no'
+    - cancellation_request
+    - stop_action
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - 'no'
+    - nope
+    - nah
+    - not really
+    - negative
+    - cancel
+    - stop
+    - halt
+    - nevermind
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: denial.r001
+      text: Understood. I’ll stop that.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: denial.r002
+      text: No problem. We can try something else.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: denial.r003
+      text: Cancelled. What would you like to do instead?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: denial.r004
+      text: Got it — I will not continue with that action.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+  gratitude:
+    title: Gratitude response
+    category: social
+    enabled: true
+    canonical_intent: gratitude
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - thanks
+    - thank you
+    - appreciate
+    - gracias
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: gratitude.r001
+      text: You’re welcome.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: gratitude.r002
+      text: Happy to help.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: gratitude.r003
+      text: Glad I could help.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: expressive
+    - id: gratitude.r004
+      text: Anytime. Let me know what you need next.
+      style: friendly
+      tone: warm
+      enabled: true
+      priority: 80
+      speech_act: expressive
+  positive_feedback:
+    title: Positive feedback response
+    category: feedback
+    enabled: true
+    canonical_intent: positive_feedback
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - great
+    - awesome
+    - well done
+    - good job
+    - perfect
+    - excellent
+    - that helps
+    - nice
+    - nice job
+    - exceptional
+    - thanks
+    - amazing
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: positive_feedback.r001
+      text: I’m glad that helped.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: positive_feedback.r002
+      text: Great — I’m happy that was useful.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: positive_feedback.r003
+      text: Thanks for the feedback. Let me know if you want to keep going.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: expressive
+    - id: positive_feedback.r004
+      text: That’s good to hear. What should we tackle next?
+      style: friendly
+      tone: warm
+      enabled: true
+      priority: 80
+      speech_act: directive
+  negative_feedback:
+    title: Negative feedback response
+    category: feedback
+    enabled: true
+    canonical_intent: negative_feedback
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - not helpful
+    - that sucks
+    - bad answer
+    - wrong
+    - useless
+    - terrible
+    - didn't work
+    - nope
+    - bad
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: negative_feedback.r001
+      text: I’m sorry that was not helpful. Tell me what was wrong, and I’ll adjust.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: negative_feedback.r002
+      text: Thanks for the feedback. I can try again with a different approach.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: negative_feedback.r003
+      text: Understood. I’ll revise the answer more carefully.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: commissive
+    - id: negative_feedback.r004
+      text: I appreciate the correction. What should I focus on instead?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+      speech_act: directive
+  help:
+    title: Help request
+    category: support
+    enabled: true
+    canonical_intent: help
+    aliases:
+    - request_help
+    speech_act: directive
+    modality: interrogative
+    triggers:
+    - help
+    - can you help
+    - i need assistance
+    - support
+    - how do i
+    - what can you do
+    - i'm lost
+    - assist me
+    - i need help
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: help.r001
+      text: Sure. What do you need help with?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: help.r002
+      text: I can help. Send me the details or the file you want me to work on.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: help.r003
+      text: Tell me the task, any constraints, and the output format you want.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: help.r004
+      text: I can help with writing, analysis, code, planning, debugging, and language-agent modules. What should we start
+        with?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+  apology:
+    title: User apology acknowledgement
+    category: social
+    enabled: true
+    canonical_intent: apology
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - sorry
+    - i'm sorry
+    - my bad
+    - forgive me
+    - excuse me
+    - didn't mean to
+    - apologies
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: apology.r001
+      text: No worries. We can continue.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: apology.r002
+      text: That’s okay. Let’s keep going.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: expressive
+    - id: apology.r003
+      text: All good. What would you like to do next?
+      style: friendly
+      tone: warm
+      enabled: true
+      priority: 90
+      speech_act: directive
+  confusion:
+    title: User confusion
+    category: support
+    enabled: true
+    canonical_intent: confusion
+    aliases: []
+    speech_act: directive
+    modality: clarification
+    triggers:
+    - i don't understand
+    - confused
+    - what does that mean
+    - huh?
+    - not making sense
+    - clarify
+    - lost me
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: confusion.r001
+      text: Let me restate that more clearly. Which part should I clarify first?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: confusion.r002
+      text: I can explain it step by step. What part feels unclear?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: confusion.r003
+      text: Thanks for saying that. I’ll simplify the explanation without skipping the important details.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: commissive
+  empathy:
+    title: Emotional support
+    category: emotion
+    enabled: true
+    canonical_intent: empathy
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - i'm sad
+    - feeling down
+    - had a bad day
+    - rough time
+    - struggling
+    - not okay
+    - need a hug
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: true
+    responses:
+    - id: empathy.r001
+      text: I’m sorry you’re dealing with that. I’m here to help you think through the next step.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 100
+      speech_act: expressive
+    - id: empathy.r002
+      text: 'That sounds difficult. What would feel most useful right now: advice, a plan, or just sorting through it?'
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: empathy.r003
+      text: Your reaction makes sense. Let’s take this one step at a time.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 90
+  fear:
+    title: Fear or anxiety support
+    category: emotion
+    enabled: true
+    canonical_intent: fear
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - scared
+    - worried
+    - anxious
+    - nervous
+    - afraid
+    - panic
+    - freaking out
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: true
+    responses:
+    - id: fear.r001
+      text: I’m sorry you’re feeling worried. Let’s focus on the immediate next step.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 100
+    - id: fear.r002
+      text: That sounds stressful. What is the most urgent part you want help with?
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: fear.r003
+      text: I can help you break this down calmly and practically.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 90
+  frustration:
+    title: Frustration support
+    category: emotion
+    enabled: true
+    canonical_intent: frustration
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - this is frustrating
+    - i'm annoyed
+    - ugh
+    - not again
+    - why is this so hard
+    - fed up
+    - sick of this
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: frustration.r001
+      text: I get why that is frustrating. Let’s identify the exact issue and fix it step by step.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 100
+    - id: frustration.r002
+      text: Understood. Tell me what failed or what result you expected, and I’ll adjust.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: frustration.r003
+      text: Let’s slow it down and isolate the problem. What happened right before it went wrong?
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 90
+      speech_act: directive
+  disappointment:
+    title: Disappointment support
+    category: emotion
+    enabled: true
+    canonical_intent: disappointment
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - not what I expected
+    - let down
+    - disappointed
+    - underwhelmed
+    - meh
+    - could be better
+    - not impressed
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: disappointment.r001
+      text: I’m sorry this did not meet expectations. Tell me what would make it right, and I’ll revise.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 100
+    - id: disappointment.r002
+      text: Thanks for being direct. I can take another pass with your expectations in mind.
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 95
+    - id: disappointment.r003
+      text: Let’s improve it. What should change first?
+      style: neutral
+      tone: supportive
+      enabled: true
+      priority: 90
+      speech_act: directive
+  excitement:
+    title: Excitement response
+    category: emotion
+    enabled: true
+    canonical_intent: excitement
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - yay
+    - woohoo
+    - i'm excited
+    - this is amazing
+    - so happy
+    - thrilled
+    - can't wait
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: excitement.r001
+      text: That’s exciting. What would you like to do next?
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: excitement.r002
+      text: Great — let’s build on that momentum.
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 95
+    - id: excitement.r003
+      text: I’m glad you’re excited. How can I help move it forward?
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 90
+      speech_act: directive
+  surprise:
+    title: Surprise response
+    category: emotion
+    enabled: true
+    canonical_intent: surprise
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - wow
+    - no way
+    - seriously?
+    - unbelievable
+    - shocked
+    - mind blown
+    - are you kidding?
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: surprise.r001
+      text: That is surprising. Want me to help verify or unpack it?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: surprise.r002
+      text: Interesting. Let’s look at the details carefully.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: surprise.r003
+      text: That is unexpected. What part should we examine first?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  curiosity:
+    title: Curiosity response
+    category: support
+    enabled: true
+    canonical_intent: curiosity
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - tell me more
+    - curious
+    - why is that
+    - explain further
+    - how come
+    - what's next
+    - intriguing
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: curiosity.r001
+      text: Great question. I can go deeper on that.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: curiosity.r002
+      text: Let’s explore that in more detail.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: curiosity.r003
+      text: There is more to unpack here. Which angle interests you most?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  boredom:
+    title: Boredom response
+    category: social
+    enabled: true
+    canonical_intent: boredom
+    aliases: []
+    speech_act: directive
+    modality: interrogative
+    triggers:
+    - bored
+    - nothing to do
+    - this is dull
+    - so boring
+    - kill time
+    - entertain me
+    - zzz
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: boredom.r001
+      text: Want a quick challenge, a fun fact, or a short explanation of something interesting?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: boredom.r002
+      text: 'We can switch gears. Pick one: trivia, planning, creative writing, or debugging.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: boredom.r003
+      text: Let’s find something useful or interesting to work on. What mood are you in?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  sarcasm:
+    title: Sarcasm handling
+    category: dialogue_repair
+    enabled: true
+    canonical_intent: sarcasm
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - great...
+    - oh wonderful
+    - sure thing
+    - perfect...
+    - just fantastic
+    - cool story
+    - yeah right
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: sarcasm.r001
+      text: I may be detecting some frustration there. What should I fix first?
+      style: neutral
+      tone: calm
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: sarcasm.r002
+      text: Understood. Let’s focus on the actual problem. What result do you want?
+      style: neutral
+      tone: calm
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: sarcasm.r003
+      text: I’ll treat that seriously. Tell me what needs to change.
+      style: neutral
+      tone: calm
+      enabled: true
+      priority: 90
+      speech_act: directive
+  urgency:
+    title: Urgency response
+    category: priority
+    enabled: true
+    canonical_intent: urgency
+    aliases: []
+    speech_act: directive
+    modality: imperative
+    triggers:
+    - quick!
+    - asap
+    - emergency
+    - urgent
+    - now!
+    - hurry
+    - time sensitive
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: urgency.r001
+      text: Understood. Send the critical detail first, and I’ll focus on that.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: urgency.r002
+      text: I’ll keep this concise. What is the immediate problem?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: urgency.r003
+      text: Let’s prioritize. What needs to happen right now?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  pride:
+    title: Pride response
+    category: emotion
+    enabled: true
+    canonical_intent: pride
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - i did it!
+    - proud of myself
+    - nailed it
+    - achieved
+    - success!
+    - finally!
+    - winning
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: pride.r001
+      text: That’s a real accomplishment. Well done.
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 100
+    - id: pride.r002
+      text: You should be proud of that. What do you want to do next?
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: pride.r003
+      text: Great progress. Let’s build on it.
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 90
+  love:
+    title: Warm appreciation response
+    category: emotion
+    enabled: true
+    canonical_intent: love
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - love this
+    - you're the best
+    - adore
+    - obsessed
+    - favorite
+    - heart you
+    - 💖
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: love.r001
+      text: I’m glad this is working well for you.
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 100
+    - id: love.r002
+      text: That means a lot. How can I help next?
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: love.r003
+      text: Happy to be useful. Let’s keep going.
+      style: neutral
+      tone: warm
+      enabled: true
+      priority: 90
+  optimism:
+    title: Optimism response
+    category: emotion
+    enabled: true
+    canonical_intent: optimism
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - hopeful
+    - things will get better
+    - looking forward
+    - bright side
+    - glass half full
+    - positive vibes
+    - onward and upward
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: optimism.r001
+      text: That’s a good mindset. Let’s turn it into a concrete next step.
+      style: neutral
+      tone: encouraging
+      enabled: true
+      priority: 100
+    - id: optimism.r002
+      text: I like that direction. What should we work on first?
+      style: neutral
+      tone: encouraging
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: optimism.r003
+      text: Good momentum. Let’s keep it practical and move forward.
+      style: neutral
+      tone: encouraging
+      enabled: true
+      priority: 90
+  neutrality:
+    title: Neutrality response
+    category: emotion
+    enabled: true
+    canonical_intent: neutrality
+    aliases: []
+    speech_act: directive
+    modality: interrogative
+    triggers:
+    - meh
+    - whatever
+    - not sure
+    - indifferent
+    - no strong feelings
+    - it’s fine
+    - okayish
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: neutrality.r001
+      text: Fair enough. What would make this more useful for you?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      speech_act: directive
+    - id: neutrality.r002
+      text: No problem. We can continue, change direction, or narrow the task.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+      speech_act: directive
+    - id: neutrality.r003
+      text: Understood. What should I focus on next?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  weather_inquiry:
+    title: Weather inquiry
+    category: task
+    enabled: true
+    canonical_intent: weather_inquiry
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - weather
+    - forecast
+    - temperature
+    - rain
+    - snow
+    slots:
+      required: []
+      optional:
+      - location
+      - weather_status
+      - weather_condition
+      - temperature
+      - unit
+      - date_time
+      defaults:
+        location: that location
+        weather_status: unknown conditions
+        weather_condition: available conditions
+        temperature: N/A
+        unit: ''
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: weather_inquiry.r001
+      text: '{confidence_qualifier}{sentiment_marker}The weather in {location|''that location''} is {weather_status|''unknown
+        conditions''}, with a temperature of {temperature|''N/A''}{unit|''''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      requires:
+      - location
+    - id: weather_inquiry.r002
+      text: For {location|'that location'}, I have {weather_condition|'available conditions'} and {temperature|'N/A'}{unit|''}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: weather_inquiry.r003
+      text: I can check the forecast, but I need the location first.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 70
+      speech_act: directive
+      requires:
+      - location
+      notes: Use when location is missing.
+  time_request:
+    title: Time request
+    category: task
+    enabled: true
+    canonical_intent: time_request
+    aliases:
+    - get_time
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - what time is it
+    - current time
+    - tell me the time
+    slots:
+      required: []
+      optional:
+      - time
+      - timezone
+      defaults:
+        time: the current system time
+        timezone: ''
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: time_request.r001
+      text: The current time is {time|'the current system time'}{timezone|''}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: time_request.r002
+      text: It is {time|'the current system time'}{timezone|''} right now.
+      style: friendly
+      tone: professional
+      enabled: true
+      priority: 90
+    - id: time_request.r003
+      text: 'Time check: {time|''the current system time''}{timezone|''''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+  date_request:
+    title: Date request
+    category: task
+    enabled: true
+    canonical_intent: date_request
+    aliases:
+    - get_date
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - what is today's date
+    - current date
+    - what day is it
+    - date today
+    slots:
+      required: []
+      optional:
+      - date
+      - weekday
+      defaults:
+        date: today
+        weekday: ''
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: date_request.r001
+      text: The date is {date|'today'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: date_request.r002
+      text: Today is {weekday|''} {date|'today'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+    - id: date_request.r003
+      text: 'Date check: {date|''today''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+  definition_request:
+    title: Definition request
+    category: task
+    enabled: true
+    canonical_intent: definition_request
+    aliases:
+    - ask_definition
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - define
+    - what is
+    - what does mean
+    - tell me about
+    slots:
+      required: []
+      optional:
+      - term
+      - definition
+      - source
+      defaults:
+        term: that term
+        definition: I do not have a definition available yet
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: definition_request.r001
+      text: '{term|''That term''} means: {definition|''I do not have a definition available yet''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+      requires:
+      - term
+      - definition
+    - id: definition_request.r002
+      text: I can define {term|'that term'}, but I need the exact term first.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 80
+      speech_act: directive
+  timer_request:
+    title: Timer or reminder request
+    category: task
+    enabled: true
+    canonical_intent: timer_request
+    aliases:
+    - set_timer
+    - reminder_request
+    speech_act: commissive
+    modality: declarative
+    triggers:
+    - set a timer
+    - timer for
+    - remind me
+    - alarm for
+    slots:
+      required: []
+      optional:
+      - duration
+      - time
+      - label
+      defaults:
+        duration: the requested duration
+        time: the requested time
+        label: that
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: timer_request.r001
+      text: 'I can help with that timer request: {duration|''the requested duration''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: timer_request.r002
+      text: For reminders or timers, I need the exact time or duration before confirming.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+      speech_act: directive
+    - id: timer_request.r003
+      text: Understood. I have the reminder details as {label|'that'} at {time|'the requested time'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 75
+  music_request:
+    title: Music request
+    category: task
+    enabled: true
+    canonical_intent: music_request
+    aliases:
+    - play_music
+    speech_act: commissive
+    modality: declarative
+    triggers:
+    - play
+    - music
+    - song
+    - album
+    - artist
+    slots:
+      required: []
+      optional:
+      - song_name
+      - artist_name
+      - album_name
+      - genre
+      defaults:
+        song_name: that song
+        artist_name: that artist
+        genre: music
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: music_request.r001
+      text: I can help with the music request for {song_name|'that song'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: music_request.r002
+      text: Which song, artist, or genre would you like?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: music_request.r003
+      text: Got it — you want {genre|'music'} music.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 80
+  restaurant_request:
+    title: Restaurant search request
+    category: task
+    enabled: true
+    canonical_intent: restaurant_request
+    aliases:
+    - find_restaurant
+    speech_act: directive
+    modality: declarative
+    triggers:
+    - restaurant
+    - where can i eat
+    - hungry
+    - find food
+    slots:
+      required: []
+      optional:
+      - cuisine_type
+      - food_type
+      - location
+      defaults:
+        cuisine_type: food
+        location: near you
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: restaurant_request.r001
+      text: I can help find a {cuisine_type|'restaurant'} option in {location|'your area'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: restaurant_request.r002
+      text: What location should I use for the restaurant search?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+    - id: restaurant_request.r003
+      text: Do you have a preferred cuisine or location?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 85
+      speech_act: directive
+  identity_request:
+    title: Bot or identity challenge
+    category: meta
+    enabled: true
+    canonical_intent: identity_request
+    aliases:
+    - bot_challenge
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - are you a bot
+    - are you human
+    - what are you
+    - who made you
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: identity_request.r001
+      text: I’m a language-agent system designed to understand requests and generate helpful responses.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: identity_request.r002
+      text: I’m software, not a human. I can help process language tasks, answer questions, and assist with your project.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: identity_request.r003
+      text: I’m your language agent interface for this system.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+  capability_request:
+    title: Capability request
+    category: meta
+    enabled: true
+    canonical_intent: capability_request
+    aliases:
+    - ask_capability
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - what can you do
+    - capabilities
+    - how can you help
+    - tell me what you can do
+    slots:
+      required: []
+      optional: []
+      defaults: {}
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: capability_request.r001
+      text: I can help with language processing, writing, analysis, debugging, planning, and generating structured outputs.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: capability_request.r002
+      text: For this subsystem, I can help with orthography, NLP, grammar, NLU, dialogue context, memory, cache, and NLG resources.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: capability_request.r003
+      text: Tell me the task and the output format you want, and I’ll work within those constraints.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  joke_request:
+    title: Joke request
+    category: social
+    enabled: true
+    canonical_intent: joke_request
+    aliases: []
+    speech_act: expressive
+    modality: declarative
+    triggers:
+    - tell me a joke
+    - joke
+    - make me laugh
+    slots:
+      required: []
+      optional:
+      - topic
+      defaults:
+        topic: chicken
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: true
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: joke_request.r001
+      text: Why did the {topic|'chicken'} cross the road? To get to the other side.
+      style: light_humor
+      tone: playful
+      enabled: true
+      priority: 100
+    - id: joke_request.r002
+      text: Why don’t scientists trust atoms? Because they make up everything.
+      style: light_humor
+      tone: playful
+      enabled: true
+      priority: 95
+    - id: joke_request.r003
+      text: What do you call fake spaghetti? An impasta.
+      style: light_humor
+      tone: playful
+      enabled: true
+      priority: 90
+    - id: joke_request.r004
+      text: Why did the math book look sad? It had too many problems.
+      style: light_humor
+      tone: playful
+      enabled: true
+      priority: 85
+  system_error:
+    title: General system error
+    category: error
+    enabled: true
+    canonical_intent: system_error
+    aliases:
+    - error
+    speech_act: assertive
+    modality: declarative
+    triggers:
+    - error
+    - wrong
+    - failed
+    - did not
+    - not working
+    slots:
+      required: []
+      optional:
+      - error_module
+      - detail
+      - retry_hint
+      defaults:
+        error_module: the language system
+        retry_hint: Please try again or rephrase the request.
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: system_error.r001
+      text: I ran into an issue in {error_module|'the language system'}. {retry_hint|'Please try again or rephrase the request.'}
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: system_error.r002
+      text: Something went wrong while processing that. Please try again with a little more detail.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: system_error.r003
+      text: I could not complete that request cleanly. Could you rephrase it?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  nlp_error:
+    title: NLP pipeline error
+    category: error
+    enabled: true
+    canonical_intent: nlp_error
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - detail
+      defaults:
+        detail: No token analysis was produced.
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: nlp_error.r001
+      text: I had trouble reading the structure of your message. Could you try again with a simpler sentence?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: nlp_error.r002
+      text: The language parser could not process that cleanly. Please rephrase your request.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: nlp_error.r003
+      text: I could not extract usable tokens from that input. Please try again.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+  nlu_error:
+    title: NLU pipeline error
+    category: error
+    enabled: true
+    canonical_intent: nlu_error
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - detail
+      defaults:
+        detail: The meaning could not be resolved.
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: nlu_error.r001
+      text: I had trouble understanding the meaning of your message. Could you rephrase it?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: nlu_error.r002
+      text: I could not determine the intent confidently. Please add more context.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: nlu_error.r003
+      text: The request is ambiguous to me. What outcome do you want?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+      speech_act: directive
+  grammar_warning:
+    title: Grammar issue acknowledgement
+    category: language_feedback
+    enabled: true
+    canonical_intent: grammar_warning
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - issue_summary
+      - suggestion
+      defaults:
+        issue_summary: a grammar issue
+        suggestion: try rephrasing it
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: grammar_warning.r001
+      text: 'I noticed {issue_summary|''a grammar issue''}. A clearer version may be: {suggestion|''try rephrasing it''}.'
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: grammar_warning.r002
+      text: There may be a grammar issue in the input, but I can still continue if the meaning is clear.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+  orthography_confirmation:
+    title: Orthography correction confirmation
+    category: language_feedback
+    enabled: true
+    canonical_intent: orthography_confirmation
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - original
+      - corrected
+      defaults:
+        original: the original text
+        corrected: the corrected text
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: orthography_confirmation.r001
+      text: I interpreted {original|'the original text'} as {corrected|'the corrected text'}.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: orthography_confirmation.r002
+      text: I applied a spelling or normalization correction before continuing.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+  nlg_error:
+    title: NLG generation error
+    category: error
+    enabled: true
+    canonical_intent: nlg_error
+    aliases: []
+    speech_act: assertive
+    modality: declarative
+    triggers: []
+    slots:
+      required: []
+      optional:
+      - detail
+      defaults:
+        detail: The response could not be rendered.
+    selection:
+      strategy: weighted_random
+      avoid_recent_repetition: true
+      max_recent_template_reuse: 2
+    safety:
+      allow_humor: false
+      allow_emojis: false
+      allow_slang: false
+      sensitive: false
+    responses:
+    - id: nlg_error.r001
+      text: I’m having trouble formulating a response right now. Please try again.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 100
+    - id: nlg_error.r002
+      text: The response generator could not complete that cleanly. Could you rephrase your request?
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 95
+    - id: nlg_error.r003
+      text: I could not render a valid response for that intent.
+      style: neutral
+      tone: professional
+      enabled: true
+      priority: 90
+validation:
+  required_top_level_keys:
+  - schema
+  - version
+  - locale
+  - templates
+  required_template_keys:
+  - title
+  - category
+  - enabled
+  - canonical_intent
+  - responses
+  required_response_keys:
+  - id
+  - text
+  - enabled
+  - priority
+  placeholder_policy: missing required placeholders should skip the response variant and try the next eligible variant
+  id_policy: response IDs must be stable across releases once consumed by logs or tests
+test_vectors:
+- intent: greeting
+  entities: {}
+  expected_any_contains:
+  - Hello
+  - Hi
+  - Good
+- intent: weather_inquiry
+  entities:
+    location: Paris
+    weather_status: partly cloudy
+    temperature: '21'
+    unit: C
+  expected_any_contains:
+  - Paris
+  - '21'
+- intent: clarification_request
+  entities:
+    pending_intent: weather_inquiry
+    mentioned_entities: 'location: Paris'
+  expected_any_contains:
+  - weather_inquiry
+  - Paris
+- intent: nlu_error
+  entities: {}
+  expected_any_contains:
+  - understanding
+  - intent
+  - ambiguous
+migration:
+  target_path: src/agents/language/templates/en/nlg_templates.yaml
+  language_config_update:
+    nlg.templates_path: src/agents/language/templates/en/nlg_templates.yaml
+  retire_after_migration:
+  - src/agents/language/templates/nlg_templates_en.json
+  retired_files:
+  - nlg_templates_en.json

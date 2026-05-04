@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Puluc | R-Games</title>
+  <link rel="icon" type="image/x-icon" href="../img/Logo01.svg" />
+  <link rel="stylesheet" href="src/index.css" />
+</head>
+<body>
+  <a href="/" class="home-btn" aria-label="Home">
+    <img src="../img/home.svg" alt="" />
+  </a>
+
+  <main class="puluc-shell">
+    <header class="top-bar">
+      <div class="title-wrap">
+        <p class="subtitle">MAYAN RACE + CAPTURE</p>
+        <h1>PULUC</h1>
+        <p class="title-note">Throw marked sticks, advance your warriors, and bind captured enemy stacks.</p>
+      </div>
+
+      <div class="status-right">
+        <div class="control-row">
+          <div class="mode-selector">
+            <button id="mode-pvp" class="mode-btn active">PvP</button>
+            <button id="mode-pvai" class="mode-btn">PvAI</button>
+          </div>
+          <button id="new-game-btn" class="new-game-btn" title="New Game">↺</button>
+        </div>
+        <p id="turn-label">CURRENT TURN</p>
+        <h2 id="turn-name">LIGHT</h2>
+        <div class="audio-controls" aria-label="Background music controls">
+          <button id="mute-btn" class="audio-btn" type="button" aria-pressed="false" aria-label="Mute background music">
+            <img id="mute-icon" src="../img/sound_on.svg" alt="" />
+          </button>
+          <label for="volume-slider">Volume</label>
+          <input id="volume-slider" type="range" min="0" max="100" value="50" />
+          <span id="volume-value">50%</span>
+        </div>
+        <audio id="bg-music" loop preload="auto">
+          <source src="../src/audio/bg_maya.mp3" type="audio/mpeg" />
+          Your browser does not support the audio element.
+        </audio>
+      </div>
+    </header>
+
+    <section class="main-layout">
+      <aside class="player-panel">
+        <article class="player-card light active" id="light-card">
+          <h3>LIGHT</h3>
+          <p><span>Warriors on path</span><strong id="light-onboard">0</strong></p>
+          <p><span>Warriors at start</span><strong id="light-reserve">5</strong></p>
+          <p><span>Warriors finished</span><strong id="light-finished">0</strong></p>
+        </article>
+        <article class="player-card dark" id="dark-card">
+          <h3>DARK</h3>
+          <p><span>Warriors on path</span><strong id="dark-onboard">0</strong></p>
+          <p><span>Warriors at start</span><strong id="dark-reserve">5</strong></p>
+          <p><span>Warriors finished</span><strong id="dark-finished">0</strong></p>
+        </article>
+      </aside>
+
+      <section>
+        <div id="board" class="board" aria-label="Puluc game board"></div>
+        <div id="throw-tray" class="throw-tray" aria-live="polite"></div>
+        <div class="controls">
+          <button id="throw-btn" class="action-btn">Throw Sticks</button>
+          <button id="move-btn" class="action-btn" disabled>Move Warrior</button>
+        </div>
+      </section>
+
+      <aside class="log-panel">
+        <h4>Round Log</h4>
+        <div id="log" class="log"></div>
+      </aside>
+    </section>
+
+    <p id="winner-banner" class="winner-banner hidden" role="status" aria-live="polite"></p>
+    
+    <!-- Quotes Section -->
+    <footer class="quote-section">
+      <div id="quote-text" class="quote-text"></div>
+      <div id="quote-meta" class="quote-meta"></div>
+    </footer>
+  </main>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

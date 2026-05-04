@@ -1,6 +1,30 @@
 sensitive_attributes: ["gender", "age_group", "race", "education_level"]
 udhr_json_path: "src/agents/alignment/templates/un_human_rights.json"
 
+human_oversight:
+  timeout_seconds: 30
+  operator_id: "human_reviewer"
+  escalation:
+    levels:
+      - timeout: 30
+        channels: [dashboard]
+      - timeout: 60
+        channels: [email, slack]
+    final_fallback_action: "reject"
+  channels:
+    slack:
+      webhook_url: "..."
+      retry_count: 5
+    email:
+      smtp_server: "..."  # Or smtp.mailgun.org, etc.
+      smtp_port: 587      # Use 465 for SSL
+      username: "..."     # Your SMTP login username
+      password: "..."     # Your API key or password
+      from_addr: "..."
+
+
+alignment_errors: {}
+
 alignment_monitor:
   fairness_metrics:
     - demographic_parity
@@ -19,7 +43,7 @@ alignment_monitor:
     ethics: 0.3
     safety: 0.3
 
-bias_detector:
+bias_detection:
   metrics:
     - demographic_parity
     - equal_opportunity
@@ -27,83 +51,244 @@ bias_detector:
     - disparate_impact
   alpha: 0.05
   bootstrap_samples: 1000
+  permutation_samples: 500
+  prediction_threshold: 0.5
   min_group_size: 30
+  min_reference_size: 30
   intersectional_depth: 3
+  max_groups_per_metric: 500
+  history_retention_days: 365
+  max_history_rows: 100000
+  changepoint_penalty: 1.0
+  changepoint_min_points: 12
+  seasonality_period: 7
+  seasonality_min_points: 28
+  enable_memory_logging: true
+  enable_history_retention: true
+  random_seed: 42
   metric_thresholds:
-    demographic_parity: 0.1
-    equal_opportunity: 0.1
-    predictive_parity: 0.1
-    disparate_impact: 0.8
+    demographic_parity: 0.10
+    equal_opportunity: 0.10
+    predictive_parity: 0.10
+    disparate_impact: 0.80
+
 
 alignment_memory:
   replay_buffer_size: 10000
   causal_window: 1000
   drift_threshold: 0.25
-  retention_period: 365 # Days
-  regressor_type: "bayesian" # of sgd
+  retention_period: 365
+  regressor_type: "bayesian"
+  min_samples_for_drift: 60
+  histogram_bins: 10
+  histogram_range: [0.0, 1.0]
+  context_decay: 0.90
+  violation_decay: 0.95
+  bayesian_fit_min_samples: 5
+  model_learning_rate: 0.01
+  max_context_registry_size: 50000
+  default_outcome_bias_rate: 0.0
+  default_ethics_violations: 0
+  retention_cleanup_on_write: true
+  checkpoint_protocol: 4
+  checkpoint_model_suffix: "_model.joblib"
+  intervention_feature_keys:
+    - magnitude
+    - target_count
+    - pre_alignment_score
+    - pre_violation_rate
+    - post_alignment_score
+    - post_violation_rate
+    - delta_alignment_score
+    - delta_violation_rate
+
 
 ethical_constraints:
-  safe_energy_threshold: 100.0    # Base threshold
-  min_energy_threshold: 30.0      # Absolute minimum threshold
-  max_energy_threshold: 200.0     # Absolute maximum threshold
+  safe_energy_threshold: 100.0
+  min_energy_threshold: 30.0
+  max_energy_threshold: 200.0
+
   controller:
-    is_active: False
+    is_active: false
   controlled_process:
     state: []
+
   safety_constraints:
-    physical_harm:  "src/agents/alignment/templates/physical_harm.json"
+    physical_harm: "src/agents/alignment/templates/physical_harm.json"
     psychological_harm: "src/agents/alignment/templates/psychological_harm.json"
+
   fairness_constraints:
     distribution: "src/agents/alignment/templates/distribution.json"
     procedure: "src/agents/alignment/templates/procedure.json"
+    capability: "src/agents/alignment/templates/capability.json"
+
   constitutional_rules:
     privacy: "src/agents/alignment/templates/constitutional_rules_privacy.json"
     transparency: "src/agents/alignment/templates/constitutional_rules_transparency.json"
-  adaptation_rate: 0.1
+
+  adaptation_rate: 0.10
   constraint_priorities:
-    - 'safety'
-    - 'privacy'
-    - 'fairness'
-    - 'transparency'
+    - safety
+    - privacy
+    - fairness
+    - transparency
+    - distribution
+    - procedure
+    - capability
+    - dynamic
+
+  category_weights:
+    safety: 1.00
+    privacy: 0.95
+    fairness: 0.90
+    transparency: 0.85
+    distribution: 0.90
+    procedure: 0.88
+    capability: 0.86
+    dynamic: 0.80
+
+  societal_impact_thresholds:
+    distribution: 0.35
+    procedure: 0.30
+    capability: 0.40
+
+  hazard_bounds:
+    physical_harm:
+      max_action_kinetic_energy: 50.0
+      blocked_environment_states:
+        - overloaded
+        - resonance
+        - critical
+        - unsafe
+    psychological_harm:
+      max_stress_index: 0.70
+      blocked_environment_states:
+        - panic
+        - distress
+        - overloaded
+        - unsafe
+
+  conflict_pairs:
+    - [transparency, privacy]
+    - [safety, distribution]
+
+  severity_bands:
+    severity:
+      medium: 0.5
+      high: 1.5
+      critical: 3.0
+    risk:
+      medium: 0.5
+      high: 1.5
+      critical: 3.0
+
+  weight_floor: 0.10
+  weight_ceiling: 5.00
+  audit_history_limit: 10000
+  rule_load_fail_open: true
+  unknown_rule_policy: review
+  memory_logging_enabled: true
+  auto_adapt_on_violation: true
+  default_scope: global
+  default_severity: medium
+
 
 causal_model:
   conditional_independence_test: "fisherz"
   graph_file: "models/causal_graph.gml"
-  prior_knowledge: ["age->income", "education->income"]
-  min_adjacency_confidence: 0.7
+  graph_export_format: "gml"
+  prior_knowledge:
+    - "age->income"
+    - "education->income"
+  min_adjacency_confidence: 0.70
   max_parents: 3
   forbidden_edges: []
   required_edges: []
-  structure_learning_method: "pc"  # or "tetrad" "fci"
-  latent_confounder_detection: True
-  tetrad_path: "src/agents/alignment/auditors/tetrad.jar" # ""
+  structure_learning_method: "pc"   # Options: pc, fci, tetrad
+  latent_confounder_detection: true
+  tetrad_path: "src/agents/alignment/auditors/tetrad.jar"
+  allow_tetrad_fallback: true
   fci_max_conditioning_set: 5
-  use_inverse_covariance: True
+  use_inverse_covariance: true
   significance_level: 0.05
+  optimize_structure: true
+  max_structure_iterations: 100
+  ci_test_min_samples: 10
+  sensitive_attributes_as_roots: true
+  enable_memory_logging: true
+  default_effect_method: "backdoor.linear_regression"
+  propensity_clip: 0.000001
+  iv_relevance_threshold: 5.0
+  counterfactual_predict_exogenous_strategy: "retain_observed"  # retain_observed, mean_fill
+  random_seed: 42
 
-fairness_metrics: {}
+
+fairness_metrics:
+  prediction_threshold: 0.50
+  individual_difference_threshold: 0.10
+  max_difference_threshold: 0.30
+  equalized_odds_gap_threshold: 0.10
+  disparate_impact_lower_bound: 0.80
+  min_group_size: 20
+  p_value_alpha: 0.05
+  bootstrap_samples: 250
+  path_effect_bootstrap_samples: 200
+  path_effect_confidence_level: 0.95
+  history_max_rows: 10000
+  enable_memory_logging: true
+  strict_memory_integration: false
+  log_distributions: false
+  distribution_sample_cap: 256
+  missing_group_policy: skip        # skip, error
+  privileged_group_policy: infer_sorted
+  sensitive_attributes_override: []
+
 
 counterfactual_auditor:
-  perturbation_strategy: 'flip' # Options: 'flip', 'sample_distribution', 'fixed_delta'
-  perturbation_magnitude: 0.1
-  num_counterfactual_samples: 1
+  perturbation_strategy: "flip"          # flip, sample_distribution, fixed_delta, quantile_grid
+  perturbation_magnitude: 0.10
+  num_counterfactual_samples: 3
+  max_scenarios_per_attribute: 5
+  quantile_grid: [0.10, 0.50, 0.90]
   sensitivity_alpha: 0.05
+  prediction_threshold: 0.50
+  random_seed: 42
+
+  auto_build_causal_model: true
+  counterfactual_predict_exogenous_strategy: "retain_observed"
+  include_counterfactual_samples: false
+  counterfactual_sample_cap: 25
+  report_distribution_samples: false
+  log_path_specific_effects: true
+
+  enable_memory_logging: true
+  strict_memory_integration: false
+
+  default_sensitive_attributes: []
+  required_edges: []
+  attribute_mediators: {}
+
   corrections:
     levels:
-      - threshold: 0.8
+      - threshold: 0.80
         action: "human_intervention"
-      - threshold: 0.5
+      - threshold: 0.50
         action: "automatic_adjustment"
-      - threshold: 0.3
+      - threshold: 0.30
         action: "alert_only"
+
   fairness_thresholds:
-    individual_fairness_mean_diff: 0.1
-    individual_fairness_max_diff: 0.3
-    group_disparity_stat_parity: 0.1
-    group_disparity_equal_opp: 0.1
-    group_disparity_avg_odds: 0.1
+    individual_fairness_mean_diff: 0.10
+    individual_fairness_max_diff: 0.30
+    group_disparity_stat_parity: 0.10
+    group_disparity_equal_opp: 0.10
+    group_disparity_avg_odds: 0.10
+    equalized_odds_gap_change: 0.10
     causal_effect_ate: 0.05
-    group_stat_parity: {}
+    sensitivity_mean_shift: 0.05
+    sensitivity_cohens_d: 0.20
+    overall_bias: 0.10
+
 
 fairness_evaluator:
   group_metrics:
@@ -112,25 +297,86 @@ fairness_evaluator:
     - predictive_parity
     - disparate_impact
   individual_metrics:
-    - consistency_score
-    - fairness_radius # Note: fairness_radius was in dataclass but not fully implemented in methods
+    - consistency
+    - lipschitz_constant
+    - fairness_violations
   alpha: 0.05
   n_bootstrap: 1000
-  batch_size: 1000 # Was used in config dataclass, ensure it's used if relevant
-  similarity_metric: 'manhattan'
+  n_permutations: 500
+  batch_size: 512
+  similarity_metric: manhattan
+  prediction_threshold: 0.5
+  min_group_size: 25
+  k_neighbors: 15
+  max_pair_samples: 5000
+  individual_violation_threshold: 1.0
+  history_max_rows: 20000
+  rolling_window: 30
+  enable_memory_logging: true
+  strict_memory_integration: false
+  log_distributions: false
+  distribution_sample_cap: 256
+  sensitive_attributes_override: []
+  metric_thresholds:
+    statistical_parity: 0.10
+    equal_opportunity: 0.10
+    predictive_parity: 0.15
+    disparate_impact: 0.80
+
 
 value_embedding:
   embedding_dim: 512
   num_cultural_dimensions: 6
-  # num_ethical_principles: will be loaded dynamically from udhr_json_path by default.
-  # Can be overridden by uncommenting and setting a value here.
   num_ethical_principles: 30
   temperature: 0.07
-  dropout: 0.1
-  margin: 0.2
+  dropout: 0.10
+  margin: 0.20
   max_seq_length: 128
-  margin: 0.2
+  text_feature_dim: 128
+  alignment_hidden_dim: 512
+  preference_hidden_dim: 256
+  policy_hidden_dims: [1024, 512]
+  default_cultural_value: 0.50
+  memory_logging_enabled: true
+  strict_memory_integration: false
+  log_predictions: false
+  ethical_keywords:
+    - dignity
+    - rights
+    - equality
+    - freedom
+    - privacy
+    - consent
+    - justice
+    - fairness
+    - equity
+    - accountability
+    - transparency
+    - honesty
+    - integrity
+    - empathy
+    - responsibility
+    - autonomy
+    - beneficence
+    - safety
+    - respect
+    - inclusion
+    - solidarity
+    - sustainability
+    - alignment
+    - explainability
+    - oversight
+    - auditability
 
-value_dataset: {}
+value_dataset:
+  preference_positive_values: [1, true, "1", "true", "yes", "approved"]
 
-value_trainer: {}
+value_trainer:
+  train_batch_size: 32
+  val_batch_size: 64
+  shuffle: true
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler_t_max: 50
+  device: cpu

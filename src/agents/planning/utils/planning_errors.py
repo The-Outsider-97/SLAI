@@ -37,8 +37,10 @@ class AcademicPlanningError(Exception):
     Custom exception for type violations and planning semantics.
     Loads additional structured error documentation from a JSON file.
     """
-    _error_metadata_path = os.path.join(os.path.dirname(__file__),
-                                        'templates/academic_planning_error.json')
+    _error_metadata_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        'templates/academic_planning_error.json'
+    )
     _metadata = None
 
     @classmethod
@@ -61,6 +63,8 @@ class ResourceViolation(Exception):
         super().__init__(message)
         self.resource_type = resource_type
         self.requested = requested
+        # Backward-compat alias used by older call sites.
+        self.required = requested
         self.available = available
         self.metadata = self._generate_metadata()
 
@@ -77,10 +81,20 @@ class ResourceViolation(Exception):
 
 class SafetyMarginError(ResourceViolation):
     """Exception for safety margin violations"""
-    def __init__(self, message: str, resource_type: str, buffer_amount: float):
-        super().__init__(message, required={}, available={})
+    def __init__(
+        self,
+        message: str,
+        resource_type: str,
+        buffer_amount: float = 0.0,
+        requested: Any = None,
+        available: Any = None,
+        **kwargs,
+    ):
+        super().__init__(message, resource_type, requested or {}, available or {})
         self.resource_type = resource_type
         self.buffer_amount = buffer_amount
+        if kwargs:
+            self.metadata.update(kwargs)
         self.metadata['violation_type'] = 'safety_margin'
 
 class ResourceAcquisitionError(ResourceViolation):

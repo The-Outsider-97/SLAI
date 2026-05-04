@@ -1,0 +1,4686 @@
+metadata:
+  name: morphology_pack
+  locale: en
+  language: English
+  version: 1.0.0
+  schema_version: '1.0'
+  created: '2026-04-28'
+  description: Production morphology resource pack for the language subsystem. Consolidates regular morphology rules, derivational
+    morphology, irregular nouns, and irregular verbs into one validated resource.
+  source_files:
+  - morphology_rules.json
+  - irregular_nouns.json
+  - irregular_verbs.json
+  intended_consumers:
+  - Rules
+  - NLPEngine
+  - GrammarProcessor
+  - NLUEngine
+  - NLGEngine
+  notes:
+  - Slash-separated alternatives from legacy resources are normalized into lists.
+  - Regular rules are deterministic fallbacks; irregular inventories take priority.
+  - The pack is a resource asset. Runtime toggles and file paths belong in language_config.yaml.
+runtime_policy:
+  default_locale: en
+  casefold_lookup: true
+  unicode_normalization: NFKC
+  prefer_irregular_forms: true
+  allow_regular_fallback: true
+  allow_multiple_outputs: true
+  return_ranked_forms: true
+  max_generated_forms_per_lemma: 12
+  unknown_word_policy: regular_fallback
+  blocked_regularization_policy: keep_original_with_issue
+  confidence:
+    irregular_exact: 0.98
+    regular_rule: 0.86
+    heuristic_lemmatization: 0.72
+    derivational_rule: 0.82
+    unknown_fallback: 0.55
+feature_schema:
+  upos:
+  - NOUN
+  - PROPN
+  - PRON
+  - VERB
+  - AUX
+  - ADJ
+  - ADV
+  - DET
+  - NUM
+  - ADP
+  - PART
+  - SCONJ
+  - CCONJ
+  - PUNCT
+  - X
+  number:
+  - singular
+  - plural
+  - mass
+  - invariant
+  - unknown
+  person:
+  - 1
+  - 2
+  - 3
+  tense:
+  - present
+  - past
+  - future
+  - unknown
+  aspect:
+  - simple
+  - progressive
+  - perfect
+  - perfect_progressive
+  - unknown
+  verb_form:
+  - finite
+  - infinitive
+  - gerund
+  - present_participle
+  - past_participle
+  - base
+  - unknown
+  degree:
+  - positive
+  - comparative
+  - superlative
+  case:
+  - subject
+  - object
+  - possessive
+  - unknown
+  voice:
+  - active
+  - passive
+  - unknown
+precedence:
+- protected_or_uninflectable_terms
+- irregular_nouns
+- irregular_verbs
+- regular_inflection_rules
+- derivational_rules
+- heuristic_lemmatization
+protected_or_uninflectable_terms:
+  enabled: true
+  classes:
+    mass_nouns:
+    - advice
+    - equipment
+    - furniture
+    - information
+    - knowledge
+    - luggage
+    - news
+    - software
+    - traffic
+    invariant_common_nouns:
+    - aircraft
+    - barracks
+    - bison
+    - chassis
+    - cod
+    - corps
+    - crossroads
+    - deer
+    - fish
+    - fruit
+    - gallows
+    - grouse
+    - headquarters
+    - hovercraft
+    - means
+    - moose
+    - offspring
+    - salmon
+    - series
+    - sheep
+    - shrimp
+    - spacecraft
+    - species
+    - squid
+    - swine
+    - trout
+    - tuna
+    - works
+    latin_greek_caution_terms:
+    - data
+    - media
+    - criteria
+    - phenomena
+    - bacteria
+    - alumni
+regular_inflection_rules:
+  nouns:
+    plural:
+      rules:
+      - id: morph.noun.plural.001.add_s_suffix
+        enabled: true
+        family: noun
+        category: plural
+        description: Add '-s' suffix
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        pattern: default
+        suffix: s
+        examples:
+        - source: cat
+          target: cats
+        - source: dog
+          target: dogs
+      - id: morph.noun.plural.002.add_es_for_words_ending_in_s_sh_ch_x_z
+        enabled: true
+        family: noun
+        category: plural
+        description: Add '-es' for words ending in [s, sh, ch, x, z]
+        priority: 20
+        confidence: 0.86
+        operation: append_suffix
+        pattern: (?:s|sh|ch|x|z)$
+        suffix: es
+        examples:
+        - source: bus
+          target: buses
+        - source: fox
+          target: foxes
+      - id: morph.noun.plural.003.replace_y_with_ies_for_consonant_y
+        enabled: true
+        family: noun
+        category: plural
+        description: Replace '-y' with '-ies' for consonant + y
+        priority: 30
+        confidence: 0.86
+        operation: replace_suffix
+        pattern: '[^aeiou]y$'
+        replacement: ies
+        examples:
+        - source: city
+          target: cities
+        - source: baby
+          target: babies
+      - id: morph.noun.plural.004.add_s_for_vowel_y
+        enabled: true
+        family: noun
+        category: plural
+        description: Add '-s' for vowel + y
+        priority: 40
+        confidence: 0.86
+        operation: append_suffix
+        pattern: '[aeiou]y$'
+        suffix: s
+        examples:
+        - source: boy
+          target: boys
+        - source: day
+          target: days
+      - id: morph.noun.plural.005.replace_f_fe_with_ves
+        enabled: true
+        family: noun
+        category: plural
+        description: Replace '-f/-fe' with '-ves'
+        priority: 50
+        confidence: 0.86
+        operation: replace_suffix
+        pattern: (?:f|fe)$
+        replacement: ves
+        suffix: ves
+        examples:
+        - source: wolf
+          target: wolves
+        - source: wife
+          target: wives
+    possessive:
+      rules:
+      - id: morph.noun.possessive.001.add_s_to_singular_nouns
+        enabled: true
+        family: noun
+        category: possessive
+        description: Add "'s" to singular nouns
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        suffix: '''s'
+        examples:
+        - source: dog
+          target: dog's
+        - source: Chris
+          target: Chris's
+      - id: morph.noun.possessive.002.add_apostrophe_only_to_plural_nouns_ending
+        enabled: true
+        family: noun
+        category: possessive
+        description: Add apostrophe only to plural nouns ending in -s
+        priority: 20
+        confidence: 0.86
+        operation: append_suffix
+        examples:
+        - source: dogs
+          target: dogs'
+        - source: players
+          target: players'
+  verbs:
+    third_person_singular:
+      rules:
+      - id: morph.verb.third_person_singular.001.add_s
+        enabled: true
+        family: verb
+        category: third_person_singular
+        description: Add '-s'
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        pattern: default
+        suffix: s
+        examples:
+        - source: run
+          target: runs
+        - source: eat
+          target: eats
+      - id: morph.verb.third_person_singular.002.add_es_for_s_sh_ch_x_z_o_endings
+        enabled: true
+        family: verb
+        category: third_person_singular
+        description: Add '-es' for [s, sh, ch, x, z, o] endings
+        priority: 20
+        confidence: 0.86
+        operation: append_suffix
+        pattern: (?:s|sh|ch|x|z|o)$
+        suffix: es
+        examples:
+        - source: pass
+          target: passes
+        - source: go
+          target: goes
+      - id: morph.verb.third_person_singular.003.replace_y_with_ies_for_consonant_y
+        enabled: true
+        family: verb
+        category: third_person_singular
+        description: Replace '-y' with '-ies' for consonant + y
+        priority: 30
+        confidence: 0.86
+        operation: replace_suffix
+        pattern: '[^aeiou]y$'
+        replacement: ies
+        examples:
+        - source: study
+          target: studies
+        - source: fly
+          target: flies
+    past_tense:
+      rules:
+      - id: morph.verb.past_tense.001.add_ed
+        enabled: true
+        family: verb
+        category: past_tense
+        description: Add '-ed'
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        pattern: default
+        suffix: ed
+        examples:
+        - source: walk
+          target: walked
+        - source: play
+          target: played
+      - id: morph.verb.past_tense.002.add_d_for_silent_e
+        enabled: true
+        family: verb
+        category: past_tense
+        description: Add '-d' for silent -e
+        priority: 20
+        confidence: 0.86
+        operation: append_suffix
+        pattern: e$
+        suffix: d
+        examples:
+        - source: dance
+          target: danced
+        - source: smile
+          target: smiled
+      - id: morph.verb.past_tense.003.double_consonant_ed_for_cvc_pattern
+        enabled: true
+        family: verb
+        category: past_tense
+        description: Double consonant + '-ed' for CVC pattern
+        priority: 30
+        confidence: 0.86
+        operation: double_final_consonant_then_append
+        pattern: '[^aeiou][aeiou][^aeiou]$'
+        suffix: ed
+        examples:
+        - source: stop
+          target: stopped
+        - source: plan
+          target: planned
+    present_participle:
+      rules:
+      - id: morph.verb.present_participle.001.add_ing
+        enabled: true
+        family: verb
+        category: present_participle
+        description: Add '-ing'
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        pattern: default
+        suffix: ing
+        examples:
+        - source: work
+          target: working
+        - source: play
+          target: playing
+      - id: morph.verb.present_participle.002.remove_e_ing
+        enabled: true
+        family: verb
+        category: present_participle
+        description: Remove '-e' + '-ing'
+        priority: 20
+        confidence: 0.86
+        operation: remove_suffix_then_append
+        pattern: e$
+        suffix: ing
+        examples:
+        - source: make
+          target: making
+        - source: write
+          target: writing
+      - id: morph.verb.present_participle.003.double_consonant_ing_for_cvc_pattern
+        enabled: true
+        family: verb
+        category: present_participle
+        description: Double consonant + '-ing' for CVC pattern
+        priority: 30
+        confidence: 0.86
+        operation: double_final_consonant_then_append
+        pattern: '[^aeiou][aeiou][^aeiou]$'
+        suffix: ing
+        examples:
+        - source: run
+          target: running
+        - source: swim
+          target: swimming
+  adjectives:
+    comparative:
+      rules:
+      - id: morph.adjective.comparative.001.add_er
+        enabled: true
+        family: adjective
+        category: comparative
+        description: Add '-er'
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        pattern: default
+        suffix: er
+        examples:
+        - source: fast
+          target: faster
+        - source: small
+          target: smaller
+      - id: morph.adjective.comparative.002.replace_y_with_ier
+        enabled: true
+        family: adjective
+        category: comparative
+        description: Replace '-y' with '-ier'
+        priority: 20
+        confidence: 0.86
+        operation: replace_suffix
+        pattern: y$
+        examples:
+        - source: happy
+          target: happier
+        - source: heavy
+          target: heavier
+      - id: morph.adjective.comparative.003.use_more_for_multi_syllable_adjectives
+        enabled: true
+        family: adjective
+        category: comparative
+        description: Use 'more' for multi-syllable adjectives
+        priority: 30
+        confidence: 0.86
+        operation: analytic_more
+        pattern: syllables >= 2
+        examples:
+        - source: beautiful
+          target: more beautiful
+    superlative:
+      rules:
+      - id: morph.adjective.superlative.001.add_est
+        enabled: true
+        family: adjective
+        category: superlative
+        description: Add '-est'
+        priority: 10
+        confidence: 0.86
+        operation: append_suffix
+        suffix: est
+        examples:
+        - source: fast
+          target: fastest
+        - source: small
+          target: smallest
+      - id: morph.adjective.superlative.002.replace_y_with_iest
+        enabled: true
+        family: adjective
+        category: superlative
+        description: Replace '-y' with '-iest'
+        priority: 20
+        confidence: 0.86
+        operation: replace_suffix
+        examples:
+        - source: happy
+          target: happiest
+        - source: heavy
+          target: heaviest
+      - id: morph.adjective.superlative.003.use_most_for_multi_syllable_adjectives
+        enabled: true
+        family: adjective
+        category: superlative
+        description: Use 'most' for multi-syllable adjectives
+        priority: 30
+        confidence: 0.86
+        operation: analytic_most
+        examples:
+        - source: beautiful
+          target: most beautiful
+irregulars_from_legacy_rules:
+  nouns.plural:
+  - base: child
+    forms:
+    - children
+  - base: foot
+    forms:
+    - feet
+  - base: mouse
+    forms:
+    - mice
+  - base: tooth
+    forms:
+    - teeth
+  verbs.past_tense:
+  - base: go
+    forms:
+    - went
+  - base: sing
+    forms:
+    - sang
+  - base: be
+    forms:
+    - was
+    - were
+  - base: have
+    forms:
+    - had
+  adjectives.comparative:
+  - base: good
+    forms:
+    - better
+  - base: bad
+    forms:
+    - worse
+  - base: far
+    forms:
+    - farther
+  adjectives.superlative:
+  - base: good
+    forms:
+    - best
+  - base: bad
+    forms:
+    - worst
+  - base: far
+    forms:
+    - farthest
+irregular_nouns:
+  description: Canonical singular-to-plural exception map. Plural alternatives are lists and may include invariant forms.
+  entries:
+    addendum:
+      plural:
+      - addenda
+      - addendums
+      source: irregular_nouns.json
+      confidence: 0.98
+    aircraft:
+      plural:
+      - aircraft
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    alga:
+      plural:
+      - algae
+      source: irregular_nouns.json
+      confidence: 0.98
+    alumnus:
+      plural:
+      - alumni
+      source: irregular_nouns.json
+      confidence: 0.98
+    alumna:
+      plural:
+      - alumnae
+      source: irregular_nouns.json
+      confidence: 0.98
+    analysis:
+      plural:
+      - analyses
+      source: irregular_nouns.json
+      confidence: 0.98
+    antenna:
+      plural:
+      - antennae
+      - antennas
+      source: irregular_nouns.json
+      confidence: 0.98
+    appendix:
+      plural:
+      - appendices
+      - appendixes
+      source: irregular_nouns.json
+      confidence: 0.98
+    aquarium:
+      plural:
+      - aquaria
+      - aquariums
+      source: irregular_nouns.json
+      confidence: 0.98
+    automaton:
+      plural:
+      - automata
+      - automatons
+      source: irregular_nouns.json
+      confidence: 0.98
+    axis:
+      plural:
+      - axes
+      source: irregular_nouns.json
+      confidence: 0.98
+    bacillus:
+      plural:
+      - bacilli
+      source: irregular_nouns.json
+      confidence: 0.98
+    bacterium:
+      plural:
+      - bacteria
+      source: irregular_nouns.json
+      confidence: 0.98
+    barracks:
+      plural:
+      - barracks
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    basis:
+      plural:
+      - bases
+      source: irregular_nouns.json
+      confidence: 0.98
+    beau:
+      plural:
+      - beaux
+      - beaus
+      source: irregular_nouns.json
+      confidence: 0.98
+    bison:
+      plural:
+      - bison
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    brother:
+      plural:
+      - brethren
+      - brothers
+      source: irregular_nouns.json
+      confidence: 0.98
+    bureau:
+      plural:
+      - bureaux
+      - bureaus
+      source: irregular_nouns.json
+      confidence: 0.98
+    cactus:
+      plural:
+      - cacti
+      - cactuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    calf:
+      plural:
+      - calves
+      source: irregular_nouns.json
+      confidence: 0.98
+    candelabrum:
+      plural:
+      - candelabra
+      - candelabrums
+      source: irregular_nouns.json
+      confidence: 0.98
+    chassis:
+      plural:
+      - chassis
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    château:
+      plural:
+      - châteaux
+      - chateaus
+      source: irregular_nouns.json
+      confidence: 0.98
+    cherub:
+      plural:
+      - cherubim
+      - cherubs
+      source: irregular_nouns.json
+      confidence: 0.98
+    child:
+      plural:
+      - children
+      source: irregular_nouns.json
+      confidence: 0.98
+    cod:
+      plural:
+      - cod
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    codex:
+      plural:
+      - codices
+      source: irregular_nouns.json
+      confidence: 0.98
+    corpus:
+      plural:
+      - corpora
+      source: irregular_nouns.json
+      confidence: 0.98
+    corps:
+      plural:
+      - corps
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    crisis:
+      plural:
+      - crises
+      source: irregular_nouns.json
+      confidence: 0.98
+    criterion:
+      plural:
+      - criteria
+      - criterions
+      source: irregular_nouns.json
+      confidence: 0.98
+    crossroads:
+      plural:
+      - crossroads
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    curriculum:
+      plural:
+      - curricula
+      - curriculums
+      source: irregular_nouns.json
+      confidence: 0.98
+    datum:
+      plural:
+      - data
+      source: irregular_nouns.json
+      confidence: 0.98
+    deer:
+      plural:
+      - deer
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    diagnosis:
+      plural:
+      - diagnoses
+      source: irregular_nouns.json
+      confidence: 0.98
+    die:
+      plural:
+      - dice
+      source: irregular_nouns.json
+      confidence: 0.98
+    dwarf:
+      plural:
+      - dwarves
+      - dwarfs
+      source: irregular_nouns.json
+      confidence: 0.98
+    elf:
+      plural:
+      - elves
+      source: irregular_nouns.json
+      confidence: 0.98
+    ellipsis:
+      plural:
+      - ellipses
+      source: irregular_nouns.json
+      confidence: 0.98
+    erratum:
+      plural:
+      - errata
+      source: irregular_nouns.json
+      confidence: 0.98
+    fish:
+      plural:
+      - fish
+      - fishes
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    focus:
+      plural:
+      - foci
+      - focuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    foot:
+      plural:
+      - feet
+      source: irregular_nouns.json
+      confidence: 0.98
+    formula:
+      plural:
+      - formulae
+      - formulas
+      source: irregular_nouns.json
+      confidence: 0.98
+    forum:
+      plural:
+      - fora
+      - forums
+      source: irregular_nouns.json
+      confidence: 0.98
+    fruit:
+      plural:
+      - fruit
+      - fruits
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    fungus:
+      plural:
+      - fungi
+      - funguses
+      source: irregular_nouns.json
+      confidence: 0.98
+    gallows:
+      plural:
+      - gallows
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    ganglion:
+      plural:
+      - ganglia
+      - ganglions
+      source: irregular_nouns.json
+      confidence: 0.98
+    genus:
+      plural:
+      - genera
+      source: irregular_nouns.json
+      confidence: 0.98
+    goose:
+      plural:
+      - geese
+      source: irregular_nouns.json
+      confidence: 0.98
+    graffito:
+      plural:
+      - graffiti
+      source: irregular_nouns.json
+      confidence: 0.98
+    grouse:
+      plural:
+      - grouse
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    half:
+      plural:
+      - halves
+      source: irregular_nouns.json
+      confidence: 0.98
+    headquarters:
+      plural:
+      - headquarters
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    hoof:
+      plural:
+      - hooves
+      - hoofs
+      source: irregular_nouns.json
+      confidence: 0.98
+    hovercraft:
+      plural:
+      - hovercraft
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    hypothesis:
+      plural:
+      - hypotheses
+      source: irregular_nouns.json
+      confidence: 0.98
+    index:
+      plural:
+      - indices
+      - indexes
+      source: irregular_nouns.json
+      confidence: 0.98
+    kibbutz:
+      plural:
+      - kibbutzim
+      - kibbutzes
+      source: irregular_nouns.json
+      confidence: 0.98
+    knife:
+      plural:
+      - knives
+      source: irregular_nouns.json
+      confidence: 0.98
+    larva:
+      plural:
+      - larvae
+      source: irregular_nouns.json
+      confidence: 0.98
+    leaf:
+      plural:
+      - leaves
+      source: irregular_nouns.json
+      confidence: 0.98
+    libretto:
+      plural:
+      - libretti
+      - librettos
+      source: irregular_nouns.json
+      confidence: 0.98
+    life:
+      plural:
+      - lives
+      source: irregular_nouns.json
+      confidence: 0.98
+    loaf:
+      plural:
+      - loaves
+      source: irregular_nouns.json
+      confidence: 0.98
+    louse:
+      plural:
+      - lice
+      source: irregular_nouns.json
+      confidence: 0.98
+    man:
+      plural:
+      - men
+      source: irregular_nouns.json
+      confidence: 0.98
+    matrix:
+      plural:
+      - matrices
+      - matrixes
+      source: irregular_nouns.json
+      confidence: 0.98
+    maximum:
+      plural:
+      - maxima
+      - maximums
+      source: irregular_nouns.json
+      confidence: 0.98
+    means:
+      plural:
+      - means
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    medium:
+      plural:
+      - media
+      - mediums
+      source: irregular_nouns.json
+      confidence: 0.98
+    memorandum:
+      plural:
+      - memoranda
+      - memorandums
+      source: irregular_nouns.json
+      confidence: 0.98
+    millennium:
+      plural:
+      - millennia
+      - millenniums
+      source: irregular_nouns.json
+      confidence: 0.98
+    minimum:
+      plural:
+      - minima
+      - minimums
+      source: irregular_nouns.json
+      confidence: 0.98
+    moose:
+      plural:
+      - moose
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    mouse:
+      plural:
+      - mice
+      source: irregular_nouns.json
+      confidence: 0.98
+    nebula:
+      plural:
+      - nebulae
+      - nebulas
+      source: irregular_nouns.json
+      confidence: 0.98
+    nucleus:
+      plural:
+      - nuclei
+      - nucleuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    oasis:
+      plural:
+      - oases
+      source: irregular_nouns.json
+      confidence: 0.98
+    octopus:
+      plural:
+      - octopuses
+      - octopi
+      source: irregular_nouns.json
+      confidence: 0.98
+    offspring:
+      plural:
+      - offspring
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    ovum:
+      plural:
+      - ova
+      source: irregular_nouns.json
+      confidence: 0.98
+    ox:
+      plural:
+      - oxen
+      source: irregular_nouns.json
+      confidence: 0.98
+    paralysis:
+      plural:
+      - paralyses
+      source: irregular_nouns.json
+      confidence: 0.98
+    parenthesis:
+      plural:
+      - parentheses
+      source: irregular_nouns.json
+      confidence: 0.98
+    penny:
+      plural:
+      - pence
+      - pennies
+      source: irregular_nouns.json
+      confidence: 0.98
+    person:
+      plural:
+      - people
+      source: irregular_nouns.json
+      confidence: 0.98
+    phenomenon:
+      plural:
+      - phenomena
+      - phenomenons
+      source: irregular_nouns.json
+      confidence: 0.98
+    polyhedron:
+      plural:
+      - polyhedra
+      - polyhedrons
+      source: irregular_nouns.json
+      confidence: 0.98
+    quiz:
+      plural:
+      - quizzes
+      source: irregular_nouns.json
+      confidence: 0.98
+    radius:
+      plural:
+      - radii
+      - radiuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    salmon:
+      plural:
+      - salmon
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    scarf:
+      plural:
+      - scarves
+      - scarfs
+      source: irregular_nouns.json
+      confidence: 0.98
+    self:
+      plural:
+      - selves
+      source: irregular_nouns.json
+      confidence: 0.98
+    seraph:
+      plural:
+      - seraphim
+      - seraphs
+      source: irregular_nouns.json
+      confidence: 0.98
+    series:
+      plural:
+      - series
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    sheaf:
+      plural:
+      - sheaves
+      source: irregular_nouns.json
+      confidence: 0.98
+    sheep:
+      plural:
+      - sheep
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    shelf:
+      plural:
+      - shelves
+      source: irregular_nouns.json
+      confidence: 0.98
+    shrimp:
+      plural:
+      - shrimp
+      - shrimps
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    spacecraft:
+      plural:
+      - spacecraft
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    species:
+      plural:
+      - species
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    spectrum:
+      plural:
+      - spectra
+      - spectrums
+      source: irregular_nouns.json
+      confidence: 0.98
+    squid:
+      plural:
+      - squid
+      - squids
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    stadium:
+      plural:
+      - stadia
+      - stadiums
+      source: irregular_nouns.json
+      confidence: 0.98
+    stimulus:
+      plural:
+      - stimuli
+      source: irregular_nouns.json
+      confidence: 0.98
+    stratum:
+      plural:
+      - strata
+      source: irregular_nouns.json
+      confidence: 0.98
+    swine:
+      plural:
+      - swine
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    syllabus:
+      plural:
+      - syllabi
+      - syllabuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    symposium:
+      plural:
+      - symposia
+      - symposiums
+      source: irregular_nouns.json
+      confidence: 0.98
+    synthesis:
+      plural:
+      - syntheses
+      source: irregular_nouns.json
+      confidence: 0.98
+    tableau:
+      plural:
+      - tableaux
+      - tableaus
+      source: irregular_nouns.json
+      confidence: 0.98
+    tempo:
+      plural:
+      - tempi
+      - tempos
+      source: irregular_nouns.json
+      confidence: 0.98
+    terminus:
+      plural:
+      - termini
+      - terminuses
+      source: irregular_nouns.json
+      confidence: 0.98
+    thesis:
+      plural:
+      - theses
+      source: irregular_nouns.json
+      confidence: 0.98
+    thief:
+      plural:
+      - thieves
+      source: irregular_nouns.json
+      confidence: 0.98
+    tooth:
+      plural:
+      - teeth
+      source: irregular_nouns.json
+      confidence: 0.98
+    trout:
+      plural:
+      - trout
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    tuna:
+      plural:
+      - tuna
+      - tunas
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+    ultimatum:
+      plural:
+      - ultimata
+      - ultimatums
+      source: irregular_nouns.json
+      confidence: 0.98
+    vertebra:
+      plural:
+      - vertebrae
+      source: irregular_nouns.json
+      confidence: 0.98
+    vertex:
+      plural:
+      - vertices
+      - vertexes
+      source: irregular_nouns.json
+      confidence: 0.98
+    virtuoso:
+      plural:
+      - virtuosi
+      - virtuosos
+      source: irregular_nouns.json
+      confidence: 0.98
+    vortex:
+      plural:
+      - vortices
+      - vortexes
+      source: irregular_nouns.json
+      confidence: 0.98
+    wharf:
+      plural:
+      - wharves
+      - wharfs
+      source: irregular_nouns.json
+      confidence: 0.98
+    wife:
+      plural:
+      - wives
+      source: irregular_nouns.json
+      confidence: 0.98
+    wolf:
+      plural:
+      - wolves
+      source: irregular_nouns.json
+      confidence: 0.98
+    woman:
+      plural:
+      - women
+      source: irregular_nouns.json
+      confidence: 0.98
+    works:
+      plural:
+      - works
+      source: irregular_nouns.json
+      confidence: 0.98
+      invariant: true
+  reverse_lookup:
+    addenda:
+    - addendum
+    addendums:
+    - addendum
+    aircraft:
+    - aircraft
+    algae:
+    - alga
+    alumnae:
+    - alumna
+    alumni:
+    - alumnus
+    analyses:
+    - analysis
+    antennae:
+    - antenna
+    antennas:
+    - antenna
+    appendices:
+    - appendix
+    appendixes:
+    - appendix
+    aquaria:
+    - aquarium
+    aquariums:
+    - aquarium
+    automata:
+    - automaton
+    automatons:
+    - automaton
+    axes:
+    - axis
+    bacilli:
+    - bacillus
+    bacteria:
+    - bacterium
+    barracks:
+    - barracks
+    bases:
+    - basis
+    beaus:
+    - beau
+    beaux:
+    - beau
+    bison:
+    - bison
+    brethren:
+    - brother
+    brothers:
+    - brother
+    bureaus:
+    - bureau
+    bureaux:
+    - bureau
+    cacti:
+    - cactus
+    cactuses:
+    - cactus
+    calves:
+    - calf
+    candelabra:
+    - candelabrum
+    candelabrums:
+    - candelabrum
+    chassis:
+    - chassis
+    chateaus:
+    - château
+    cherubim:
+    - cherub
+    cherubs:
+    - cherub
+    children:
+    - child
+    châteaux:
+    - château
+    cod:
+    - cod
+    codices:
+    - codex
+    corpora:
+    - corpus
+    corps:
+    - corps
+    crises:
+    - crisis
+    criteria:
+    - criterion
+    criterions:
+    - criterion
+    crossroads:
+    - crossroads
+    curricula:
+    - curriculum
+    curriculums:
+    - curriculum
+    data:
+    - datum
+    deer:
+    - deer
+    diagnoses:
+    - diagnosis
+    dice:
+    - die
+    dwarfs:
+    - dwarf
+    dwarves:
+    - dwarf
+    ellipses:
+    - ellipsis
+    elves:
+    - elf
+    errata:
+    - erratum
+    feet:
+    - foot
+    fish:
+    - fish
+    fishes:
+    - fish
+    foci:
+    - focus
+    focuses:
+    - focus
+    fora:
+    - forum
+    formulae:
+    - formula
+    formulas:
+    - formula
+    forums:
+    - forum
+    fruit:
+    - fruit
+    fruits:
+    - fruit
+    fungi:
+    - fungus
+    funguses:
+    - fungus
+    gallows:
+    - gallows
+    ganglia:
+    - ganglion
+    ganglions:
+    - ganglion
+    geese:
+    - goose
+    genera:
+    - genus
+    graffiti:
+    - graffito
+    grouse:
+    - grouse
+    halves:
+    - half
+    headquarters:
+    - headquarters
+    hoofs:
+    - hoof
+    hooves:
+    - hoof
+    hovercraft:
+    - hovercraft
+    hypotheses:
+    - hypothesis
+    indexes:
+    - index
+    indices:
+    - index
+    kibbutzes:
+    - kibbutz
+    kibbutzim:
+    - kibbutz
+    knives:
+    - knife
+    larvae:
+    - larva
+    leaves:
+    - leaf
+    libretti:
+    - libretto
+    librettos:
+    - libretto
+    lice:
+    - louse
+    lives:
+    - life
+    loaves:
+    - loaf
+    matrices:
+    - matrix
+    matrixes:
+    - matrix
+    maxima:
+    - maximum
+    maximums:
+    - maximum
+    means:
+    - means
+    media:
+    - medium
+    mediums:
+    - medium
+    memoranda:
+    - memorandum
+    memorandums:
+    - memorandum
+    men:
+    - man
+    mice:
+    - mouse
+    millennia:
+    - millennium
+    millenniums:
+    - millennium
+    minima:
+    - minimum
+    minimums:
+    - minimum
+    moose:
+    - moose
+    nebulae:
+    - nebula
+    nebulas:
+    - nebula
+    nuclei:
+    - nucleus
+    nucleuses:
+    - nucleus
+    oases:
+    - oasis
+    octopi:
+    - octopus
+    octopuses:
+    - octopus
+    offspring:
+    - offspring
+    ova:
+    - ovum
+    oxen:
+    - ox
+    paralyses:
+    - paralysis
+    parentheses:
+    - parenthesis
+    pence:
+    - penny
+    pennies:
+    - penny
+    people:
+    - person
+    phenomena:
+    - phenomenon
+    phenomenons:
+    - phenomenon
+    polyhedra:
+    - polyhedron
+    polyhedrons:
+    - polyhedron
+    quizzes:
+    - quiz
+    radii:
+    - radius
+    radiuses:
+    - radius
+    salmon:
+    - salmon
+    scarfs:
+    - scarf
+    scarves:
+    - scarf
+    selves:
+    - self
+    seraphim:
+    - seraph
+    seraphs:
+    - seraph
+    series:
+    - series
+    sheaves:
+    - sheaf
+    sheep:
+    - sheep
+    shelves:
+    - shelf
+    shrimp:
+    - shrimp
+    shrimps:
+    - shrimp
+    spacecraft:
+    - spacecraft
+    species:
+    - species
+    spectra:
+    - spectrum
+    spectrums:
+    - spectrum
+    squid:
+    - squid
+    squids:
+    - squid
+    stadia:
+    - stadium
+    stadiums:
+    - stadium
+    stimuli:
+    - stimulus
+    strata:
+    - stratum
+    swine:
+    - swine
+    syllabi:
+    - syllabus
+    syllabuses:
+    - syllabus
+    symposia:
+    - symposium
+    symposiums:
+    - symposium
+    syntheses:
+    - synthesis
+    tableaus:
+    - tableau
+    tableaux:
+    - tableau
+    teeth:
+    - tooth
+    tempi:
+    - tempo
+    tempos:
+    - tempo
+    termini:
+    - terminus
+    terminuses:
+    - terminus
+    theses:
+    - thesis
+    thieves:
+    - thief
+    trout:
+    - trout
+    tuna:
+    - tuna
+    tunas:
+    - tuna
+    ultimata:
+    - ultimatum
+    ultimatums:
+    - ultimatum
+    vertebrae:
+    - vertebra
+    vertexes:
+    - vertex
+    vertices:
+    - vertex
+    virtuosi:
+    - virtuoso
+    virtuosos:
+    - virtuoso
+    vortexes:
+    - vortex
+    vortices:
+    - vortex
+    wharfs:
+    - wharf
+    wharves:
+    - wharf
+    wives:
+    - wife
+    wolves:
+    - wolf
+    women:
+    - woman
+    works:
+    - works
+irregular_verbs:
+  description: Canonical base-to-form exception map. Multiple accepted forms are represented as lists.
+  entries:
+    arise:
+      present_plural:
+      - arise
+      past_simple:
+      - arose
+      past_participle:
+      - arisen
+      source: irregular_verbs.json
+      confidence: 0.98
+    awake:
+      present_plural:
+      - awake
+      past_simple:
+      - awoke
+      past_participle:
+      - awoken
+      source: irregular_verbs.json
+      confidence: 0.98
+    be:
+      present_singular:
+      - am
+      - is
+      present_plural:
+      - are
+      past_simple:
+      - was
+      - were
+      past_participle:
+      - been
+      present_participle:
+      - being
+      source: irregular_verbs.json
+      confidence: 0.98
+    bear:
+      present_plural:
+      - bear
+      past_simple:
+      - bore
+      past_participle:
+      - born
+      - borne
+      source: irregular_verbs.json
+      confidence: 0.98
+    beat:
+      present_plural:
+      - beat
+      past_simple:
+      - beat
+      past_participle:
+      - beaten
+      source: irregular_verbs.json
+      confidence: 0.98
+    become:
+      present_plural:
+      - become
+      past_simple:
+      - became
+      past_participle:
+      - become
+      source: irregular_verbs.json
+      confidence: 0.98
+    begin:
+      present_plural:
+      - begin
+      past_simple:
+      - began
+      past_participle:
+      - begun
+      source: irregular_verbs.json
+      confidence: 0.98
+    bend:
+      present_plural:
+      - bend
+      past_simple:
+      - bent
+      past_participle:
+      - bent
+      source: irregular_verbs.json
+      confidence: 0.98
+    bet:
+      present_plural:
+      - bet
+      past_simple:
+      - bet
+      past_participle:
+      - bet
+      source: irregular_verbs.json
+      confidence: 0.98
+    bid:
+      present_plural:
+      - bid
+      past_simple:
+      - bid
+      - bade
+      past_participle:
+      - bid
+      - bidden
+      source: irregular_verbs.json
+      confidence: 0.98
+    bind:
+      present_plural:
+      - bind
+      past_simple:
+      - bound
+      past_participle:
+      - bound
+      source: irregular_verbs.json
+      confidence: 0.98
+    bite:
+      present_plural:
+      - bite
+      past_simple:
+      - bit
+      past_participle:
+      - bitten
+      source: irregular_verbs.json
+      confidence: 0.98
+    bleed:
+      present_plural:
+      - bleed
+      past_simple:
+      - bled
+      past_participle:
+      - bled
+      source: irregular_verbs.json
+      confidence: 0.98
+    blow:
+      present_plural:
+      - blow
+      past_simple:
+      - blew
+      past_participle:
+      - blown
+      source: irregular_verbs.json
+      confidence: 0.98
+    break:
+      present_plural:
+      - break
+      past_simple:
+      - broke
+      past_participle:
+      - broken
+      source: irregular_verbs.json
+      confidence: 0.98
+    breed:
+      present_plural:
+      - breed
+      past_simple:
+      - bred
+      past_participle:
+      - bred
+      source: irregular_verbs.json
+      confidence: 0.98
+    bring:
+      present_plural:
+      - bring
+      past_simple:
+      - brought
+      past_participle:
+      - brought
+      source: irregular_verbs.json
+      confidence: 0.98
+    broadcast:
+      present_plural:
+      - broadcast
+      past_simple:
+      - broadcast
+      past_participle:
+      - broadcast
+      source: irregular_verbs.json
+      confidence: 0.98
+    build:
+      present_plural:
+      - build
+      past_simple:
+      - built
+      past_participle:
+      - built
+      source: irregular_verbs.json
+      confidence: 0.98
+    burn:
+      present_plural:
+      - burn
+      past_simple:
+      - burnt
+      - burned
+      past_participle:
+      - burnt
+      - burned
+      source: irregular_verbs.json
+      confidence: 0.98
+    burst:
+      present_plural:
+      - burst
+      past_simple:
+      - burst
+      past_participle:
+      - burst
+      source: irregular_verbs.json
+      confidence: 0.98
+    buy:
+      present_plural:
+      - buy
+      past_simple:
+      - bought
+      past_participle:
+      - bought
+      source: irregular_verbs.json
+      confidence: 0.98
+    cast:
+      present_plural:
+      - cast
+      past_simple:
+      - cast
+      past_participle:
+      - cast
+      source: irregular_verbs.json
+      confidence: 0.98
+    catch:
+      present_plural:
+      - catch
+      past_simple:
+      - caught
+      past_participle:
+      - caught
+      source: irregular_verbs.json
+      confidence: 0.98
+    choose:
+      present_plural:
+      - choose
+      past_simple:
+      - chose
+      past_participle:
+      - chosen
+      source: irregular_verbs.json
+      confidence: 0.98
+    cling:
+      present_plural:
+      - cling
+      past_simple:
+      - clung
+      past_participle:
+      - clung
+      source: irregular_verbs.json
+      confidence: 0.98
+    come:
+      present_plural:
+      - come
+      past_simple:
+      - came
+      past_participle:
+      - come
+      source: irregular_verbs.json
+      confidence: 0.98
+    cost:
+      present_plural:
+      - cost
+      past_simple:
+      - cost
+      past_participle:
+      - cost
+      source: irregular_verbs.json
+      confidence: 0.98
+    creep:
+      present_plural:
+      - creep
+      past_simple:
+      - crept
+      past_participle:
+      - crept
+      source: irregular_verbs.json
+      confidence: 0.98
+    cut:
+      present_plural:
+      - cut
+      past_simple:
+      - cut
+      past_participle:
+      - cut
+      source: irregular_verbs.json
+      confidence: 0.98
+    deal:
+      present_plural:
+      - deal
+      past_simple:
+      - dealt
+      past_participle:
+      - dealt
+      source: irregular_verbs.json
+      confidence: 0.98
+    dig:
+      present_plural:
+      - dig
+      past_simple:
+      - dug
+      past_participle:
+      - dug
+      source: irregular_verbs.json
+      confidence: 0.98
+    dive:
+      present_plural:
+      - dive
+      past_simple:
+      - dove
+      - dived
+      past_participle:
+      - dived
+      source: irregular_verbs.json
+      confidence: 0.98
+    do:
+      present_singular:
+      - does
+      present_plural:
+      - do
+      past_simple:
+      - did
+      past_participle:
+      - done
+      present_participle:
+      - doing
+      source: irregular_verbs.json
+      confidence: 0.98
+    draw:
+      present_plural:
+      - draw
+      past_simple:
+      - drew
+      past_participle:
+      - drawn
+      source: irregular_verbs.json
+      confidence: 0.98
+    dream:
+      present_plural:
+      - dream
+      past_simple:
+      - dreamt
+      - dreamed
+      past_participle:
+      - dreamt
+      - dreamed
+      source: irregular_verbs.json
+      confidence: 0.98
+    drink:
+      present_plural:
+      - drink
+      past_simple:
+      - drank
+      past_participle:
+      - drunk
+      source: irregular_verbs.json
+      confidence: 0.98
+    drive:
+      present_plural:
+      - drive
+      past_simple:
+      - drove
+      past_participle:
+      - driven
+      source: irregular_verbs.json
+      confidence: 0.98
+    eat:
+      present_plural:
+      - eat
+      past_simple:
+      - ate
+      past_participle:
+      - eaten
+      source: irregular_verbs.json
+      confidence: 0.98
+    fall:
+      present_plural:
+      - fall
+      past_simple:
+      - fell
+      past_participle:
+      - fallen
+      source: irregular_verbs.json
+      confidence: 0.98
+    feed:
+      present_plural:
+      - feed
+      past_simple:
+      - fed
+      past_participle:
+      - fed
+      source: irregular_verbs.json
+      confidence: 0.98
+    feel:
+      present_plural:
+      - feel
+      past_simple:
+      - felt
+      past_participle:
+      - felt
+      source: irregular_verbs.json
+      confidence: 0.98
+    fight:
+      present_plural:
+      - fight
+      past_simple:
+      - fought
+      past_participle:
+      - fought
+      source: irregular_verbs.json
+      confidence: 0.98
+    find:
+      present_plural:
+      - find
+      past_simple:
+      - found
+      past_participle:
+      - found
+      source: irregular_verbs.json
+      confidence: 0.98
+    fit:
+      present_plural:
+      - fit
+      past_simple:
+      - fit
+      - fitted
+      past_participle:
+      - fit
+      - fitted
+      source: irregular_verbs.json
+      confidence: 0.98
+    flee:
+      present_plural:
+      - flee
+      past_simple:
+      - fled
+      past_participle:
+      - fled
+      source: irregular_verbs.json
+      confidence: 0.98
+    fling:
+      present_plural:
+      - fling
+      past_simple:
+      - flung
+      past_participle:
+      - flung
+      source: irregular_verbs.json
+      confidence: 0.98
+    fly:
+      present_plural:
+      - fly
+      past_simple:
+      - flew
+      past_participle:
+      - flown
+      source: irregular_verbs.json
+      confidence: 0.98
+    forbid:
+      present_plural:
+      - forbid
+      past_simple:
+      - forbade
+      past_participle:
+      - forbidden
+      source: irregular_verbs.json
+      confidence: 0.98
+    forecast:
+      present_plural:
+      - forecast
+      past_simple:
+      - forecast
+      - forecasted
+      past_participle:
+      - forecast
+      - forecasted
+      source: irregular_verbs.json
+      confidence: 0.98
+    foresee:
+      present_plural:
+      - foresee
+      past_simple:
+      - foresaw
+      past_participle:
+      - foreseen
+      source: irregular_verbs.json
+      confidence: 0.98
+    foretell:
+      present_plural:
+      - foretell
+      past_simple:
+      - foretold
+      past_participle:
+      - foretold
+      source: irregular_verbs.json
+      confidence: 0.98
+    forget:
+      present_plural:
+      - forget
+      past_simple:
+      - forgot
+      past_participle:
+      - forgotten
+      - forgot
+      source: irregular_verbs.json
+      confidence: 0.98
+    forgive:
+      present_plural:
+      - forgive
+      past_simple:
+      - forgave
+      past_participle:
+      - forgiven
+      source: irregular_verbs.json
+      confidence: 0.98
+    forsake:
+      present_plural:
+      - forsake
+      past_simple:
+      - forsook
+      past_participle:
+      - forsaken
+      source: irregular_verbs.json
+      confidence: 0.98
+    freeze:
+      present_plural:
+      - freeze
+      past_simple:
+      - froze
+      past_participle:
+      - frozen
+      source: irregular_verbs.json
+      confidence: 0.98
+    get:
+      present_plural:
+      - get
+      past_simple:
+      - got
+      past_participle:
+      - gotten
+      - got
+      source: irregular_verbs.json
+      confidence: 0.98
+    give:
+      present_plural:
+      - give
+      past_simple:
+      - gave
+      past_participle:
+      - given
+      source: irregular_verbs.json
+      confidence: 0.98
+    go:
+      present_singular:
+      - goes
+      present_plural:
+      - go
+      past_simple:
+      - went
+      past_participle:
+      - gone
+      present_participle:
+      - going
+      source: irregular_verbs.json
+      confidence: 0.98
+    grind:
+      present_plural:
+      - grind
+      past_simple:
+      - ground
+      past_participle:
+      - ground
+      source: irregular_verbs.json
+      confidence: 0.98
+    grow:
+      present_plural:
+      - grow
+      past_simple:
+      - grew
+      past_participle:
+      - grown
+      source: irregular_verbs.json
+      confidence: 0.98
+    hang:
+      present_plural:
+      - hang
+      past_simple:
+      - hung
+      past_participle:
+      - hung
+      source: irregular_verbs.json
+      confidence: 0.98
+    have:
+      present_singular:
+      - has
+      present_plural:
+      - have
+      past_simple:
+      - had
+      past_participle:
+      - had
+      present_participle:
+      - having
+      source: irregular_verbs.json
+      confidence: 0.98
+    hear:
+      present_plural:
+      - hear
+      past_simple:
+      - heard
+      past_participle:
+      - heard
+      source: irregular_verbs.json
+      confidence: 0.98
+    hew:
+      present_plural:
+      - hew
+      past_simple:
+      - hewed
+      past_participle:
+      - hewn
+      - hewed
+      source: irregular_verbs.json
+      confidence: 0.98
+    hide:
+      present_plural:
+      - hide
+      past_simple:
+      - hid
+      past_participle:
+      - hidden
+      source: irregular_verbs.json
+      confidence: 0.98
+    hit:
+      present_plural:
+      - hit
+      past_simple:
+      - hit
+      past_participle:
+      - hit
+      source: irregular_verbs.json
+      confidence: 0.98
+    hold:
+      present_plural:
+      - hold
+      past_simple:
+      - held
+      past_participle:
+      - held
+      source: irregular_verbs.json
+      confidence: 0.98
+    hurt:
+      present_plural:
+      - hurt
+      past_simple:
+      - hurt
+      past_participle:
+      - hurt
+      source: irregular_verbs.json
+      confidence: 0.98
+    input:
+      present_plural:
+      - input
+      past_simple:
+      - input
+      - inputted
+      past_participle:
+      - input
+      - inputted
+      source: irregular_verbs.json
+      confidence: 0.98
+    keep:
+      present_plural:
+      - keep
+      past_simple:
+      - kept
+      past_participle:
+      - kept
+      source: irregular_verbs.json
+      confidence: 0.98
+    kneel:
+      present_plural:
+      - kneel
+      past_simple:
+      - knelt
+      - kneeled
+      past_participle:
+      - knelt
+      - kneeled
+      source: irregular_verbs.json
+      confidence: 0.98
+    knit:
+      present_plural:
+      - knit
+      past_simple:
+      - knit
+      - knitted
+      past_participle:
+      - knit
+      - knitted
+      source: irregular_verbs.json
+      confidence: 0.98
+    know:
+      present_plural:
+      - know
+      past_simple:
+      - knew
+      past_participle:
+      - known
+      source: irregular_verbs.json
+      confidence: 0.98
+    lay:
+      present_plural:
+      - lay
+      past_simple:
+      - laid
+      past_participle:
+      - laid
+      source: irregular_verbs.json
+      confidence: 0.98
+    lead:
+      present_plural:
+      - lead
+      past_simple:
+      - led
+      past_participle:
+      - led
+      source: irregular_verbs.json
+      confidence: 0.98
+    leap:
+      present_plural:
+      - leap
+      past_simple:
+      - leapt
+      - leaped
+      past_participle:
+      - leapt
+      - leaped
+      source: irregular_verbs.json
+      confidence: 0.98
+    learn:
+      present_plural:
+      - learn
+      past_simple:
+      - learnt
+      - learned
+      past_participle:
+      - learnt
+      - learned
+      source: irregular_verbs.json
+      confidence: 0.98
+    leave:
+      present_plural:
+      - leave
+      past_simple:
+      - left
+      past_participle:
+      - left
+      source: irregular_verbs.json
+      confidence: 0.98
+    lend:
+      present_plural:
+      - lend
+      past_simple:
+      - lent
+      past_participle:
+      - lent
+      source: irregular_verbs.json
+      confidence: 0.98
+    let:
+      present_plural:
+      - let
+      past_simple:
+      - let
+      past_participle:
+      - let
+      source: irregular_verbs.json
+      confidence: 0.98
+    lie:
+      present_plural:
+      - lie
+      past_simple:
+      - lay
+      past_participle:
+      - lain
+      source: irregular_verbs.json
+      confidence: 0.98
+    light:
+      present_plural:
+      - light
+      past_simple:
+      - lit
+      - lighted
+      past_participle:
+      - lit
+      - lighted
+      source: irregular_verbs.json
+      confidence: 0.98
+    lose:
+      present_plural:
+      - lose
+      past_simple:
+      - lost
+      past_participle:
+      - lost
+      source: irregular_verbs.json
+      confidence: 0.98
+    make:
+      present_plural:
+      - make
+      past_simple:
+      - made
+      past_participle:
+      - made
+      source: irregular_verbs.json
+      confidence: 0.98
+    mean:
+      present_plural:
+      - mean
+      past_simple:
+      - meant
+      past_participle:
+      - meant
+      source: irregular_verbs.json
+      confidence: 0.98
+    meet:
+      present_plural:
+      - meet
+      past_simple:
+      - met
+      past_participle:
+      - met
+      source: irregular_verbs.json
+      confidence: 0.98
+    mislead:
+      present_plural:
+      - mislead
+      past_simple:
+      - misled
+      past_participle:
+      - misled
+      source: irregular_verbs.json
+      confidence: 0.98
+    mistake:
+      present_plural:
+      - mistake
+      past_simple:
+      - mistook
+      past_participle:
+      - mistaken
+      source: irregular_verbs.json
+      confidence: 0.98
+    mow:
+      present_plural:
+      - mow
+      past_simple:
+      - mowed
+      past_participle:
+      - mown
+      - mowed
+      source: irregular_verbs.json
+      confidence: 0.98
+    offset:
+      present_plural:
+      - offset
+      past_simple:
+      - offset
+      past_participle:
+      - offset
+      source: irregular_verbs.json
+      confidence: 0.98
+    overcome:
+      present_plural:
+      - overcome
+      past_simple:
+      - overcame
+      past_participle:
+      - overcome
+      source: irregular_verbs.json
+      confidence: 0.98
+    pay:
+      present_plural:
+      - pay
+      past_simple:
+      - paid
+      past_participle:
+      - paid
+      source: irregular_verbs.json
+      confidence: 0.98
+    preset:
+      present_plural:
+      - preset
+      past_simple:
+      - preset
+      past_participle:
+      - preset
+      source: irregular_verbs.json
+      confidence: 0.98
+    prove:
+      present_plural:
+      - prove
+      past_simple:
+      - proved
+      past_participle:
+      - proven
+      - proved
+      source: irregular_verbs.json
+      confidence: 0.98
+    put:
+      present_plural:
+      - put
+      past_simple:
+      - put
+      past_participle:
+      - put
+      source: irregular_verbs.json
+      confidence: 0.98
+    quit:
+      present_plural:
+      - quit
+      past_simple:
+      - quit
+      - quitted
+      past_participle:
+      - quit
+      - quitted
+      source: irregular_verbs.json
+      confidence: 0.98
+    read:
+      present_plural:
+      - read
+      past_simple:
+      - read
+      past_participle:
+      - read
+      source: irregular_verbs.json
+      confidence: 0.98
+    rid:
+      present_plural:
+      - rid
+      past_simple:
+      - rid
+      - ridded
+      past_participle:
+      - rid
+      - ridded
+      source: irregular_verbs.json
+      confidence: 0.98
+    ride:
+      present_plural:
+      - ride
+      past_simple:
+      - rode
+      past_participle:
+      - ridden
+      source: irregular_verbs.json
+      confidence: 0.98
+    ring:
+      present_plural:
+      - ring
+      past_simple:
+      - rang
+      past_participle:
+      - rung
+      source: irregular_verbs.json
+      confidence: 0.98
+    rise:
+      present_plural:
+      - rise
+      past_simple:
+      - rose
+      past_participle:
+      - risen
+      source: irregular_verbs.json
+      confidence: 0.98
+    run:
+      present_plural:
+      - run
+      past_simple:
+      - ran
+      past_participle:
+      - run
+      source: irregular_verbs.json
+      confidence: 0.98
+    saw:
+      present_plural:
+      - saw
+      past_simple:
+      - sawed
+      past_participle:
+      - sawn
+      - sawed
+      source: irregular_verbs.json
+      confidence: 0.98
+    say:
+      present_plural:
+      - say
+      past_simple:
+      - said
+      past_participle:
+      - said
+      source: irregular_verbs.json
+      confidence: 0.98
+    see:
+      present_plural:
+      - see
+      past_simple:
+      - saw
+      past_participle:
+      - seen
+      source: irregular_verbs.json
+      confidence: 0.98
+    seek:
+      present_plural:
+      - seek
+      past_simple:
+      - sought
+      past_participle:
+      - sought
+      source: irregular_verbs.json
+      confidence: 0.98
+    sell:
+      present_plural:
+      - sell
+      past_simple:
+      - sold
+      past_participle:
+      - sold
+      source: irregular_verbs.json
+      confidence: 0.98
+    send:
+      present_plural:
+      - send
+      past_simple:
+      - sent
+      past_participle:
+      - sent
+      source: irregular_verbs.json
+      confidence: 0.98
+    set:
+      present_plural:
+      - set
+      past_simple:
+      - set
+      past_participle:
+      - set
+      source: irregular_verbs.json
+      confidence: 0.98
+    sew:
+      present_plural:
+      - sew
+      past_simple:
+      - sewed
+      past_participle:
+      - sewn
+      - sewed
+      source: irregular_verbs.json
+      confidence: 0.98
+    shake:
+      present_plural:
+      - shake
+      past_simple:
+      - shook
+      past_participle:
+      - shaken
+      source: irregular_verbs.json
+      confidence: 0.98
+    shear:
+      present_plural:
+      - shear
+      past_simple:
+      - sheared
+      past_participle:
+      - shorn
+      - sheared
+      source: irregular_verbs.json
+      confidence: 0.98
+    shed:
+      present_plural:
+      - shed
+      past_simple:
+      - shed
+      past_participle:
+      - shed
+      source: irregular_verbs.json
+      confidence: 0.98
+    shine:
+      present_plural:
+      - shine
+      past_simple:
+      - shone
+      - shined
+      past_participle:
+      - shone
+      - shined
+      source: irregular_verbs.json
+      confidence: 0.98
+    shoot:
+      present_plural:
+      - shoot
+      past_simple:
+      - shot
+      past_participle:
+      - shot
+      source: irregular_verbs.json
+      confidence: 0.98
+    show:
+      present_plural:
+      - show
+      past_simple:
+      - showed
+      past_participle:
+      - shown
+      - showed
+      source: irregular_verbs.json
+      confidence: 0.98
+    shrink:
+      present_plural:
+      - shrink
+      past_simple:
+      - shrank
+      - shrunk
+      past_participle:
+      - shrunk
+      - shrunken
+      source: irregular_verbs.json
+      confidence: 0.98
+    shut:
+      present_plural:
+      - shut
+      past_simple:
+      - shut
+      past_participle:
+      - shut
+      source: irregular_verbs.json
+      confidence: 0.98
+    sing:
+      present_plural:
+      - sing
+      past_simple:
+      - sang
+      past_participle:
+      - sung
+      source: irregular_verbs.json
+      confidence: 0.98
+    sink:
+      present_plural:
+      - sink
+      past_simple:
+      - sank
+      - sunk
+      past_participle:
+      - sunk
+      - sunken
+      source: irregular_verbs.json
+      confidence: 0.98
+    sit:
+      present_plural:
+      - sit
+      past_simple:
+      - sat
+      past_participle:
+      - sat
+      source: irregular_verbs.json
+      confidence: 0.98
+    slay:
+      present_plural:
+      - slay
+      past_simple:
+      - slew
+      - slayed
+      past_participle:
+      - slain
+      - slayed
+      source: irregular_verbs.json
+      confidence: 0.98
+    sleep:
+      present_plural:
+      - sleep
+      past_simple:
+      - slept
+      past_participle:
+      - slept
+      source: irregular_verbs.json
+      confidence: 0.98
+    slide:
+      present_plural:
+      - slide
+      past_simple:
+      - slid
+      past_participle:
+      - slid
+      source: irregular_verbs.json
+      confidence: 0.98
+    sling:
+      present_plural:
+      - sling
+      past_simple:
+      - slung
+      past_participle:
+      - slung
+      source: irregular_verbs.json
+      confidence: 0.98
+    slink:
+      present_plural:
+      - slink
+      past_simple:
+      - slunk
+      - slinked
+      past_participle:
+      - slunk
+      - slinked
+      source: irregular_verbs.json
+      confidence: 0.98
+    slit:
+      present_plural:
+      - slit
+      past_simple:
+      - slit
+      past_participle:
+      - slit
+      source: irregular_verbs.json
+      confidence: 0.98
+    smell:
+      present_plural:
+      - smell
+      past_simple:
+      - smelt
+      - smelled
+      past_participle:
+      - smelt
+      - smelled
+      source: irregular_verbs.json
+      confidence: 0.98
+    sow:
+      present_plural:
+      - sow
+      past_simple:
+      - sowed
+      past_participle:
+      - sown
+      - sowed
+      source: irregular_verbs.json
+      confidence: 0.98
+    speak:
+      present_plural:
+      - speak
+      past_simple:
+      - spoke
+      past_participle:
+      - spoken
+      source: irregular_verbs.json
+      confidence: 0.98
+    speed:
+      present_plural:
+      - speed
+      past_simple:
+      - sped
+      - speeded
+      past_participle:
+      - sped
+      - speeded
+      source: irregular_verbs.json
+      confidence: 0.98
+    spell:
+      present_plural:
+      - spell
+      past_simple:
+      - spelt
+      - spelled
+      past_participle:
+      - spelt
+      - spelled
+      source: irregular_verbs.json
+      confidence: 0.98
+    spend:
+      present_plural:
+      - spend
+      past_simple:
+      - spent
+      past_participle:
+      - spent
+      source: irregular_verbs.json
+      confidence: 0.98
+    spill:
+      present_plural:
+      - spill
+      past_simple:
+      - spilt
+      - spilled
+      past_participle:
+      - spilt
+      - spilled
+      source: irregular_verbs.json
+      confidence: 0.98
+    spin:
+      present_plural:
+      - spin
+      past_simple:
+      - spun
+      past_participle:
+      - spun
+      source: irregular_verbs.json
+      confidence: 0.98
+    spit:
+      present_plural:
+      - spit
+      past_simple:
+      - spat
+      - spit
+      past_participle:
+      - spat
+      - spit
+      source: irregular_verbs.json
+      confidence: 0.98
+    split:
+      present_plural:
+      - split
+      past_simple:
+      - split
+      past_participle:
+      - split
+      source: irregular_verbs.json
+      confidence: 0.98
+    spoil:
+      present_plural:
+      - spoil
+      past_simple:
+      - spoilt
+      - spoiled
+      past_participle:
+      - spoilt
+      - spoiled
+      source: irregular_verbs.json
+      confidence: 0.98
+    spread:
+      present_plural:
+      - spread
+      past_simple:
+      - spread
+      past_participle:
+      - spread
+      source: irregular_verbs.json
+      confidence: 0.98
+    spring:
+      present_plural:
+      - spring
+      past_simple:
+      - sprang
+      - sprung
+      past_participle:
+      - sprung
+      source: irregular_verbs.json
+      confidence: 0.98
+    stand:
+      present_plural:
+      - stand
+      past_simple:
+      - stood
+      past_participle:
+      - stood
+      source: irregular_verbs.json
+      confidence: 0.98
+    steal:
+      present_plural:
+      - steal
+      past_simple:
+      - stole
+      past_participle:
+      - stolen
+      source: irregular_verbs.json
+      confidence: 0.98
+    stick:
+      present_plural:
+      - stick
+      past_simple:
+      - stuck
+      past_participle:
+      - stuck
+      source: irregular_verbs.json
+      confidence: 0.98
+    sting:
+      present_plural:
+      - sting
+      past_simple:
+      - stung
+      past_participle:
+      - stung
+      source: irregular_verbs.json
+      confidence: 0.98
+    stink:
+      present_plural:
+      - stink
+      past_simple:
+      - stank
+      - stunk
+      past_participle:
+      - stunk
+      source: irregular_verbs.json
+      confidence: 0.98
+    strew:
+      present_plural:
+      - strew
+      past_simple:
+      - strewed
+      past_participle:
+      - strewn
+      - strewed
+      source: irregular_verbs.json
+      confidence: 0.98
+    stride:
+      present_plural:
+      - stride
+      past_simple:
+      - strode
+      past_participle:
+      - stridden
+      source: irregular_verbs.json
+      confidence: 0.98
+    strike:
+      present_plural:
+      - strike
+      past_simple:
+      - struck
+      past_participle:
+      - struck
+      - stricken
+      source: irregular_verbs.json
+      confidence: 0.98
+    string:
+      present_plural:
+      - string
+      past_simple:
+      - strung
+      past_participle:
+      - strung
+      source: irregular_verbs.json
+      confidence: 0.98
+    strive:
+      present_plural:
+      - strive
+      past_simple:
+      - strove
+      - strived
+      past_participle:
+      - striven
+      - strived
+      source: irregular_verbs.json
+      confidence: 0.98
+    swear:
+      present_plural:
+      - swear
+      past_simple:
+      - swore
+      past_participle:
+      - sworn
+      source: irregular_verbs.json
+      confidence: 0.98
+    sweat:
+      present_plural:
+      - sweat
+      past_simple:
+      - sweat
+      - sweated
+      past_participle:
+      - sweat
+      - sweated
+      source: irregular_verbs.json
+      confidence: 0.98
+    sweep:
+      present_plural:
+      - sweep
+      past_simple:
+      - swept
+      past_participle:
+      - swept
+      source: irregular_verbs.json
+      confidence: 0.98
+    swell:
+      present_plural:
+      - swell
+      past_simple:
+      - swelled
+      past_participle:
+      - swollen
+      - swelled
+      source: irregular_verbs.json
+      confidence: 0.98
+    swim:
+      present_plural:
+      - swim
+      past_simple:
+      - swam
+      past_participle:
+      - swum
+      source: irregular_verbs.json
+      confidence: 0.98
+    swing:
+      present_plural:
+      - swing
+      past_simple:
+      - swung
+      past_participle:
+      - swung
+      source: irregular_verbs.json
+      confidence: 0.98
+    take:
+      present_plural:
+      - take
+      past_simple:
+      - took
+      past_participle:
+      - taken
+      source: irregular_verbs.json
+      confidence: 0.98
+    teach:
+      present_plural:
+      - teach
+      past_simple:
+      - taught
+      past_participle:
+      - taught
+      source: irregular_verbs.json
+      confidence: 0.98
+    tear:
+      present_plural:
+      - tear
+      past_simple:
+      - tore
+      past_participle:
+      - torn
+      source: irregular_verbs.json
+      confidence: 0.98
+    tell:
+      present_plural:
+      - tell
+      past_simple:
+      - told
+      past_participle:
+      - told
+      source: irregular_verbs.json
+      confidence: 0.98
+    think:
+      present_plural:
+      - think
+      past_simple:
+      - thought
+      past_participle:
+      - thought
+      source: irregular_verbs.json
+      confidence: 0.98
+    thrive:
+      present_plural:
+      - thrive
+      past_simple:
+      - throve
+      - thrived
+      past_participle:
+      - thriven
+      - thrived
+      source: irregular_verbs.json
+      confidence: 0.98
+    throw:
+      present_plural:
+      - throw
+      past_simple:
+      - threw
+      past_participle:
+      - thrown
+      source: irregular_verbs.json
+      confidence: 0.98
+    thrust:
+      present_plural:
+      - thrust
+      past_simple:
+      - thrust
+      past_participle:
+      - thrust
+      source: irregular_verbs.json
+      confidence: 0.98
+    tread:
+      present_plural:
+      - tread
+      past_simple:
+      - trod
+      past_participle:
+      - trodden
+      - trod
+      source: irregular_verbs.json
+      confidence: 0.98
+    understand:
+      present_plural:
+      - understand
+      past_simple:
+      - understood
+      past_participle:
+      - understood
+      source: irregular_verbs.json
+      confidence: 0.98
+    undertake:
+      present_plural:
+      - undertake
+      past_simple:
+      - undertook
+      past_participle:
+      - undertaken
+      source: irregular_verbs.json
+      confidence: 0.98
+    upset:
+      present_plural:
+      - upset
+      past_simple:
+      - upset
+      past_participle:
+      - upset
+      source: irregular_verbs.json
+      confidence: 0.98
+    wake:
+      present_plural:
+      - wake
+      past_simple:
+      - woke
+      - waked
+      past_participle:
+      - woken
+      - waked
+      source: irregular_verbs.json
+      confidence: 0.98
+    wear:
+      present_plural:
+      - wear
+      past_simple:
+      - wore
+      past_participle:
+      - worn
+      source: irregular_verbs.json
+      confidence: 0.98
+    weave:
+      present_plural:
+      - weave
+      past_simple:
+      - wove
+      - weaved
+      past_participle:
+      - woven
+      - weaved
+      source: irregular_verbs.json
+      confidence: 0.98
+    wed:
+      present_plural:
+      - wed
+      past_simple:
+      - wed
+      - wedded
+      past_participle:
+      - wed
+      - wedded
+      source: irregular_verbs.json
+      confidence: 0.98
+    weep:
+      present_plural:
+      - weep
+      past_simple:
+      - wept
+      past_participle:
+      - wept
+      source: irregular_verbs.json
+      confidence: 0.98
+    wet:
+      present_plural:
+      - wet
+      past_simple:
+      - wet
+      - wetted
+      past_participle:
+      - wet
+      - wetted
+      source: irregular_verbs.json
+      confidence: 0.98
+    win:
+      present_plural:
+      - win
+      past_simple:
+      - won
+      past_participle:
+      - won
+      source: irregular_verbs.json
+      confidence: 0.98
+    wind:
+      present_plural:
+      - wind
+      past_simple:
+      - wound
+      past_participle:
+      - wound
+      source: irregular_verbs.json
+      confidence: 0.98
+    withdraw:
+      present_plural:
+      - withdraw
+      past_simple:
+      - withdrew
+      past_participle:
+      - withdrawn
+      source: irregular_verbs.json
+      confidence: 0.98
+    withhold:
+      present_plural:
+      - withhold
+      past_simple:
+      - withheld
+      past_participle:
+      - withheld
+      source: irregular_verbs.json
+      confidence: 0.98
+    withstand:
+      present_plural:
+      - withstand
+      past_simple:
+      - withstood
+      past_participle:
+      - withstood
+      source: irregular_verbs.json
+      confidence: 0.98
+    wring:
+      present_plural:
+      - wring
+      past_simple:
+      - wrung
+      past_participle:
+      - wrung
+      source: irregular_verbs.json
+      confidence: 0.98
+    write:
+      present_plural:
+      - write
+      past_simple:
+      - wrote
+      past_participle:
+      - written
+      source: irregular_verbs.json
+      confidence: 0.98
+  form_to_lemma:
+    am:
+    - be
+    are:
+    - be
+    arise:
+    - arise
+    arisen:
+    - arise
+    arose:
+    - arise
+    ate:
+    - eat
+    awake:
+    - awake
+    awoke:
+    - awake
+    awoken:
+    - awake
+    bade:
+    - bid
+    be:
+    - be
+    bear:
+    - bear
+    beat:
+    - beat
+    beaten:
+    - beat
+    became:
+    - become
+    become:
+    - become
+    been:
+    - be
+    began:
+    - begin
+    begin:
+    - begin
+    begun:
+    - begin
+    being:
+    - be
+    bend:
+    - bend
+    bent:
+    - bend
+    bet:
+    - bet
+    bid:
+    - bid
+    bidden:
+    - bid
+    bind:
+    - bind
+    bit:
+    - bite
+    bite:
+    - bite
+    bitten:
+    - bite
+    bled:
+    - bleed
+    bleed:
+    - bleed
+    blew:
+    - blow
+    blow:
+    - blow
+    blown:
+    - blow
+    bore:
+    - bear
+    born:
+    - bear
+    borne:
+    - bear
+    bought:
+    - buy
+    bound:
+    - bind
+    break:
+    - break
+    bred:
+    - breed
+    breed:
+    - breed
+    bring:
+    - bring
+    broadcast:
+    - broadcast
+    broke:
+    - break
+    broken:
+    - break
+    brought:
+    - bring
+    build:
+    - build
+    built:
+    - build
+    burn:
+    - burn
+    burned:
+    - burn
+    burnt:
+    - burn
+    burst:
+    - burst
+    buy:
+    - buy
+    came:
+    - come
+    cast:
+    - cast
+    catch:
+    - catch
+    caught:
+    - catch
+    choose:
+    - choose
+    chose:
+    - choose
+    chosen:
+    - choose
+    cling:
+    - cling
+    clung:
+    - cling
+    come:
+    - come
+    cost:
+    - cost
+    creep:
+    - creep
+    crept:
+    - creep
+    cut:
+    - cut
+    deal:
+    - deal
+    dealt:
+    - deal
+    did:
+    - do
+    dig:
+    - dig
+    dive:
+    - dive
+    dived:
+    - dive
+    do:
+    - do
+    does:
+    - do
+    doing:
+    - do
+    done:
+    - do
+    dove:
+    - dive
+    drank:
+    - drink
+    draw:
+    - draw
+    drawn:
+    - draw
+    dream:
+    - dream
+    dreamed:
+    - dream
+    dreamt:
+    - dream
+    drew:
+    - draw
+    drink:
+    - drink
+    drive:
+    - drive
+    driven:
+    - drive
+    drove:
+    - drive
+    drunk:
+    - drink
+    dug:
+    - dig
+    eat:
+    - eat
+    eaten:
+    - eat
+    fall:
+    - fall
+    fallen:
+    - fall
+    fed:
+    - feed
+    feed:
+    - feed
+    feel:
+    - feel
+    fell:
+    - fall
+    felt:
+    - feel
+    fight:
+    - fight
+    find:
+    - find
+    fit:
+    - fit
+    fitted:
+    - fit
+    fled:
+    - flee
+    flee:
+    - flee
+    flew:
+    - fly
+    fling:
+    - fling
+    flown:
+    - fly
+    flung:
+    - fling
+    fly:
+    - fly
+    forbade:
+    - forbid
+    forbid:
+    - forbid
+    forbidden:
+    - forbid
+    forecast:
+    - forecast
+    forecasted:
+    - forecast
+    foresaw:
+    - foresee
+    foresee:
+    - foresee
+    foreseen:
+    - foresee
+    foretell:
+    - foretell
+    foretold:
+    - foretell
+    forgave:
+    - forgive
+    forget:
+    - forget
+    forgive:
+    - forgive
+    forgiven:
+    - forgive
+    forgot:
+    - forget
+    forgotten:
+    - forget
+    forsake:
+    - forsake
+    forsaken:
+    - forsake
+    forsook:
+    - forsake
+    fought:
+    - fight
+    found:
+    - find
+    freeze:
+    - freeze
+    froze:
+    - freeze
+    frozen:
+    - freeze
+    gave:
+    - give
+    get:
+    - get
+    give:
+    - give
+    given:
+    - give
+    go:
+    - go
+    goes:
+    - go
+    going:
+    - go
+    gone:
+    - go
+    got:
+    - get
+    gotten:
+    - get
+    grew:
+    - grow
+    grind:
+    - grind
+    ground:
+    - grind
+    grow:
+    - grow
+    grown:
+    - grow
+    had:
+    - have
+    hang:
+    - hang
+    has:
+    - have
+    have:
+    - have
+    having:
+    - have
+    hear:
+    - hear
+    heard:
+    - hear
+    held:
+    - hold
+    hew:
+    - hew
+    hewed:
+    - hew
+    hewn:
+    - hew
+    hid:
+    - hide
+    hidden:
+    - hide
+    hide:
+    - hide
+    hit:
+    - hit
+    hold:
+    - hold
+    hung:
+    - hang
+    hurt:
+    - hurt
+    input:
+    - input
+    inputted:
+    - input
+    is:
+    - be
+    keep:
+    - keep
+    kept:
+    - keep
+    kneel:
+    - kneel
+    kneeled:
+    - kneel
+    knelt:
+    - kneel
+    knew:
+    - know
+    knit:
+    - knit
+    knitted:
+    - knit
+    know:
+    - know
+    known:
+    - know
+    laid:
+    - lay
+    lain:
+    - lie
+    lay:
+    - lay
+    - lie
+    lead:
+    - lead
+    leap:
+    - leap
+    leaped:
+    - leap
+    leapt:
+    - leap
+    learn:
+    - learn
+    learned:
+    - learn
+    learnt:
+    - learn
+    leave:
+    - leave
+    led:
+    - lead
+    left:
+    - leave
+    lend:
+    - lend
+    lent:
+    - lend
+    let:
+    - let
+    lie:
+    - lie
+    light:
+    - light
+    lighted:
+    - light
+    lit:
+    - light
+    lose:
+    - lose
+    lost:
+    - lose
+    made:
+    - make
+    make:
+    - make
+    mean:
+    - mean
+    meant:
+    - mean
+    meet:
+    - meet
+    met:
+    - meet
+    mislead:
+    - mislead
+    misled:
+    - mislead
+    mistake:
+    - mistake
+    mistaken:
+    - mistake
+    mistook:
+    - mistake
+    mow:
+    - mow
+    mowed:
+    - mow
+    mown:
+    - mow
+    offset:
+    - offset
+    overcame:
+    - overcome
+    overcome:
+    - overcome
+    paid:
+    - pay
+    pay:
+    - pay
+    preset:
+    - preset
+    prove:
+    - prove
+    proved:
+    - prove
+    proven:
+    - prove
+    put:
+    - put
+    quit:
+    - quit
+    quitted:
+    - quit
+    ran:
+    - run
+    rang:
+    - ring
+    read:
+    - read
+    rid:
+    - rid
+    ridded:
+    - rid
+    ridden:
+    - ride
+    ride:
+    - ride
+    ring:
+    - ring
+    rise:
+    - rise
+    risen:
+    - rise
+    rode:
+    - ride
+    rose:
+    - rise
+    run:
+    - run
+    rung:
+    - ring
+    said:
+    - say
+    sang:
+    - sing
+    sank:
+    - sink
+    sat:
+    - sit
+    saw:
+    - saw
+    - see
+    sawed:
+    - saw
+    sawn:
+    - saw
+    say:
+    - say
+    see:
+    - see
+    seek:
+    - seek
+    seen:
+    - see
+    sell:
+    - sell
+    send:
+    - send
+    sent:
+    - send
+    set:
+    - set
+    sew:
+    - sew
+    sewed:
+    - sew
+    sewn:
+    - sew
+    shake:
+    - shake
+    shaken:
+    - shake
+    shear:
+    - shear
+    sheared:
+    - shear
+    shed:
+    - shed
+    shine:
+    - shine
+    shined:
+    - shine
+    shone:
+    - shine
+    shook:
+    - shake
+    shoot:
+    - shoot
+    shorn:
+    - shear
+    shot:
+    - shoot
+    show:
+    - show
+    showed:
+    - show
+    shown:
+    - show
+    shrank:
+    - shrink
+    shrink:
+    - shrink
+    shrunk:
+    - shrink
+    shrunken:
+    - shrink
+    shut:
+    - shut
+    sing:
+    - sing
+    sink:
+    - sink
+    sit:
+    - sit
+    slain:
+    - slay
+    slay:
+    - slay
+    slayed:
+    - slay
+    sleep:
+    - sleep
+    slept:
+    - sleep
+    slew:
+    - slay
+    slid:
+    - slide
+    slide:
+    - slide
+    sling:
+    - sling
+    slink:
+    - slink
+    slinked:
+    - slink
+    slit:
+    - slit
+    slung:
+    - sling
+    slunk:
+    - slink
+    smell:
+    - smell
+    smelled:
+    - smell
+    smelt:
+    - smell
+    sold:
+    - sell
+    sought:
+    - seek
+    sow:
+    - sow
+    sowed:
+    - sow
+    sown:
+    - sow
+    spat:
+    - spit
+    speak:
+    - speak
+    sped:
+    - speed
+    speed:
+    - speed
+    speeded:
+    - speed
+    spell:
+    - spell
+    spelled:
+    - spell
+    spelt:
+    - spell
+    spend:
+    - spend
+    spent:
+    - spend
+    spill:
+    - spill
+    spilled:
+    - spill
+    spilt:
+    - spill
+    spin:
+    - spin
+    spit:
+    - spit
+    split:
+    - split
+    spoil:
+    - spoil
+    spoiled:
+    - spoil
+    spoilt:
+    - spoil
+    spoke:
+    - speak
+    spoken:
+    - speak
+    sprang:
+    - spring
+    spread:
+    - spread
+    spring:
+    - spring
+    sprung:
+    - spring
+    spun:
+    - spin
+    stand:
+    - stand
+    stank:
+    - stink
+    steal:
+    - steal
+    stick:
+    - stick
+    sting:
+    - sting
+    stink:
+    - stink
+    stole:
+    - steal
+    stolen:
+    - steal
+    stood:
+    - stand
+    strew:
+    - strew
+    strewed:
+    - strew
+    strewn:
+    - strew
+    stricken:
+    - strike
+    stridden:
+    - stride
+    stride:
+    - stride
+    strike:
+    - strike
+    string:
+    - string
+    strive:
+    - strive
+    strived:
+    - strive
+    striven:
+    - strive
+    strode:
+    - stride
+    strove:
+    - strive
+    struck:
+    - strike
+    strung:
+    - string
+    stuck:
+    - stick
+    stung:
+    - sting
+    stunk:
+    - stink
+    sung:
+    - sing
+    sunk:
+    - sink
+    sunken:
+    - sink
+    swam:
+    - swim
+    swear:
+    - swear
+    sweat:
+    - sweat
+    sweated:
+    - sweat
+    sweep:
+    - sweep
+    swell:
+    - swell
+    swelled:
+    - swell
+    swept:
+    - sweep
+    swim:
+    - swim
+    swing:
+    - swing
+    swollen:
+    - swell
+    swore:
+    - swear
+    sworn:
+    - swear
+    swum:
+    - swim
+    swung:
+    - swing
+    take:
+    - take
+    taken:
+    - take
+    taught:
+    - teach
+    teach:
+    - teach
+    tear:
+    - tear
+    tell:
+    - tell
+    think:
+    - think
+    thought:
+    - think
+    threw:
+    - throw
+    thrive:
+    - thrive
+    thrived:
+    - thrive
+    thriven:
+    - thrive
+    throve:
+    - thrive
+    throw:
+    - throw
+    thrown:
+    - throw
+    thrust:
+    - thrust
+    told:
+    - tell
+    took:
+    - take
+    tore:
+    - tear
+    torn:
+    - tear
+    tread:
+    - tread
+    trod:
+    - tread
+    trodden:
+    - tread
+    understand:
+    - understand
+    understood:
+    - understand
+    undertake:
+    - undertake
+    undertaken:
+    - undertake
+    undertook:
+    - undertake
+    upset:
+    - upset
+    wake:
+    - wake
+    waked:
+    - wake
+    was:
+    - be
+    wear:
+    - wear
+    weave:
+    - weave
+    weaved:
+    - weave
+    wed:
+    - wed
+    wedded:
+    - wed
+    weep:
+    - weep
+    went:
+    - go
+    wept:
+    - weep
+    were:
+    - be
+    wet:
+    - wet
+    wetted:
+    - wet
+    win:
+    - win
+    wind:
+    - wind
+    withdraw:
+    - withdraw
+    withdrawn:
+    - withdraw
+    withdrew:
+    - withdraw
+    withheld:
+    - withhold
+    withhold:
+    - withhold
+    withstand:
+    - withstand
+    withstood:
+    - withstand
+    woke:
+    - wake
+    woken:
+    - wake
+    won:
+    - win
+    wore:
+    - wear
+    worn:
+    - wear
+    wound:
+    - wind
+    wove:
+    - weave
+    woven:
+    - weave
+    wring:
+    - wring
+    write:
+    - write
+    written:
+    - write
+    wrote:
+    - write
+    wrung:
+    - wring
+derivational_morphology:
+  prefixes:
+  - id: morph.deriv.prefix.001.un
+    enabled: true
+    affix: un-
+    position: prefix
+    function: negation
+    confidence: 0.82
+    examples:
+    - source: happy
+      target: unhappy
+    - source: do
+      target: undo
+  - id: morph.deriv.prefix.002.re
+    enabled: true
+    affix: re-
+    position: prefix
+    function: repetition
+    confidence: 0.82
+    examples:
+    - source: do
+      target: redo
+    - source: write
+      target: rewrite
+  - id: morph.deriv.prefix.003.dis
+    enabled: true
+    affix: dis-
+    position: prefix
+    function: negation
+    confidence: 0.82
+    examples:
+    - source: agree
+      target: disagree
+    - source: honest
+      target: dishonest
+  suffixes:
+  - id: morph.deriv.suffix.001.able
+    enabled: true
+    affix: -able
+    position: suffix
+    function: adjective formation
+    confidence: 0.82
+    examples:
+    - source: read
+      target: readable
+    - source: love
+      target: lovable
+  - id: morph.deriv.suffix.002.ly
+    enabled: true
+    affix: -ly
+    position: suffix
+    function: adverb formation
+    confidence: 0.82
+    examples:
+    - source: quick
+      target: quickly
+    - source: happy
+      target: happily
+  - id: morph.deriv.suffix.003.ness
+    enabled: true
+    affix: -ness
+    position: suffix
+    function: noun formation
+    confidence: 0.82
+    examples:
+    - source: happy
+      target: happiness
+    - source: kind
+      target: kindness
+  policy:
+    apply_before_inflection: false
+    generate_candidates_only: true
+    validate_against_wordlist_when_available: true
+lemmatization:
+  noun_singularization:
+    enabled: true
+    priority:
+    - irregular_reverse_lookup
+    - invariant_noun_lookup
+    - ies_to_y
+    - ves_to_f_or_fe
+    - es_suffix_removal
+    - s_suffix_removal
+    rules:
+    - id: lemma.noun.ies_to_y
+      pattern: ies$
+      replacement: y
+      confidence: 0.82
+      examples:
+      - source: cities
+        target: city
+    - id: lemma.noun.ves_to_f
+      pattern: ves$
+      replacement: f
+      confidence: 0.7
+      examples:
+      - source: wolves
+        target: wolf
+    - id: lemma.noun.es_removal
+      pattern: (?:s|sh|ch|x|z)es$
+      operation: remove_es
+      confidence: 0.76
+      examples:
+      - source: boxes
+        target: box
+    - id: lemma.noun.s_removal
+      pattern: s$
+      operation: remove_s
+      blocked_endings:
+      - ss
+      - us
+      - is
+      confidence: 0.68
+      examples:
+      - source: dogs
+        target: dog
+  verb_lemmatization:
+    enabled: true
+    priority:
+    - irregular_form_to_lemma
+    - present_participle_rules
+    - past_tense_rules
+    - third_person_singular_rules
+    - base_form_fallback
+    rules:
+    - id: lemma.verb.ing_drop_double_consonant
+      pattern: ([bcdfghjklmnpqrstvwxyz])\1ing$
+      operation: drop_ing_and_one_consonant
+      confidence: 0.78
+      examples:
+      - source: running
+        target: run
+    - id: lemma.verb.ing_restore_e
+      pattern: ing$
+      operation: drop_ing_or_restore_silent_e
+      confidence: 0.7
+      examples:
+      - source: making
+        target: make
+    - id: lemma.verb.ed_drop_double_consonant
+      pattern: ([bcdfghjklmnpqrstvwxyz])\1ed$
+      operation: drop_ed_and_one_consonant
+      confidence: 0.76
+      examples:
+      - source: stopped
+        target: stop
+    - id: lemma.verb.ed_restore_e
+      pattern: ed$
+      operation: drop_ed_or_restore_silent_e
+      confidence: 0.68
+      examples:
+      - source: liked
+        target: like
+    - id: lemma.verb.ies_to_y
+      pattern: ies$
+      replacement: y
+      confidence: 0.82
+      examples:
+      - source: studies
+        target: study
+    - id: lemma.verb.es_or_s_removal
+      pattern: (?:es|s)$
+      operation: remove_present_suffix
+      confidence: 0.7
+      examples:
+      - source: goes
+        target: go
+  adjective_lemmatization:
+    enabled: true
+    rules:
+    - id: lemma.adj.irregular_comparative
+      source: inline_irregulars
+      confidence: 0.95
+    - id: lemma.adj.ier_to_y
+      pattern: ier$
+      replacement: y
+      confidence: 0.8
+      examples:
+      - source: happier
+        target: happy
+    - id: lemma.adj.iest_to_y
+      pattern: iest$
+      replacement: y
+      confidence: 0.8
+      examples:
+      - source: happiest
+        target: happy
+    - id: lemma.adj.er_est_removal
+      pattern: (?:er|est)$
+      operation: remove_degree_suffix
+      confidence: 0.64
+      examples:
+      - source: faster
+        target: fast
+agreement_support:
+  pronoun_features:
+    i:
+      person: 1
+      number: singular
+      case: subject
+    me:
+      person: 1
+      number: singular
+      case: object
+    we:
+      person: 1
+      number: plural
+      case: subject
+    us:
+      person: 1
+      number: plural
+      case: object
+    you:
+      person: 2
+      number: ambiguous
+      case: subject_or_object
+    he:
+      person: 3
+      number: singular
+      case: subject
+    him:
+      person: 3
+      number: singular
+      case: object
+    she:
+      person: 3
+      number: singular
+      case: subject
+    her:
+      person: 3
+      number: singular
+      case: object_or_possessive
+    it:
+      person: 3
+      number: singular
+      case: subject_or_object
+    they:
+      person: 3
+      number: plural_or_singular_neutral
+      case: subject
+    them:
+      person: 3
+      number: plural_or_singular_neutral
+      case: object
+  auxiliary_agreement:
+    be:
+      present:
+        1_singular:
+        - am
+        2_singular:
+        - are
+        3_singular:
+        - is
+        plural:
+        - are
+      past:
+        1_singular:
+        - was
+        3_singular:
+        - was
+        plural:
+        - were
+        2_singular:
+        - were
+    have:
+      present:
+        3_singular:
+        - has
+        other:
+        - have
+      past:
+        all:
+        - had
+    do:
+      present:
+        3_singular:
+        - does
+        other:
+        - do
+      past:
+        all:
+        - did
+generation_support:
+  noun_pluralization:
+    method_order:
+    - irregular_nouns
+    - regular_inflection_rules.nouns.plural
+    return_all_accepted_forms: true
+  verb_inflection:
+    method_order:
+    - irregular_verbs
+    - regular_inflection_rules.verbs
+    return_all_accepted_forms: true
+  adjective_degree:
+    method_order:
+    - irregulars_from_legacy_rules.adjectives
+    - regular_inflection_rules.adjectives
+    analytic_threshold:
+      comparative: multi_syllable
+      superlative: multi_syllable
+validation:
+  schema_required_top_level_keys:
+  - metadata
+  - runtime_policy
+  - regular_inflection_rules
+  - irregular_nouns
+  - irregular_verbs
+  - lemmatization
+  compile_regex_patterns: true
+  reject_duplicate_rule_ids: true
+  reject_empty_irregular_entries: true
+  warn_on_conflicting_reverse_lookup: true
+test_vectors:
+  noun_pluralization:
+  - input: cat
+    expected:
+    - cats
+    source: regular
+  - input: city
+    expected:
+    - cities
+    source: regular
+  - input: child
+    expected:
+    - children
+    source: irregular
+  - input: analysis
+    expected:
+    - analyses
+    source: irregular
+  - input: aircraft
+    expected:
+    - aircraft
+    source: irregular_invariant
+  verb_inflection:
+  - lemma: walk
+    tense: past
+    expected:
+    - walked
+    source: regular
+  - lemma: go
+    tense: past
+    expected:
+    - went
+    source: irregular
+  - lemma: be
+    tense: past
+    expected:
+    - was
+    - were
+    source: irregular
+  - lemma: study
+    tense: present
+    person: 3
+    number: singular
+    expected:
+    - studies
+    source: regular
+  - lemma: run
+    form: present_participle
+    expected:
+    - running
+    source: regular
+  lemmatization:
+  - input: children
+    upos: NOUN
+    expected:
+    - child
+  - input: went
+    upos: VERB
+    expected:
+    - go
+  - input: running
+    upos: VERB
+    expected:
+    - run
+  - input: studies
+    upos: VERB
+    expected:
+    - study
+  - input: happier
+    upos: ADJ
+    expected:
+    - happy
+language_config_migration:
+  recommended_path: src/agents/language/resources/en/morphology_pack.yaml
+  set:
+    language_rules.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+    nlp.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+    grammar_processor.morphology_pack_path: src/agents/language/resources/en/morphology_pack.yaml
+  retire_standalone_paths:
+  - irregular_verbs_path
+  - irregular_nouns_path
+  - morphology_rules_path

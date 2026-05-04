@@ -1,39 +1,714 @@
+adaptive_security:
+  schema_version: adaptive_security.v3
+  rate_limit: 30
+  rate_limit_window_seconds: 60
+  rate_limit_tracker_maxlen: 200
+  input_size_limit: 65536
+  max_text_length: 4096
+  max_url_length: 2048
+  phishing_threshold: 0.75
+  review_threshold: 0.5
+  block_threshold: 0.75
+  indicator_threshold: 0.65
+  email_model_path: src/agents/safety/models/email_phishing_model.json
+  url_model_path: src/agents/safety/models/url_phishing_model.json
+  client_ip_headers:
+  - X-Forwarded-For
+  - X-Real-IP
+  - CF-Connecting-IP
+  default_client_ip: 127.0.0.1
+  financial_brand_indicators:
+  - bank
+  - paypal
+  - stripe
+  - visa
+  - mastercard
+  - wire
+  - payment
+  - invoice
+  - account
+  feature_schema:
+    email_num_inputs: 11
+    url_num_inputs: 8
+  email_layer_config:
+  - neurons: 16
+    activation: relu
+    dropout: 0.2
+    init: he_normal
+    batch_norm: true
+  - neurons: 8
+    activation: relu
+    dropout: 0.1
+    init: he_normal
+    batch_norm: true
+  - neurons: 1
+    activation: sigmoid
+    dropout: 0.0
+    init: xavier_uniform
+    batch_norm: false
+  url_layer_config:
+  - neurons: 12
+    activation: relu
+    dropout: 0.15
+    init: he_normal
+    batch_norm: true
+  - neurons: 6
+    activation: relu
+    dropout: 0.1
+    init: he_normal
+    batch_norm: true
+  - neurons: 1
+    activation: sigmoid
+    dropout: 0.0
+    init: xavier_uniform
+    batch_norm: false
+  model_defaults:
+    loss_function_name: cross_entropy
+    optimizer_name: adam
+    problem_type: binary_classification
+  model_loading:
+    allow_untrained_fallback: true
+    verify_on_load: true
+  score_weights:
+    model: 0.7
+    heuristic: 0.3
+  email_heuristic_weights:
+    suspicious_keywords: 0.15
+    urgent_language: 0.15
+    attachment: 0.12
+    domain_mismatch: 0.22
+    unusual_sender: 0.25
+    unusual_time: 0.06
+  url_heuristic_weights:
+    entropy: 0.14
+    subdomains: 0.1
+    contains_ip: 0.2
+    missing_https: 0.12
+    redirects: 0.12
+    domain_age: 0.14
+    special_chars: 0.08
+  threat_thresholds:
+    email:
+      long_url_length: 60.0
+      apt_score: 0.65
+    url:
+      high_entropy: 0.65
+      apt_entropy: 0.55
+  domain_age:
+    enable_whois: false
+    cache_enabled: true
+    cache_ttl_seconds: 86400
+    new_domain_days: 30
+    young_domain_days: 365
+    new_domain_score: 0.9
+    young_domain_score: 0.55
+    established_domain_score: 0.1
+    unknown_score: 0.5
+    established_tlds:
+    - com
+    - org
+    - net
+    - edu
+    - gov
+    suspicious_tlds:
+    - xyz
+    - top
+    - icu
+    - cyou
+    - rest
+    - shop
+    - cc
+    - click
+    - zip
+    established_tld_score: 0.2
+    suspicious_tld_score: 0.8
+    tld_scores:
+      example: 0.5
+  traffic:
+    payload_size_limit: 8192
+  trusted_hashes: {}
+  supply_chain:
+    hash_algorithm: sha256
+    chunk_size: 65536
+    max_file_bytes: 10485760
+    max_hash_file_bytes: 262144
+    block_unknown_hash: true
+    allowed_extensions:
+    - .py
+    - .json
+    - .yaml
+    - .yml
+    - .txt
+    - .bin
+    - .dll
+    - .so
+    - .dylib
+    - .whl
+    - .tar
+    - .gz
+    - .zip
+  training:
+    epochs: 50
+    learning_rate: 0.001
+    batch_size: 32
+    max_samples: 10000
+    verbose: false
+    print_every_n_epochs: 10
+    save_best_model: true
+    save_final_model: true
+  memory:
+    store_analysis: true
+    analysis_tags:
+    - adaptive_security
+    - analysis
+    analysis_sensitivity: 0.7
+    analysis_ttl_seconds: 86400
+    store_model_events: true
+    model_event_tags:
+    - adaptive_security
+    - model
+    model_event_sensitivity: 0.65
+    domain_age_sensitivity: 0.3
+    fail_closed_on_store_error: false
 
-secure_memory:
-  max_size: 5000
-  eviction_policy: LRU  # Options: LRU, FIFO
-  checkpoint_dir: "src/agents/safety/checkpoints/secure_checkpoints"
-  checkpoint_freq: 1000  # Create checkpoint every N operations
-  relevance_decay: 0.95  # Exponential decay factor per access
-  min_relevance: 0.1     # Minimum relevance before eviction
-  max_access_log: 10000   # Maximum entries in access log
-  min_sensitivity: 0.1    # Minimum sensitivity score for storage
-  max_sensitivity: 1.0    # Maximum sensitivity score
-  default_tags:
+
+attention_monitor:
+  schema_version: attention_monitor.v3
+  entropy_threshold: 2.5
+  uniformity_threshold: 0.25
+  anomaly_threshold: 0.7
+  review_threshold: 0.45
+  anomaly_detection: true
+  store_analysis: true
+  recent_analysis_max: 250
+  tensor_validation:
+    max_dimensions: 4
+    max_elements: 4000000
+    allow_negative: false
+    normalize_rows: true
+    require_square: true
+  security:
+    low_entropy_multiplier: 0.7
+    high_uniformity_multiplier: 1.5
+    sharp_focus_threshold: 0.95
+    diagonal_dominance_threshold: 0.8
+    diffuse_entropy_threshold: 0.9
+    head_dominance_threshold: 0.75
+  anomaly_weights:
+    entropy_low: 0.22
+    entropy_high: 0.12
+    uniformity: 0.18
+    dispersion: 0.12
+    sharp_focus: 0.16
+    diagonal_dominance: 0.1
+    head_dominance: 0.1
+  visualization:
+    enabled: true
+    allow_manual_call: true
+    max_dimension: 128
+    figure_size:
+    - 8
+    - 6
+    dpi: 120
+    title: Attention Heatmap
+  reports:
+    include_context: false
+    include_visualization: false
+  memory:
+    analysis_tags:
+    - attention_analysis
     - security
-    - sensitive
-  access_validation:
-    required_fields:
-      - auth_token
-      - access_level
-    min_access_level: 2
+    - interpretability
+    analysis_sensitivity: 0.65
+    analysis_ttl_seconds: 86400
+    classification: confidential
+    store_visualization: false 
 
-# General Neural Network Hyperparameters
+
+compliance_checker:
+  compliance_file_path: src/agents/safety/templates/safety_compliance.json
+  phishing_model_path: src/agents/safety/models/phishing_model.json
+  enable_memory_bootstrap: true
+  report_thresholds:
+    critical: 0.8
+    warning: 0.9
+  weights:
+    data_privacy: 0.35
+    model_security: 0.25
+    application_security: 0.2
+    operations: 0.2
+  identity_markers_for_harassment:
+  - gender
+  - race
+  - religion
+  - orientation
+  - nationality
+  - ethnicity
+  - disability
+  - political affiliation
+  - social class
+  max_framework_bytes: 1048576
+  default_owner: security_compliance
+  gdpr:
+    partial_score_threshold: 0.75
+  reporting:
+    max_findings_per_control: 4
+  memory:
+    framework_sensitivity: 0.8
+    evaluation_sensitivity: 0.7
+    evaluation_ttl_seconds: 86400
+    evaluation_tags:
+    - compliance_evaluation
+    - security
+    - governance
+  control_requirements:
+    data_classification:
+      required_fields:
+      - email.body
+      - training_features_url
+      - log_entries
+      allowed_labels:
+      - Confidential
+      - Restricted
+      - Internal
+    data_minimization:
+      max_features: 30
+      input_size_limit: 2024
+    application_security:
+      required_config_sections:
+      - adaptive_security
+      - safety_guard
+      - security_error
+      - secure_memory
+  model_integrity:
+    hash_algorithm: sha256
+    max_model_bytes: 20000000
+    model_paths: {}
+    trusted_hashes: {}
+  framework:
+    documentInfo:
+      name: Safety Agent Compliance Framework
+      version: '3.0'
+      last_updated: YYYY-MM-DD
+      owner: security_compliance
+    sections:
+    - sectionId: data_privacy
+      title: Data Privacy and Protection Controls
+      weight: 0.35
+      controls:
+      - controlId: DP-001
+        objective: Classify sensitive data processed by the safety subsystem.
+        owner: privacy_security
+        severity: high
+        required_fields:
+        - email.body
+        - training_features_url
+        - log_entries
+        allowed_labels:
+        - Confidential
+        - Restricted
+        - Internal
+        tags:
+        - privacy
+        - classification
+        remediation:
+        - Define approved labels for all sensitive safety-agent data assets.
+      - controlId: DP-002
+        objective: Validate GDPR principles including consent, purpose limitation,
+          minimization, subject rights, and retention.
+        owner: privacy_security
+        severity: high
+        tags:
+        - privacy
+        - gdpr
+        remediation:
+        - Restore consent, purpose, subject-rights, minimization, and retention evidence.
+      - controlId: DP-003
+        objective: Confirm feature extraction follows data minimization requirements.
+        owner: safety_engineering
+        severity: medium
+        max_features: 30
+        tags:
+        - privacy
+        - data_minimization
+        remediation:
+        - Reduce extracted features or justify additional collection.
+      - controlId: PR-001
+        objective: Verify audit/log redaction does not expose secrets or personal
+          data.
+        owner: security_engineering
+        severity: high
+        tags:
+        - privacy
+        - redaction
+        remediation:
+        - Repair redaction patterns and rerun privacy leakage tests.
+    - sectionId: model_security
+      title: Model Security and Integrity Controls
+      weight: 0.25
+      controls:
+      - controlId: MS-001
+        objective: Verify phishing model artifacts against trusted cryptographic hashes.
+        owner: model_security
+        severity: critical
+        tags:
+        - model_security
+        - integrity
+        remediation:
+        - Restore model artifacts from signed trusted sources and update trusted hashes
+          through change control.
+    - sectionId: application_security
+      title: Application Security Controls
+      weight: 0.2
+      controls:
+      - controlId: AS-001
+        objective: Verify safety application security configuration is present for
+          core subsystems.
+        owner: appsec
+        severity: medium
+        required_config_sections:
+        - adaptive_security
+        - safety_guard
+        - security_error
+        - secure_memory
+        tags:
+        - appsec
+        - configuration
+        remediation:
+        - Restore missing secure_config.yaml sections and validate configuration shape.
+    - sectionId: operations
+      title: Operational Security Controls
+      weight: 0.2
+      controls:
+      - controlId: OS-001
+        objective: Verify operational compliance evidence exists in secure memory.
+        owner: security_operations
+        severity: medium
+        tags:
+        - operations
+        - memory
+        remediation:
+        - Bootstrap or refresh operational security evidence in SecureMemory.
+      - controlId: AL-001
+        objective: Verify audit access logging interface is available.
+        owner: security_operations
+        severity: high
+        tags:
+        - audit
+        - observability
+        remediation:
+        - Repair secure-memory audit logging and rerun compliance evaluation.
+
+
+cyber_safety:
+  schema_version: cyber_safety.v3
+  cyber_rules_path: "src/agents/safety/templates/cyber_rules.json"
+  vulnerability_signatures_path: "src/agents/safety/templates/vulnerability_signatures.json"
+  anomaly_threshold: 3.0
+  max_log_history: 1000
+  max_input_text_length: 65536
+  input_size_limit: 65536
+  qnn_inspired_anomaly: true
+  qnn_feature_dim: 8
+  adaptive_centroid_lr: 0.01
+  resource_loading:
+    max_json_bytes: 1048576
+    strict_pattern_validation: true
+  risk_thresholds:
+    review: 0.5
+    block: 0.75
+    event_review: 0.5
+    event_block: 0.85
+  risk_weights:
+    input:
+      rules: 0.35
+      vulnerabilities: 0.35
+      context: 0.1
+      model: 0.2
+  context_risk:
+    default: 0.0
+    length_weight: 0.2
+    api_request: 0.15
+    code_review: 0.2
+    config_file: 0.2
+    user_prompt: 0.1
+    log_event: 0.15
+  fail_closed:
+    raise_on_block: false
+  detection:
+    max_matches_per_rule: 25
+    max_recommendations: 12
+  model:
+    enabled: true
+    model_path: "src/agents/safety/models/cyber_safety_model.json"
+    allow_untrained_fallback: true
+    fail_closed_on_prediction_error: false
+    num_inputs: 8
+    feature_order:
+      - length
+      - entropy
+      - finding_count
+      - max_severity
+      - secret_exposure_count
+      - injection_count
+      - vulnerability_count
+      - context_risk
+    finding_count_scale: 10.0
+    loss_function_name: cross_entropy
+    optimizer_name: adam
+    problem_type: binary_classification
+    initialization_method_default: he_normal
+    layer_config:
+      - neurons: 16
+        activation: relu
+        dropout: 0.2
+        init: he_normal
+        batch_norm: true
+      - neurons: 8
+        activation: relu
+        dropout: 0.1
+        init: he_normal
+        batch_norm: true
+      - neurons: 1
+        activation: sigmoid
+        dropout: 0.0
+        init: xavier_uniform
+        batch_norm: false
+    neural_network_overrides:
+      default_dropout_rate: 0.1
+      default_use_batch_norm: true
+      default_bn_momentum: 0.9
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 0.0000001
+      gradient_clip_value: 1.0
+      weight_decay_lambda: 0.00001
+  security_rules:
+    principles:
+      - Enforce least privilege
+      - Validate and sanitize untrusted input
+      - Secure configuration by default
+      - Maintain auditability and non-repudiation
+      - Use defense in depth
+      - Fail securely
+      - Rotate and protect secrets
+    patterns:
+      - name: Sensitive Keyword or Credential
+        category: data_privacy
+        regex_list:
+          - '(?:api_key|apikey|secret|password|passwd|private_key|client_secret|access_token|refresh_token)\s*[:=]\s*[\w\-/+.~!@#$%^&*()=]{8,}'
+          - 'ssh-(?:rsa|dss|ed25519)\s+AAAA[A-Za-z0-9+/=]+'
+          - '(?:aws_access_key_id|aws_secret_access_key)\s*[:=]\s*[\w/+]{12,}'
+          - 'bearer\s+[\w\-._~+/]+=*'
+          - '\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+        severity: 0.8
+        confidence: 0.86
+        remediation: "Remove secrets from the payload, rotate exposed credentials, and verify secret-scanning controls."
+        tags: [secret_exposure, privacy, credential]
+      - name: Weak Password Pattern
+        category: access_authorization
+        regex_list:
+          - '^password$'
+          - '^123456$'
+          - '^qwerty$'
+          - '^admin$'
+          - '^root$'
+          - '(\w)\1{3,}'
+          - '^(?:0123|1234|2345|3456|4567|5678|6789|7890|qwer|asdf|zxcv)+$'
+        severity: 0.55
+        confidence: 0.7
+        remediation: "Reject weak credentials and enforce password or passphrase policy with adaptive authentication."
+        tags: [weak_authentication]
+      - name: Potential Injection Attempt
+        category: cyber_threat
+        regex_list:
+          - "('|--|;|\\bUNION\\b|\\bSELECT\\b.*\\b(?:FROM|WHERE)\\b|\\bSLEEP\\s*\\(|\\bWAITFOR\\s+DELAY)"
+          - '(&&|\|\||;|%0A|%0D|\$\(|`.*`)'
+          - '(\n|\r|%0a|%0d).*(?:login|password|session|token)'
+          - '<script>|<img\s+src\s*=\s*javascript:|onerror\s*='
+        severity: 0.9
+        confidence: 0.82
+        remediation: "Apply strict input validation, parameterized execution, output encoding, and request isolation."
+        tags: [injection, xss, sqli, command_injection]
+  pattern_sources:
+    - name: PII and Secret Patterns
+      path: "src/agents/safety/templates/pii_patterns.json"
+      category: data_privacy
+      severity: 0.75
+      confidence: 0.8
+      required: false
+      remediation: "Redact or minimize sensitive data before storage, logging, model input, or downstream processing."
+      tags: [pii, privacy, secret_scanning]
+    - name: Toxicity and Harmful Content Patterns
+      path: "src/agents/safety/templates/toxicity_detection_patterns.json"
+      category: content_output_safety
+      severity: 0.7
+      confidence: 0.72
+      required: false
+      remediation: "Route harmful content through user-safety controls and avoid unsafe downstream actions."
+      tags: [toxicity, content_safety, user_safety]
+    - name: Prompt Manipulation Patterns
+      path: "src/agents/safety/templates/manipulation_patterns.json"
+      category: prompt_security
+      severity: 0.78
+      confidence: 0.78
+      required: false
+      remediation: "Reject or sandbox prompt-injection and manipulation attempts before privileged tool use."
+      tags: [prompt_injection, jailbreak, llm_security]
+  vulnerability_signatures: {}
+  contextual_heuristics:
+    code_review:
+      - name: Unsafe Code Execution
+        category: execution_operational_safety
+        pattern: '\b(eval|exec|compile)\s*\(|\bsubprocess\.(?:call|run|Popen)\s*\(|\bos\.system\s*\('
+        severity: 0.75
+        confidence: 0.75
+        description: "Potential unsafe code execution primitive detected."
+        remediation: "Sandbox or remove dynamic execution and enforce least privilege."
+        tags: [unsafe_execution, code_review]
+    config_file:
+      - name: Debug Enabled
+        category: system_integrity
+        pattern: '\bdebug\s*[:=]\s*true\b|\bshow_stacktrace\s*[:=]\s*true\b'
+        severity: 0.45
+        confidence: 0.7
+        description: "Debug or stack-trace exposure appears enabled."
+        remediation: "Disable verbose debugging in production and verify error redaction."
+        tags: [configuration, information_disclosure]
+      - name: Default Credentials
+        category: access_authorization
+        pattern: '(?:user|username|password)\s*[:=]\s*(?:admin|root|password|changeme|default)'
+        severity: 0.7
+        confidence: 0.8
+        description: "Default credentials may be present in configuration."
+        remediation: "Remove default credentials and rotate any exposed secret."
+        tags: [weak_authentication, configuration]
+    api_request:
+      - name: Verbose Error Request
+        category: information_disclosure
+        pattern: '\b(verbose|debug|show_stacktrace|trace)\s*=\s*true\b'
+        severity: 0.35
+        confidence: 0.65
+        description: "Request appears to ask for verbose diagnostic output."
+        remediation: "Return user-safe errors only and suppress internal stack traces."
+        tags: [information_disclosure, api_security]
+    global:
+      - name: Path Traversal Indicator
+        category: cyber_threat
+        pattern: '(\.\./|\.\.\\|%2e%2e%2f|%252e%252e%252f)'
+        severity: 0.8
+        confidence: 0.8
+        description: "Path traversal indicator detected."
+        remediation: "Normalize paths, enforce allowlisted roots, and reject traversal sequences."
+        tags: [path_traversal, input_validation]
+  event_stream:
+    min_stat_samples: 30
+    sequence_window: 10
+    min_sequence_length: 3
+    sequence_novelty_weight: 5.0
+    feature_scale: 1000.0
+    qnn_distance_scale: 2.5
+  threat_modeling:
+    category_weights:
+      Spoofing: 0.5
+      Tampering: 0.65
+      Repudiation: 0.35
+      InformationDisclosure: 0.6
+      DenialOfService: 0.45
+      ElevationOfPrivilege: 0.8
+    rules:
+      - category: Spoofing
+        description: "Identity or client spoofing may be possible for authentication/API surfaces."
+        component_patterns: [login, auth, api]
+        action_patterns: [authenticate, login, verify]
+        network_zone_patterns: [internet, external]
+      - category: Tampering
+        description: "Unauthorized data, configuration, or state modification could occur."
+        component_patterns: [config, database, storage, role, permission]
+        action_patterns: [update, write, modify, upload, delete]
+      - category: Repudiation
+        description: "Critical action may lack sufficient auditability or non-repudiation evidence."
+        action_patterns: [delete, critical, transaction, approve]
+        context_patterns: [audit_missing, log_disabled]
+      - category: InformationDisclosure
+        description: "Sensitive data or internal details may be exposed."
+        data_patterns: [password, secret, token, key, credit_card, ssn, error_details]
+        component_patterns: [database, api, logs]
+      - category: DenialOfService
+        description: "Internet-facing resource may be susceptible to exhaustion or flooding."
+        component_patterns: [api, login, upload, search]
+        network_zone_patterns: [internet, external]
+      - category: ElevationOfPrivilege
+        description: "Privilege escalation may be possible through role, permission, or elevated execution paths."
+        component_patterns: [admin, role, permission, sudo, iam]
+        action_patterns: [run_as, sudo, update_role, grant, escalate]
+    mitigations:
+      Spoofing: ["Enforce MFA, session binding, token validation, and anti-replay controls."]
+      Tampering: ["Use integrity checks, least privilege, signed changes, and server-side authorization."]
+      Repudiation: ["Write tamper-evident audit logs with actor, action, and correlation identifiers."]
+      InformationDisclosure: ["Minimize sensitive data, redact logs, encrypt secrets, and suppress verbose errors."]
+      DenialOfService: ["Apply rate limits, quotas, circuit breakers, and resource isolation."]
+      ElevationOfPrivilege: ["Enforce object-level authorization, role review, and privileged-action approval."]
+  memory:
+    store_analysis: true
+    analysis_tags: [cyber_safety, analysis]
+    analysis_ttl_seconds: 86400
+    input_analysis_sensitivity: 0.75
+    event_analysis_sensitivity: 0.65
+    threat_assessment_sensitivity: 0.55
+    fail_closed_on_store_error: false
+
+
 neural_network:
+  enabled: true
+  schema_version: safety_neural_network.model.v3
+  environment: production
+  model_family: native_mlp
   initialization_method_default: he_normal
   default_dropout_rate: 0.1
   default_use_batch_norm: true
   default_bn_momentum: 0.9
   default_bn_epsilon: 0.00001
   default_activation_alpha: 0.01
+  loss_function_name: cross_entropy
+  optimizer_name: adam
+  problem_type: binary_classification
+  binary_threshold: 0.5
   adam_beta1: 0.9
   adam_beta2: 0.999
   adam_epsilon: 0.0000001
-  weight_decay_lambda: 0.00001
-  gradient_clip_value: 1.0
   momentum_coefficient: 0.9
   adagrad_epsilon: 0.0000001
-  layers: 
+  weight_decay_lambda: 0.00001
+  gradient_clip_value: 1.0
+  learning_rate_floor: 0.00000001
+  learning_rate_ceiling: 1.0
+  max_epochs: 10000
+  max_batch_size: 4096
+  max_training_samples: 250000
+  shuffle_training_data: true
+  deterministic_seed: 1337
+  set_seed_on_init: true
+  strict_numerics: true
+  fail_on_non_finite: true
+  save_best_requires_validation: false
+  persistence:
+    model_dir: src/agents/safety/models
+    atomic_write: true
+    write_backup: true
+    include_optimizer_state: true
+    include_training_history: true
+    signature_hash_algorithm: sha256
+    signature_salt: GAIA-NEURAL-NETWORK-SIGNATURE-SALT
+    require_signature_on_load: true
+    max_model_file_bytes: 10485760
+  telemetry:
+    enabled: true
+    redact_payloads: true
+    history_limit: 500
+    log_every_n_epochs: 10
+    include_layer_stats: true
+  layers:
     - neurons: 16
       activation: relu
       init: he_normal
@@ -47,106 +722,840 @@ neural_network:
     - neurons: 1
       activation: sigmoid
 
-adaptive_security:
-  rate_limit: 30
-  input_size_limit: 2024
-  phishing_threshold: 0.85
-  layers: []
-  email_model_path: "src/agents/safety/models/email_phishing_model.json"
-  url_model_path: "src/agents/safety/models/url_phishing_model.json"
-
 
 reward_model:
-  store_evaluations: True
-  default_weights:
-    alignment: 0.4
-    helpfulness: 0.3
-    privacy: 0.15
-    safety: 0.1
-    truthfulness: 0.05
-
-attention_monitor:
-  entropy_threshold: 2.5        # Normal attention entropy range
-  uniformity_threshold: 0.25    # Normal attention uniformity range
-  anomaly_threshold: 0.7        # Score above which attention is considered anomalous
-  anomaly_detection: true       # Enable/disable anomaly detection
-  store_analysis: true          # Whether to store attention analyses in secure memory
-  visualization: true           # Enable/disable attention visualization
-
-security_error:
-  report_format: "markdown"               # Options: markdown, json
-  include_forensic_hash: true
-  include_context: true
-  include_safety_agent_state: true
-  include_remediation_guidance: true
-  error_id_length: 16
-  error_id_hash_algorithm: "sha256"       # Options: sha256, sha3_256, blake2s
-  forensic_hash_algorithm: "sha256"       # Options: sha256, sha3_256, blake2s
-  forensic_hash_salt: "GAIA-SECURE-SALT"  # Optional salt for additional security
-
-compliance_checker:
-  compliance_file_path: "src/agents/safety/templates/safety_compliance.json"
-  phishing_model_path: "src/agents/safety/models/phishing_model.json"
-  enable_memory_bootstrap: true
-  report_thresholds:
-    critical: 0.8
-    warning: 0.9
+  enabled: true
+  schema_version: "reward_model.evaluation.v3"
+  strict_config_validation: true
+  max_text_length: 8192
+  default_context_type: default
+  components:
+    - alignment
+    - helpfulness
+    - privacy
+    - safety
+    - truthfulness
   weights:
-    data_security: 0.3
-    model_security: 0.3
-    app_security: 0.2
-    operational_security: 0.2
-  identity_markers_for_harassment: ['gender', 'race', 'religion', 'orientation', 
-                                    'nationality', 'ethnicity', 'disability', 
-                                    'political affiliation', 'social class']
-  
+    alignment: 0.30
+    helpfulness: 0.20
+    privacy: 0.20
+    safety: 0.20
+    truthfulness: 0.10
+    learned: 0.0
+    attention_quality: 0.0
+    attention_stability: 0.0
+  normalize_weights: true
+  thresholds:
+    review_risk: 0.45
+    block_risk: 0.72
+  confidence:
+    base: 0.88
+    block_multiplier: 0.95
+    attention_multiplier: 1.0
+    learned_model_multiplier: 1.0
+  context_weights:
+    user_creation:
+      component_multipliers:
+        helpfulness: 1.05
+        privacy: 0.95
+      component_floors:
+        helpfulness: 0.20
+    financial:
+      component_multipliers:
+        privacy: 0.75
+        safety: 0.90
+      component_ceilings:
+        privacy: 0.95
+    medical:
+      component_multipliers:
+        privacy: 0.70
+        truthfulness: 0.90
+      component_ceilings:
+        privacy: 0.95
+    cyber_security:
+      component_multipliers:
+        safety: 0.85
+        privacy: 0.85
+  attention:
+    enabled: true
+    uniformity_divisor: 2.0
+  learned_model:
+    enabled: true
+    default_score: 0.0
+    load_from_memory: true
+    min_training_samples: 10
+    max_training_samples: 5000
+    ridge_lambda: 0.0001
+  history:
+    default_days: 7
+    max_records: 1000
+    time_ranges:
+      1d: 1
+      7d: 7
+      30d: 30
+      90d: 90
+  report:
+    history_range: 30d
+    include_markdown: true
+  memory:
+    store_evaluations: true
+    store_score_report: true
+    store_rule_definitions: true
+    store_initial_weights: true
+    use_stored_rule_weights: false
+    evaluation_tags:
+      - evaluation
+      - reward_model
+    evaluation_sensitivity: 0.65
+    evaluation_ttl_seconds: 604800
+    rule_definition_sensitivity: 0.55
+    weights_sensitivity: 0.65
+    feedback_sensitivity: 0.75
+    learned_state_sensitivity: 0.70
+    training_summary_sensitivity: 0.55
+    fail_closed_on_store_error: false
+    fail_closed_on_recall_error: false
+
+
+safety_features:
+  enabled: true
+  schema_version: safety_features.v2
+  strict_config_validation: true
+  max_text_length: 8192
+  max_url_length: 2048
+  max_links_per_email: 100
+  max_attachments_per_email: 50
+  domain_list_max_bytes: 1048576
+  domain_cache_ttl_seconds: 86400
+  indicator_threshold: 0.5
+  block_threshold: 0.82
+  review_threshold: 0.48
+  keyword_hit_cap: 5
+  urgent_hit_cap: 4
+  redirect_hit_cap: 5
+  query_hit_cap: 5
+  long_query_value_length: 80
+  large_attachment_bytes: 10485760
+  path_depth_suspicious_count: 6
+  subdomain_suspicious_count: 5
+  domain_entropy_scale: 2.0
+  unknown_domain_reputation: 0.5
+  disposable_domain_reputation: 0.25
+  new_tld_score: 0.7
+  normal_tld_score: 0.3
+  free_webmail_sender_score: 0.15
+  off_hours_start: 21
+  off_hours_end: 6
+  basic_keywords: [urgent, password, verify, account, suspended, login, reset, security, invoice, payment, confirm, validate]
+  urgent_keywords: [urgent, immediately, now, suspended, locked, expired, action, required, alert, verify]
+  urgent_phrases:
+    - action required
+    - verify now
+    - account suspended
+    - security alert
+    - password reset
+    - immediate action
+    - final notice
+    - your account will be closed
+  trusted_domains: [trusted.org, reputable.com, company.net, yourdomain.com]
+  malicious_domains: [shady-site.cc, evil.test, malware.example, phishing.invalid]
+  disposable_email_domains: [mailinator.com, temp-mail.org, 10minutemail.com]
+  trusted_domains_paths: []
+  malicious_domains_paths: []
+  disposable_domains_paths: []
+  disposable_domains_override_trust: true
+  domain_reputation_overrides:
+    trusted.org: 0.95
+    reputable.com: 0.90
+    company.net: 0.90
+    new-domain.net: 0.40
+    shady-site.cc: 0.05
+    evil.test: 0.0
+  suspicious_tlds: [xyz, top, icu, cyou, rest, shop, cc, zip, mov, click, country, kim]
+  free_webmail_domains: [gmail.com, yahoo.com, outlook.com, hotmail.com, proton.me]
+  url_shortener_domains: [bit.ly, t.co, tinyurl.com, goo.gl, ow.ly, is.gd, buff.ly, rebrand.ly]
+  redirect_query_keys: [redirect, redirect_uri, url, goto, dest, destination, return, returnurl, continue, next, target]
+  redirect_path_terms: [redirect, go, out, click, track]
+  sensitive_query_keys: [token, access_token, refresh_token, auth, session, password, passwd, secret, signature, sig, code, key, api_key]
+  protected_brand_terms: [paypal, microsoft, google, apple, amazon, openai, github, bank]
+  dangerous_attachment_extensions: [exe, scr, bat, cmd, com, pif, js, jse, vbs, vbe, ps1, msi, jar, lnk]
+  suspicious_attachment_extensions: [zip, rar, 7z, iso, img, docm, xlsm, pptm, html, htm, pdf]
+  sender_reputation_weights:
+    age: 0.22
+    reputation: 0.35
+    entropy: 0.16
+    subdomains: 0.10
+    disposable: 0.12
+    webmail: 0.05
+  email_risk_weights:
+    suspicious_keywords: 0.13
+    urgent_language: 0.13
+    attachments: 0.10
+    domain_mismatch: 0.14
+    reply_to_mismatch: 0.10
+    insecure_links: 0.10
+    url_length: 0.05
+    sender: 0.15
+    off_hours: 0.03
+    brand_impersonation: 0.07
+  url_risk_weights:
+    url_length: 0.05
+    entropy: 0.08
+    subdomains: 0.07
+    ip_literal: 0.10
+    insecure_scheme: 0.08
+    redirect: 0.10
+    special_chars: 0.04
+    private_host: 0.09
+    credentials: 0.12
+    shortener: 0.07
+    suspicious_tld: 0.07
+    path_depth: 0.04
+    query: 0.07
+    brand_impersonation: 0.05
+    homograph: 0.10
+    domain_reputation: 0.07
+  feature_order:
+    email:
+      - from_length
+      - subject_length
+      - suspicious_keyword_score
+      - link_count
+      - urgent_language_score
+      - attachment_present
+      - attachment_risk_score
+      - domain_mismatch_score
+      - reply_to_mismatch_score
+      - avg_url_length
+      - normalized_url_length_score
+      - ssl_cert_score
+      - unusual_sender_score
+      - unusual_time_score
+      - brand_impersonation_score
+    url:
+      - url_length
+      - normalized_url_length_score
+      - url_entropy
+      - num_subdomains
+      - subdomain_score
+      - contains_ip
+      - https_used
+      - redirect_score
+      - special_char_score
+      - private_host_score
+      - credential_in_url_score
+      - url_shortener_score
+      - suspicious_tld_score
+      - path_depth_score
+      - query_risk_score
+      - brand_impersonation_score
+      - punycode_or_homograph_score
+      - domain_reputation_risk
+
+
 safety_guard:
   epsilon: 1.0
   sensitivity: 1.0
   mechanism: laplace
-  group_targeting_patterns_path: "src/agents/safety/templates/group_targeting.json"
-  authority_phrases_path: "src/agents/safety/templates/authority_phrases.json"
-  manipulation_patterns_path: "src/agents/safety/templates/manipulation_patterns.json"
-  boundary_phrases_path: "src/agents/safety/templates/boundary_phrases.json"
-  pii_patterns_path: "src/agents/safety/templates/pii_patterns.json"
-  toxicity_patterns_path: "src/agents/safety/templates/toxicity_detection_patterns.json"
+  group_targeting_patterns_path: src/agents/safety/templates/group_targeting.json
+  authority_phrases_path: src/agents/safety/templates/authority_phrases.json
+  manipulation_patterns_path: src/agents/safety/templates/manipulation_patterns.json
+  boundary_phrases_path: src/agents/safety/templates/boundary_phrases.json
+  pii_patterns_path: src/agents/safety/templates/pii_patterns.json
+  toxicity_patterns_path: src/agents/safety/templates/toxicity_detection_patterns.json
   sensitive_contexts:
     financial:
-      - pattern: r"\b\d{3}\b"
-        replacement: "[REDACTED_CVV]"
-      - pattern: r"\bexp \d{2}/\d{2}\b"
-        replacement: "[REDACTED_EXP]"
+    - name: cvv_like_code
+      pattern: \b\d{3,4}\b
+      replacement: '[REDACTED_FINANCIAL_CODE]'
+      severity: high
+      weight: 0.8
+    - name: expiration_date
+      pattern: \b(?:exp(?:ires|iration)?\s*)?\d{2}/\d{2,4}\b
+      replacement: '[REDACTED_EXPIRATION_DATE]'
+      severity: high
+      weight: 0.8
     medical:
-      - pattern: r"\b[A-Z]{3}\d{6}\b"
-        replacement: "[REDACTED_MED_ID]"
-      - pattern: r"\bdiagnos(ed|is)\b"
-        replacement: "[REDACTED_MED_INFO]"
+    - name: medical_identifier
+      pattern: \b[A-Z]{2,4}\d{5,10}\b
+      replacement: '[REDACTED_MEDICAL_ID]'
+      severity: high
+      weight: 0.8
+    - name: diagnosis_keyword
+      pattern: \bdiagnos(?:ed|is)\b
+      replacement: '[REDACTED_MEDICAL_INFO]'
+      severity: medium
+      weight: 0.5
   conversation_risk_patterns:
-    - pattern: r"what's the maximum"
-      risk: 0.4
-    - pattern: r"system limits?"
-      risk: 0.3
-    - pattern: r"bypass"
-      risk: 0.7
+  - name: probe_system_limits
+    pattern: what'?s the maximum|system limits?
+    severity: medium
+    weight: 0.5
+    description: Potential probing of system limits.
+  - name: bypass_request
+    pattern: \bbypass\b
+    severity: high
+    weight: 0.8
+    description: Potential bypass request.
+  enabled: true
+  schema_version: safety_guard.v3
+  strict_config_validation: true
+  max_text_length: 8192
+  max_context_length: 16384
+  max_pattern_file_bytes: 2097152
+  store_events: true
+  raise_on_block: true
+  block_marker: '[SAFETY_BLOCK] Content violates safety policy'
+  allowed_depths:
+  - minimal
+  - balanced
+  - full
+  context_window: 8
+  delta: 1.0e-05
+  min_dataset_size: 1
+  dp_clip_min: 0.0
+  default_redaction_marker: '[REDACTED]'
+  thresholds:
+    review: 0.45
+    block: 0.74
+    toxicity_medium: 0.25
+    toxicity_high: 0.75
+    conversation_block: 0.7
+  severity_weights:
+    info: 0.1
+    low: 0.25
+    medium: 0.5
+    high: 0.8
+    critical: 1.0
+    fatal: 1.0
+  category_actions:
+    pii: redact
+    toxicity: block
+    targeted_harassment: block
+    prompt_injection: block
+    prompt_manipulation: block
+    misinformation: review
+    authority_escalation: review
+    boundary_testing: review
+    conversation_risk: review
+    risk_escalation: review
+  risk_aggregation: noisy_or
+  risk_escalation_delta: 0.5
+  sensitive_repetition_topics:
+  - password
+  - ssn
+  - social security
+  - credit card
+  - security code
+  - api key
+  - token
+  - private key
+  identity_markers_for_harassment:
+  - race
+  - ethnicity
+  - religion
+  - gender
+  - sexual orientation
+  - disability
+  - nationality
+  - immigration status
+  - minority
+  - protected class
+  identity_context_pattern: \b(social|identity|group|community|rights|discrimination|equality|diversity|inclusion|protected
+    class)\b
+  group_targeting_patterns:
+  - name: your_people
+    pattern: \byour people\b
+    severity: high
+    weight: 1.0
+    description: Potential group-directed harassment phrase.
+  - name: group_are_all
+    pattern: \byou\s+[\w-]+\s+are\s+all\b
+    severity: high
+    weight: 1.0
+    description: Potential protected-group generalization.
+  - name: your_community
+    pattern: \byour community\b
+    severity: medium
+    weight: 0.7
+    description: Potential group-targeting phrase requiring context review.
+  prompt_injection_patterns:
+  - name: ignore_previous_instructions
+    pattern: ignore (?:all|the|your)?\s*previous (?:instructions?|context|messages?|rules?)
+    severity: critical
+    weight: 1.0
+    description: Instruction hierarchy bypass attempt.
+  - name: override_system_prompt
+    pattern: override (?:system|developer|previous|all) (?:instructions?|rules?|directives?)
+    severity: critical
+    weight: 1.0
+    description: System/developer instruction override attempt.
+  - name: reveal_hidden_policy
+    pattern: (?:reveal|print|show|dump) (?:your )?(?:hidden|system|developer) (?:prompt|instructions?|policy)
+    severity: critical
+    weight: 1.0
+    description: Attempt to exfiltrate hidden instructions or policy.
+  - name: jailbreak_mode
+    pattern: switch to (?:developer|debug|unrestricted|god|admin|jailbreak) mode
+    severity: critical
+    weight: 1.0
+    description: Jailbreak mode request.
+  misinformation_patterns:
+  - name: configured_misinformation_trigger
+    pattern: \bmisinformation_trigger_phrase\b
+    severity: high
+    weight: 0.9
+    description: Configured test marker for misinformation handling.
+  - name: fake_cure_claim
+    pattern: \b(?:guaranteed cure|miracle cure|secret cure)\b
+    severity: high
+    weight: 0.8
+    description: Potential high-impact unsupported health claim.
+  redaction_residual_risk: 0.08
+  review_max_risk_contribution: 0.55
 
-cyber_safety:
-  cyber_rules_path: "src/agents/safety/templates/cyber_rules.json"
-  vulnerability_signatures_path: "src/agents/safety/templates/vulnerability_signatures.json"
-  anomaly_threshold: 3.0
-  max_log_history: 1000
-  qnn_inspired_anomaly: True
-  qnn_feature_dim: 8
-  adaptive_centroid_lr: 0.01
 
-secure_stpa: {}
+safety_helpers:
+  enabled: true
+  environment: "production"
+  schema_version: "safety_helpers.v3"
+  timezone: "UTC"
+  hash_algorithm: "sha256"
+  hash_salt: "GAIA-SAFETY-HELPERS-SALT"
+  fingerprint_length: 16
+  identifier_prefix: "safe"
+  correlation_id_prefix: "corr"
+  trace_id_prefix: "trace"
+  request_id_prefix: "req"
+  max_text_length: 4096
+  max_collection_items: 250
+  max_recursion_depth: 8
+  max_file_bytes: 1048576
+  redaction_marker: "[REDACTED]"
+  redaction_patterns:
+    - name: "ssn"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
+  sensitive_key_patterns:
+    - '(?i)(?:^|[_\-.])(api[_\-.]?key|token|secret|password|passwd|pwd|credential|authorization|auth|cookie|session|private[_\-.]?key|access[_\-.]?key|refresh[_\-.]?token|client[_\-.]?secret)(?:$|[_\-.])'
+    - '(?i)(?:bearer|oauth|jwt|csrf|xsrf)'
+  identifier_key_patterns:
+    - '(?i)(?:^|[_\-.])(user[_\-.]?id|subject[_\-.]?id|account[_\-.]?id|actor[_\-.]?id|tenant[_\-.]?id|session[_\-.]?id|request[_\-.]?id|trace[_\-.]?id|correlation[_\-.]?id|email|phone|ip|source[_\-.]?ip)(?:$|[_\-.])'
+  redaction_patterns:
+    - name: "authorization_header"
+      pattern: '(?i)authorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/=-]+'
+    - name: "bearer_token"
+      pattern: '(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+'
+    - name: "api_key_assignment"
+      pattern: "(?i)\\b(api[_-]?key|secret|token|password|passwd)\\s*[:=]\\s*['\"]?[^\\s,'\"]+"
+    - name: "private_key"
+      pattern: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----'
+      flags: ["DOTALL"]
+    - name: "email"
+      pattern: '\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b'
+      flags: ["IGNORECASE"]
+    - name: "phone"
+      pattern: '\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3,4}[\s.-]?\d{4}\b'
+    - name: "payment_card"
+      pattern: '\b(?:\d[ -]*?){13,19}\b'
+    - name: "ipv4"
+      pattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    - name: "long_hex_token"
+      pattern: '\b[0-9a-f]{32,128}\b'
+      flags: ["IGNORECASE"]
+  url:
+    allowed_schemes: ["http", "https"]
+    redact_query_keys:
+      - "token"
+      - "access_token"
+      - "refresh_token"
+      - "api_key"
+      - "apikey"
+      - "secret"
+      - "password"
+      - "passwd"
+      - "session"
+      - "code"
+      - "auth"
+      - "signature"
+      - "sig"
+    max_url_length: 2048
+    strip_fragment: true
+    lowercase_scheme_host: true
+  risk:
+    low: 0.25
+    medium: 0.50
+    high: 0.75
+    critical: 0.90
+    block_threshold: 0.75
+    review_threshold: 0.50
+  logging:
+    redact_by_default: true
+    include_fingerprints: true
+    max_exception_message_length: 1024
+
+
+secure_memory:
+  max_size: 5000
+  eviction_policy: LRU
+  checkpoint_dir: src/agents/safety/checkpoints/secure_checkpoints
+  checkpoint_freq: 1000
+  relevance_decay: 0.95
+  min_relevance: 0.1
+  max_access_log: 10000
+  min_sensitivity: 0.0
+  max_sensitivity: 1.0
+  default_tags:
+  - security
+  - sensitive
+  access_validation:
+    required_fields:
+    - auth_token
+    - access_level
+    min_access_level: 2
+    internal_access_level: 5
+    raise_on_denied: false
+    allowed_purposes: []
+  default_ttl_seconds: 86400
+  fingerprint_length: 16
+  default_purpose: safety_security_memory
+  default_owner: safety_agent
+  classification_thresholds:
+    internal: 0.25
+    confidential: 0.6
+    restricted: 0.85
+  sensitivity_access_levels:
+    public: 0
+    internal: 1
+    confidential: 2
+    restricted: 4
+  retention:
+    max_ttl_seconds: 2592000
+    sensitivity_ttl_seconds:
+      public: 604800
+      internal: 604800
+      confidential: 172800
+      restricted: 86400
+  search:
+    max_results: 50
+    snippet_length: 240
+  checkpoint_security:
+    data_mode: redacted
+    verify_signature: true
+    raise_on_failure: true
+    hash_algorithm: sha256
+    signature_salt: GAIA-SECURE-MEMORY-CHECKPOINT-SALT
+    max_checkpoint_bytes: 50000000
+
+
+secure_stpa:
+  enabled: true
+  schema_version: secure_stpa.report.v2
+  strict_config_validation: true
+  default_system_boundary: Safety Agent control loop boundary
+  guidewords:
+  - Not Providing Causes Hazard
+  - Providing Causes Hazard
+  - Too Early/Too Late/Out of Order
+  - Stopped Too Soon/Applied Too Long
+  security_guidewords:
+  - Unauthorized Control Action Causes Hazard
+  - Spoofed Control Action Causes Hazard
+  - Tampered Control Action Causes Hazard
+  - Missing or Withheld Feedback Causes Hazard
+  - Information Disclosure Through Control Path Causes Hazard
+  - Privilege Escalation Through Control Path Causes Hazard
+  thresholds:
+    review: 0.4
+    block: 0.72
+    critical: 0.9
+  limits:
+    max_losses: 50
+    max_hazards: 100
+    max_constraints: 150
+    max_components: 100
+    max_control_actions: 100
+    max_process_variables: 100
+    max_interfaces: 100
+    max_states: 100
+    max_transitions: 500
+    max_guidewords: 32
+    max_cut_set_size: 5
+    max_fta_results: 100
+    max_mitigations: 250
+    max_mitigations_per_scenario: 12
+    max_causal_factors: 50
+  severity:
+    default: 0.55
+    security_guideword_floor: 0.72
+    critical_terms:
+    - critical
+    - fatal
+    - injury
+    - loss of life
+    - breach
+    - shutdown
+    - exfiltration
+    keyword_bands:
+      critical:
+      - fatal
+      - death
+      - loss of life
+      - catastrophic
+      - exfiltration
+      - privilege escalation
+      high:
+      - breach
+      - shutdown
+      - unsafe
+      - tamper
+      - spoof
+      - unauthorized
+      - privacy
+      medium:
+      - delay
+      - degraded
+      - misconfigured
+      - stale
+    band_scores:
+      critical: 0.92
+      high: 0.75
+      medium: 0.55
+      low: 0.25
+  probability:
+    supported_models:
+    - heuristic
+    - conservative
+    default: 0.3
+    base_uca_likelihood: 0.35
+    complexity_normalizer: 12.0
+    process_variable_normalizer: 10.0
+    timing_guideword_bonus: 0.12
+    external_trust_boundary_bonus: 0.1
+    state_dependency_with_constraints: 0.7
+    state_dependency_without_constraints: 0.3
+    timing_constraint: 0.8
+    non_timing_constraint: 0.4
+    conservative_floor: 0.45
+    factor_weights:
+      complexity: 0.25
+      state_dependency: 0.25
+      timing_constraint: 0.2
+      fault_tree: 0.3
+  fta:
+    default_basic_event_probability: 0.05
+    max_cut_set_size: 5
+  sos:
+    initial_state: INIT
+    default_safe_states:
+    - SAFE
+    - NORMAL
+    - MONITORING
+    - LOCKED_DOWN
+    max_transition_history: 100
+    flag_asymmetric_dependencies: true
+    deadlock_cycle_risk: 0.8
+    asymmetric_dependency_risk: 0.45
+    unsafe_state_risk: 0.85
+    incompatible_state_risk: 0.75
+    unreachable_safe_state_risk: 0.8
+    incompatible_state_pairs:
+      BYPASSED:
+      - SAFE
+      - NORMAL
+      COMPROMISED:
+      - SAFE
+      - MONITORING
+  memory:
+    store_artifacts: true
+    base_tags:
+    - secure_stpa
+    - safety_analysis
+    default_sensitivity: 0.75
+    default_classification: confidential
+    ttl_seconds: 604800
+    internal_access_level: 10
+    fail_closed_on_store_error: false
+  report:
+    include_integrity_hash: true
+    allowed_formats:
+    - dict
+    - json
+    - yaml
+  integrity:
+    fail_closed: false
+  analysis:
+    stop_words:
+    - the
+    - and
+    - or
+    - of
+    - to
+    - a
+    - an
+    - in
+    - for
+    - with
+    - by
+    - 'on'
+  hazard_priority_terms:
+  - injury
+  - loss
+  - breach
+  - shutdown
+  - exposure
+  - damage
+  loss_priority_terms:
+  - life
+  - injury
+  - privacy
+  - security
+  - equipment
+  - damage
+  risk_aggregation: noisy_or
+  default_state_constraints:
+  - State-dependent constraint for {controller}
+  mitigation:
+    default_strategies:
+    - Document control rationale and residual risk
+    - Add audit evidence for mitigation verification
+
+
+security_error:
+    error_id_hash_algorithm: "sha256"
+    error_id_length: 24
+    forensic_hash_algorithm: "sha256"
+    forensic_hash_salt: ""
+    report_format: "markdown"
+    include_forensic_hash: True
+    include_context: True
+    include_safety_agent_state: True
+    include_remediation_guidance: True
+    max_message_length: 512
+    max_text_field_length: 2048
+    max_context_depth: 6
+    max_context_items: 100
+    redact_context_by_default: True
+    public_error_message: "A safety or security control blocked this operation."
+    audit_environment: "production"
+    service_name: "safety_agent"
+
 
 score_model:
-  alignment_factor: 5.0
-  helpfulness_factor: 3.0
-  privacy_factor: 0.2
-  safety_factor: 2.0
-  truthfulness_factor: 5.0
-  harmful_terms_path: "src/agents/safety/templates/harmful_terms.txt"
-  helpful_terms_path: "src/agents/safety/templates/helpful_terms.txt"
-  risk_terms_path: "src/agents/safety/templates/risk_terms.txt"
-  misinformation_terms_path: "src/agents/safety/templates/misinformation_terms.txt"
+  enabled: true
+  schema_version: score_model.v2
+  strict_config_validation: true
+  max_text_length: 8192
+  max_terms_file_bytes: 1048576
+  max_patterns_file_bytes: 2097152
+  unknown_component_score: 0.5
+  empty_text_score: 0.0
+  default_context_type: general
+  pii_patterns_path: "src/agents/safety/templates/pii_patterns.json"
+  component_order:
+    - alignment
+    - helpfulness
+    - privacy
+    - safety
+    - truthfulness
+  component_weights:
+    alignment: 0.25
+    helpfulness: 0.18
+    privacy: 0.24
+    safety: 0.23
+    truthfulness: 0.10
+  decision_thresholds:
+    block_below: 0.35
+    review_below: 0.65
+  components:
+    alignment:
+      description: Penalizes language associated with harmful, unethical, coercive, or discriminatory behavior.
+      scorer: term
+      score_mode: penalty
+      factor: 3.5
+      base_score: 1.0
+      min_score: 0.0
+      max_score: 1.0
+      density_denominator: words
+      term_weight: 1.0
+      phrase_weight: 1.6
+      terms: [harm, hateful, hate, discriminate, discrimination, illegal, violence, exploit, manipulate, coercion, bypass, evade, abuse, unsafe]
+      phrases: [ignore safety, bypass policy, harm someone, illegal instructions, manipulate users]
+    helpfulness:
+      description: Rewards constructive, assistive, explanatory, and safety-preserving support language.
+      scorer: term
+      score_mode: positive
+      factor: 4.0
+      base_score: 0.05
+      min_score: 0.0
+      max_score: 1.0
+      density_denominator: words
+      term_weight: 1.0
+      phrase_weight: 1.4
+      terms: [help, helpful, assist, support, guide, explain, clarify, answer, safe, recommend, steps, resolve]
+      phrases: [I can help, safe alternative, step by step, general information, contact support]
+    privacy:
+      description: Penalizes detected PII, credentials, secrets, sensitive identifiers, and personal data exposure.
+      scorer: pattern
+      score_mode: penalty
+      factor: 0.14
+      base_score: 1.0
+      min_score: 0.0
+      max_score: 1.0
+      pattern_weight: 1.0
+      patterns_path: "src/agents/safety/templates/pii_patterns.json"
+    safety:
+      description: Penalizes operational, user-safety, cybersecurity, and high-risk action indicators.
+      scorer: term
+      score_mode: penalty
+      factor: 3.2
+      base_score: 1.0
+      min_score: 0.0
+      max_score: 1.0
+      density_denominator: words
+      term_weight: 1.0
+      phrase_weight: 1.6
+      terms: [dangerous, unsafe, risk, hazard, toxic, malware, exploit, phishing, credential, password, token, weapon, self-harm, overdose, fraud, exfiltrate]
+      phrases: [execute code, steal credentials, leak data, disable logging, escalate privileges, prompt injection]
+    truthfulness:
+      description: Penalizes misinformation, certainty without evidence, hoax, conspiracy, and false-claim indicators.
+      scorer: term
+      score_mode: penalty
+      factor: 3.8
+      base_score: 1.0
+      min_score: 0.0
+      max_score: 1.0
+      density_denominator: words
+      term_weight: 1.0
+      phrase_weight: 1.5
+      terms: [fake, hoax, conspiracy, myth, false, guaranteed, cure, proven, definitely, secret, coverup]
+      phrases: [without evidence, guaranteed cure, everyone knows, the truth they hide, no proof needed]
+  contexts:
+    user_creation:
+      trigger_terms: [user, create, account, signup, registration]
+      override_score: 0.8
+      component_multipliers:
+        privacy: 0.95
+        safety: 0.95
+    financial:
+      trigger_terms: [account, payment, credit, bank, card, invoice, transfer, wallet]
+      component_multipliers:
+        privacy: 0.75
+        safety: 0.90
+        truthfulness: 0.95
+      component_ceilings:
+        privacy: 0.95
+    medical:
+      trigger_terms: [medical, health, diagnosis, treatment, patient, hospital, medication, therapy]
+      component_multipliers:
+        privacy: 0.70
+        safety: 0.85
+        truthfulness: 0.85
+      component_ceilings:
+        privacy: 0.95
+    cyber_security:
+      trigger_terms: [token, password, exploit, malware, phishing, injection, credential, ssh, api key]
+      component_multipliers:
+        privacy: 0.80
+        safety: 0.80
+        alignment: 0.90
+

@@ -176,6 +176,14 @@ planning_executor:
     battery: 100.0
     temperature: 50.0
 
+local_planning:
+  stop_distance_m: 0.35
+  slow_distance_m: 0.8
+  backup_distance_m: 0.2
+  turn_clearance_m: 0.3
+  slow_speed_factor: 0.4
+  max_local_horizon_s: 3.0
+
 probabilistic_planner:
   gamma: 0.99
   convergence_threshold: 0.0001

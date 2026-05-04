@@ -1,0 +1,1713 @@
+metadata:
+  pack_name: semantics_pack
+  schema_version: 1.0.0
+  language: en
+  locale: en
+  created: '2026-04-28'
+  owner: src.agents.language
+  description: Unified semantics resource pack for NLU intent detection, entity extraction, modality detection, speech-act
+    mapping, and cross-module semantic aliases.
+  source_files:
+  - intent_patterns.json
+  - entity_patterns.json
+  - modality_markers.json
+  migration_status: canonical_resource_pack
+runtime_policy:
+  default_intent: unknown
+  fallback_intent: default
+  unknown_intent: unknown
+  low_confidence_intent: clarification_request
+  intent_match_order:
+  - exact_phrase
+  - template
+  - regex
+  - keyword_overlap
+  - semantic_similarity
+  case_sensitive: false
+  unicode_normalization: NFKC
+  collapse_whitespace: true
+  allow_partial_intent_match: true
+  minimum_intent_confidence: 0.35
+  ambiguity_margin: 0.08
+  max_intent_candidates: 5
+  max_entity_matches_per_type: 10
+  prefer_longest_entity_match: true
+  dedupe_entity_spans: true
+  require_context_for_broad_entities: true
+  entity_overlap_strategy: priority_then_longest_then_confidence
+  record_alternatives: true
+intent_aliases:
+  affirm: affirmation
+  ask_capability: capability_request
+  ask_definition: definition_request
+  deny: denial
+  find_restaurant: restaurant_search
+  get_date: date_request
+  get_time: time_request
+  greetings: greeting
+  request_help: help_request
+canonical_intents:
+  greeting:
+    enabled: true
+    canonical_id: greeting
+    aliases:
+    - greetings
+    category: social
+    speech_act: expressive
+    priority: 30
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.greeting.001
+      type: phrase
+      value: hello
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.002
+      type: phrase
+      value: hi
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.003
+      type: phrase
+      value: hey there
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.004
+      type: phrase
+      value: good morning
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.005
+      type: phrase
+      value: good afternoon
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.006
+      type: phrase
+      value: good evening
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.007
+      type: phrase
+      value: what's up
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.greeting.008
+      type: phrase
+      value: howdy
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - hello
+    - good morning
+    metadata: {}
+  farewell:
+    enabled: true
+    canonical_id: farewell
+    aliases: []
+    category: social
+    speech_act: expressive
+    priority: 30
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.farewell.001
+      type: phrase
+      value: bye
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.002
+      type: phrase
+      value: goodbye
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.003
+      type: phrase
+      value: see you later
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.004
+      type: phrase
+      value: talk to you later
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.005
+      type: phrase
+      value: farewell
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.006
+      type: phrase
+      value: take care
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.farewell.007
+      type: phrase
+      value: have a good day
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - bye
+    - take care
+    metadata: {}
+  affirmation:
+    enabled: true
+    canonical_id: affirmation
+    aliases:
+    - affirm
+    category: dialogue_control
+    speech_act: assertive
+    priority: 20
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.affirmation.001
+      type: phrase
+      value: 'yes'
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.002
+      type: phrase
+      value: yep
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.003
+      type: phrase
+      value: yeah
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.004
+      type: phrase
+      value: sure
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.005
+      type: phrase
+      value: okay
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.006
+      type: phrase
+      value: sounds good
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.007
+      type: phrase
+      value: alright
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.008
+      type: phrase
+      value: confirm
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.009
+      type: phrase
+      value: indeed
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.affirmation.010
+      type: phrase
+      value: absolutely
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - 'yes'
+    - sounds good
+    metadata: {}
+  denial:
+    enabled: true
+    canonical_id: denial
+    aliases:
+    - deny
+    category: dialogue_control
+    speech_act: assertive
+    priority: 20
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.denial.001
+      type: phrase
+      value: 'no'
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.002
+      type: phrase
+      value: nope
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.003
+      type: phrase
+      value: nah
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.004
+      type: phrase
+      value: not really
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.005
+      type: phrase
+      value: negative
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.006
+      type: phrase
+      value: I don't think so
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.denial.007
+      type: phrase
+      value: cancel
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - 'no'
+    - cancel
+    metadata: {}
+  gratitude:
+    enabled: true
+    canonical_id: gratitude
+    aliases: []
+    category: social
+    speech_act: expressive
+    priority: 25
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.gratitude.001
+      type: phrase
+      value: thanks
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.gratitude.002
+      type: phrase
+      value: thank you
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.gratitude.003
+      type: phrase
+      value: much appreciated
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.gratitude.004
+      type: phrase
+      value: thanks a lot
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.gratitude.005
+      type: phrase
+      value: cheers
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - thank you
+    - cheers
+    metadata: {}
+  weather_inquiry:
+    enabled: true
+    canonical_id: weather_inquiry
+    aliases: []
+    category: task
+    speech_act: directive
+    priority: 55
+    confidence_floor: 0.42
+    match_strategy: hybrid
+    patterns:
+    - id: intent.weather_inquiry.001
+      type: phrase
+      value: what's the weather like
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.weather_inquiry.002
+      type: template
+      value: how is the weather in {LOCATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - LOCATION
+    - id: intent.weather_inquiry.003
+      type: template
+      value: weather forecast for {LOCATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - LOCATION
+    - id: intent.weather_inquiry.004
+      type: template
+      value: is it going to rain in {LOCATION} {DATE_TIME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - DATE_TIME
+      - LOCATION
+    - id: intent.weather_inquiry.005
+      type: template
+      value: temperature in {LOCATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - LOCATION
+    - id: intent.weather_inquiry.006
+      type: phrase
+      value: tell me the weather
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.weather_inquiry.007
+      type: template
+      value: weather in {LOCATION} for {DATE_TIME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - DATE_TIME
+      - LOCATION
+    required_entities: []
+    optional_entities:
+    - LOCATION
+    - DATE_TIME
+    - TIME
+    negative_patterns: []
+    examples:
+    - weather in Paris tomorrow
+    - is it going to rain in Tokyo today
+    metadata: {}
+  play_music:
+    enabled: true
+    canonical_id: play_music
+    aliases: []
+    category: task
+    speech_act: directive
+    priority: 55
+    confidence_floor: 0.42
+    match_strategy: hybrid
+    patterns:
+    - id: intent.play_music.001
+      type: template
+      value: play {SONG_NAME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - SONG_NAME
+    - id: intent.play_music.002
+      type: template
+      value: play some music by {ARTIST_NAME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - ARTIST_NAME
+    - id: intent.play_music.003
+      type: template
+      value: play the album {ALBUM_NAME} by {ARTIST_NAME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - ALBUM_NAME
+      - ARTIST_NAME
+    - id: intent.play_music.004
+      type: template
+      value: I want to listen to {GENRE} music
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - GENRE
+    - id: intent.play_music.005
+      type: template
+      value: put on {SONG_NAME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - SONG_NAME
+    - id: intent.play_music.006
+      type: phrase
+      value: play something
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities:
+    - SONG_NAME
+    - ARTIST_NAME
+    - GENRE
+    - ALBUM_NAME
+    negative_patterns: []
+    examples:
+    - play some jazz
+    - play Imagine by John Lennon
+    metadata: {}
+  set_timer:
+    enabled: true
+    canonical_id: set_timer
+    aliases: []
+    category: task
+    speech_act: directive
+    priority: 60
+    confidence_floor: 0.42
+    match_strategy: hybrid
+    patterns:
+    - id: intent.set_timer.001
+      type: template
+      value: set a timer for {DURATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - DURATION
+    - id: intent.set_timer.002
+      type: template
+      value: timer for {NUMBER} {TIME_UNIT}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - NUMBER
+      - TIME_UNIT
+    - id: intent.set_timer.003
+      type: template
+      value: set an alarm for {TIME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TIME
+    - id: intent.set_timer.004
+      type: template
+      value: wake me up at {TIME}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TIME
+    - id: intent.set_timer.005
+      type: template
+      value: remind me in {DURATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - DURATION
+    required_entities:
+    - DURATION|TIME
+    optional_entities:
+    - NUMBER
+    - TIME_UNIT
+    - DURATION
+    - TIME
+    negative_patterns: []
+    examples:
+    - set a timer for 10 minutes
+    - wake me up at 7am
+    metadata: {}
+  time_request:
+    enabled: true
+    canonical_id: time_request
+    aliases:
+    - current_time
+    - get_time
+    category: task
+    speech_act: directive
+    priority: 50
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.time_request.001
+      type: phrase
+      value: what time is it
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.002
+      type: phrase
+      value: current time please
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.003
+      type: phrase
+      value: do you have the time
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.004
+      type: phrase
+      value: tell me the time
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.005
+      type: regex
+      value: (what|current).{0,3}time
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.006
+      type: regex
+      value: what.time.is.it
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.007
+      type: regex
+      value: how.late.is.it
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.008
+      type: regex
+      value: what.time.is.it.now
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.009
+      type: regex
+      value: current.time.now
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.time_request.010
+      type: regex
+      value: tell.me.the.current.time
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - what time is it
+    - tell me the current time
+    metadata: {}
+  date_request:
+    enabled: true
+    canonical_id: date_request
+    aliases:
+    - get_date
+    category: task
+    speech_act: directive
+    priority: 50
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.date_request.001
+      type: phrase
+      value: what's the date today
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.date_request.002
+      type: phrase
+      value: what is today's date
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.date_request.003
+      type: phrase
+      value: current date
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.date_request.004
+      type: phrase
+      value: what day is it
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - what's the date today
+    - what day is it
+    metadata: {}
+  definition_request:
+    enabled: true
+    canonical_id: definition_request
+    aliases:
+    - ask_definition
+    category: knowledge
+    speech_act: directive
+    priority: 50
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.definition_request.001
+      type: template
+      value: what is {TERM}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TERM
+    - id: intent.definition_request.002
+      type: template
+      value: define {TERM}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TERM
+    - id: intent.definition_request.003
+      type: template
+      value: what does {TERM} mean
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TERM
+    - id: intent.definition_request.004
+      type: template
+      value: tell me about {TERM}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - TERM
+    required_entities:
+    - TERM
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - define recursion
+    - what does entropy mean
+    metadata: {}
+  restaurant_search:
+    enabled: true
+    canonical_id: restaurant_search
+    aliases:
+    - find_restaurant
+    category: task
+    speech_act: directive
+    priority: 55
+    confidence_floor: 0.42
+    match_strategy: hybrid
+    patterns:
+    - id: intent.restaurant_search.001
+      type: template
+      value: find a {CUISINE_TYPE} restaurant near me
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - CUISINE_TYPE
+    - id: intent.restaurant_search.002
+      type: template
+      value: restaurants in {LOCATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - LOCATION
+    - id: intent.restaurant_search.003
+      type: template
+      value: I'm hungry for {FOOD_TYPE}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - FOOD_TYPE
+    - id: intent.restaurant_search.004
+      type: template
+      value: where can I eat {CUISINE_TYPE} in {LOCATION}
+      case_sensitive: false
+      weight: 1.0
+      slots:
+      - CUISINE_TYPE
+      - LOCATION
+    required_entities: []
+    optional_entities:
+    - CUISINE_TYPE
+    - FOOD_TYPE
+    - LOCATION
+    negative_patterns: []
+    examples:
+    - find an Italian restaurant near me
+    - where can I eat sushi in London
+    metadata: {}
+  bot_challenge:
+    enabled: true
+    canonical_id: bot_challenge
+    aliases: []
+    category: meta
+    speech_act: interrogative
+    priority: 45
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.bot_challenge.001
+      type: phrase
+      value: are you a bot
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.bot_challenge.002
+      type: phrase
+      value: are you human
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.bot_challenge.003
+      type: phrase
+      value: what are you
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.bot_challenge.004
+      type: phrase
+      value: who made you
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - are you a bot
+    - what are you
+    metadata: {}
+  capability_request:
+    enabled: true
+    canonical_id: capability_request
+    aliases:
+    - ask_capability
+    category: meta
+    speech_act: directive
+    priority: 45
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.capability_request.001
+      type: phrase
+      value: what can you do
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.capability_request.002
+      type: phrase
+      value: what are your capabilities
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.capability_request.003
+      type: phrase
+      value: tell me what you can do
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.capability_request.004
+      type: phrase
+      value: how can you help me
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - what can you do
+    - how can you help me
+    metadata: {}
+  stop_action:
+    enabled: true
+    canonical_id: stop_action
+    aliases: []
+    category: dialogue_control
+    speech_act: directive
+    priority: 35
+    confidence_floor: 0.35
+    match_strategy: hybrid
+    patterns:
+    - id: intent.stop_action.001
+      type: phrase
+      value: stop
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.stop_action.002
+      type: phrase
+      value: halt
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.stop_action.003
+      type: phrase
+      value: cancel that
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.stop_action.004
+      type: phrase
+      value: nevermind
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.stop_action.005
+      type: phrase
+      value: that's enough
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - stop
+    - cancel that
+    metadata: {}
+  help_request:
+    enabled: true
+    canonical_id: help_request
+    aliases:
+    - request_help
+    category: support
+    speech_act: directive
+    priority: 40
+    confidence_floor: 0.38
+    match_strategy: hybrid
+    patterns:
+    - id: intent.help_request.001
+      type: phrase
+      value: help
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.help_request.002
+      type: phrase
+      value: I need help
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.help_request.003
+      type: phrase
+      value: can you help me
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    - id: intent.help_request.004
+      type: phrase
+      value: assist me
+      case_sensitive: false
+      weight: 1.0
+      slots: []
+    required_entities: []
+    optional_entities: []
+    negative_patterns: []
+    examples:
+    - help
+    - I need help
+    metadata: {}
+entity_types:
+  LOCATION:
+    enabled: true
+    description: Geographic location, city, region, address-like phrase, or deictic location such as 'near me'.
+    canonical_type: LOCATION
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (Paris|London|New York|Tokyo|Berlin|Rome|California|Germany|Main Street|[A-Z][a-zA-Z\s]+(?:, [A-Z]{2})?|near
+        me)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 70
+      allow_overlaps: false
+      requires_intent_context: true
+      max_span_chars: 120
+    validation:
+      validator: location
+      required: false
+      min_confidence: 0.45
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: medium
+    metadata: {}
+  DATE_TIME:
+    enabled: true
+    description: Date or broad temporal expression.
+    canonical_type: DATE_TIME
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (today|tomorrow|yesterday|next week|last month|this evening|tonight|now|\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})|\d{4}-\d{2}-\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|at
+        5 pm|7am|noon|midnight|\d{1,2}:\d{2}\s?(?:[apAP][mM])?)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 90
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: temporal
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  TIME:
+    enabled: true
+    description: Clock time expression.
+    canonical_type: TIME
+    aliases: []
+    extraction:
+      type: regex
+      pattern: ([0-2]?[0-9]:[0-5][0-9](?:\s?[AP]M)?)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 95
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: temporal
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  DURATION:
+    enabled: true
+    description: Duration expression such as '10 minutes' or 'in an hour'.
+    canonical_type: DURATION
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (\d+\s+(?:minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)|for 5 minutes|in
+        an hour|for a few seconds)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 90
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: duration
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  NUMBER:
+    enabled: true
+    description: Numeric quantity or simple number word.
+    canonical_type: NUMBER
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (-?\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|a couple|a few)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 60
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: quantity
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  TIME_UNIT:
+    enabled: true
+    description: Temporal unit such as minutes, hours, days, or weeks.
+    canonical_type: TIME_UNIT
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (second|seconds|sec|minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 65
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: quantity
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  SONG_NAME:
+    enabled: true
+    description: Music title candidate; broad and should be constrained by intent context.
+    canonical_type: SONG_NAME
+    aliases: []
+    extraction:
+      type: regex
+      pattern: ([A-Za-z0-9\s']+)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 30
+      allow_overlaps: false
+      requires_intent_context: true
+      max_span_chars: 120
+    validation:
+      validator: free_text
+      required: false
+      min_confidence: 0.45
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: high
+    metadata: {}
+  ARTIST_NAME:
+    enabled: true
+    description: Artist/person name candidate; broad and should be constrained by intent context.
+    canonical_type: ARTIST_NAME
+    aliases: []
+    extraction:
+      type: regex
+      pattern: ([A-Za-z\s\.]+)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 35
+      allow_overlaps: false
+      requires_intent_context: true
+      max_span_chars: 120
+    validation:
+      validator: person_or_artist
+      required: false
+      min_confidence: 0.45
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: medium
+    metadata: {}
+  GENRE:
+    enabled: true
+    description: Music genre.
+    canonical_type: GENRE
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (rock|pop|jazz|classical|electronic|hip hop|blues|country|reggae)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 65
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: term
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  TERM:
+    enabled: true
+    description: Definition/search term; broad and should be constrained by intent context.
+    canonical_type: TERM
+    aliases: []
+    extraction:
+      type: regex
+      pattern: ([a-zA-Z0-9\s]+)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 25
+      allow_overlaps: false
+      requires_intent_context: true
+      max_span_chars: 120
+    validation:
+      validator: term
+      required: false
+      min_confidence: 0.45
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: high
+    metadata: {}
+  CUISINE_TYPE:
+    enabled: true
+    description: Cuisine or restaurant type.
+    canonical_type: CUISINE_TYPE
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (italian|chinese|mexican|indian|thai|japanese|french|pizza|burgers|sushi)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 65
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: term
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  FOOD_TYPE:
+    enabled: true
+    description: Food item.
+    canonical_type: FOOD_TYPE
+    aliases: []
+    extraction:
+      type: regex
+      pattern: (pizza|pasta|sushi|tacos|burgers|salad|steak|seafood)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 65
+      allow_overlaps: false
+      requires_intent_context: false
+      max_span_chars: 64
+    validation:
+      validator: term
+      required: false
+      min_confidence: 0.55
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: low
+    metadata: {}
+  ALBUM_NAME:
+    enabled: true
+    description: Album title candidate; broad and should be constrained by play_music intent context.
+    canonical_type: ALBUM_NAME
+    aliases: []
+    extraction:
+      type: regex
+      pattern: ([A-Za-z0-9\s'’:\-]+)
+      flags:
+      - IGNORECASE
+      - UNICODE
+      capture_group: 1
+      priority: 30
+      allow_overlaps: false
+      requires_intent_context: true
+      max_span_chars: 120
+    validation:
+      validator: free_text
+      required: false
+      min_confidence: 0.45
+      normalize: true
+      drop_if_empty: true
+    components: {}
+    risk: high
+    metadata:
+      added_because: Referenced by play_music intent patterns.
+modalities:
+  epistemic:
+    enabled: true
+    description: Speaker certainty, probability, evidence, or belief.
+    default_confidence: 0.58
+    markers:
+    - undoubtedly
+    - conceivably
+    - supposedly
+    - definitely
+    - apparently
+    - seemingly
+    - obviously
+    - evidently
+    - certainly
+    - unlikely
+    - probably
+    - possibly
+    - perhaps
+    - clearly
+    - surely
+    - likely
+    - maybe
+    strong_markers:
+    - certainly
+    - definitely
+    - undoubtedly
+    - clearly
+    - obviously
+    - surely
+    weak_markers:
+    - apparently
+    - conceivably
+    - evidently
+    - likely
+    - maybe
+    - perhaps
+    - possibly
+    - probably
+    - seemingly
+    - supposedly
+    - unlikely
+    priority: 60
+    metadata: {}
+  deontic:
+    enabled: true
+    description: Obligation, permission, prohibition, or requirement.
+    default_confidence: 0.58
+    markers:
+    - supposed to
+    - may not
+    - have to
+    - prohibited
+    - permitted
+    - obligated
+    - forbidden
+    - required
+    - allowed
+    - should
+    - cannot
+    - shall
+    - ought
+    - bound
+    - need
+    - must
+    - may
+    strong_markers:
+    - must
+    - required
+    - prohibited
+    - forbidden
+    - shall
+    - have to
+    weak_markers:
+    - allowed
+    - bound
+    - cannot
+    - may
+    - may not
+    - need
+    - obligated
+    - ought
+    - permitted
+    - should
+    - supposed to
+    priority: 65
+    metadata: {}
+  dynamic:
+    enabled: true
+    description: Ability, capacity, possibility, or enabling condition.
+    default_confidence: 0.58
+    markers:
+    - could not
+    - possibility
+    - potential
+    - incapable
+    - capacity
+    - capable
+    - unable
+    - enable
+    - cannot
+    - could
+    - able
+    - can
+    strong_markers:
+    - can
+    - could
+    - able
+    - capable
+    - unable
+    - incapable
+    weak_markers:
+    - cannot
+    - capacity
+    - could not
+    - enable
+    - possibility
+    - potential
+    priority: 55
+    metadata: {}
+  alethic:
+    enabled: true
+    description: Logical necessity, possibility, actuality, or impossibility.
+    default_confidence: 0.58
+    markers:
+    - contingently
+    - necessarily
+    - impossibly
+    - potential
+    - essential
+    - possibly
+    - actual
+    - 'false'
+    - 'true'
+    strong_markers:
+    - necessarily
+    - impossibly
+    - 'true'
+    - 'false'
+    weak_markers:
+    - actual
+    - contingently
+    - essential
+    - possibly
+    - potential
+    priority: 50
+    metadata: {}
+  interrogative:
+    enabled: true
+    description: Question-oriented modality.
+    default_confidence: 0.58
+    markers:
+    - whether
+    - whose
+    - which
+    - where
+    - whom
+    - when
+    - what
+    - why
+    - who
+    - how
+    - if
+    strong_markers:
+    - who
+    - what
+    - when
+    - where
+    - why
+    - how
+    weak_markers:
+    - if
+    - whether
+    - which
+    - whom
+    - whose
+    priority: 75
+    metadata: {}
+  imperative:
+    enabled: true
+    description: Command, request, instruction, or urgency.
+    default_confidence: 0.58
+    markers:
+    - make sure
+    - immediately
+    - urgently
+    - instruct
+    - require
+    - request
+    - command
+    - please
+    - kindly
+    - ensure
+    - demand
+    - order
+    - let's
+    - stop
+    - go
+    - do
+    strong_markers:
+    - please
+    - urgently
+    - immediately
+    - demand
+    - command
+    - ensure
+    - make sure
+    weak_markers:
+    - do
+    - go
+    - instruct
+    - kindly
+    - let's
+    - order
+    - request
+    - require
+    - stop
+    priority: 80
+    metadata: {}
+  conditional:
+    enabled: true
+    description: Condition, contingency, or hypothetical dependency.
+    default_confidence: 0.58
+    markers:
+    - on condition that
+    - as long as
+    - in case
+    - conditional
+    - contingent
+    - supposing
+    - whenever
+    - provided
+    - assuming
+    - suppose
+    - unless
+    - while
+    - given
+    - if
+    strong_markers:
+    - if
+    - unless
+    - provided
+    - assuming
+    - as long as
+    - on condition that
+    weak_markers:
+    - conditional
+    - contingent
+    - given
+    - in case
+    - suppose
+    - supposing
+    - whenever
+    - while
+    priority: 70
+    metadata: {}
+speech_acts:
+  types:
+    assertive:
+      description: Speaker provides, confirms, denies, or states information.
+      default_intents:
+      - affirmation
+      - denial
+    directive:
+      description: User requests, asks, commands, or instructs the agent to do something.
+      default_intents:
+      - weather_inquiry
+      - play_music
+      - set_timer
+      - time_request
+      - date_request
+      - definition_request
+      - restaurant_search
+      - capability_request
+      - help_request
+      - stop_action
+    expressive:
+      description: Speaker expresses social state, gratitude, greeting, farewell, apology, or affect.
+      default_intents:
+      - greeting
+      - farewell
+      - gratitude
+    commissive:
+      description: Speaker commits to a future action.
+      default_intents: []
+    declaration:
+      description: Speaker performs an action by declaring it.
+      default_intents: []
+    interrogative:
+      description: Speaker asks about identity, capability, or system state.
+      default_intents:
+      - bot_challenge
+  intent_to_speech_act:
+    greeting: expressive
+    farewell: expressive
+    affirmation: assertive
+    denial: assertive
+    gratitude: expressive
+    weather_inquiry: directive
+    play_music: directive
+    set_timer: directive
+    time_request: directive
+    date_request: directive
+    definition_request: directive
+    restaurant_search: directive
+    bot_challenge: interrogative
+    capability_request: directive
+    stop_action: directive
+    help_request: directive
+  modality_to_speech_act_hints:
+    imperative: directive
+    interrogative: directive
+    deontic: directive
+    epistemic: assertive
+    conditional: assertive
+    dynamic: assertive
+    alethic: assertive
+entity_validation:
+  validators:
+    temporal:
+      description: Accepts relative dates, clock times, ISO-like dates, and common calendar expressions.
+      normalizers:
+      - lowercase
+      - trim
+      - collapse_whitespace
+    duration:
+      description: Accepts numeric/time-unit duration phrases and relative duration phrases.
+      normalizers:
+      - lowercase
+      - trim
+      - collapse_whitespace
+    quantity:
+      description: Accepts numbers, decimals, and simple number words.
+      normalizers:
+      - lowercase
+      - trim
+    location:
+      description: Accepts known locations and capitalized location-like spans; high precision should use domain/geocoder
+        validation later.
+      normalizers:
+      - trim
+      - collapse_whitespace
+    closed_set:
+      description: Accepts only values covered by the regex/lexicon.
+      normalizers:
+      - lowercase
+      - trim
+    term:
+      description: Free-text term validation; only trusted inside an intent slot context.
+      normalizers:
+      - trim
+      - collapse_whitespace
+    free_text:
+      description: Broad free-text capture. Must be bounded by intent context and max span length.
+      normalizers:
+      - trim
+      - collapse_whitespace
+    person_or_artist:
+      description: Broad person/artist name capture. Should later be backed by NER or domain lookup.
+      normalizers:
+      - trim
+      - collapse_whitespace
+slot_policy:
+  slot_aliases:
+    location: LOCATION
+    date_time: DATE_TIME
+    datetime: DATE_TIME
+    time: TIME
+    duration: DURATION
+    number: NUMBER
+    time_unit: TIME_UNIT
+    song: SONG_NAME
+    song_name: SONG_NAME
+    artist: ARTIST_NAME
+    artist_name: ARTIST_NAME
+    album: ALBUM_NAME
+    album_name: ALBUM_NAME
+    genre: GENRE
+    term: TERM
+    cuisine: CUISINE_TYPE
+    cuisine_type: CUISINE_TYPE
+    food: FOOD_TYPE
+    food_type: FOOD_TYPE
+  clarification_prompts:
+    LOCATION: Which location should I use?
+    DATE_TIME: What date or time should I use?
+    DURATION: How long should the timer be?
+    TERM: What term would you like me to define?
+    SONG_NAME: Which song would you like?
+    ARTIST_NAME: Which artist should I use?
+modality_policy:
+  default_modality: epistemic
+  question_punctuation_overrides_to: interrogative
+  imperative_verb_start_overrides_to: imperative
+  conditional_marker_overrides_to: conditional
+  allow_multiple_modalities: true
+  max_modalities: 3
+  confidence_decay_per_additional_marker: 0.08
+test_vectors:
+- text: hello
+  expected_intent: greeting
+  expected_entities: {}
+  expected_modality: epistemic
+- text: what's the weather in Paris tomorrow
+  expected_intent: weather_inquiry
+  expected_entities:
+    LOCATION: Paris
+    DATE_TIME: tomorrow
+  expected_modality: interrogative
+- text: set a timer for 10 minutes
+  expected_intent: set_timer
+  expected_entities:
+    DURATION: 10 minutes
+  expected_modality: imperative
+- text: define entropy
+  expected_intent: definition_request
+  expected_entities:
+    TERM: entropy
+  expected_modality: imperative
+- text: can you help me
+  expected_intent: help_request
+  expected_entities: {}
+  expected_modality: dynamic
+migration_hints:
+  replace_config_paths:
+    custom_intent_patterns_path: semantics_pack_path
+    custom_entity_patterns_path: semantics_pack_path
+    modality_markers_path: semantics_pack_path
+  recommended_language_config:
+    nlu:
+      semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+      use_semantics_pack: true
+      intent_alias_normalization: true
+      accept_precomputed_nlp: true
+      use_shared_nlp_engine: true
+    nlg:
+      semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+      normalize_intent_aliases: true
+    dialogue_context:
+      semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
+  retire_standalone_files:
+  - intent_patterns.json
+  - entity_patterns.json
+  - modality_markers.json

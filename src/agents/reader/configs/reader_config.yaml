@@ -9,11 +9,24 @@ reader:
     - .md
     - .json
     - .csv
+  supported_output_formats:
+    - txt
+    - md
+    - html
+    - xml
+    - json
+    - csv
   default_output_format: txt
   output_dir: output/reader
   enable_recovery: true
   enable_semantic_recovery: true
+  max_file_size_bytes: 52428800
+  encoding_candidates:
+    - utf-8
+    - utf-8-sig
+    - latin-1
 
 reader_memory:
   checkpoint_dir: tmp/reader/checkpoints
   cache_dir: tmp/reader/cache
+  cache_ttl_seconds: 0

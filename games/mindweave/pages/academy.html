@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weaver Academy | MindWeave</title>
+  <link rel="stylesheet" href="../src/academy.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+  <style>
+    /* Fix the canvas background so it does not scroll */
+    #academy-canvas {
+      position: fixed;
+    }
+  </style>
+</head>
+<body class="bg-black text-white overflow-x-hidden font-sans">
+
+  <!-- 3D Canvas Background (fixed) -->
+  <div id="academy-canvas" class="fixed inset-0 z-0"></div>
+
+  <!-- CRT Scanline Overlay -->
+  <div class="scanlines z-10 pointer-events-none"></div>
+
+  <!-- Fixed Progress Bar -->
+  <div class="fixed top-0 left-0 w-full h-1 bg-black/50 z-30">
+    <div id="progress-fill" class="h-full bg-cyan-400 transition-all duration-300" style="width: 0%;"></div>
+  </div>
+  <div class="fixed top-2 right-4 text-xs font-mono text-cyan-300 z-30" id="progress-text">Step 0/5</div>
+
+  <!-- Main Content -->
+  <main class="relative z-20 min-h-screen py-12 px-4 flex items-start justify-center overflow-y-auto">
+    <div class="academy-panel w-full max-w-5xl rounded-2xl p-8 space-y-8 mt-6"> <!-- added mt-6 to avoid overlap with progress bar -->
+
+      <!-- Header -->
+      <div class="border-b border-white/10 pb-4">
+        <h1 class="text-3xl font-bold tracking-wider text-cyan-300">Weaver Academy</h1>
+        <p class="text-sm text-slate-400 font-mono mt-1">
+          A research‑backed primer on the cognitive and emotional skills you will train in the Mindweave campaign.
+        </p>
+      </div>
+
+      <!-- Director's Welcome (dynamic) -->
+      <div id="director-welcome" class="academy-section-card cursor-pointer">
+        <h2 class="text-xl font-mono text-sky-300 mb-2">Director's Greeting</h2>
+        <p class="text-slate-200 text-sm leading-relaxed" id="director-message">Loading...</p>
+      </div>
+
+      <!-- Introduction -->
+      <section id="section-foundations" class="academy-section-card cursor-pointer">
+        <span class="section-timer"></span>
+        <h2 class="text-xl font-mono text-sky-300 mb-2">Foundations of the Weaver Discipline</h2>
+        <p class="text-slate-200 text-sm leading-relaxed">
+          The Mindweave protocol is built upon three pillars: metacognition, fluid intelligence (IQ), and emotional intelligence (EQ). 
+          Each corresponds to a distinct set of trainable competencies that, when developed together, enhance adaptive problem‑solving, 
+          interpersonal effectiveness, and self‑regulated learning. Below we explore the scientific underpinnings of each pillar and 
+          explain how they are woven into the campaign’s mechanics.
+        </p>
+      </section>
+
+      <!-- 1. Metacognition -->
+      <section id="section-metacognition" class="academy-section-card cursor-pointer">
+        <span class="section-timer"></span>
+        <h2 class="text-xl font-mono text-sky-300 mb-2">1. Metacognition</h2>
+        <p class="text-slate-200 text-sm leading-relaxed">
+          <span class="font-bold text-white">Definition & Theoretical Framework:</span> Metacognition refers to the awareness and active control of one’s own cognitive processes. First formalized by Flavell (1979), it is traditionally divided into two distinct but interacting components: <strong>Metacognitive Knowledge</strong> (what we know about our own cognitive architectures, task demands, and strategy effectiveness) and <strong>Metacognitive Regulation</strong> (the dynamic executive processes used to oversee learning). According to Nelson and Narens' (1990) highly influential model, this operates via a continuous feedback loop between a "meta-level" (the monitoring system) and an "object-level" (the actual cognitive operations). The core regulatory skills include:
+        </p>
+        <ul class="list-disc list-inside text-slate-200 text-sm mt-2 space-y-1">
+          <li><span class="text-cyan-200">Planning (Feed-forward control)</span> – Goal setting, allocating working memory resources, and selecting heuristic or algorithmic strategies before engaging in a task.</li>
+          <li><span class="text-cyan-200">Monitoring (Concurrent tracking)</span> – Metacognitive judgments (e.g., Judgment of Learning, Feeling of Knowing) made during task execution to assess progress, detect errors, and calibrate cognitive load.</li>
+          <li><span class="text-cyan-200">Evaluating (Feedback integration)</span> – Post-task reflection on outcomes, identifying strategy failures, and updating procedural knowledge for future approaches.</li>
+        </ul>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Why it matters:</span> High metacognitive ability is one of the strongest predictors of academic achievement and novel problem‑solving, often compensating for lower baseline intellectual ability (Veenman et al., 2006). Furthermore, explicit metacognitive reflection is the primary mechanism that enables "far transfer"—the elusive ability to apply skills learned in one domain to an entirely different, untrained domain.
+        </p>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Mindweave implementation:</span> The <span class="text-cyan-200">debrief phase</span> explicitly trains metacognition by forcing the Weaver to abstract their experiences. By requiring you to articulate your strategy, describe a specific moment of cognitive adaptation, and commit to real‑world transfer, the protocol bridges the gap between procedural gameplay and declarative self-knowledge.
+        </p>
+        <div class="mt-3 text-xs text-slate-400 border-l-2 border-cyan-700 pl-3">
+          <span class="font-mono text-cyan-300">Key references:</span>
+          <ul class="list-none pl-0 mt-1 space-y-1">
+            <li>Flavell, J. H. (1979). Metacognition and cognitive monitoring: A new area of cognitive–developmental inquiry. <span class="italic">American Psychologist, 34</span>(10), 906–911.</li>
+            <li>Nelson, T. O., & Narens, L. (1990). Metamemory: A theoretical framework and new findings. <span class="italic">The Psychology of Learning and Motivation, 26</span>, 125-173.</li>
+            <li>Veenman, M. V. J., Van Hout‑Wolters, B. H. A. M., & Afflerbach, P. (2006). Metacognition and learning: Conceptual and methodological considerations. <span class="italic">Metacognition and Learning, 1</span>(1), 3–14.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 2. Fluid Intelligence (IQ) -->
+      <section id="section-iq" class="academy-section-card cursor-pointer">
+        <span class="section-timer"></span>
+        <h2 class="text-xl font-mono text-sky-300 mb-2">2. Fluid Intelligence (IQ)</h2>
+        <p class="text-slate-200 text-sm leading-relaxed">
+          <span class="font-bold text-white">Definition & Cognitive Architecture:</span> Fluid intelligence (Gf) is the capacity to solve novel problems, identify complex patterns, and manipulate abstract information independently of acquired knowledge or cultural context (Cattell, 1963). In the widely accepted Cattell-Horn-Carroll (CHC) theory of cognitive abilities, Gf is distinct from Crystallized Intelligence (Gc), which represents accumulated declarative knowledge. Core cognitive mechanisms underlying Gf include:
+        </p>
+        <ul class="list-disc list-inside text-slate-200 text-sm mt-2 space-y-1">
+          <li><span class="text-cyan-200">Working Memory Capacity (WMC)</span> – Not merely short-term storage, but "executive attention"—the ability to maintain goal-relevant information in the face of potent distraction and interference (Engle, 2002).</li>
+          <li><span class="text-cyan-200">Relational Reasoning</span> – Inductive and deductive logic, rule discovery, and the abstraction of structural similarities across different domains.</li>
+          <li><span class="text-cyan-200">Processing Speed</span> – The neurological efficiency and rate at which fundamental mental operations are executed.</li>
+        </ul>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Trainability & The Far-Transfer Debate:</span> The malleability of Gf has been a subject of intense academic debate. A landmark study by Jaeggi and colleagues (2008) demonstrated that adaptive dual n‑back training could lead to significant gains in fluid intelligence, with effects transferring to untrained matrix reasoning tasks. While some subsequent researchers have contested the magnitude of these "far-transfer" effects, rigorous meta‑analyses (Au et al., 2015) confirm that small but reliable transfer occurs when training is highly adaptive, cognitively taxing, and sufficiently prolonged.
+        </p>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Mindweave implementation:</span> The IQ phase operates as a cognitive stress-test. It incorporates dual n‑back (working memory updating), logic gate repair (deductive reasoning), task‑switching (cognitive flexibility), and threat‑code puzzles (mathematical reasoning). By constantly adapting the difficulty to the edge of the Weaver's capability, the tasks force continuous reliance on executive control rather than automated, crystallized habits.
+        </p>
+        <div class="mt-3 text-xs text-slate-400 border-l-2 border-cyan-700 pl-3">
+          <span class="font-mono text-cyan-300">Key references:</span>
+          <ul class="list-none pl-0 mt-1 space-y-1">
+            <li>Cattell, R. B. (1963). Theory of fluid and crystallized intelligence: A critical experiment. <span class="italic">Journal of Educational Psychology, 54</span>(1), 1–22.</li>
+            <li>Engle, R. W. (2002). Working memory capacity as executive attention. <span class="italic">Current Directions in Psychological Science, 11</span>(1), 19-23.</li>
+            <li>Jaeggi, S. M., Buschkuehl, M., Jonides, J., & Perrig, W. J. (2008). Improving fluid intelligence with training on working memory. <span class="italic">Proceedings of the National Academy of Sciences, 105</span>(19), 6829–6833.</li>
+            <li>Au, J., Sheehan, E., Tsai, N., Duncan, G. J., Buschkuehl, M., & Jaeggi, S. M. (2015). Improving fluid intelligence with training on working memory: a meta‑analysis. <span class="italic">Psychonomic Bulletin & Review, 22</span>(2), 366–377.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 3. Emotional Intelligence (EQ) -->
+      <section id="section-eq" class="academy-section-card cursor-pointer">
+        <span class="section-timer"></span>
+        <h2 class="text-xl font-mono text-sky-300 mb-2">3. Emotional Intelligence (EQ)</h2>
+        <p class="text-slate-200 text-sm leading-relaxed">
+          <span class="font-bold text-white">Definition & Models:</span> Emotional intelligence is the capacity to accurately perceive, use, understand, and manage emotions. In the psychological literature, EQ is generally divided into "Trait EQ" (self-perceived behavioral dispositions measured via personality questionnaires) and "Ability EQ" (actual cognitive-emotional processing capacity measured via performance tests). Mindweave strictly targets the <strong>Ability Model</strong> (Mayer & Salovey, 1997), which posits four hierarchical branches:
+        </p>
+        <ul class="list-disc list-inside text-slate-200 text-sm mt-2 space-y-1">
+          <li><span class="text-cyan-200">Perceiving Emotion</span> – The fundamental ability to decode emotional signals in facial micro-expressions, vocal prosody, and physiological states.</li>
+          <li><span class="text-cyan-200">Using Emotion</span> – Harnessing affective states to facilitate specific cognitive activities (e.g., utilizing mild anxiety for vigilant error-checking, or positive affect for creative brainstorming).</li>
+          <li><span class="text-cyan-200">Understanding Emotion</span> – Comprehending emotional language, analyzing emotional trajectories, and predicting how conflicting emotions blend over time.</li>
+          <li><span class="text-cyan-200">Managing Emotion</span> – The highest-order skill involving emotion regulation. This includes up-regulating or down-regulating one’s own emotions (e.g., via cognitive reappraisal) and ethically influencing the emotions of others.</li>
+        </ul>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Evidence Base & Neuroscience:</span> Higher Ability EQ predicts better mental health, conflict resolution, and leadership effectiveness (O’Boyle et al., 2011). Neurologically, emotion management (specifically cognitive reappraisal) relies on the prefrontal cortex (PFC) exerting inhibitory control over the amygdala, altering the trajectory of the emotional response before it fully manifests (Gross, 2002). Training studies (Nelis et al., 2009) confirm that structured psycho-education and active role-play can reliably alter these neural pathways and increase objective EQ capacity.
+        </p>
+        <p class="text-slate-200 text-sm leading-relaxed mt-3">
+          <span class="font-bold text-white">Mindweave implementation:</span> The EQ phase acts as a social-cognitive simulation targeting all four branches:
+        </p>
+        <ul class="list-disc list-inside text-slate-200 text-sm mt-1 space-y-1">
+          <li><span class="text-cyan-200">Perceiving</span> – Micro‑expression analysis based on the Facial Action Coding System (FACS).</li>
+          <li><span class="text-cyan-200">Using/Understanding</span> – Empathy bridge dialogues requiring the Weaver to validate, reflect, and predict the Architect's complex emotional transitions.</li>
+          <li><span class="text-cyan-200">Managing</span> – Cognitive reappraisal tasks (reframing hostile or stressful statements into constructive logic) and co‑regulation boundary setting to prevent emotional contagion.</li>
+          <li><span class="text-cyan-200">Regulation</span> – Biometric pulse matching, requiring real-time physiological synchrony.</li>
+        </ul>
+        <div class="mt-3 text-xs text-slate-400 border-l-2 border-cyan-700 pl-3">
+          <span class="font-mono text-cyan-300">Key references:</span>
+          <ul class="list-none pl-0 mt-1 space-y-1">
+            <li>Mayer, J. D., & Salovey, P. (1997). What is emotional intelligence? In P. Salovey & D. Sluyter (Eds.), <span class="italic">Emotional development and emotional intelligence</span> (pp. 3–31). Basic Books.</li>
+            <li>Gross, J. J. (2002). Emotion regulation: Affective, cognitive, and social consequences. <span class="italic">Psychophysiology, 39</span>(3), 281-291.</li>
+            <li>Nelis, D., Quoidbach, J., Mikolajczak, M., & Hansenne, M. (2009). Increasing emotional intelligence: (How) is it possible? <span class="italic">Personality and Individual Differences, 47</span>(1), 36–41.</li>
+            <li>O’Boyle, E. H., Humphrey, R. H., Pollack, J. M., Hawver, T. H., & Story, P. A. (2011). The relation between emotional intelligence and job performance: A meta‑analysis. <span class="italic">Journal of Organizational Behavior, 32</span>(5), 788–818.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Integration: Why Combine Them? -->
+      <section id="section-integration" class="academy-section-card cursor-pointer">
+        <span class="section-timer"></span>
+        <h2 class="text-xl font-mono text-sky-300 mb-2">Why Train Metacognition, IQ, and EQ Together?</h2>
+        <p class="text-slate-200 text-sm leading-relaxed">
+          Real‑world challenges rarely isolate cognitive from emotional demands. A leader must analyse data (IQ), 
+          regulate their own frustration (EQ), and reflect on their decision‑making process (metacognition). 
+          Neuroimaging studies show that executive functions (IQ) and emotion regulation (EQ) share overlapping 
+          prefrontal circuits (Ochsner & Gross, 2005), suggesting that integrated training may yield synergistic gains. 
+          Mindweave’s phased campaign deliberately interweaves these domains, culminating in a debrief that cements 
+          transferable learning.
+        </p>
+        <div class="mt-3 text-xs text-slate-400 border-l-2 border-cyan-700 pl-3">
+          <span class="font-mono text-cyan-300">Reference:</span>
+          <p>Ochsner, K. N., & Gross, J. J. (2005). The cognitive control of emotion. <span class="italic">Trends in Cognitive Sciences, 9</span>(5), 242–249.</p>
+        </div>
+      </section>
+
+      <!-- How Mindweave Trains These (summary table) -->
+      <section class="academy-section-card cursor-pointer">
+        <h2 class="text-xl font-mono text-sky-300 mb-2">Mindweave Training Matrix</h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-slate-300 font-mono">
+            <thead>
+              <tr class="border-b border-cyan-800">
+                <th class="text-left py-2 pr-4">Domain</th>
+                <th class="text-left py-2 pr-4">Specific Protocol</th>
+                <th class="text-left py-2">Targeted Competency</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td class="py-1 pr-4 align-top">Metacognition</td><td class="py-1 pr-4 align-top">Debrief (strategy articulation, adaptation, transfer)</td><td class="py-1 align-top">Planning, monitoring, evaluation</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Dual n‑back</td><td class="py-1 align-top">Working memory updating</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Resource management</td><td class="py-1 align-top">Planning under constraints</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Logic gate repair</td><td class="py-1 align-top">Deductive reasoning</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Task‑switching relay</td><td class="py-1 align-top">Cognitive flexibility</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Planning optimization</td><td class="py-1 align-top">Goal‑directed selection</td></tr>
+              <tr><td class="py-1 pr-4 align-top">IQ</td><td class="py-1 pr-4 align-top">Threat‑code puzzle</td><td class="py-1 align-top">Mathematical reasoning</td></tr>
+              <tr><td class="py-1 pr-4 align-top">EQ</td><td class="py-1 pr-4 align-top">Micro‑expression analysis</td><td class="py-1 align-top">Emotion perception (FACS)</td></tr>
+              <tr><td class="py-1 pr-4 align-top">EQ</td><td class="py-1 pr-4 align-top">Cognitive reappraisal</td><td class="py-1 align-top">Emotion regulation</td></tr>
+              <tr><td class="py-1 pr-4 align-top">EQ</td><td class="py-1 pr-4 align-top">Co‑regulation boundary</td><td class="py-1 align-top">Empathic limit‑setting</td></tr>
+              <tr><td class="py-1 pr-4 align-top">EQ</td><td class="py-1 pr-4 align-top">Active listening (chat)</td><td class="py-1 align-top">Emotion understanding</td></tr>
+              <tr><td class="py-1 pr-4 align-top">EQ</td><td class="py-1 pr-4 align-top">Biometric pulse regulation</td><td class="py-1 align-top">Physiological synchrony / self‑regulation</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- References (consolidated) -->
+      <section class="border-t border-white/10 pt-4 text-xs text-slate-500 font-mono space-y-1">
+        <p class="text-slate-400 mb-2 font-bold">📚 Full Reference List</p>
+        <p>Au, J., Sheehan, E., Tsai, N., Duncan, G. J., Buschkuehl, M., & Jaeggi, S. M. (2015). Improving fluid intelligence with training on working memory: a meta‑analysis. <span class="italic">Psychonomic Bulletin & Review, 22</span>(2), 366–377.</p>
+        <p>Cattell, R. B. (1963). Theory of fluid and crystallized intelligence: A critical experiment. <span class="italic">Journal of Educational Psychology, 54</span>(1), 1–22.</p>
+        <p>Flavell, J. H. (1979). Metacognition and cognitive monitoring: A new area of cognitive–developmental inquiry. <span class="italic">American Psychologist, 34</span>(10), 906–911.</p>
+        <p>Jaeggi, S. M., Buschkuehl, M., Jonides, J., & Perrig, W. J. (2008). Improving fluid intelligence with training on working memory. <span class="italic">Proceedings of the National Academy of Sciences, 105</span>(19), 6829–6833.</p>
+        <p>Mayer, J. D., & Salovey, P. (1997). What is emotional intelligence? In P. Salovey & D. Sluyter (Eds.), <span class="italic">Emotional development and emotional intelligence</span> (pp. 3–31). Basic Books.</p>
+        <p>Nelis, D., Quoidbach, J., Mikolajczak, M., & Hansenne, M. (2009). Increasing emotional intelligence: (How) is it possible? <span class="italic">Personality and Individual Differences, 47</span>(1), 36–41.</p>
+        <p>O’Boyle, E. H., Humphrey, R. H., Pollack, J. M., Hawver, T. H., & Story, P. A. (2011). The relation between emotional intelligence and job performance: A meta‑analysis. <span class="italic">Journal of Organizational Behavior, 32</span>(5), 788–818.</p>
+        <p>Ochsner, K. N., & Gross, J. J. (2005). The cognitive control of emotion. <span class="italic">Trends in Cognitive Sciences, 9</span>(5), 242–249.</p>
+        <p>Veenman, M. V. J., Van Hout‑Wolters, B. H. A. M., & Afflerbach, P. (2006). Metacognition and learning: Conceptual and methodological considerations. <span class="italic">Metacognition and Learning, 1</span>(1), 3–14.</p>
+      </section>
+
+      <!-- Navigation Buttons -->
+      <div class="flex flex-wrap gap-3 justify-end pt-4 border-t border-white/10">
+        <a href="/../mindweave/index.html" class="academy-btn">← Return to Campaign</a>
+        <a href="/../index.html" class="academy-btn academy-btn-secondary">Launcher</a>
+      </div>
+
+    </div>
+  </main>
+
+  <script type="module" src="../src/academy.js"></script>
+</body>
+</html>

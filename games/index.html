@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>R-Games Launcher</title>
+    <link rel="icon" type="image/x-icon" href="games/img/Logo01.svg" />
+    <link rel="stylesheet" href="games/src/style.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen flex items-center justify-center p-6">
+    <div class="page-bg-grid"></div>
+
+    <main class="glass-panel rounded-3xl max-w-5xl w-full p-8 md:p-12">
+      <header class="text-center mb-8 md:mb-12">
+        <p class="text-[11px] tracking-[0.3em] uppercase text-slate-500 mb-2">R-Games Command Uplink</p>
+        <h1 class="text-3xl md:text-5xl font-black tracking-tight neon-text">Choose Your Battlefield</h1>
+        <p class="text-slate-400 mt-3 text-sm md:text-base">Select a game to initialize agents and launch the experience.</p>
+      </header>
+
+      <section>
+        <div></div> <!--- If the game is taking more than 5 seconss to finish initializing a random quote appears and it changes every 10 seconds --->
+      </section>
+
+      <section id="game-grid" class="grid gap-4 md:gap-6 md:grid-cols-3">
+        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--sky-blue)]" data-game="chronos" data-launch="/games/chronos/index.html">
+          <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Tactical Strategy</p>
+          <h2 class="text-2xl font-extrabold mt-2 text-[var(--sky-blue)]">Chronos</h2>
+          <p class="text-xs text-slate-400 mt-3">Command temporal units and fight for core control.</p>
+        </button>
+
+        <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--signal-white)]" data-game="aether_shift" data-launch="/games/aether/index.html">
+          <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Arcane Systems</p>
+          <h2 class="text-2xl font-extrabold mt-2 text-[var(--signal-white)]">Aether Shift</h2>
+          <p class="text-xs text-slate-400 mt-3">Manipulate energy lanes and outmaneuver rival casters.</p>
+        </button>
+
+        <button id="btn-mindweave" class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[var(--traffic-red)]" data-game="mindweave" data-launch="/games/mindweave/index.html" data-requires-api="true">
+          <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Neural Puzzle</p>
+          <h2 class="text-2xl font-extrabold mt-2 text-[var(--traffic-red)]">Project: Mindweave</h2>
+          <p class="text-xs text-slate-400 mt-3">A Web-Based Cognitive and Socio-Emotional RPG Simulation.</p>
+        </button>
+      </section>
+
+      <section class="mt-4 md:mt-6">
+        <div class="grid gap-4 md:gap-6 md:grid-cols-3">
+          <button class="game-card card-glow rounded-2xl border border-white/10 bg-black/40 p-6 text-left transition-all hover:-translate-y-1 hover:border-[#ddba79]" data-game="patolli" data-launch="/games/Patolli/index.html">
+            <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Aztec Race</p>
+            <h2 class="text-2xl font-extrabold mt-1 text-[#ddba79]">Patolli</h2>
+            <p class="text-xs text-slate-400 mt-2">Cast beans, race the sacred cross, and outscore your rival.</p>
+          </button>
+
+          <button class="game-card card-glow rounded-xl border border-[#2f6f42]/60 bg-black/40 px-4 py-3 text-left transition-all hover:-translate-y-1 hover:border-[#5fbf73]" data-game="puluc" data-launch="/games/puluc/index.html">
+            <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Mayan Race</p>
+            <h2 class="text-2xl font-extrabold mt-1 text-[#6fcf84]">Puluc</h2>
+            <p class="text-xs text-slate-400 mt-2">Throw sticks, race warriors, and capture enemy stacks.</p>
+          </button>
+
+          <button type="button" disabled class="rounded-xl border border-dashed border-white/20 bg-black/20 px-4 py-3 text-sm font-semibold text-slate-400 cursor-not-allowed" aria-label="Parallax placeholder button">
+            <p class="text-[10px] tracking-[0.2em] uppercase text-slate-500">Aztec Race</p>
+            <h2 class="text-2xl font-extrabold mt-1 text-[var(--night-blue)]">Parallax Protocol</h2>
+            <p class="text-xs text-slate-400 mt-2">A sci-fi, turn-based cognitive strategy game</p>
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <div></div> <!--- The image of this div box changes when hovering on any of the game buttons. Under each image there's a text explaining the game --->
+      </section>
+
+      <div class="mt-8 border border-white/10 rounded-2xl bg-black/30 p-4 flex items-center justify-between gap-4">
+        <p id="status" class="text-xs md:text-sm text-slate-300">Awaiting game selection...</p>
+        <div class="flex items-center gap-3">
+          <button id="btn-reset-mindweave-api" class="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors text-xs font-medium">
+            Replace Mindweave LLM API Key
+          </button>
+          <div id="spinner" class="hidden h-4 w-4 border-2 border-white/20 border-t-[var(--sky-blue)] rounded-full animate-spin"></div>
+        </div>
+      </div>
+      <p class="mt-2 text-[11px] text-slate-500">Mindweave LLM API key storage location: your browser's localStorage entry <code>mindweave_llm_api_key</code> (OpenAI, Anthropic, Gemini, Groq, OpenRouter, xAI supported).</p>
+
+      <br /> <hr class="border-white/10" /> <br />
+      
+      <div class="flex justify-center">
+        <a href="https://github.com/The-Outsider-97/R-Games.git" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 px-6 py-3 rounded-lg border border-white/20 bg-black/40 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-all">
+          <svg viewBox="0 0 24 24" class="w-5 h-5 fill-current" aria-hidden="true">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.161 22 16.416 22 12c0-5.523-4.477-10-10-10z"></path>
+          </svg>
+          View on GitHub
+        </a>
+      </div>
+    </main>
+
+    <!-- API Key Modal (Hidden by default) -->
+    <div id="api-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+      <div class="glass-panel bg-slate-900 border border-white/20 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+        <h3 class="text-xl font-bold text-white mb-2">LLM Configuration Required</h3>
+        <p class="text-sm text-slate-400 mb-6">Project: MindWeave requires an LLM API key (OpenAI, Anthropic, Gemini, Groq, OpenRouter, or xAI) to power dynamic NPC interactions. This key is stored securely in your local browser storage and is never saved to our servers.</p>
+        
+        <div class="mb-4">
+          <label for="api-key-input" class="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">API Key</label>
+          <input type="password" id="api-key-input" placeholder="sk-..., sk-ant-..., gsk_..., AIza..." class="w-full bg-black/50 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-[var(--sky-blue)] transition-colors">
+        </div>
+        
+        <div class="flex justify-end gap-3 mt-6">
+          <button id="btn-cancel-api" class="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors text-sm font-medium">Cancel</button>
+          <button id="btn-save-api" class="px-4 py-2 rounded-lg bg-[var(--traffic-red)] text-white hover:bg-red-500 transition-colors text-sm font-medium">Save & Launch</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="games/src/script.js"></script>
+  </body>
+</html>

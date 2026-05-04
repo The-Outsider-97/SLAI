@@ -1,88 +1,110 @@
-This module provides the project’s hyperparameter-tuning surface and uncertainty-aware utility models.
+# Tuning Module (`src/tuning/`)
 
-## Scope
+This package provides the unified tuning pipeline for SLAI models, including:
 
-- **Search orchestration:** `tuner.py` chooses and executes the configured strategy.
-- **Search strategies:**
-  - `bayesian_search.py` for Bayesian optimization.
-  - `grid_search.py` for exhaustive discrete search.
-- **Config management:** `configs/hyperparam.yaml` with strategy- and model-specific parameter spaces.
-- **Utilities:** `utils/` contains helper components (including the Bayesian neural network implementation).
+- strategy orchestration (`HyperparamTuner`),
+- Bayesian optimization (`BayesianSearch`),
+- deterministic grid search (`GridSearch`),
+- built-in neural network evaluators for uncertainty-aware and deterministic models,
+- configuration loading/validation and persisted reports.
 
-## Design principles
+## Directory map
 
-The tuning stack should be treated as production infrastructure, not experimental notebooks:
+- `tuner.py`  
+  Top-level orchestrator that selects a strategy from config (`tuning.strategy`) and executes the appropriate search engine.
 
-1. **Deterministic where practical**
-   - Explicit random seeds for optimization/model sampling.
-   - Timestamped run artifacts for traceability.
+- `bayesian_search.py`  
+  Production-style Bayesian optimization wrapper around `skopt.gp_minimize` with:
+  - explicit config validation,
+  - search space validation,
+  - optional built-in BNN evaluation,
+  - JSON summaries + optional progress plots.
 
-2. **Strict validation and fail-fast behavior**
-   - Validate strategy settings (fold counts, call budgets, etc.) at startup.
-   - Validate search spaces (duplicate names, invalid bounds, empty candidate sets).
+- `grid_search.py`  
+  Exhaustive combinatorial search with:
+  - k-fold CV evaluation,
+  - optional built-in GNN evaluation,
+  - robust candidate validation,
+  - JSON summaries + optional performance plots.
 
-3. **Failure isolation**
-   - Individual trial/fold failures should not crash entire runs.
-   - Failures are logged and reflected in result artifacts.
+- `networks/`  
+  Native NumPy model implementations used by the tuning stack:
+  - `bayesian_neural_network.py` (variational BNN),
+  - `grid_neural_network.py` (deterministic dense NN for grid tuning).
 
-4. **Operational observability**
-   - Structured logs for start/stop, best-so-far updates, and failures.
-   - Persisted JSON summaries and progress plots for post-run analysis.
+- `utils/`  
+  Shared infrastructure:
+  - `config_loader.py` for loading global YAML config,
+  - `evaluator.py` for consistent BNN/GNN candidate scoring,
+  - `tuning_error.py` for structured error taxonomy.
 
-5. **Consistent interfaces**
-   - Shared conventions across search strategies for initialization, execution, and outputs.
+- `configs/hyperparam.yaml`  
+  Single source of truth for runtime defaults and model search spaces.
 
 ## Configuration contract
 
-Primary config file: `src/tuning/configs/hyperparam.yaml`.
+Primary config path: `src/tuning/configs/hyperparam.yaml`.
 
 Expected top-level sections:
 
-- `hyperparameters`: model-keyed search-space definitions.
-- `tuning`: global strategy selection.
-- `bayesian_search`: Bayesian runtime settings.
-- `grid_search`: grid runtime settings.
+- `model`, `run`, `training` (global metadata/runtime defaults)
+- `tuning` (strategy selector + generation behavior)
+- `bayesian_search` (Bayesian-specific runtime settings)
+- `grid_search` (grid-specific runtime settings)
+- `bnn` (Bayesian neural network defaults)
+- `gnn` (deterministic neural network defaults)
+- `hyperparameters` (model-keyed search spaces)
+- `configs` (generated JSON config output/input references)
 
-### Hyperparameter specification
+### Hyperparameter spec rules
 
-Each parameter spec should provide:
+Each model entry under `hyperparameters` is a list of parameter specs. Each parameter must include:
 
-- `name` (unique per model)
-- `type` (`integer`, `real`, or `categorical` depending on strategy)
-- either explicit `values` or numeric bounds (`min`/`max`) where supported.
+- `name` (unique within model scope)
+- `type` (`integer`, `real`, or `categorical`; aliases `int`/`float` are normalized)
+- either:
+  - `values` (categorical/discrete candidates), or
+  - `min` + `max` (for numeric ranges)
+- optional `prior` (for Bayesian numeric dimensions, e.g. `log-uniform`)
 
-## Usage patterns
+## Runtime behavior
 
-### Bayesian search
+### Strategy selection
 
-- Provide an objective function `f(params: dict) -> float`.
-- Choose objective semantics (`minimize` or `maximize`).
-- Run `run_search()` and consume:
-  - best parameters,
-  - best score,
-  - optimizer state.
+`HyperparamTuner` reads `tuning.strategy` and dispatches to:
 
-### Grid search
+- `BayesianSearch` when `strategy: bayesian`
+- `GridSearch` when `strategy: grid`
 
-- Provide evaluation function
-  `f(params, X_train, y_train, X_val, y_val) -> float`.
-- Run `run_search(X, y)` with data arrays.
-- Consume best parameters and persisted result summary.
+### Built-in evaluators
 
-## Bayesian Neural Network utility
+- Bayesian search can directly evaluate built-in `BayesianNeuralNetwork` candidates when no external evaluation function is provided.
+- Grid search can directly evaluate built-in `GridNeuralNetwork` candidates when no external evaluation function is provided.
 
-`utils/bayesian_neural_network.py` provides a lightweight variational BNN that can be used by planning/selection components for uncertainty-aware scoring.
+### Reporting and artifacts
 
-Key behavior:
+Both search strategies write timestamped JSON summaries to configured output paths and can render plots when enabled.
 
-- Gaussian variational posterior over weights/biases.
-- Reparameterization trick for Monte Carlo estimates.
-- ELBO-based updates and predictive uncertainty from MC sampling.
-- JSON save/load for reproducible deployment snapshots.
+## Consistency expectations
 
-## Operational recommendations
+When updating tuning code/config, keep these invariants:
 
-- Keep search spaces bounded and auditable; avoid unreviewed auto-generated large spaces.
-- Track dependency versions (`numpy`, `scikit-learn`, `scikit-optimize`, `joblib`, `matplotlib`) in lock files.
-- Prefer small smoke tests in CI and larger tuning jobs in scheduled/batch environments.
-- Version artifact schemas if external tooling depends on JSON field names.
+1. **No duplicated config authority**
+   - Keep strategy parameters in strategy sections (`bayesian_search`, `grid_search`) rather than repeating them in `tuning`.
+
+2. **Model defaults stay in model sections**
+   - BNN defaults belong in `bnn`.
+   - GNN defaults belong in `gnn`.
+
+3. **Search spaces stay model-keyed**
+   - Every model’s hyperparameters remain isolated and free of duplicate `name` entries.
+
+4. **Generated config references are accurate**
+   - Paths under `configs` should point to real `src/tuning/configs/*.json` locations.
+
+## Recommended maintenance workflow
+
+1. Update `hyperparam.yaml` first.
+2. Validate that all required keys are present for any strategy/model you run.
+3. Run a smoke tuning job for both strategies (or unit tests around configuration loading/validation).
+4. Verify JSON/plot outputs are produced under the configured report directories.

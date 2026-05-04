@@ -32,7 +32,23 @@ maml:
   hidden_size: 64
   meta_lr: 0.001
   inner_lr: 0.01
+  inner_steps: 1
   gamma: 0.99
+  support_episodes: 1
+  query_episodes: 1
+  max_trajectory_steps: 500
+  entropy_coef: 0.0
+  normalize_returns: True
+  first_order: False
+  grad_clip_norm: 1.0
+  gradient_explosion_threshold: 1000
+  eval_deterministic: False
+  use_reward_shaping: False
+  novelty_coef: 0.1
+  communication_bonus_coef: 2.0
+  task_completion_bonus_coef: 5.0
+  train_novelty_detector: True
+  checkpoint_dir: "src/agents/learning/checkpoints/maml"
 
 rl:
   learning_rate: 0.1

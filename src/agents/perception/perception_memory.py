@@ -24,28 +24,34 @@ from logs.logger import get_logger, PrettyPrinter
 logger = get_logger("Perception Memory")
 printer = PrettyPrinter
 
+
 class PerceptionMemory(nn.Module):
     """
     Perception Memory prioritizes memory efficiency while maintaining flexibility for different use cases.
     The combination of in-memory caching, gradient checkpointing,
     and disk storage provides a comprehensive memory management solution suitable for large-scale perception systems.
     """
-    def __init__(self):
+    def __init__(self, enable_checkpointing: Optional[bool] = None, enable_cache: Optional[bool] = None):
         super().__init__()
         self.config = load_global_config()
         self.memory_config = get_config_section('perception_memory')
-        self.cache = OrderedDict()
-        self.tag_index = defaultdict(list)
+
+        # Allow overriding config via arguments
+        self.enable_checkpointing = enable_checkpointing if enable_checkpointing is not None else self.memory_config.get('enable_checkpointing', True)
+        self.enable_cache = enable_cache if enable_cache is not None else self.memory_config.get('enable_cache', True)
+
         self.checkpoint_dir = self.memory_config.get('checkpoint_dir')
         self.cache_dir = self.memory_config.get('cache_dir')
-        self.max_cache_size = self.memory_config.get('max_cache_size')
-        self.enable_checkpointing = self.memory_config.get('enable_checkpointing')
-        self.enable_cache = self.memory_config.get('enable_cache')
+        self.max_cache_size = self.memory_config.get('max_cache_size', 100)
 
         if self.enable_checkpointing and self.checkpoint_dir:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
         if self.enable_cache and self.cache_dir:
             os.makedirs(self.cache_dir, exist_ok=True)
+
+        # Cache storage
+        self.cache = OrderedDict()
+        self.tag_index = defaultdict(list)
 
         # Memory metrics
         self.hit_count = 0
@@ -59,8 +65,6 @@ class PerceptionMemory(nn.Module):
                  tags: Optional[List[str]] = None,
                  metadata: Optional[Dict] = None) -> str:
         """Cache a tensor with optional tags and metadata"""
-        printer.status("MEMORY", "Caching items", "info")
-
         if not self.enable_cache:
             return ""
 
@@ -96,15 +100,11 @@ class PerceptionMemory(nn.Module):
 
     def _generate_key(self, *args) -> str:
         """Generate unique key from input arguments"""
-        printer.status("MEMORY", "Generate unique key", "info")
-
         key_str = "|".join(str(arg) for arg in args)
         return hashlib.sha256(key_str.encode()).hexdigest()
 
     def _remove_from_tag_index(self, key: str):
         """Remove key from tag index"""
-        printer.status("MEMORY", "Removing key from tag index", "info")
-
         empty_tags = []
         for tag, keys in self.tag_index.items():
             if key in keys:
@@ -117,10 +117,8 @@ class PerceptionMemory(nn.Module):
     def retrieve(self, 
                key: Optional[str] = None, 
                tag: Optional[str] = None,
-               device: Optional[torch.device] = None) -> torch.Tensor:
+               device: Optional[torch.device] = None) -> Union[torch.Tensor, List[torch.Tensor]]:
         """Retrieve tensor by key or tag"""
-        printer.status("MEMORY", "Retrieving tensor by key or tag", "info")
-
         if not self.enable_cache:
             raise RuntimeError("Cache is disabled")
             
@@ -154,8 +152,6 @@ class PerceptionMemory(nn.Module):
 
     def clear_cache(self, key: Optional[str] = None, tag: Optional[str] = None):
         """Clear cache by key, tag, or entirely"""
-        printer.status("MEMORY", "Clearing cache by key, tag, or entirely", "info")
-
         if key:
             if key in self.cache:
                 del self.cache[key]
@@ -183,8 +179,6 @@ class PerceptionMemory(nn.Module):
                        preserve_rng_state: bool = False,
                        **kwargs) -> Any:
         """Run function with gradient checkpointing"""
-        printer.status("MEMORY", "Running function with gradient checkpointing", "info")
-
         if not self.enable_checkpointing:
             return fn(*args, **kwargs)
             
@@ -201,8 +195,6 @@ class PerceptionMemory(nn.Module):
                  file_prefix: str = "memory_checkpoint",
                  metadata: Optional[Dict] = None) -> str:
         """Save tensor to disk checkpoint"""
-        printer.status("MEMORY", "Saving tensor to disk checkpoint", "info")
-
         metadata = metadata or {}
         metadata.update({
             'shape': list(tensor.shape),
@@ -225,8 +217,6 @@ class PerceptionMemory(nn.Module):
 
     def load_checkpoint(self, filename: str, device: Optional[torch.device] = None) -> torch.Tensor:
         """Load tensor from disk checkpoint"""
-        printer.status("MEMORY", "Loading checkpoint...", "info")
-
         checkpoint = torch.load(filename, map_location=device)
         tensor = checkpoint['tensor']
         logger.debug(f"Loaded checkpoint from {filename}")
@@ -234,8 +224,6 @@ class PerceptionMemory(nn.Module):
 
     def memory_stats(self) -> Dict[str, Any]:
         """Get memory usage statistics"""
-        printer.status("MEMORY", "Retrieving memory stats", "info")
-
         cache_size = sum(
             t['tensor'].element_size() * t['tensor'].numel() 
             for t in self.cache.values()
@@ -273,29 +261,7 @@ class PerceptionMemory(nn.Module):
                 checkpoint_fn: Optional[Callable] = None) -> Union[torch.Tensor, str, List[torch.Tensor], None]:
         """
         Unified forward method for memory operations with intelligent auto-detection.
-        
-        Args:
-            input: Can be:
-                - Tensor (for caching)
-                - Key string (for retrieval)
-                - List of tags (for tag-based retrieval)
-            operation: One of ['auto', 'cache', 'retrieve', 'retrieve_by_tag', 'checkpoint', 'run_checkpointed']
-            tags: List of tags for caching or retrieval
-            metadata: Additional metadata for caching
-            device: Target device for retrieved tensors
-            file_prefix: Prefix for checkpoint files
-            preserve_rng_state: For gradient checkpointing
-            checkpoint_fn: Function to run with gradient checkpointing
-            
-        Returns:
-            Depending on operation:
-                - Cache: Cache key (str)
-                - Retrieve: Tensor or list of tensors
-                - Checkpoint: Checkpoint filename (str)
-                - Run_checkpointed: Result of checkpointed function
         """
-        printer.status("MEMORY", f"PerceptionMemory forward - Operation: {operation}", "info")
-        
         # Auto-detect operation based on input type
         if operation == 'auto':
             if isinstance(input, torch.Tensor):
@@ -306,7 +272,6 @@ class PerceptionMemory(nn.Module):
                 operation = 'retrieve_by_tag'
             else:
                 raise ValueError("Could not auto-detect operation from input type")
-            printer.status("MEMORY", f"Auto-detected operation: {operation}", "debug")
 
         # Execute the requested operation
         if operation == 'cache':
@@ -329,7 +294,6 @@ class PerceptionMemory(nn.Module):
             for tag in tags:
                 items = self.retrieve(tag=tag, device=device)
                 for i, item in enumerate(items):
-                    # Use a composite key to track items across tags
                     item_key = f"{tag}_{i}"
                     if item_key not in results:
                         results[item_key] = {'tensor': item, 'count': 1}
@@ -367,17 +331,13 @@ class PerceptionMemory(nn.Module):
         
         else:
             raise ValueError(f"Unsupported operation: {operation}")
-        
-    def expensive_operation(x, y):
-        # Complex computation
-        result = {}
-        return result
 
     def __repr__(self):
         stats = self.memory_stats()
         return (f"PerceptionMemory(cache_size={stats['cache_size']}, "
                 f"memory={stats['memory_usage_mb']:.2f}MB, "
                 f"hit_rate={stats['hit_rate']:.2f})")
+
 
 if __name__ == "__main__":
     print("\n=== Running Perception Memory Test ===\n")

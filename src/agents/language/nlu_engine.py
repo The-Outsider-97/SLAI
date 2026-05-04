@@ -1,1771 +1,1564 @@
 """
+Natural Language Understanding Engine
+
 Core Function:
-Performs Natural Language Understanding — extracting structured meaning from raw user input.
+Performs Natural Language Understanding — extracting structured meaning from
+normalized user input and returning a LinguisticFrame that DialogueContext and
+NLGEngine can consume.
 
 Responsibilities:
-- Tokenize input (using your BPE tokenizer).
-- Identify intents (what the user wants).
-- Extract entities (important values like names, dates, etc.).
-- Leverage the structured wordlist and embeddings for semantic similarity, synonyms, etc.
+- Identify intents with deterministic pattern, trigger, keyword, entity, and optional semantic evidence.
+- Extract entities with source spans, normalized values, confidence, and validation metadata.
+- Compute sentiment, modality, speech-act type, lexical coverage, confidence, and alternatives.
+- Integrate with the agent pipeline without secretly re-running NLP or creating another NLPEngine.
+- Accept already-computed NLP tokens/dependencies from the LanguageAgent when available.
+- Support a shared injected NLPEngine for standalone NLU usage without creating circular imports.
+- Preserve the current LanguageAgent contract: NLUEngine(...).parse(text) returns LinguisticFrame.
 
-Why it matters:
-This is the brain of the language agent — it translates text into actionable representations that drive the agent’s behavior.
+Pipeline position:
+    OrthographyProcessor -> NLPEngine -> GrammarProcessor -> NLUEngine -> DialogueContext -> NLGEngine
+
+Design note:
+NLU depends conceptually on NLP annotations, but it should not own a second NLP pipeline by default.
+This module therefore uses dependency injection:
+    NLUEngine(wordlist_instance=wordlist, nlp_engine=shared_nlp_engine)
+or per-call annotations:
+    nlu.parse(text, nlp_tokens=tokens, dependencies=dependencies, grammar_result=grammar_result)
+If neither is provided, the module falls back to lightweight internal word-tokenization so it remains
+usable in direct tests.
 """
-import datetime
+
+from __future__ import annotations
+
+import datetime as datetime_module
+import json
 import math
 import re
-import torch
-import yaml, json
-import textstat
-import ply.lex as lex
-import multiprocessing as mp
+import statistics
+import yaml
 
+from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
-from functools import partial
-from dataclasses import dataclass, field, asdict
-from collections import deque, defaultdict
-from typing import Dict, Tuple, Optional, List, Any, Union, OrderedDict, Set, Iterable
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
-from src.agents.language.utils.config_loader import load_global_config, get_config_section
-from src.agents.language.utils.linguistic_frame import LinguisticFrame, SpeechActType
-from src.agents.language.utils.language_tokenizer import LanguageTokenizer
-from src.agents.language.utils.language_transformer import LanguageTransformer
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.linguistic_frame import LinguisticFrame, SpeechActType
+from .utils.language_error import * # type: ignore
+from .utils.language_helpers import * # type: ignore
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
+
+if TYPE_CHECKING:
+    from .nlp_engine import NLPEngine, Token as NLPToken
+    from .modules.rules import DependencyRelation
 
 logger = get_logger("NLU Engine")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-# Forward declaration for Wordlist to satisfy type hints before actual import
-class Wordlist:
-    """Advanced linguistic processor with phonetics, morphology, and semantic analysis"""
-    
-    def __init__(self, n: int = 3):
-        self.config = load_global_config()
-        self.main_wordlist_path = self.config.get('main_wordlist_path')
-        self.wordlist_path = self.config.get('wordlist_path')
-        self.modality_markers_path = self.config.get('modality_markers_path')
+Span = Tuple[int, int]
+JsonMap = Dict[str, Any]
+TokenLike = Any
+DependencyLike = Any
 
-        self.nlu_config = get_config_section('nlu')
-        self.sentiment_lexicon_path = self.nlu_config.get('sentiment_lexicon_path')
-        self.custom_intent_patterns_path = self.nlu_config.get('custom_intent_patterns_path')
-        self.custom_entity_patterns_path = self.nlu_config.get('custom_entity_patterns_path')
-        self.morphology_rules_path = self.nlu_config.get('morphology_rules_path')
-        self.glove_synonym_threshold = self.nlu_config.get('glove_synonym_threshold')
-        self.glove_top_synonyms = self.nlu_config.get('glove_top_synonyms')
-        self.glove_path = self.nlu_config.get('glove_path')
 
-        self.cache_config = get_config_section('language_cache')
-        self.max_cache_size = self.cache_config.get('max_size')
+# ---------------------------------------------------------------------------
+# Small local coercion helpers
+# ---------------------------------------------------------------------------
+# These intentionally stay tiny and NLU-specific. Larger generic helpers should
+# remain in language_helpers.py. The current subsystem still has mixed helper
+# maturity across files, so NLU avoids depending on non-guaranteed helper names.
+def _text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
 
-        self.glove_vectors = self._load_glove_vectors()
 
-        self.tokenizer = LanguageTokenizer()
-        self.transformer = LanguageTransformer()
+def _strip_text(value: Any, default: str = "") -> str:
+    return _text(value, default).strip()
 
-        self.path = Path(self.wordlist_path)
-        self.path = Path(self.main_wordlist_path)
-        self.n = n
-        self.segmented_ngram_models = {}
-        self.data = {}
-        self.metadata = {}
-        try:
-            self._load()
-        except (FileNotFoundError, ValueError, Exception) as e:
-            logger.error(f"Failed to load wordlist data from {self.path}: {e}. Initializing with empty data.")
-            self.data = {}
-            self.metadata = {}
-        
-        # Advanced caching systems
-        self.lru_cache = OrderedDict()
-        self.lfu_cache = defaultdict(int)
-        
-        # Precomputed linguistic data
-        self.phonetic_index = defaultdict(set)
-        self.ngram_index = defaultdict(set)
-        if self.data:
-            self._precompute_linguistic_data()
-        else:
-            logger.warning("Wordlist data empty, skipping precomputation.")
 
-        self.ngram_model = defaultdict(lambda: defaultdict(int)) # Language model parameters
+def _lower(value: Any) -> str:
+    return _strip_text(value).casefold()
 
-        # Keyboard proximity costs, using a QWERTY keyboard
-        self.keyboard_layout = {
-            'q': {'w': 0.5, 'a': 0.7}, 'w': {'e': 0.5, 's': 0.7},
-            'w': {'q': 0.4, 'e': 0.4, 'a': 0.6, 's': 0.5, 'd': 0.6},
-            'e': {'w': 0.4, 'r': 0.4, 's': 0.6, 'd': 0.5, 'f': 0.6},
-            'r': {'e': 0.4, 't': 0.4, 'd': 0.6, 'f': 0.5, 'g': 0.6},
-            't': {'r': 0.4, 'y': 0.4, 'f': 0.6, 'g': 0.5, 'h': 0.6},
-            'y': {'t': 0.4, 'u': 0.4, 'g': 0.6, 'h': 0.5, 'j': 0.6},
-            'u': {'y': 0.4, 'i': 0.4, 'h': 0.6, 'j': 0.5, 'k': 0.6},
-            'i': {'u': 0.4, 'o': 0.4, 'j': 0.6, 'k': 0.5, 'l': 0.6},
-            'o': {'i': 0.4, 'p': 0.4, 'k': 0.6, 'l': 0.5},
-            'p': {'o': 0.4, 'l': 0.6},
-            
-            'a': {'q': 0.6, 'w': 0.6, 's': 0.4, 'z': 0.7},
-            's': {'q': 0.7, 'w': 0.5, 'e': 0.6, 'a': 0.4, 'd': 0.4, 'z': 0.6, 'x': 0.7},
-            'd': {'w': 0.6, 'e': 0.5, 'r': 0.6, 's': 0.4, 'f': 0.4, 'x': 0.6, 'c': 0.7},
-            'f': {'e': 0.6, 'r': 0.5, 't': 0.6, 'd': 0.4, 'g': 0.4, 'c': 0.6, 'v': 0.7},
-            'g': {'r': 0.6, 't': 0.5, 'y': 0.6, 'f': 0.4, 'h': 0.4, 'v': 0.6, 'b': 0.7},
-            'h': {'t': 0.6, 'y': 0.5, 'u': 0.6, 'g': 0.4, 'j': 0.4, 'b': 0.6, 'n': 0.7},
-            'j': {'y': 0.6, 'u': 0.5, 'i': 0.6, 'h': 0.4, 'k': 0.4, 'n': 0.6, 'm': 0.7},
-            'k': {'u': 0.6, 'i': 0.5, 'o': 0.6, 'j': 0.4, 'l': 0.4, 'm': 0.6},
-            'l': {'i': 0.6, 'o': 0.5, 'p': 0.6, 'k': 0.4},
-            
-            'z': {'a': 0.7, 's': 0.6, 'x': 0.4},
-            'x': {'s': 0.7, 'd': 0.6, 'z': 0.4, 'c': 0.4},
-            'c': {'d': 0.7, 'f': 0.6, 'x': 0.4, 'v': 0.4},
-            'v': {'f': 0.7, 'g': 0.6, 'c': 0.4, 'b': 0.4},
-            'b': {'g': 0.7, 'h': 0.6, 'v': 0.4, 'n': 0.4},
-            'n': {'h': 0.7, 'j': 0.6, 'b': 0.4, 'm': 0.4},
-            'm': {'j': 0.7, 'k': 0.6, 'n': 0.4},
-            
-            # Number row and special characters
-            '1': {'2': 0.4, 'q': 0.6, '!': 0.3},
-            '!': {'1': 0.3, '2': 0.5, 'q': 0.6},
-            '2': {'1': 0.4, '3': 0.4, 'q': 0.6, 'w': 0.6, '@': 0.3},
-            '@': {'2': 0.3, '3': 0.5, 'w': 0.6},
-            '3': {'2': 0.4, '4': 0.4, 'w': 0.6, 'e': 0.6, '#': 0.3},
-            '#': {'3': 0.3, '4': 0.5, 'e': 0.6},
-            '4': {'3': 0.4, '5': 0.4, 'e': 0.6, 'r': 0.6, '$': 0.3},
-            '$': {'4': 0.3, '5': 0.5, 'r': 0.6},
-            '5': {'4': 0.4, '6': 0.4, 'r': 0.6, 't': 0.6, '%': 0.3},
-            '%': {'5': 0.3, '6': 0.5, 't': 0.6},
-            '6': {'5': 0.4, '7': 0.4, 't': 0.6, 'y': 0.6, '^': 0.3},
-            '^': {'6': 0.3, '7': 0.5, 'y': 0.6},
-            '7': {'6': 0.4, '8': 0.4, 'y': 0.6, 'u': 0.6, '&': 0.3},
-            '&': {'7': 0.3, '8': 0.5, 'u': 0.6},
-            '8': {'7': 0.4, '9': 0.4, 'u': 0.6, 'i': 0.6, '*': 0.3},
-            '*': {'8': 0.3, '9': 0.5, 'i': 0.6},
-            '9': {'8': 0.4, '0': 0.4, 'i': 0.6, 'o': 0.6, '(': 0.3},
-            '(': {'9': 0.3, '0': 0.5, 'o': 0.6},
-            '0': {'9': 0.4, 'p': 0.6, ')': 0.3, '-': 0.4},
-            ')': {'0': 0.3, 'p': 0.6, '-': 0.5},
 
-            # Top-right special characters
-            '-': {'0': 0.4, 'p': 0.6, '=': 0.4, '_': 0.3},
-            '_': {'-': 0.3, '=': 0.5},
-            '=': {'-': 0.4, '[': 0.6, '+': 0.3},
-            '+': {'=': 0.3, '[': 0.5},
-            
-            # Brackets and backslash
-            '[': {'p': 0.6, ']': 0.4, '=': 0.6, '{': 0.3},
-            '{': {'[': 0.3, ']': 0.5},
-            ']': {'[': 0.4, '\\': 0.4, '}': 0.3},
-            '}': {']': 0.3, '\\': 0.5},
-            '\\': {']': 0.4, "'": 0.6, '|': 0.3},
-            '|': {'\\': 0.3},
+def _clamp(value: Any, minimum: float = 0.0, maximum: float = 1.0, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
-            # Right-side punctuation
-            ';': {'l': 0.6, "'": 0.4, ':': 0.3},
-            ':': {';': 0.3, "'": 0.5},
-            "'": {';': 0.4, 'k': 0.6, ',': 0.4, '"': 0.3},
-            '"': {"'": 0.3, ',': 0.5},
-            ',': {'m': 0.6, '.': 0.4, 'k': 0.6, '<': 0.3},
-            '<': {',': 0.3, '.': 0.5},
-            '.': {',': 0.4, '/': 0.4, 'm': 0.6, '>': 0.3},
-            '>': {'.': 0.3, '/': 0.5},
-            '/': {'.': 0.4, 'shift': 0.6, '?': 0.3},
-            '?': {'/': 0.3},
 
-            # Space and modifiers (approximate positions)
-            'space': {'v': 0.7, 'b': 0.7, 'n': 0.7, 'm': 0.7},
-            'caps': {'a': 0.6, 'q': 0.6, 'tab': 0.4},
-            'tab': {'q': 0.6, 'caps': 0.4},
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [value]
+
+
+def _as_mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _dedupe(values: Iterable[Any]) -> List[Any]:
+    seen: Set[str] = set()
+    output: List[Any] = []
+    for value in values:
+        marker = json.dumps(value, sort_keys=True, default=str) if isinstance(value, (dict, list, tuple)) else str(value)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        output.append(value)
+    return output
+
+
+def _safe_json(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(k): _safe_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_json(item) for item in value]
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if hasattr(value, "__dict__"):
+        return {k: _safe_json(v) for k, v in vars(value).items() if not k.startswith("_")}
+    return str(value)
+
+
+def _read_structured_file(path: Union[str, Path, None]) -> Any:
+    if path in (None, "", "none", "None"):
+        return None
+    file_path = Path(str(path))
+    if not file_path.exists():
+        return None
+    if file_path.suffix.lower() in {".yaml", ".yml"}:
+        with file_path.open("r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    with file_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _word_tokenize(text: str) -> List[Tuple[str, Span]]:
+    pattern = re.compile(r"\b[\w]+(?:['’][\w]+)?\b|[^\w\s]", re.UNICODE)
+    return [(match.group(0), (int(match.start()), int(match.end()))) for match in pattern.finditer(text)]
+
+
+def _phrase_to_regex(phrase: str) -> str:
+    cleaned = _strip_text(phrase)
+    if not cleaned:
+        return r"$a"
+    # Treat obvious regex expressions as regex. Plain language examples become phrase patterns.
+    regex_markers = {"\\b", "(?:", "(?P", "[", "]", "^", "$", ".*", "\\d", "\\w", "|", "+", "*"}
+    if any(marker in cleaned for marker in regex_markers):
+        return cleaned
+    pieces = [re.escape(part) for part in cleaned.split()]
+    return r"\b" + r"\s+".join(pieces) + r"\b"
+
+
+def _extract_attr(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+# ---------------------------------------------------------------------------
+# Enums and dataclasses
+# ---------------------------------------------------------------------------
+class IntentMatchSource(str, Enum):
+    PATTERN = "pattern"
+    TRIGGER = "trigger"
+    KEYWORD = "keyword"
+    EXAMPLE = "example"
+    ENTITY = "entity"
+    CONTEXT = "context"
+    FALLBACK = "fallback"
+    EMBEDDING = "embedding"
+
+
+class EntitySource(str, Enum):
+    REGEX = "regex"
+    BUILTIN = "builtin"
+    WORDLIST = "wordlist"
+    NLP = "nlp"
+    CONTEXT = "context"
+
+
+class NLUSeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class NLUIssue:
+    code: str
+    message: str
+    severity: NLUSeverity = NLUSeverity.WARNING
+    recoverable: bool = True
+    details: JsonMap = field(default_factory=dict)
+
+    def to_dict(self) -> JsonMap:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity.value,
+            "recoverable": self.recoverable,
+            "details": _safe_json(self.details),
         }
 
-        # Add reverse relationships automatically
-        reverse_mapping = defaultdict(dict)
-        for char, neighbors in self.keyboard_layout.items():
-            for neighbor, cost in neighbors.items():
-                if neighbor not in reverse_mapping or char not in reverse_mapping[neighbor]:
-                    reverse_mapping[neighbor][char] = cost
 
-        for char, neighbors in reverse_mapping.items():
-             self.keyboard_layout[char] = {**self.keyboard_layout.get(char, {}), **neighbors}
+@dataclass(frozen=True)
+class NLUInputToken:
+    text: str
+    lemma: str
+    pos: str
+    index: int
+    start_char: Optional[int] = None
+    end_char: Optional[int] = None
+    is_stop: bool = False
+    is_punct: bool = False
+    morphology: JsonMap = field(default_factory=dict)
+    metadata: JsonMap = field(default_factory=dict)
 
-    def add_word(self, word: str, metadata: dict = None):
-        word_lower = word.lower()
-        if word_lower not in self.data:
-            self.data[word_lower] = metadata or {}
-            # Update indices
-            self._update_linguistic_data(word_lower)
+    @property
+    def lower(self) -> str:
+        return self.text.casefold()
 
-    def _update_linguistic_data(self, text: str):
-        """
-        Updates the internal vocabulary and tag patterns based on new input text.
-        This helps the engine adapt over time with new domain-specific language.
-    
-        Args:
-            text (str): The raw input sentence to be used for updating linguistic data.
-        """
-        if not text:
-            logger.warning("No text provided for linguistic data update.")
-            return
-    
-        # Tokenize and tag the input
-        tokens = self.tokenizer.tokenize(text)
-        tagged_tokens = self.tagger.tag(tokens)
-    
-        # Update word frequency in the wordlist
-        for token, tag in tagged_tokens:
-            if self.wordlist is not None:
-                if hasattr(self.wordlist, "update_term"):
-                    self.wordlist.update_term(token)
-                elif isinstance(self.wordlist, dict):
-                    self.wordlist.setdefault("terms", []).append(token)
-    
-        # Optionally, update any learned patterns or tag associations
-        for _, tag in tagged_tokens:
-            self.tag_frequencies[tag] += 1
-    
-        logger.info(f"Linguistic data updated with {len(tagged_tokens)} tokens from new input.")
+    @property
+    def span(self) -> Optional[Span]:
+        if self.start_char is None or self.end_char is None:
+            return None
+        return (self.start_char, self.end_char)
 
-    def _load_glove_vectors(self) -> Dict[str, List[float]]:
-        """Load pre-trained GloVe vectors from JSON file"""
-        printer.status("INIT", "GloVe initialized", "info")
+    def to_dict(self) -> JsonMap:
+        return _safe_json(asdict(self))
 
-        if not self.glove_path or not Path(self.glove_path).exists():
-            logger.warning(f"GloVe vectors file not found: {self.glove_path}")
-            return {}
-        
-        try:
-            with open(self.glove_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load GloVe vectors: {e}")
-            return {}
+
+@dataclass(frozen=True)
+class WordlistEntry:
+    word: str
+    normalized: str
+    pos: Tuple[str, ...] = ()
+    synonyms: Tuple[str, ...] = ()
+    related_terms: Tuple[str, ...] = ()
+    sentiment: float = 0.0
+    frequency: float = 0.0
+    metadata: JsonMap = field(default_factory=dict)
+
+    def has_pos(self, *labels: str) -> bool:
+        wanted = {_lower(label) for label in labels if label}
+        return bool(wanted.intersection({_lower(label) for label in self.pos}))
+
+    def to_dict(self) -> JsonMap:
+        return _safe_json(asdict(self))
+
+
+@dataclass(frozen=True)
+class IntentPattern:
+    intent: str
+    pattern: str
+    source: IntentMatchSource = IntentMatchSource.PATTERN
+    weight: float = 1.0
+    priority: int = 0
+    required_entities: Tuple[str, ...] = ()
+    examples: Tuple[str, ...] = ()
+    keywords: Tuple[str, ...] = ()
+    act_type: Optional[str] = None
+    metadata: JsonMap = field(default_factory=dict)
+    flags: int = re.IGNORECASE
+
+    def compile(self) -> re.Pattern[str]:
+        return re.compile(self.pattern, self.flags)
+
+    def to_dict(self) -> JsonMap:
+        payload = asdict(self)
+        payload["source"] = self.source.value
+        payload.pop("flags", None)
+        return _safe_json(payload)
+
+
+@dataclass(frozen=True)
+class EntityPattern:
+    label: str
+    pattern: str
+    source: EntitySource = EntitySource.REGEX
+    normalizer: Optional[str] = None
+    confidence: float = 0.85
+    priority: int = 0
+    validation: Optional[str] = None
+    metadata: JsonMap = field(default_factory=dict)
+    flags: int = re.IGNORECASE
+
+    def compile(self) -> re.Pattern[str]:
+        return re.compile(self.pattern, self.flags)
+
+    def to_dict(self) -> JsonMap:
+        payload = asdict(self)
+        payload["source"] = self.source.value
+        payload.pop("flags", None)
+        return _safe_json(payload)
+
+
+@dataclass(frozen=True)
+class IntentCandidate:
+    intent: str
+    confidence: float
+    source: IntentMatchSource
+    matched_text: Optional[str] = None
+    pattern: Optional[str] = None
+    priority: int = 0
+    evidence: Tuple[str, ...] = ()
+    required_entities: Tuple[str, ...] = ()
+    act_type: Optional[str] = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    def to_dict(self) -> JsonMap:
+        payload = asdict(self)
+        payload["source"] = self.source.value
+        return _safe_json(payload)
+
+
+@dataclass(frozen=True)
+class EntityMention:
+    label: str
+    text: str
+    value: Any
+    span: Span
+    confidence: float = 0.85
+    source: EntitySource = EntitySource.REGEX
+    normalized: Optional[str] = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    def to_dict(self) -> JsonMap:
+        payload = asdict(self)
+        payload["source"] = self.source.value
+        return _safe_json(payload)
+
+
+@dataclass(frozen=True)
+class NLUAnalysisResult:
+    text: str
+    normalized_text: str
+    frame: LinguisticFrame
+    tokens: Tuple[NLUInputToken, ...]
+    intents: Tuple[IntentCandidate, ...]
+    entities: Tuple[EntityMention, ...]
+    lexical_coverage: float
+    issues: Tuple[NLUIssue, ...] = ()
+    dependencies: Tuple[Any, ...] = ()
+    grammar_result: Optional[Any] = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return not any(issue.severity == NLUSeverity.ERROR and not issue.recoverable for issue in self.issues)
+
+    def to_dict(self) -> JsonMap:
+        return {
+            "ok": self.ok,
+            "text": self.text,
+            "normalized_text": self.normalized_text,
+            "frame": {
+                "intent": self.frame.intent,
+                "entities": _safe_json(self.frame.entities),
+                "sentiment": self.frame.sentiment,
+                "modality": self.frame.modality,
+                "confidence": self.frame.confidence,
+                "act_type": self.frame.act_type.value if isinstance(self.frame.act_type, SpeechActType) else str(self.frame.act_type),
+                "propositional_content": self.frame.propositional_content,
+                "illocutionary_force": self.frame.illocutionary_force,
+                "perlocutionary_effect": self.frame.perlocutionary_effect,
+            },
+            "tokens": [token.to_dict() for token in self.tokens],
+            "intents": [candidate.to_dict() for candidate in self.intents],
+            "entities": [entity.to_dict() for entity in self.entities],
+            "lexical_coverage": self.lexical_coverage,
+            "issues": [issue.to_dict() for issue in self.issues],
+            "dependencies": [_safe_json(dep) for dep in self.dependencies],
+            "grammar_result": _safe_json(self.grammar_result),
+            "metadata": _safe_json(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class NLUStats:
+    parse_calls: int
+    pattern_count: int
+    entity_pattern_count: int
+    wordlist_size: int
+    diagnostics_count: int
+    history_length: int
+    has_shared_nlp_engine: bool
+    tokenizer_attached: bool
+    transformer_attached: bool
+
+    def to_dict(self) -> JsonMap:
+        return _safe_json(asdict(self))
+
+
+# ---------------------------------------------------------------------------
+# Wordlist
+# ---------------------------------------------------------------------------
+class Wordlist:
+    """
+    Lightweight structured wordlist used by NLU.
+
+    The previous Wordlist eagerly initialized tokenizer/transformer resources and carried a large
+    amount of unrelated keyboard/spelling behavior. This version is deliberately lexical: it loads
+    structured entries, supports lookup, rough lexical probability, phonetic candidates, stemming,
+    and semantic similarity through synonyms/related terms. Heavy model/tokenizer components should
+    be injected into NLUEngine, not owned by Wordlist.
+    """
+
+    def __init__(self, n: int = 3, *, path: Optional[Union[str, Path]] = None) -> None:
+        self.config = load_global_config()
+        self.nlu_config = get_config_section("nlu") or {}
+        self.path = Path(str(path or self.nlu_config.get("structured_wordlist_path") or self.config.get("main_wordlist_path") or self.config.get("wordlist_path") or ""))
+        self.n = int(n)
+        self.data: Dict[str, JsonMap] = {}
+        self.entries: Dict[str, WordlistEntry] = {}
+        self.metadata: JsonMap = {}
+        self.phonetic_index: Dict[str, Set[str]] = defaultdict(set)
+        self.ngram_index: Dict[str, Set[str]] = defaultdict(set)
+        self.lru_cache: OrderedDict[str, Optional[JsonMap]] = OrderedDict()
+        self.cache_limit = int(self.nlu_config.get("wordlist_cache_size", 512) or 512)
+        self._load()
+        self._precompute_linguistic_data()
+
+    @property
+    def vocabulary(self) -> Set[str]:
+        return set(self.entries.keys())
+
+    @property
+    def words(self) -> Set[str]:
+        return self.vocabulary
 
     def _load(self) -> None:
-        """Robust data loading with validation"""
-        printer.status("INIT", "Loader initialized", "info")
-
-        if not self.path.exists():
-            raise FileNotFoundError(f"Wordlist missing: {self.path}")
-
-        with open(self.path, 'r', encoding='utf-8') as f:
-            raw = json.load(f)
-
-        required_keys = {'words', 'metadata'} # Simplified required keys based on usage
-        if not all(key in raw for key in required_keys):
-             # Allow just a list of words as a fallback simple wordlist
-             if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
-                 logger.warning(f"Wordlist {self.path} is a simple list. Using basic lookup only.")
-                 self.data = {word.lower(): {} for word in raw} # Convert list to dict structure
-                 self.metadata = {"version": "N/A", "language": "en (assumed)"}
-                 return # Loading successful, but basic structure
-             else:
-                 raise ValueError("Invalid wordlist format - missing required keys 'words' or 'metadata', and not a simple list.")
-
-        if not isinstance(raw['words'], dict):
-             raise ValueError("Invalid wordlist format - 'words' key must contain a dictionary.")
-
-        self.data = raw['words']
-        self.metadata = raw.get('metadata', {}) # Metadata is optional
-
-    def _validate_word_entries(self) -> None:
-        """Ensure all entries have valid structure"""
-        printer.status("INIT", "Word validator initialized", "info")
-
-        for word, entry in self.data.items():
-            if not isinstance(entry, dict):
-                logger.warning(f"Invalid entry format for word: {word}. Should be dict, got {type(entry)}. Skipping.")
+        if not str(self.path) or not self.path.exists():
+            logger.warning("Wordlist path missing or unavailable for NLU: %s", self.path)
+            self.data = {}
+            self.entries = {}
+            self.metadata = {}
+            return
+        raw = _read_structured_file(self.path)
+        if isinstance(raw, Mapping):
+            self.metadata = _as_mapping(raw.get("metadata"))
+            words_payload = raw.get("words", raw.get("entries", {}))
+        else:
+            words_payload = raw
+        entries: Dict[str, WordlistEntry] = {}
+        data: Dict[str, JsonMap] = {}
+        if isinstance(words_payload, Mapping):
+            iterator = words_payload.items()
+        elif isinstance(words_payload, Sequence) and not isinstance(words_payload, (str, bytes, bytearray)):
+            iterator = ((str(item), {}) for item in words_payload)
+        else:
+            iterator = []
+        for raw_word, raw_meta in iterator:
+            word = _lower(raw_word)
+            if not word:
                 continue
-            if 'pos' not in entry or 'synonyms' not in entry:
-                raise ValueError(f"Missing required fields in entry: {word}")
-            if 'synonyms' not in entry:
-                logger.debug(f"Missing 'synonyms' in entry: {word}")
+            meta = _as_mapping(raw_meta)
+            entry = WordlistEntry(
+                word=str(raw_word),
+                normalized=word,
+                pos=tuple(_lower(item) for item in _as_list(meta.get("pos", meta.get("upos", []))) if _strip_text(item)),
+                synonyms=tuple(_lower(item) for item in _as_list(meta.get("synonyms", [])) if _strip_text(item)),
+                related_terms=tuple(_lower(item) for item in _as_list(meta.get("related_terms", meta.get("related", []))) if _strip_text(item)),
+                sentiment=_clamp(meta.get("sentiment", 0.0), -1.0, 1.0, 0.0),
+                frequency=max(0.0, float(meta.get("frequency", meta.get("freq", meta.get("count", 0.0))) or 0.0)),
+                metadata={k: v for k, v in meta.items() if k not in {"pos", "upos", "synonyms", "related_terms", "related", "sentiment", "frequency", "freq", "count"}},
+            )
+            entries[word] = entry
+            data[word] = meta
+        self.entries = entries
+        self.data = data
+        logger.info("NLU Wordlist loaded %s entries from %s", len(self.entries), self.path)
 
     def _precompute_linguistic_data(self) -> None:
-        """Precompute phonetic and n-gram indices from loaded data."""
-        printer.status("INIT", "Data precomputation initialized", "info")
+        self.phonetic_index.clear()
+        self.ngram_index.clear()
+        for word in self.entries:
+            self.phonetic_index[self._soundex(word)].add(word)
+            for size in range(1, max(1, self.n) + 1):
+                padded = f"^{word}$" if size > 1 else word
+                for index in range(max(0, len(padded) - size + 1)):
+                    self.ngram_index[padded[index:index + size]].add(word)
 
-        # Ensure necessary attributes/methods exist (e.g., _metaphone, _soundex)
-        if not hasattr(self, '_metaphone') or not hasattr(self, '_soundex'):
-             logger.warning("Phonetic methods not available. Skipping phonetic indexing.")
-             phonetic_methods_available = False
-        else:
-             phonetic_methods_available = True
+    def query(self, word: str) -> Optional[JsonMap]:
+        key = _lower(word)
+        if key in self.lru_cache:
+            value = self.lru_cache.pop(key)
+            self.lru_cache[key] = value
+            return value
+        entry = self.entries.get(key)
+        value = entry.to_dict() if entry else None
+        self.lru_cache[key] = value
+        while len(self.lru_cache) > self.cache_limit:
+            self.lru_cache.popitem(last=False)
+        return value
 
-        for word in self.data:
-            word_lc = word.lower()
-            if not word_lc.strip():
-                continue
+    def add_word(self, word: str, metadata: Optional[JsonMap] = None) -> None:
+        key = _lower(word)
+        if not key:
+            return
+        meta = dict(metadata or {})
+        self.data[key] = meta
+        self.entries[key] = WordlistEntry(
+            word=word,
+            normalized=key,
+            pos=tuple(_lower(item) for item in _as_list(meta.get("pos", [])) if _strip_text(item)),
+            synonyms=tuple(_lower(item) for item in _as_list(meta.get("synonyms", [])) if _strip_text(item)),
+            related_terms=tuple(_lower(item) for item in _as_list(meta.get("related_terms", [])) if _strip_text(item)),
+            sentiment=_clamp(meta.get("sentiment", 0.0), -1.0, 1.0, 0.0),
+            frequency=max(0.0, float(meta.get("frequency", 0.0) or 0.0)),
+            metadata=meta,
+        )
+        self._precompute_linguistic_data()
 
-            # Phonetic representations (only if phonetic methods are available)
-            if phonetic_methods_available:
-                 try:
-                    metaphone_key = self._metaphone(word_lc)
-                    soundex_key = self._soundex(word_lc)
-                    if metaphone_key: self.phonetic_index[metaphone_key].add(word)
-                    if soundex_key: self.phonetic_index[soundex_key].add(word)
-                 except Exception as e:
-                    logger.warning(f"Error computing phonetic key for '{word}': {e}")
-
-            # Generate n-gram indices
-            for n in range(1, self.n + 1): # Unigrams, bigrams, trigrams up to self.n
-                # Standard n-grams
-                for i in range(len(word_lc) - n + 1):
-                    ng = word_lc[i:i+n]
-                    self.ngram_index[ng].add(word)
-
-                # Position-aware n-grams with boundary markers (example for n=2,3)
-                if n >= 2:
-                    padded = f'^{word_lc}$'
-                    for i in range(len(padded) - n + 1):
-                         bng = padded[i:i+n]
-                         self.ngram_index[bng].add(word)
-
-    def _process_segment(self, label: str, word_iterable: Iterable[str]) -> Dict[int, defaultdict[Tuple[str, ...], int]]:
-        """
-        Processes a single segment to count n-grams.
-        """
-        printer.status("INIT", "Process segmentation initialized", "info")
-
-        ngram_counts = [defaultdict(int) for _ in range(self.n)]
-        for word in word_iterable:
-            tokens = word.split()
-            for ngram_len in range(1, self.n + 1):
-                for i in range(len(tokens) - ngram_len + 1):
-                    ngram = tuple(tokens[i : i + ngram_len])
-                    ngram_counts[ngram_len - 1][ngram] += 1
-        return {label: ngram_counts}
-
-    def _witten_bell_smoothing(self, order_counts: defaultdict[Tuple[str, ...], int],
-                                lower_order_counts: defaultdict[Tuple[str, ...], int] = None) -> defaultdict[Tuple[str, ...], float]:
-        """
-        Applies Witten-Bell smoothing to n-gram counts.
-        """
-        printer.status("INIT", "Witten Bell initialized", "info")
-
-        smoothed_probs = defaultdict(float)
-        total_count = sum(order_counts.values())
-        unique_continuations = len(set(ngram[:-1] for ngram in order_counts))
-
-        for ngram, count in order_counts.items():
-            context = ngram[:-1]
-            if total_count > 0:
-                smoothed_probs[ngram] = (count / (total_count + unique_continuations))
-            else:
-                smoothed_probs[ngram] = 1.0 / (unique_continuations + 1) # Handle cases with no counts
-
-        # Incorporate lower-order probabilities
-        if lower_order_counts is not None:
-            total_lower_count = sum(lower_order_counts.values())
-            unique_lower_continuations = len(set(ngram[:-1] for ngram in lower_order_counts)) if lower_order_counts else 0
-            unseen_prob_mass = unique_continuations / (total_count + unique_continuations) if total_count > 0 else 1.0
-
-            for ngram, prob in smoothed_probs.items():
-                lower_order_token = ngram[1:]
-                lower_order_prob = 0.0
-                if lower_order_counts and lower_order_token in lower_order_counts:
-                    lower_order_prob = lower_order_counts.get(lower_order_token, 0) / (total_lower_count + unique_lower_continuations) if total_lower_count > 0 else 1.0 / (unique_lower_continuations + 1)
-
-                smoothed_probs[ngram] = prob + unseen_prob_mass * lower_order_prob
-
-        return smoothed_probs
-
-    def build_segmented_ngram_models_streaming(self, segments: Dict[str, Iterable[str]], n: int = 3, num_processes: int = None) -> None:
-        """
-        Build separate n-gram models for different wordlist segments using streaming
-        and parallel processing with Witten-Bell smoothing.
-        `segments` is a dict of label -> iterable of words.
-        """
-        printer.status("INIT", "ngram initialized", "info")
-
-        self.n = n
-        self.segmented_ngram_models = {}
-        if num_processes is None:
-            num_processes = mp.cpu_count()
-
-        pool = mp.Pool(processes=num_processes)
-        partial_process_segment = partial(self._process_segment, n=self.n)
-        results = pool.starmap(partial_process_segment, segments.items())
-        pool.close()
-        pool.join()
-
-        # Merge counts from parallel processing
-        raw_ngram_counts = {}
-        for res in results:
-            raw_ngram_counts.update(res)
-
-        # Apply Witten-Bell smoothing
-        self.segmented_ngram_models = {}
-        for label, counts_list in raw_ngram_counts.items():
-            smoothed_models = []
-            for i in range(self.n):
-                lower_order_counts = counts_list[i - 1] if i > 0 else None
-                smoothed_models.append(self._witten_bell_smoothing(counts_list[i], lower_order_counts))
-            self.segmented_ngram_models[label] = smoothed_models
-
-    # PHONETIC ALGORITHMS ------------------------------------------------------
-    
-    def _soundex(self, word: str) -> str:
-        """Soundex phonetic encoding implementation"""
-        if not word:
-            return ""
-    
-        # Step 0: Convert to uppercase and remove non-alphabetic characters
-        word = re.sub(r'[^A-Za-z]', '', word).upper()
-        
-        # Step 1: Retain first letter
-        first_char = word[0]
-        soundex_code = [first_char]
-        
-        # Soundex mapping dictionary
-        char_map = {
-            'BFPV': '1',
-            'CGJKQSXZ': '2',
-            'DT': '3',
-            'L': '4',
-            'MN': '5',
-            'R': '6'
-        }
-        
-        # Step 2: Convert remaining characters
-        prev_code = ''
-        for char in word[1:]:
-            # Handle 'H' and 'W' separators
-            if char in 'HW':
-                continue
-                
-            matched = False
-            for chars, code in char_map.items():
-                if char in chars:
-                    current_code = code
-                    matched = True
-                    break
-            
-            # Handle vowels (including Y after first character)
-            if not matched:
-                if char in 'AEIOUY':
-                    current_code = ''
-                else:
-                    current_code = ''
-                    continue
-            
-            # Skip duplicates
-            if current_code != prev_code:
-                soundex_code.append(current_code)
-                prev_code = current_code
-            
-            # Stop when we have 3 digits
-            if len(soundex_code) == 4:
-                break
-        
-        # Step 3: Pad/truncate to 4 characters
-        if len(soundex_code) < 4:
-            soundex_code.extend(['0'] * (4 - len(soundex_code)))
-        
-        return ''.join(soundex_code)
-    
-    def _metaphone(self, word: str) -> str:
-        """Metaphone phonetic encoding implementation (simplified version)"""
-        if not word:
-            return ""
-        word = word.upper()
-        metaphone = []
-        length = len(word)
-        i = 0
-        
-        # Preprocessing
-        word = re.sub(r'([^C])\1+', r'\1', word)  # Remove duplicate letters except C
-        length = len(word)  # Update length after substitution
-        
-        # Transformation rules
-        while i < length and len(metaphone) < 6:
-            # Ensure i is within bounds
-            if i >= length:
-                break
-            char = word[i]
-            
-            # Handle initial letters
-            if i == 0:
-                if char in ('A', 'E', 'I', 'O', 'U'):
-                    metaphone.append(char)
-                    i += 1
-                    continue
-                if word.startswith('KN') or word.startswith('GN'):
-                    i += 1
-                    continue
-                if word.startswith('WR'):
-                    metaphone.append('R')
-                    i += 2
-                    continue
-
-            # Main transformation rules
-            if char == 'C':
-                # Check for 'CIA' only if there are enough characters
-                if i + 2 <= length and word[i+1:i+3] == 'IA':
-                    metaphone.append('X')
-                    i += 3  # Skip the 'IA' part
-                elif i > 0 and i + 1 < length and word[i-1] == 'S' and word[i+1] in ('H', 'I', 'E', 'Y'):
-                    i += 1  # Skip processing this 'C'
-                elif i + 1 < length and word[i+1] in ('H', 'I', 'E', 'Y'):
-                    metaphone.append('S')
-                    i += 1
-                else:
-                    metaphone.append('K')
-                    i += 1
-            
-            elif char == 'D':
-                if i + 2 < length and word[i+1] == 'G' and word[i+2] in ('E', 'Y', 'I'):
-                    metaphone.append('J')
-                    i += 3
-                else:
-                    metaphone.append('T')
-                    i += 1
-            
-            elif char == 'G':
-                # Silent G in 'GN', 'GNED'
-                if (i + 1 < length and word[i+1] == 'N') or \
-                   (i + 3 < length and word[i+1] == 'N' and word[i+2] == 'E' and word[i+3] == 'D'):
-                    i += 1
-                else:
-                    metaphone.append('K')
-                    i += 1
-            
-            elif char == 'P':
-                if i+1 < length and word[i+1] == 'H':
-                    metaphone.append('F')
-                    i += 2
-                else:
-                    metaphone.append('P')
-                    i += 1
-            
-            elif char == 'T':
-                if i+1 < length and word[i+1] == 'H':
-                    metaphone.append('0')  # θ sound
-                    i += 2
-                elif i+2 < length and word[i+1:i+3] in ('IA', 'IO'):
-                    metaphone.append('X')  # SH sound
-                    i += 3
-                else:
-                    metaphone.append('T')
-                    i += 1
-            
-            elif char == 'V':
-                metaphone.append('F')
-                i += 1
-            
-            elif char == 'Q':
-                metaphone.append('K')
-                i += 1
-            
-            elif char == 'X':
-                if i == 0:
-                    metaphone.append('S')
-                else:
-                    if len(metaphone) < 5:  # Check remaining space
-                        metaphone.extend(['K', 'S'])
-                    elif len(metaphone) == 5:
-                        metaphone.append('K')
-                i += 1
-            
-            elif char == 'S':
-                if i+1 < length and word[i+1] == 'H':
-                    metaphone.append('X')
-                    i += 2
-                else:
-                    metaphone.append('S')
-                    i += 1
-            
-            elif char == 'Z':
-                metaphone.append('S')
-                i += 1
-            
-            elif char == 'F':
-                metaphone.append('F')
-                i += 1
-            
-            elif char == 'W':
-                if i+1 < length and word[i+1] in 'AEIOU':
-                    metaphone.append('W')
-                    i += 2
-                else:
-                    i += 1
-            
-            elif char == 'H':
-                # Keep H between vowels
-                if 0 < i < length-1 and word[i-1] in 'AEIOU' and word[i+1] in 'AEIOU':
-                    metaphone.append('H')
-                i += 1
-            
-            elif char in ('B', 'M', 'N', 'R', 'L'):
-                metaphone.append(char)
-                i += 1
-            
-            elif char == 'K':
-                if i > 0 and word[i-1] != 'C':
-                    metaphone.append('K')
-                i += 1
-            
-            # Vowel handling
-            elif char in ('A', 'E', 'I', 'O', 'U'):
-                if i == 0:
-                    metaphone.append(char)
-                i += 1
-            
-            else:
-                i += 1  # Ignore other characters
-        
-        return ''.join(metaphone)[:6]  # Return first 6 characters
-
-    # MORPHOLOGICAL ANALYSIS ---------------------------------------------------
     def stem(self, word: str) -> str:
-        """Porter Stemmer implementation for morphological reduction"""
-        # Implementation based on Porter's algorithm (1980)
-        word = word.lower()
-        
-        # Step 1a: Plural/possessive removal
-        if word.endswith('sses'):
-            word = word[:-2]
-        elif word.endswith('ies'):
-            word = word[:-2]
-        elif word.endswith('ss'):
-            pass
-        elif word.endswith('s'):
-            word = word[:-1]
-        
-        # Step 1b: Verb forms
-        m = self._measure(word)
-        if m > 0 and word.endswith('eed'):
-            word = word[:-1]
-        elif re.search(r'[aeiou]', word[:-3]) and word.endswith('eed'):
-            word = word[:-1]
-        elif re.search(r'[aeiou]', word[:-2]) and word.endswith('ed'):
-            word = word[:-2]
-        elif re.search(r'[aeiou]', word[:-3]) and word.endswith('ing'):
-            word = word[:-3]
-        
-        # Step 1c: Replace *y with i
-        if word.endswith('y') and re.search(r'[aeiou]', word[:-1]):
-            word = word[:-1] + 'i'
-        
-        # Step 2: Common suffixes
-        step2_map = {
-            'ational': 'ate',
-            'tional': 'tion',
-            'enci': 'ence',
-            'anci': 'ance',
-            'izer': 'ize',
-            'abli': 'able'
-        }
-        for suffix, replacement in step2_map.items():
-            if word.endswith(suffix) and self._measure(word[:-len(suffix)]) > 0:
-                word = word[:-len(suffix)] + replacement
-                break
-        
-        # Step 3: Complex suffixes
-        step3_map = {
-            'icate': 'ic',
-            'ative': '',
-            'alize': 'al',
-            'iciti': 'ic'
-        }
-        for suffix, replacement in step3_map.items():
-            if word.endswith(suffix) and self._measure(word[:-len(suffix)]) > 0:
-                word = word[:-len(suffix)] + replacement
-                break
-        
-        # Step 4: Remove final suffixes
-        for suffix in ['al', 'ance', 'er', 'ic', 'able', 'ant', 'ement']:
-            if word.endswith(suffix) and self._measure(word[:-len(suffix)]) > 1:
-                word = word[:-len(suffix)]
-                break
-        
-        # Step 5: Final cleanup
-        if self._measure(word[:-1]) > 1 and word.endswith('e'):
-            word = word[:-1]
-        elif self._measure(word[:-1]) == 1 and not self._cvc(word[:-1]) and word.endswith('e'):
-            word = word[:-1]
-        
-        if self._measure(word) > 1 and word.endswith('ll'):
-            word = word[:-1]
-        
-        return word
+        value = _lower(word)
+        if len(value) <= 3:
+            return value
+        for suffix in ("ingly", "edly", "ization", "isation", "fulness", "ousness", "iveness", "tional", "less", "ness", "ment", "ing", "ies", "ied", "ed", "ly", "s"):
+            if value.endswith(suffix) and len(value) > len(suffix) + 2:
+                if suffix in {"ies", "ied"}:
+                    return value[: -len(suffix)] + "y"
+                return value[: -len(suffix)]
+        return value
 
-    def _measure(self, stem: str) -> int:
-        """Calculate Porter's 'm' measure for VC pattern counting"""
-        vowels = 'aeiou'
-        count = 0
-        pattern = []
-        
-        for char in stem:
-            if char in vowels:
-                if pattern and pattern[-1] == 'C':
-                    pattern.append('V')
-                elif not pattern:
-                    pattern.append('V')
-            else:
-                if pattern and pattern[-1] == 'V':
-                    pattern.append('C')
-                elif not pattern:
-                    pattern.append('C')
-        
-        # Count VC transitions (each VC pair is one measure)
-        return (len(pattern) - 1) // 2
+    def _soundex(self, word: str) -> str:
+        text = re.sub(r"[^A-Za-z]", "", word).upper()
+        if not text:
+            return "0000"
+        first = text[0]
+        mapping = {
+            "B": "1", "F": "1", "P": "1", "V": "1",
+            "C": "2", "G": "2", "J": "2", "K": "2", "Q": "2", "S": "2", "X": "2", "Z": "2",
+            "D": "3", "T": "3", "L": "4", "M": "5", "N": "5", "R": "6",
+        }
+        digits: List[str] = []
+        previous = mapping.get(first, "")
+        for char in text[1:]:
+            code = mapping.get(char, "")
+            if code and code != previous:
+                digits.append(code)
+            previous = code
+        return (first + "".join(digits) + "000")[:4]
 
-    def _cvc(self, stem: str) -> bool:
-        """Check CVC pattern where last C is not W, X, or Y"""
-        if len(stem) < 3:
-            return False
-        return (stem[-3] not in 'aeiou' and
-                stem[-2] in 'aeiou' and
-                stem[-1] not in 'aeiouwxy')
-      
-    # ADVANCED SPELLING CORRECTION ----------------------------------------------
     def phonetic_candidates(self, word: str) -> List[str]:
-        """Get phonetically similar candidates using precomputed index."""
-        if not self.phonetic_index:
-             logger.warning("Phonetic index not built. Cannot find phonetic candidates.")
-             return []
-        if not hasattr(self, '_metaphone') or not hasattr(self, '_soundex'):
-             logger.warning("Phonetic methods not available. Cannot find phonetic candidates.")
-             return []
-
-        word_lower = word.lower()
-        candidates = set()
-        try:
-            meta_key = self._metaphone(word_lower)
-            soundex_key = self._soundex(word_lower)
-            candidates.update(self.phonetic_index.get(meta_key, set()))
-            candidates.update(self.phonetic_index.get(soundex_key, set()))
-        except Exception as e:
-             logger.warning(f"Error generating phonetic keys for '{word}': {e}")
-
-        return list(candidates)
-    
-    # SEMANTIC ANALYSIS ---------------------------------------------------------
+        return sorted(self.phonetic_index.get(self._soundex(_lower(word)), set()))
 
     def semantic_similarity(self, word1: str, word2: str) -> float:
-        """Calculate enhanced semantic similarity using GloVe and Transformer embeddings."""
-        # GloVe-based similarity
-        glove_sim = 0.0
-        if self.glove_vectors:
-            vec1 = self.glove_vectors.get(word1.lower())
-            vec2 = self.glove_vectors.get(word2.lower())
-            if vec1 and vec2:
-                glove_sim = self._cosine_similarity(vec1, vec2)
-        
-        # Transformer-based similarity
-        transformer_sim = 0.0
-        try:
-            emb1 = self._get_transformer_embedding(word1)
-            emb2 = self._get_transformer_embedding(word2)
-            if emb1 and emb2:
-                transformer_sim = self._cosine_similarity(emb1, emb2)
-        except Exception as e:
-            logger.warning(f"Transformer similarity failed: {e}")
-            if glove_sim == 0.0:
-                return 0.0
-        
-        # Combine scores
-        combined_sim = 0.7 * transformer_sim + 0.3 * glove_sim
-        return max(-1.0, min(1.0, combined_sim))
-    
-    def _get_transformer_embedding(self, word: str) -> Optional[List[float]]:
-        """Get contextual embedding for a word using Transformer"""
-        try:
-            # Use class tokenizer instead of undefined variable
-            tokens = self.tokenizer.tokenize(word)
-            input_ids = torch.tensor(
-                [self.tokenizer.token_to_id(token) for token in tokens]
-            ).unsqueeze(0)
-            
-            # Use transformer's encoder directly
-            with torch.no_grad():
-                encoder_output = self.transformer.encode(input_ids)
-                return torch.mean(encoder_output, dim=1).squeeze().tolist()
-        except Exception as e:
-            logger.error(f"Transformer embedding failed: {e}")
-            return None
+        a = _lower(word1)
+        b = _lower(word2)
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        entry_a = self.entries.get(a)
+        entry_b = self.entries.get(b)
+        related_a = set(entry_a.synonyms + entry_a.related_terms) if entry_a else set()
+        related_b = set(entry_b.synonyms + entry_b.related_terms) if entry_b else set()
+        if b in related_a or a in related_b:
+            return 0.9
+        grams_a = {a[i:i + 3] for i in range(max(1, len(a) - 2))}
+        grams_b = {b[i:i + 3] for i in range(max(1, len(b) - 2))}
+        if not grams_a or not grams_b:
+            return 0.0
+        return len(grams_a & grams_b) / len(grams_a | grams_b)
 
-    def _word_vector(self, word: str) -> List[float]:
-        """Get pre-trained GloVe vector for a word"""
-        if not self.glove_vectors: return None
-        return self.glove_vectors.get(word.lower(), None)
-
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Optimized cosine similarity for numerical lists."""
-        dot_product = sum(v1*v2 for v1, v2 in zip(vec1, vec2))
-        norm_a = math.sqrt(sum(v**2 for v in vec1))
-        norm_b = math.sqrt(sum(v**2 for v in vec2))
-
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0 # Avoid division by zero
-
-        return dot_product / (norm_a * norm_b)
-
-    # LANGUAGE MODELING ---------------------------------------------------------
-    
-    def word_probability(self, word: str, context: List[str] = None) -> float:
-        """Calculate relative frequency probability with backoff smoothing"""
-        if not context or len(context) < self.ngram_order-1:
-            # Fallback to unigram probability
-            return self.ngram_counts[0].get((word,), 1) / sum(self.ngram_counts[0].values())
-        
-        # Try highest order n-gram first
-        for order in range(min(self.ngram_order, len(context)+1), 0, -1):
-            ngram = tuple(context[-(order-1):] + [word])
-            count = self.ngram_counts[order-1].get(ngram, 0)
-            
-            if count > 0:
-                denominator = sum(
-                    self.ngram_counts[order-1][tuple(context[-(order-1):] + [w])] 
-                    for w in self.vocabulary
-                )
-                return count / denominator
-                
-        # Absolute backoff to unigram
-        return self.ngram_counts[0].get((word,), 1) / sum(self.ngram_counts[0].values())
+    def word_probability(self, word: str, context: Optional[List[str]] = None) -> float:
+        key = _lower(word)
+        entry = self.entries.get(key)
+        if not entry:
+            return 0.0
+        if entry.frequency > 0:
+            max_frequency = max((item.frequency for item in self.entries.values()), default=entry.frequency)
+            return _clamp(entry.frequency / max(max_frequency, 1.0))
+        score = 0.35
+        if context:
+            score += min(0.3, sum(self.semantic_similarity(key, item) for item in context) / max(len(context), 1))
+        return _clamp(score)
 
     def context_suggestions(self, previous_words: List[str], limit: int = 5) -> List[Tuple[str, float]]:
-        """Predict next words using n-gram probabilities with backoff"""
-        suggestions = defaultdict(float)
-        max_order = min(self.ngram_order, len(previous_words)+1)
-        
-        # Calculate interpolated probability
-        for order in range(max_order, 0, -1):
-            context = previous_words[-(order-1):] if order > 1 else []
-            lambda_weight = 0.4 ** (max_order - order)  # Weighting scheme
-            
-            # Get possible next words
-            possible_ngrams = [k for k in self.ngram_counts[order-1] 
-                             if k[:-1] == tuple(context)]
-            
-            total = sum(self.ngram_counts[order-1][gram] for gram in possible_ngrams)
-            
-            for gram in possible_ngrams:
-                word = gram[-1]
-                prob = self.ngram_counts[order-1][gram] / total
-                suggestions[word] += lambda_weight * prob
-                
-        # Normalize and sort
-        total_prob = sum(suggestions.values())
-        normalized = [(w, p/total_prob) for w, p in suggestions.items()]
-        
-        return sorted(normalized, key=lambda x: -x[1])[:limit]
-
-    # Helper methods
-    @property
-    def vocabulary(self):
-        """Returns the list of words in the wordlist data."""
-        return list(self.data.keys())
-    
-    @property
-    def words(self):
-        """Alias for vocabulary."""
-        return list(self.data.keys())
-
-    def query(self, word: str) -> Optional[Dict]:
-        """Case-insensitive lookup with caching"""
-        if not isinstance(word, str) or not word.strip():
-             return None
-
-        word_lower = word.strip().lower()
-
-        # Check cache first
-        if word_lower in self.lru_cache:
-            self._update_lfu(word_lower)
-            self.lru_cache.move_to_end(word_lower)
-            return self.lru_cache[word_lower]
-
-        # Check main data
-        entry = self.data.get(word_lower)
-        if entry:
-            self._update_cache(word_lower, entry) # Add/Update cache
-            return entry
-
-        # Check stemmed version (optional, based on need and Stemmer reliability)
-        stemmed = self.stem(word) # Requires a stemmer implementation
-        if stemmed and stemmed != word_lower:
-            entry = self.data.get(stemmed)
-            if entry:
-                # Cache the stemmed version lookup result against the original word
-                self._update_cache(word_lower, entry)
-                return entry
-
-        return None  
-  
-    def _update_cache(self, word: str, entry: Dict) -> None:
-        """Hybrid cache update strategy"""
-        self.lru_cache[word] = entry
-        self._update_lfu(word) # Increment LFU count
-        self.lru_cache.move_to_end(word) # Move to end for LRU
-
-        if len(self.lru_cache) > self.max_cache_size:
-            self._evict_cache_item()
-
-    def _update_lfu(self, word: str) -> None:
-        """Increment LFU count for a word."""
-        self.lfu_cache[word] += 1
-
-    def _evict_cache_item(self) -> None:
-        """Eviction strategy: remove the least frequently used, breaking ties with LRU."""
-        if not self.lfu_cache: return # Nothing to evict
-
-        # 1. Find the minimum frequency
-        min_freq = float('inf')
-        try:
-            min_freq = min(self.lfu_cache.values())
-        except ValueError: # Handle case where values() is empty (shouldn't happen if lfu_cache is not empty)
-             return
-
-        # 2. Find all items with minimum frequency
-        min_freq_candidates = [k for k, v in self.lfu_cache.items() if v == min_freq]
-
-        # 3. Of the minimum frequency candidates, find the least recently used (first in OrderedDict)
-        for key in self.lru_cache:
-            if key in min_freq_candidates:
-                logger.debug(f"Evicting '{key}' from cache (LFU/LRU).")
-                del self.lru_cache[key]
-                del self.lfu_cache[key]
-                return # Evicted one item
-
-    def _add_synonym_edge(self, word: str, synonym: str) -> None:
-        """Add bidirectional synonym edge if the synonym exists in the wordlist."""
-        synonym_lower = synonym.lower()
-        if synonym_lower in self.data and synonym_lower != word.lower():
-            self.graph[word.lower()].add(synonym_lower)
-            self.graph[synonym_lower].add(word.lower())
-
-    def _find_glove_synonyms(self, target_word: str, top_n: int, threshold: float) -> List[str]:
-        """Find top-N words with GloVe similarity above threshold."""
-        target_vec = self._word_vector(target_word)
-        if not target_vec or all(v == 0 for v in target_vec):
-            return []
-    
-        similarities = []
-        for candidate in self.data:
-            if candidate == target_word:
-                continue
-            candidate_vec = self._word_vector(candidate)
-            if not candidate_vec:
-                continue
-            sim = self._cosine_similarity(target_vec, candidate_vec)
-            if sim >= threshold:
-                similarities.append((candidate, sim))
-
-        similarities.sort(key=lambda x: -x[1])
-        return [word for word, _ in similarities[:top_n]]
+        context = [_lower(item) for item in previous_words if _strip_text(item)]
+        scores: List[Tuple[str, float]] = []
+        for word in self.entries:
+            score = self.word_probability(word, context)
+            if score > 0:
+                scores.append((word, score))
+        scores.sort(key=lambda item: item[1], reverse=True)
+        return scores[: max(1, int(limit))]
 
     def validate_word(self, word: str) -> bool:
-        """Comprehensive word validation"""
-        return (
-            self._check_orthography(word) and
-            self._check_morphology(word) and
-            self._check_phonotactics(word)
-        )
+        return _lower(word) in self.entries
 
     def correct_typo(self, word: str) -> Tuple[str, float]:
-        """Main interface for typo correction"""
-        if word in self.data:
-            return (word, 1.0)  # Already correct
-
-        suggestions = self.spell_checker.suggest(word)
-        return (suggestions[0], 1.0) if suggestions else (word, 0.0)
-
-    def _check_orthography(self, word: str) -> bool:
-        """Advanced orthographic validation using multiple strategies"""
-        # Direct lexicon lookup
-        if word in self.data:
-            return True
-        
-        # Phonetic fallback check
-        phonetic_matches = self.phonetic_candidates(word)
-        if any(match in self.data for match in phonetic_matches):
-            return True
-        
-        # Edit distance to known words
-        candidates = self.phonetic_candidates(word)
-        if candidates:
-            closest = min(candidates, key=lambda x: self.weighted_edit_distance(word, x))
-            if self.weighted_edit_distance(word, closest) < 2.0:
-                return True  # Valid candidate found
-            
-            # Proceed to typo correction if no close candidate
-            correction, confidence = self.correct_typo(word)
-            return confidence > 0.7
-
-        return self._validate_grapheme_phoneme(word) # Fallback to grapheme-phoneme alignment
-
-    def _check_morphology(self, word: str) -> bool:
-        """Morphological validation using language-specific rules"""
-        morphology_path = self.config.get("nlu", {}).get("morphology_rules_path")
-        if not morphology_path or not Path(morphology_path).exists():
-            logger.warning("Morphology rules path missing or file not found.")
-            return False
-    
-        with open(morphology_path, "r", encoding="utf-8") as f:
-            all_rules = json.load(f)
-    
-        lang = self.metadata.get('language', 'en')
-        rules = all_rules.get(lang, {})
-        
-        # Character level validation
-        if not re.fullmatch(rules.get('valid_chars', r'^\p{L}+$'), word, re.IGNORECASE):
-            return False
-
-        if not self._validate_affixes(word, rules['allowed_affixes']): # Affix validation
-            return False
-
-        if '-' in word: # Compound word validation
-            return self._validate_compounds(word, rules['compound_patterns'])
-
-        if self.syllable_count(word) > rules['max_syllables']:  # Syllable constraints
-            return False
-
-        # Affix validation
-        affix_rules = rules.get('allowed_affixes', {})
-        for affix_type, prefixes in affix_rules.items():
-            if affix_type == 'pre':
-                if any(word.startswith(p) for p in prefixes) and not self._validate_prefix(word):
-                    return False
-            elif affix_type == 'suf':
-                if any(word.endswith(s) for s in prefixes) and not self._validate_suffix(word):
-                    return False
-
-        if '-' in word: # Compound word validation
-            if not any(re.fullmatch(p, word) for p in rules.get('compound_patterns', [])):
-                return False
-            return all(self.validate_word(part) for part in word.split('-'))
-        
-        # Syllable constraints
-        if 'max_syllables' in rules:
-            return self.syllable_count(word) <= rules['max_syllables']
-        
-        return True
-
-    def _validate_affixes(self, word: str, affix_rules: dict) -> bool:
-        """Generic affix validation for all languages"""
-        for affix_type, affixes in affix_rules.items():
-            if affix_type == 'pre':
-                if any(word.startswith(p) for p in affixes):
-                    stem = next(word[len(p):] for p in affixes if word.startswith(p))
-                    if not self._validate_stem(stem):
-                        return False
-            elif affix_type == 'suf':
-                if any(word.endswith(s) for s in affixes):
-                    stem = next(word[:-len(s)] for s in affixes if word.endswith(s))
-                    if not self._validate_stem(stem):
-                        return False
-        return True
-
-
-    def _validate_stem(self, stem: str) -> bool:
-        """Validate word stems after affix removal"""
-        if not stem:
-            return False
-        return stem in self.data or self.stem(stem) in self.data
-
-    def _validate_prefix(self, word: str) -> bool:
-        """Prefix-stripping validation"""
-        stem = self.stem(word)
-        return stem != word and stem in self.data
-
-    def _validate_suffix(self, word: str) -> bool:
-        """Suffix-stripping validation"""
-        base = word
-        while base[-1] in {'s', 'd', 'g'} and len(base) > 2:
-            base = base[:-1]
-            if base in self.data:
-                return True
-        return False
-
-    def _validate_compounds(self, word: str, patterns: list) -> bool:
-        """Validate compound words against language patterns"""
-        if not any(re.fullmatch(p, word) for p in patterns):
-            return False
-        
-        # Check each component word
-        parts = re.split(r'[-]', word)
-        return all(self.validate_word(part) for part in parts)
-
-    def _validate_grapheme_phoneme(self, word: str) -> bool:
-        """Phonetic plausibility check"""
-        phonetic = self._metaphone(word)
-        return any(
-            self._metaphone(known) == phonetic 
-            for known in self.data.keys()
-        )
-
-    def _check_phonotactics(self, word: str) -> bool:
-        """Validate word structure against language-specific phonotactic rules"""
-        lang = self.metadata.get('language', 'en').lower()
-        word_lower = word.lower()
-    
-        # Universal check: Minimum word structure
-        if len(word_lower) < 1:
-            return False
-    
-        # Language-specific rule sets
-        if lang == 'en':
-            return self._validate_english_phonotactics(word_lower)
-        # Add other languages as needed
-        return True  # Default pass for unsupported languages
-    
-    def _validate_english_phonotactics(self, word: str) -> bool:
-        """English phonotactic constraints based on Cruttenden (2014)"""
-        # 1. Mandatory vowel presence
-        if not re.search(r'[aeiouy]', word):
-            return False
-    
-        # 2. Invalid initial clusters (Blevins, 1995)
-        invalid_onsets = {
-            'tk', 'pf', 'gb', 'sr', 'dlr', 'lv', 'km',
-            'bd', 'gt', 'pn', 'ts', 'dz', 'fp', 'vr'
-        }
-        if any(word.startswith(onset) for onset in invalid_onsets):
-            return False
-    
-        # 3. Invalid final clusters (Harris, 1994)
-        invalid_codas = {
-            'mt', 'pn', 'dl', 'bm', 'lr', 'nm', 'tn',
-            'aa', 'ii', 'uu', 'vv', 'jk', 'qq', 'xz'
-        }
-        if any(word.endswith(coda) for coda in invalid_codas):
-            return False
-    
-        # 4. Maximal onset principle (Kahn, 1976)
-        if re.search(r'[bcdfghjklmnpqrstvwxz]{4}', word):
-            return False  # No quad-consonant sequences
-    
-        # 5. Vowel sequence constraints (Roach, 2000)
-        if re.search(r'[aeiouy]{3}', word):
-            return False
-    
-        # 6. Valid syllable structure (C)(C)(C)V(C)(C)(C)(C)
-        syllables = self._split_syllables(word)
-        for syl in syllables:
-            if not re.fullmatch(r'^([bcdfghjklmnpqrstvwxz]{0,3}[aeiouy]+[bcdfghjklmnpqrstvwxz]{0,4})$', syl):
-                return False
-    
-        return True
-
-    def _split_syllables(self, word: str) -> list:
-        """Basic syllabification using sonority hierarchy (Selkirk, 1984)"""
-        vowels = 'aeiouy'
-        syllables = []
-        current = ''
-        
-        for i, char in enumerate(word):
-            current += char
-            if char in vowels:
-                # Look ahead to determine syllable boundary
-                if i < len(word)-1 and word[i+1] in vowels:
-                    syllables.append(current)
-                    current = ''
-                elif i < len(word)-2 and word[i+1] not in vowels and word[i+2] in vowels:
-                    syllables.append(current)
-                    current = ''
-        
-        if current:
-            syllables.append(current)
-        return syllables
+        key = _lower(word)
+        if key in self.entries:
+            return word, 1.0
+        candidates = self.phonetic_candidates(key)
+        if not candidates:
+            return word, 0.0
+        best = max(candidates, key=lambda item: self.semantic_similarity(key, item))
+        return best, self.semantic_similarity(key, best)
 
     def __contains__(self, word: str) -> bool:
-        """Case-insensitive check against wordlist data (no cache side effects)."""
-        return word.lower() in self.data  # Directly check the source data
+        return self.validate_word(word)
+
+    def __len__(self) -> int:
+        return len(self.entries)
 
 
+# ---------------------------------------------------------------------------
+# NLU Engine
+# ---------------------------------------------------------------------------
 class NLUEngine:
-    """Rule-based semantic parser with fallback patterns"""
-    def __init__(self, wordlist_instance: Wordlist):
+    """
+    Production NLU engine with pipeline-safe dependency boundaries.
+
+    It does not import or instantiate NLPEngine at runtime. If NLP annotations are needed,
+    pass them into parse()/analyze() or inject a shared nlp_engine instance from the agent.
+    """
+
+    VERSION = "3.1"
+
+    def __init__(self, wordlist_instance: Optional[Wordlist] = None, *,
+        nlp_engine: Optional["NLPEngine"] = None,
+        tokenizer: Optional[Any] = None,
+        transformer: Optional[Any] = None,
+        memory: Optional[Any] = None,
+    ) -> None:
         self.config = load_global_config()
-        self.main_wordlist_path = self.config.get('main_wordlist_path')
-        self.modality_markers_path = self.config.get('modality_markers_path')
+        self.nlu_config = get_config_section("nlu") or {}
+        self.main_wordlist_path = self.config.get("main_wordlist_path")
+        self.modality_markers_path = self.nlu_config.get("modality_markers_path", self.config.get("modality_markers_path"))
+        self.sentiment_lexicon_path = self.nlu_config.get("sentiment_lexicon_path")
+        self.custom_intent_patterns_path = self.nlu_config.get("custom_intent_patterns_path")
+        self.custom_entity_patterns_path = self.nlu_config.get("custom_entity_patterns_path")
+        self.morphology_rules_path = self.nlu_config.get("morphology_rules_path")
 
-        self.nlu_config = get_config_section('nlu')
-        self.sentiment_lexicon_path = self.nlu_config.get('sentiment_lexicon_path')
-        self.custom_intent_patterns_path = self.nlu_config.get('custom_intent_patterns_path')
-        self.custom_entity_patterns_path = self.nlu_config.get('custom_entity_patterns_path')
-        self.morphology_rules_path = self.nlu_config.get('morphology_rules_path')
-        self.glove_path = self.nlu_config.get('glove_path')
+        self.wordlist = wordlist_instance or Wordlist()
+        self.nlp_engine = nlp_engine
+        self.tokenizer = tokenizer
+        self.transformer = transformer
+        self.memory = memory
 
-        self.wordlist = wordlist_instance
-        self.coherence_checker = None
+        self.default_intent = _strip_text(self.nlu_config.get("default_intent", "unknown"), "unknown")
+        self.fallback_intent = _strip_text(self.nlu_config.get("fallback_intent", self.default_intent), self.default_intent)
+        self.low_confidence_threshold = _clamp(self.nlu_config.get("low_confidence_threshold", 0.45), 0.0, 1.0, 0.45)
+        self.intent_margin_threshold = _clamp(self.nlu_config.get("intent_margin_threshold", 0.12), 0.0, 1.0, 0.12)
+        self.min_entity_confidence = _clamp(self.nlu_config.get("min_entity_confidence", 0.35), 0.0, 1.0, 0.35)
+        self.enable_wordlist_entities = bool(self.nlu_config.get("enable_wordlist_entities", True))
+        self.enable_nlp_entities = bool(self.nlu_config.get("enable_nlp_entities", True))
+        self.enable_context_intents = bool(self.nlu_config.get("enable_context_intents", True))
+        self.max_history = int(self.nlu_config.get("history_limit", 200) or 200)
 
-        # Load intent and entity patterns from JSON files
-        self.intent_patterns = self._load_intent_patterns(self.custom_intent_patterns_path)
-        self.entity_patterns = {}
-        try:
-            entity_path = Path(self.custom_entity_patterns_path) if self.custom_entity_patterns_path else None
-            if entity_path and entity_path.exists():
-                with open(entity_path, 'r', encoding='utf-8') as f:
-                    loaded_entities = json.load(f)
-                self.entity_patterns = loaded_entities if isinstance(loaded_entities, dict) else {}
-            else:
-                logger.error(f"Entity patterns file not found at: {self.custom_entity_patterns_path}")
-        except Exception as e:
-            logger.error(f"Error loading entity patterns: {e}")
-            self.entity_patterns = {}
+        self.diagnostics: Deque[NLUIssue] = deque(maxlen=int(self.nlu_config.get("diagnostics_limit", 500) or 500))
+        self.history: Deque[JsonMap] = deque(maxlen=self.max_history)
+        self._parse_calls = 0
 
-        logger.info("NLU Engine initialized...")
+        self.intent_patterns: Dict[str, List[str]] = {}
+        self.intent_recognizers: List[Tuple[IntentPattern, re.Pattern[str]]] = []
+        self.entity_patterns: Dict[str, Any] = {}
+        self.entity_recognizers: List[Tuple[EntityPattern, re.Pattern[str]]] = []
+        self.sentiment_lexicon = self._load_sentiment_lexicon()
+        self.modality_markers = self._load_modality_markers()
 
-    def _load_intent_patterns(self, path: str) -> Dict[str, Any]:
-        """Load intent patterns from JSON file with better error handling"""
-        if not path:
-            logger.warning("Intent patterns path not provided in config")
-            return {}
-        
-        try:
-            file_path = Path(path)
-            if not file_path.exists():
-                logger.error(f"Intent patterns file not found at: {file_path}")
-                return {}
-                
-            with open(file_path, 'r', encoding='utf-8') as f:
-                patterns = json.load(f)
-                
-            # Convert old format to new format
-            processed_patterns = {}
-            for intent, pattern_data in patterns.items():
-                if isinstance(pattern_data, dict) and "patterns" in pattern_data:
-                    processed_patterns[intent] = pattern_data["patterns"]
-                elif isinstance(pattern_data, list):
-                    processed_patterns[intent] = pattern_data
-                else:
-                    logger.warning(f"Unexpected pattern format for intent '{intent}'")
-                    
-            logger.info(f"Loaded {len(processed_patterns)} intents from patterns file")
-            return processed_patterns
-            
-        except Exception as e:
-            logger.error(f"Error loading intent patterns: {e}")
-            return {}
+        self._load_intent_resources()
+        self._load_entity_resources()
 
-    def get_intents(self):
+        logger.info("NLU Engine initialized: intents=%s entity_patterns=%s shared_nlp=%s", len(self.intent_patterns), len(self.entity_recognizers), bool(self.nlp_engine))
+        printer.status("INIT", "NLU Engine initialized", "success")
+
+    # ------------------------------------------------------------------
+    # Dependency injection and compatibility accessors
+    # ------------------------------------------------------------------
+    def attach_nlp_engine(self, nlp_engine: "NLPEngine") -> None:
+        """Attach the agent-owned NLPEngine without importing or constructing one here."""
+        self.nlp_engine = nlp_engine
+
+    def attach_tokenizer(self, tokenizer: Any) -> None:
+        self.tokenizer = tokenizer
+
+    def attach_transformer(self, transformer: Any) -> None:
+        self.transformer = transformer
+
+    def get_intents(self) -> Optional[str]:
         return self.custom_intent_patterns_path
 
-    def get_entities(self):
+    def get_entities(self) -> Optional[str]:
         return self.custom_entity_patterns_path
 
-    def get_modalities(self):
+    def get_modalities(self) -> Optional[str]:
         return self.modality_markers_path
 
-    def get_lexicons(self):
+    def get_lexicons(self) -> Optional[str]:
         return self.sentiment_lexicon_path
 
-    def get_morphologies(self):
+    def get_morphologies(self) -> Optional[str]:
         return self.morphology_rules_path
-    
-    def _match_intent_by_pattern(self, text: str) -> List[Tuple[str, str, float]]:
-        """Match text against intent patterns using word boundaries"""
-        text_clean = re.sub(r'[^\w\s]', '', text).lower().strip()
-        intents = []
-        
-        for intent_name, patterns in self.intent_patterns.items():
-            for pattern in patterns:
-                # Clean and escape pattern
-                pattern_clean = re.sub(r'[^\w\s]', '', pattern).lower().strip()
-                
-                # Skip empty patterns
-                if not pattern_clean:
+
+    # ------------------------------------------------------------------
+    # Resource loading
+    # ------------------------------------------------------------------
+    def _add_issue(self, issue: NLUIssue) -> None:
+        self.diagnostics.append(issue)
+        if issue.severity == NLUSeverity.ERROR:
+            logger.error("NLU issue: %s", issue.to_dict())
+        elif issue.severity == NLUSeverity.WARNING:
+            logger.warning("NLU issue: %s", issue.to_dict())
+        else:
+            logger.info("NLU issue: %s", issue.to_dict())
+
+    def _load_intent_resources(self) -> None:
+        raw = _read_structured_file(self.custom_intent_patterns_path)
+        if raw is None:
+            raw = self.nlu_config.get("intent_patterns") or self._default_intent_patterns()
+            self._add_issue(NLUIssue("NLU.INTENT.RESOURCE_FALLBACK", "Intent patterns resource was not found; using inline/default intent patterns.", NLUSeverity.INFO))
+        processed: Dict[str, List[str]] = {}
+        recognizers: List[Tuple[IntentPattern, re.Pattern[str]]] = []
+
+        if not isinstance(raw, Mapping):
+            self._add_issue(NLUIssue("NLU.INTENT.INVALID_RESOURCE", "Intent patterns must be a mapping.", NLUSeverity.WARNING, details={"type": type(raw).__name__}))
+            raw = self._default_intent_patterns()
+
+        for intent, payload in raw.items():
+            intent_name = _strip_text(intent)
+            if not intent_name:
+                continue
+            patterns, meta = self._normalize_intent_payload(payload)
+            processed[intent_name] = patterns
+            priority = int(meta.get("priority", 0) or 0)
+            weight = float(meta.get("weight", 1.0) or 1.0)
+            required_entities = tuple(_strip_text(item) for item in _as_list(meta.get("required_entities")) if _strip_text(item))
+            act_type = _strip_text(meta.get("act_type") or meta.get("speech_act")) or None
+            keywords = tuple(_lower(item) for item in _as_list(meta.get("keywords")) if _strip_text(item))
+            examples = tuple(_strip_text(item) for item in _as_list(meta.get("examples")) if _strip_text(item))
+            triggers = tuple(_strip_text(item) for item in _as_list(meta.get("triggers")) if _strip_text(item))
+
+            for source_name, values in (
+                (IntentMatchSource.PATTERN, patterns),
+                (IntentMatchSource.TRIGGER, triggers),
+                (IntentMatchSource.KEYWORD, keywords),
+                (IntentMatchSource.EXAMPLE, examples),
+            ):
+                for pattern_text in values:
+                    regex_text = _phrase_to_regex(pattern_text) if source_name != IntentMatchSource.PATTERN else _phrase_to_regex(pattern_text)
+                    recognizer = IntentPattern(
+                        intent=intent_name,
+                        pattern=regex_text,
+                        source=source_name,
+                        weight=weight,
+                        priority=priority,
+                        required_entities=required_entities,
+                        examples=examples,
+                        keywords=keywords,
+                        act_type=act_type,
+                        metadata={"raw": pattern_text},
+                    )
+                    try:
+                        recognizers.append((recognizer, recognizer.compile()))
+                    except re.error as exc:
+                        self._add_issue(NLUIssue("NLU.INTENT.PATTERN_INVALID", "Intent regex pattern could not be compiled.", NLUSeverity.WARNING, details={"intent": intent_name, "pattern": regex_text, "error": str(exc)}))
+
+        recognizers.sort(key=lambda item: (item[0].priority, len(item[0].pattern), item[0].weight), reverse=True)
+        self.intent_patterns = processed
+        self.intent_recognizers = recognizers
+
+    def _normalize_intent_payload(self, payload: Any) -> Tuple[List[str], JsonMap]:
+        if isinstance(payload, Mapping):
+            patterns = [str(item) for item in _as_list(payload.get("patterns", payload.get("pattern", []))) if _strip_text(item)]
+            triggers = [str(item) for item in _as_list(payload.get("triggers", [])) if _strip_text(item)]
+            keywords = [str(item) for item in _as_list(payload.get("keywords", [])) if _strip_text(item)]
+            examples = [str(item) for item in _as_list(payload.get("examples", [])) if _strip_text(item)]
+            all_patterns = _dedupe(patterns + triggers + keywords + examples)
+            return [str(item) for item in all_patterns], dict(payload)
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            return [str(item) for item in payload if _strip_text(item)], {}
+        if _strip_text(payload):
+            return [str(payload)], {}
+        return [], {}
+
+    def _load_entity_resources(self) -> None:
+        raw = _read_structured_file(self.custom_entity_patterns_path)
+        if raw is None:
+            raw = self.nlu_config.get("entity_patterns") or self._default_entity_patterns()
+            self._add_issue(NLUIssue("NLU.ENTITY.RESOURCE_FALLBACK", "Entity patterns resource was not found; using inline/default entity patterns.", NLUSeverity.INFO))
+        if not isinstance(raw, Mapping):
+            self._add_issue(NLUIssue("NLU.ENTITY.INVALID_RESOURCE", "Entity patterns must be a mapping.", NLUSeverity.WARNING, details={"type": type(raw).__name__}))
+            raw = self._default_entity_patterns()
+
+        self.entity_patterns = dict(raw)
+        recognizers: List[Tuple[EntityPattern, re.Pattern[str]]] = []
+        for label, payload in raw.items():
+            label_text = _strip_text(label)
+            if not label_text:
+                continue
+            payload_map = _as_mapping(payload)
+            pattern_values = _as_list(payload_map.get("patterns", payload_map.get("pattern", []))) if payload_map else _as_list(payload)
+            normalizer = _strip_text(payload_map.get("normalizer")) or None
+            validation = _strip_text(payload_map.get("validation")) or None
+            priority = int(payload_map.get("priority", 0) or 0)
+            confidence = _clamp(payload_map.get("confidence", 0.85), 0.0, 1.0, 0.85)
+            source = EntitySource(payload_map.get("source", EntitySource.REGEX.value)) if payload_map.get("source") in EntitySource._value2member_map_ else EntitySource.REGEX
+            for pattern_text in pattern_values:
+                regex_text = str(pattern_text)
+                if not _strip_text(regex_text):
                     continue
-                    
-                # Create regex pattern that matches the entire phrase
-                pattern_re = r'\b' + re.escape(pattern_clean) + r'\b'
-                
-                if re.search(pattern_re, text_clean):
-                    # Calculate match score based on length ratio
-                    score = len(pattern_clean) / max(1, len(text_clean))
-                    intents.append((intent_name, pattern, score))
-                    logger.debug(f"Pattern match: '{pattern}' -> '{intent_name}' (score: {score:.2f})")
-        
-        # Sort by match score descending
-        return sorted(intents, key=lambda x: x[2], reverse=True)
+                entity_pattern = EntityPattern(
+                    label=label_text,
+                    pattern=regex_text,
+                    source=source,
+                    normalizer=normalizer,
+                    confidence=confidence,
+                    priority=priority,
+                    validation=validation,
+                    metadata={"raw": _safe_json(payload)},
+                )
+                try:
+                    recognizers.append((entity_pattern, entity_pattern.compile()))
+                except re.error as exc:
+                    self._add_issue(NLUIssue("NLU.ENTITY.PATTERN_INVALID", "Entity regex pattern could not be compiled.", NLUSeverity.WARNING, details={"label": label_text, "pattern": regex_text, "error": str(exc)}))
+        recognizers.sort(key=lambda item: (item[0].priority, item[0].confidence), reverse=True)
+        self.entity_recognizers = recognizers
 
-    def _validate_temporal(self, entity: str) -> bool:
-        """Temporal validation using date logic"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            return False
-    
-        if re.match(r'\d{4}-\d{2}-\d{2}', entity):
-            try:
-                datetime.datetime.strptime(entity, '%Y-%m-%d')
-                return True
-            except ValueError:
-                return False
-        return True  # Accept relative times
+    def _load_sentiment_lexicon(self) -> JsonMap:
+        raw = _read_structured_file(self.sentiment_lexicon_path)
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        return {
+            "positive": {"good": 0.7, "great": 0.9, "excellent": 1.0, "thanks": 0.5, "helpful": 0.6, "love": 0.9},
+            "negative": {"bad": -0.7, "terrible": -1.0, "wrong": -0.6, "hate": -0.9, "problem": -0.5, "issue": -0.4},
+            "negators": ["not", "never", "no", "n't"],
+            "intensifiers": {"very": 1.25, "really": 1.2, "extremely": 1.5, "slightly": 0.7},
+        }
 
-    def _validate_quantity(self, entity: Any) -> bool:
-        """Quantity validation using unit and value"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            return False
-    
-        match = re.match(r'(\d+)\s*(\D+)', entity)
-        return bool(match)
+    def _load_modality_markers(self) -> JsonMap:
+        raw = _read_structured_file(self.modality_markers_path)
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        return {
+            "interrogative": ["who", "what", "where", "when", "why", "how", "can", "could", "would", "should", "?"],
+            "imperative": ["please", "show", "tell", "give", "create", "update", "delete", "find", "explain"],
+            "conditional": ["if", "unless", "provided", "assuming"],
+            "epistemic": ["might", "maybe", "probably", "possibly", "seems", "think", "believe"],
+            "deontic": ["must", "should", "need", "ought", "required"],
+            "dynamic": ["can", "able", "could"],
+        }
 
-    def _validate_technical(self, entity: str) -> bool:
-        """Technical spec validation"""
-        if '-' in entity:
-            parts = entity.split('-', 1)
-            if len(parts) == 2:
-                prefix, code = parts
-                return prefix.isalpha() and code.isdigit()
-        return True # Default to true if not matching specific invalid patterns
+    def _default_intent_patterns(self) -> JsonMap:
+        return {
+            "greeting": {"patterns": ["hello", "hi", "hey", "good morning", "good evening"], "act_type": "expressive", "priority": 1},
+            "farewell": {"patterns": ["bye", "goodbye", "see you", "talk later"], "act_type": "expressive", "priority": 1},
+            "gratitude": {"patterns": ["thank you", "thanks", "appreciate it"], "act_type": "expressive", "priority": 1},
+            "help_request": {"patterns": ["help", "can you help", "what can you do", "i need help"], "act_type": "directive", "priority": 1},
+            "time_request": {"patterns": ["what time", "current time", "tell me the time"], "act_type": "directive", "priority": 2},
+            "clarification_request": {"patterns": ["what do you mean", "can you clarify", "explain that", "i don't understand"], "act_type": "directive", "priority": 2},
+            "question": {"patterns": [r"^(who|what|where|when|why|how)\b", r"\?$"], "act_type": "directive", "priority": 0},
+        }
 
-    def _validate_duration(self, entity: str) -> bool:
-        """Duration validation using time expressions"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            return False
-        return bool(re.match(r"\d+\s*(second|minute|hour|day|week|month|year|decade)s?", entity, re.IGNORECASE))
+    def _default_entity_patterns(self) -> JsonMap:
+        return {
+            "EMAIL": {"pattern": r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "confidence": 0.98, "priority": 10},
+            "URL": {"pattern": r"\bhttps?://[^\s]+|\bwww\.[^\s]+", "confidence": 0.98, "priority": 10},
+            "DATE_TIME": {"pattern": r"\b(?:today|tomorrow|yesterday|tonight|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{4}-\d{2}-\d{2}\b", "normalizer": "temporal", "confidence": 0.85},
+            "TIME": {"pattern": r"\b\d{1,2}:\d{2}\s?(?:am|pm)?\b|\b\d{1,2}\s?(?:am|pm)\b", "normalizer": "time", "confidence": 0.9},
+            "NUMBER": {"pattern": r"\b[-+]?\d+(?:\.\d+)?\b", "normalizer": "number", "confidence": 0.9},
+            "QUANTITY": {"pattern": r"\b[-+]?\d+(?:\.\d+)?\s?(?:kg|g|m|cm|mm|km|hours?|minutes?|seconds?|days?|weeks?|months?|years?|%|percent)\b", "normalizer": "quantity", "confidence": 0.88},
+            "QUOTED_TEXT": {"pattern": r"['\"]([^'\"]{1,200})['\"]", "normalizer": "quoted", "confidence": 0.82},
+        }
 
-    def _validate_term(self, entity: Any) -> bool:
-        """Term validation for alphanumeric labels"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            return False
-        return bool(re.match(r"[a-zA-Z0-9\s]+", entity))
+    # ------------------------------------------------------------------
+    # Main public API
+    # ------------------------------------------------------------------
+    def parse(self, text: str, *, nlp_tokens: Optional[Sequence[Any]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
+        grammar_result: Optional[Any] = None,
+        nlp_result: Optional[Any] = None,
+        context: Optional[Any] = None,
+    ) -> LinguisticFrame:
+        """Return the agent-facing LinguisticFrame.
 
-    def _validate_boolean(self, entity: Any) -> bool:
-        """Boolean validation"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            return False
-    
-        return entity.lower() in ['true', 'false', 'yes', 'no']
+        The method accepts optional NLP artifacts so the LanguageAgent can pass the results it already
+        computed. It only calls an injected shared nlp_engine if no tokens were provided.
+        """
+        return self.analyze(
+            text,
+            nlp_tokens=nlp_tokens,
+            dependencies=dependencies,
+            grammar_result=grammar_result,
+            nlp_result=nlp_result,
+            context=context,
+        ).frame
 
-    def _normalize_entity(self, entity: Any) -> str:
-        """Ensure entity is a string for validation purposes"""
-        if isinstance(entity, set):
-            entity = next(iter(entity), "")
-        if not isinstance(entity, str):
-            entity = str(entity)
-        return entity
+    def analyze(self, text: str, *, nlp_tokens: Optional[Sequence[Any]] = None,
+        dependencies: Optional[Sequence[Any]] = None,
+        grammar_result: Optional[Any] = None,
+        nlp_result: Optional[Any] = None,
+        context: Optional[Any] = None,
+    ) -> NLUAnalysisResult:
+        printer.status("INIT", "NLU analysis initialized", "info")
+        self._parse_calls += 1
+        original_text = _text(text)
+        normalized_text = self._normalize_text(original_text)
+        issues: List[NLUIssue] = []
 
-    def parse(self, text: str) -> LinguisticFrame:
-        """Hybrid parsing using rules and simple statistics"""
-        printer.status("INIT", "Parse initialized", "info")
-    
-        # Initialize frame with defaults
-        frame = LinguisticFrame(
-            intent='unknown',
-            entities={},
-            sentiment=0.0,
-            modality='declarative',
-            confidence=0.0,
-            act_type=SpeechActType.ASSERTIVE
+        tokens = self._resolve_tokens(original_text, nlp_tokens=nlp_tokens, nlp_result=nlp_result)
+        deps = tuple(dependencies or self._extract_dependencies(nlp_result))
+        entities = self._extract_entities(original_text, tokens=tokens, dependencies=deps, context=context)
+        intent_candidates = self._rank_intents(original_text, tokens=tokens, entities=entities, context=context, grammar_result=grammar_result)
+        sentiment = self._calculate_sentiment(original_text, tokens=tokens)
+        modality = self._detect_modality(original_text, tokens=tokens, grammar_result=grammar_result)
+        lexical_coverage = self._lexical_coverage(tokens)
+        frame = self._build_frame(
+            text=original_text,
+            intents=intent_candidates,
+            entities=entities,
+            sentiment=sentiment,
+            modality=modality,
+            lexical_coverage=lexical_coverage,
         )
-    
-        detected_intent = 'unknown'
-        max_confidence_for_intent = 0.0  # Initialize properly as float
 
-        # Match against intent patterns
-        matched_intents = self._match_intent_by_pattern(text)
-        if matched_intents:
-            intent, pattern, score = matched_intents[0]
-            logger.debug(f"Top intent match: '{intent}' with pattern '{pattern}' (score: {score:.2f})")
-    
-        # Intent detection
-        for intent, patterns in self.intent_patterns.items():
-            # Handle both list and dict formats in JSON
-            actual_patterns = patterns
-            if isinstance(patterns, dict) and 'patterns' in patterns:
-                actual_patterns = patterns['patterns']
-            
-            current_intent_confidence = 0.0
-            for pattern in actual_patterns:
-                if re.search(pattern, text, re.IGNORECASE):
-                    current_intent_confidence += 0.1
-            
-            # FIX: Ensure we're comparing floats
-            if current_intent_confidence > max_confidence_for_intent:
-                max_confidence_for_intent = current_intent_confidence
-                detected_intent = intent
-        
-        frame.intent = detected_intent
-        frame.confidence = min(1.0, max_confidence_for_intent)
+        if frame.confidence < self.low_confidence_threshold:
+            issues.append(NLUIssue("NLU.INTENT.LOW_CONFIDENCE", "Best intent confidence is below threshold.", NLUSeverity.WARNING, details={"intent": frame.intent, "confidence": frame.confidence, "threshold": self.low_confidence_threshold}))
+        if len(intent_candidates) > 1 and intent_candidates[0].confidence - intent_candidates[1].confidence < self.intent_margin_threshold:
+            issues.append(NLUIssue("NLU.INTENT.AMBIGUOUS", "Top intent candidates are close in confidence.", NLUSeverity.WARNING, details={"top": intent_candidates[0].to_dict(), "second": intent_candidates[1].to_dict(), "margin_threshold": self.intent_margin_threshold}))
 
-        # Entity extraction
-        entities = {}
-        for entity_type, meta in self.entity_patterns.items():
-            pattern_str = meta.get('pattern', "")
-            # components = meta.get('components', {})
-            formatted_pattern = pattern_str 
+        result = NLUAnalysisResult(
+            text=original_text,
+            normalized_text=normalized_text,
+            frame=frame,
+            tokens=tuple(tokens),
+            intents=tuple(intent_candidates),
+            entities=tuple(entities),
+            lexical_coverage=lexical_coverage,
+            issues=tuple(issues),
+            dependencies=deps,
+            grammar_result=grammar_result,
+            metadata={
+                "version": self.VERSION,
+                "token_source": self._token_source_label(nlp_tokens=nlp_tokens, nlp_result=nlp_result),
+                "used_shared_nlp_engine": bool(self.nlp_engine and not nlp_tokens and not nlp_result),
+            },
+        )
+        self._record_analysis(result)
+        for issue in issues:
+            self._add_issue(issue)
+        return result
 
-            matches = [m[0] if isinstance(m, tuple) and m else m for m in re.findall(formatted_pattern, text, re.IGNORECASE)]
-            
-            valid_matches = []
-            if 'validation' in meta:
-                validation_func_name = f"_validate_{meta['validation']}"
-                validation_func = getattr(self, validation_func_name, None)
-                if validation_func:
-                    valid_matches = [m for m in matches if m and validation_func(m)]
+    # ------------------------------------------------------------------
+    # Token and dependency adaptation
+    # ------------------------------------------------------------------
+    def _resolve_tokens(self, text: str, *, nlp_tokens: Optional[Sequence[Any]], nlp_result: Optional[Any]) -> List[NLUInputToken]:
+        if nlp_tokens is not None:
+            return self._adapt_tokens(nlp_tokens, original_text=text)
+        if nlp_result is not None:
+            candidate_tokens = _extract_attr(nlp_result, "tokens", None)
+            if candidate_tokens is None:
+                sentences = _extract_attr(nlp_result, "sentences", None)
+                if sentences:
+                    flat: List[Any] = []
+                    for sentence in sentences:
+                        flat.extend(_extract_attr(sentence, "tokens", sentence) or [])
+                    candidate_tokens = flat
+            if candidate_tokens is not None:
+                return self._adapt_tokens(candidate_tokens, original_text=text)
+        if self.nlp_engine is not None and hasattr(self.nlp_engine, "process_text"):
+            return self._adapt_tokens(self.nlp_engine.process_text(text), original_text=text)
+        return self._fallback_tokens(text)
+
+    def _adapt_tokens(self, tokens: Sequence[Any], *, original_text: str) -> List[NLUInputToken]:
+        adapted: List[NLUInputToken] = []
+        search_from = 0
+        for index, token in enumerate(tokens):
+            text = _text(_extract_attr(token, "text", _extract_attr(token, "token", "")))
+            if not text:
+                continue
+            start = _extract_attr(token, "start_char", _extract_attr(token, "start_char_abs", None))
+            end = _extract_attr(token, "end_char", _extract_attr(token, "end_char_abs", None))
+            if start is None or end is None:
+                found = original_text.find(text, search_from)
+                if found >= 0:
+                    start, end = found, found + len(text)
+                    search_from = end
                 else:
-                    logger.warning(f"Validation function {validation_func_name} not found for entity {entity_type}")
-                    valid_matches = [m for m in matches if m]
-            else:
-                valid_matches = [m for m in matches if m] # Keep all non-empty matches
+                    start, end = None, None
+            adapted.append(
+                NLUInputToken(
+                    text=text,
+                    lemma=_text(_extract_attr(token, "lemma", text)).casefold(),
+                    pos=_text(_extract_attr(token, "pos", _extract_attr(token, "upos", "X"))).upper(),
+                    index=int(_extract_attr(token, "index", index) or index),
+                    start_char=int(start) if start is not None else None,
+                    end_char=int(end) if end is not None else None,
+                    is_stop=bool(_extract_attr(token, "is_stop", False)),
+                    is_punct=bool(_extract_attr(token, "is_punct", bool(re.fullmatch(r"\W+", text)))),
+                    morphology=_as_mapping(_extract_attr(token, "morphology", _extract_attr(token, "feats", {}))),
+                    metadata={"source": "nlp"},
+                )
+            )
+        return adapted
 
-            if valid_matches:
-                entities[entity_type] = valid_matches
-        
-        frame.entities = entities
-
-        self._validate_entity_words(frame) # Validate extracted entity values against wordlist
-
-        # Sentiment and Modality
-        frame.sentiment = self._calculate_sentiment(text)
-        frame.modality = self._detect_modality(text)
-        
-        # Recalculate confidence based on more factors
-        frame.confidence = self._calculate_overall_confidence(text, frame)
-
-        return frame # Return as LinguisticFrame object, not dict
-
-    def _validate_entity_words(self, frame: LinguisticFrame) -> None:
-        """Check if recognized entity values (words) exist in the wordlist."""
-        printer.status("INIT", "Entity word validation initialized", "info")
-
-        if not self.wordlist:
-            logger.error("Wordlist not initialized for entity word validation.")
-            return
-    
-        valid_entities = {}
-        for entity_type, values in frame.entities.items():
-            validated = []
-            for v in values:
-                # Convert to string and call query correctly with single argument
-                word_str = str(v)
-                if self.wordlist.query(word_str):  # CORRECTED: single argument
-                    validated.append(v)
-            if validated:
-                valid_entities[entity_type] = validated
-        frame.entities = valid_entities
-
-    def _tokenize(self, text:str) -> List[str]:
-        # Simple tokenizer, can be replaced with a more advanced one (e.g., BPE from agent)
-        text = text.lower()
-        text = re.sub(r"([.,!?;:])", r" \1 ", text) # Add space around punctuation
-        tokens = text.split()
+    def _fallback_tokens(self, text: str) -> List[NLUInputToken]:
+        tokens: List[NLUInputToken] = []
+        stopwords = {"a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "for", "with"}
+        for index, (token_text, span) in enumerate(_word_tokenize(text)):
+            lower = token_text.casefold()
+            pos = self._infer_pos(lower, token_text)
+            tokens.append(
+                NLUInputToken(
+                    text=token_text,
+                    lemma=self.wordlist.stem(lower) if hasattr(self.wordlist, "stem") else lower,
+                    pos=pos,
+                    index=index,
+                    start_char=span[0],
+                    end_char=span[1],
+                    is_stop=lower in stopwords,
+                    is_punct=pos == "PUNCT",
+                    metadata={"source": "nlu_fallback"},
+                )
+            )
         return tokens
 
-    def _calculate_sentiment(self, text: str) -> float:
-        """Enhanced sentiment analysis using lexicon and syntactic patterns"""
-        printer.status("INIT", "Sentiment Calculations initialized", "info")
+    def _infer_pos(self, lower: str, original: str) -> str:
+        if re.fullmatch(r"[^\w\s]+", original):
+            return "PUNCT"
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", original):
+            return "NUM"
+        if lower in {"i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them"}:
+            return "PRON"
+        if lower in {"is", "are", "was", "were", "be", "am", "been", "being", "has", "have", "had", "do", "does", "did", "can", "could", "will", "would", "should", "may", "might", "must"}:
+            return "AUX"
+        entry = self.wordlist.query(lower) if hasattr(self.wordlist, "query") else None
+        pos_values = [str(item).lower() for item in _as_list((entry or {}).get("pos", []))]
+        if "verb" in pos_values:
+            return "VERB"
+        if "adjective" in pos_values or "adj" in pos_values:
+            return "ADJ"
+        if "adverb" in pos_values or "adv" in pos_values:
+            return "ADV"
+        if "pronoun" in pos_values or "pron" in pos_values:
+            return "PRON"
+        if lower.endswith("ing") or lower.endswith("ed"):
+            return "VERB"
+        if lower.endswith("ly"):
+            return "ADV"
+        if original[:1].isupper() and lower not in {"i"}:
+            return "PROPN"
+        return "NOUN"
 
-        if not self.sentiment_lexicon_path:
-            logger.warning("Sentiment lexicon not loaded. Returning neutral sentiment.")
-            return 0.0
-    
-        valence_dict_data = {} # Use a different name to avoid confusion if self.sentiment_lexicon_path was intended for something else
-        try:
-            with open(self.sentiment_lexicon_path, 'r', encoding='utf-8') as f:
-                valence_dict_data = json.load(f) # Load data into this new variable
-        except FileNotFoundError:
-            logger.error(f"Sentiment lexicon file not found: {self.sentiment_lexicon_path}")
-            return 0.0
-        except json.JSONDecodeError:
-            logger.error(f"Error decoding JSON from sentiment lexicon: {self.sentiment_lexicon_path}")
-            return 0.0
-        except Exception as e:
-            logger.error(f"Failed to load sentiment lexicon: {e}")
-            return 0.0
-            
-        tokens = self._tokenize(text)
-        # REMOVED: valence_dict = self.sentiment_lexicon_path # This was the error
-        
-        # Use the loaded dictionary: valence_dict_data
-        intensifiers = valence_dict_data.get("intensifiers", {})
-        negators = valence_dict_data.get("negators", [])
-        positive_words = valence_dict_data.get("positive", {})
-        negative_words = valence_dict_data.get("negative", {})
-    
-        sentiment_score = 0.0
-        weight_sum = 0.0 
+    def _extract_dependencies(self, nlp_result: Optional[Any]) -> Tuple[Any, ...]:
+        if nlp_result is None:
+            return ()
+        deps = _extract_attr(nlp_result, "dependencies", None)
+        if deps is not None:
+            return tuple(deps)
+        sentences = _extract_attr(nlp_result, "sentences", None)
+        if sentences:
+            collected: List[Any] = []
+            for sentence in sentences:
+                collected.extend(_extract_attr(sentence, "dependencies", []) or [])
+            return tuple(collected)
+        return ()
+
+    def _token_source_label(self, *, nlp_tokens: Optional[Sequence[Any]], nlp_result: Optional[Any]) -> str:
+        if nlp_tokens is not None:
+            return "provided_tokens"
+        if nlp_result is not None:
+            return "provided_nlp_result"
+        if self.nlp_engine is not None:
+            return "shared_nlp_engine"
+        return "nlu_fallback"
+
+    # ------------------------------------------------------------------
+    # Intent recognition
+    # ------------------------------------------------------------------
+    def _rank_intents(self, text: str, *, tokens: Sequence[NLUInputToken], entities: Sequence[EntityMention], context: Optional[Any], grammar_result: Optional[Any]) -> List[IntentCandidate]:
+        text_clean = text.casefold()
+        candidates: List[IntentCandidate] = []
+        token_lowers = [token.lower for token in tokens if not token.is_punct]
+        entity_labels = {entity.label for entity in entities}
+
+        for pattern, compiled in self.intent_recognizers:
+            for match in compiled.finditer(text):
+                matched = match.group(0)
+                base = self._intent_match_score(pattern, matched, text)
+                missing_required = [label for label in pattern.required_entities if label not in entity_labels]
+                if missing_required:
+                    base *= 0.72
+                candidates.append(
+                    IntentCandidate(
+                        intent=pattern.intent,
+                        confidence=_clamp(base * pattern.weight),
+                        source=pattern.source,
+                        matched_text=matched,
+                        pattern=pattern.pattern,
+                        priority=pattern.priority,
+                        evidence=(matched,),
+                        required_entities=pattern.required_entities,
+                        act_type=pattern.act_type,
+                        metadata={"missing_required_entities": missing_required},
+                    )
+                )
+
+        # Keyword overlap fallback using configured intent keywords/examples.
+        for intent, patterns in self.intent_patterns.items():
+            words = set()
+            for pattern_text in patterns:
+                words.update(part.casefold() for part in re.findall(r"\b\w+\b", pattern_text) if len(part) > 2)
+            if not words:
+                continue
+            overlap = len(words.intersection(token_lowers))
+            if overlap:
+                score = min(0.75, 0.20 + overlap / max(len(words), 1))
+                candidates.append(IntentCandidate(intent=intent, confidence=score, source=IntentMatchSource.KEYWORD, evidence=tuple(sorted(words.intersection(token_lowers)))))
+
+        # Entity-driven intent hints.
+        if entity_labels:
+            entity_intent_hints = _as_mapping(self.nlu_config.get("entity_intent_hints", {}))
+            for label in entity_labels:
+                for intent in _as_list(entity_intent_hints.get(label, [])):
+                    candidates.append(IntentCandidate(intent=str(intent), confidence=0.52, source=IntentMatchSource.ENTITY, evidence=(label,)))
+
+        # Context-driven continuation support without owning DialogueContext.
+        if self.enable_context_intents and context is not None:
+            last_intent = None
+            if hasattr(context, "get_environment_state"):
+                last_intent = context.get_environment_state("last_intent") or context.get_environment_state("pending_intent")
+            elif isinstance(context, Mapping):
+                last_intent = context.get("last_intent") or context.get("pending_intent")
+            if last_intent and self._looks_like_followup(text_clean):
+                candidates.append(IntentCandidate(intent=str(last_intent), confidence=0.58, source=IntentMatchSource.CONTEXT, evidence=("followup",)))
+
+        if not candidates:
+            inferred = "question" if text.strip().endswith("?") else self.fallback_intent
+            candidates.append(IntentCandidate(intent=inferred, confidence=0.28 if inferred == self.fallback_intent else 0.48, source=IntentMatchSource.FALLBACK, evidence=("fallback",)))
+
+        merged = self._merge_intent_candidates(candidates)
+        merged.sort(key=lambda item: (item.confidence, item.priority, len(" ".join(item.evidence))), reverse=True)
+        return merged
+
+    def _intent_match_score(self, pattern: IntentPattern, matched: str, text: str) -> float:
+        matched_words = max(1, len(re.findall(r"\b\w+\b", matched)))
+        total_words = max(1, len(re.findall(r"\b\w+\b", text)))
+        length_score = min(1.0, matched_words / total_words + 0.35)
+        source_bonus = {
+            IntentMatchSource.PATTERN: 0.18,
+            IntentMatchSource.TRIGGER: 0.14,
+            IntentMatchSource.KEYWORD: 0.05,
+            IntentMatchSource.EXAMPLE: 0.10,
+        }.get(pattern.source, 0.0)
+        priority_bonus = min(0.12, max(0, pattern.priority) * 0.02)
+        return _clamp(0.45 + length_score * 0.35 + source_bonus + priority_bonus)
+
+    def _merge_intent_candidates(self, candidates: Sequence[IntentCandidate]) -> List[IntentCandidate]:
+        grouped: Dict[str, List[IntentCandidate]] = defaultdict(list)
+        for candidate in candidates:
+            grouped[candidate.intent].append(candidate)
+        merged: List[IntentCandidate] = []
+        for intent, items in grouped.items():
+            items_sorted = sorted(items, key=lambda item: item.confidence, reverse=True)
+            best = items_sorted[0]
+            extra = sum(item.confidence for item in items_sorted[1:]) * 0.15
+            confidence = _clamp(best.confidence + min(0.18, extra))
+            evidence = tuple(_dedupe(piece for item in items_sorted for piece in item.evidence if piece))
+            merged.append(
+                IntentCandidate(
+                    intent=intent,
+                    confidence=confidence,
+                    source=best.source,
+                    matched_text=best.matched_text,
+                    pattern=best.pattern,
+                    priority=max(item.priority for item in items_sorted),
+                    evidence=evidence,
+                    required_entities=best.required_entities,
+                    act_type=best.act_type,
+                    metadata={"sources": [item.source.value for item in items_sorted], "candidate_count": len(items_sorted)},
+                )
+            )
+        return merged
+
+    def _looks_like_followup(self, text: str) -> bool:
+        return bool(re.match(r"^(and|also|what about|how about|then|so|but|yes|no|okay|ok|sure)\b", text)) or any(word in text.split() for word in {"it", "that", "those", "these", "they", "them"})
+
+    # ------------------------------------------------------------------
+    # Entity extraction and validation
+    # ------------------------------------------------------------------
+    def _extract_entities(self, text: str, *, tokens: Sequence[NLUInputToken], dependencies: Sequence[Any], context: Optional[Any]) -> List[EntityMention]:
+        entities: List[EntityMention] = []
+        for pattern, compiled in self.entity_recognizers:
+            for match in compiled.finditer(text):
+                raw = match.group(1) if match.groups() else match.group(0)
+                span = (int(match.start(1) if match.groups() else match.start()), int(match.end(1) if match.groups() else match.end()))
+                value = self._normalize_entity_value(raw, pattern.normalizer or pattern.validation or pattern.label)
+                if not self._validate_entity_value(value, pattern.validation or pattern.label):
+                    continue
+                confidence = _clamp(pattern.confidence)
+                if confidence < self.min_entity_confidence:
+                    continue
+                entities.append(
+                    EntityMention(
+                        label=pattern.label,
+                        text=raw,
+                        value=value,
+                        span=span,
+                        confidence=confidence,
+                        source=pattern.source,
+                        normalized=_text(value),
+                        metadata={"pattern": pattern.pattern, "normalizer": pattern.normalizer, "validation": pattern.validation},
+                    )
+                )
+
+        if self.enable_nlp_entities:
+            entities.extend(self._entities_from_nlp_tokens(tokens))
+        if self.enable_wordlist_entities:
+            entities.extend(self._entities_from_wordlist(tokens))
+        return self._dedupe_entities(entities)
+
+    def _entities_from_nlp_tokens(self, tokens: Sequence[NLUInputToken]) -> List[EntityMention]:
+        entities: List[EntityMention] = []
+        current: List[NLUInputToken] = []
+        for token in list(tokens) + [NLUInputToken("", "", "PUNCT", len(tokens), metadata={"sentinel": True})]:
+            if token.pos in {"PROPN"} or (current and token.pos in {"NOUN", "PROPN"} and not token.is_punct):
+                current.append(token)
+                continue
+            if current:
+                text = " ".join(item.text for item in current)
+                start = current[0].start_char if current[0].start_char is not None else 0
+                end = current[-1].end_char if current[-1].end_char is not None else start + len(text)
+                entities.append(EntityMention("MENTION", text, text, (int(start), int(end)), 0.58, EntitySource.NLP, text.casefold(), {"pos_sequence": [item.pos for item in current]}))
+                current = []
+        return entities
+
+    def _entities_from_wordlist(self, tokens: Sequence[NLUInputToken]) -> List[EntityMention]:
+        output: List[EntityMention] = []
+        entity_pos = {"proper_noun", "name", "location", "organization", "person", "noun"}
+        for token in tokens:
+            if token.is_punct or token.is_stop or not token.text.strip():
+                continue
+            entry = self.wordlist.query(token.text) if hasattr(self.wordlist, "query") else None
+            if not entry:
+                continue
+            pos_values = {_lower(item) for item in _as_list(entry.get("pos", []))}
+            if token.pos == "PROPN" or pos_values.intersection(entity_pos):
+                span = token.span or (0, len(token.text))
+                output.append(EntityMention("TERM", token.text, token.lemma or token.text, span, 0.50, EntitySource.WORDLIST, token.lemma or token.lower, {"pos": list(pos_values)}))
+        return output
+
+    def _dedupe_entities(self, entities: Sequence[EntityMention]) -> List[EntityMention]:
+        best: Dict[Tuple[str, Span, str], EntityMention] = {}
+        for entity in entities:
+            key = (entity.label, entity.span, _text(entity.value))
+            if key not in best or entity.confidence > best[key].confidence:
+                best[key] = entity
+        return sorted(best.values(), key=lambda item: (item.span[0], -item.confidence, item.label))
+
+    def _normalize_entity_value(self, value: Any, normalizer: str) -> Any:
+        text = _strip_text(value)
+        mode = _lower(normalizer)
+        if mode in {"number", "quantity"}:
+            number_match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+            if number_match:
+                number_text = number_match.group(0)
+                number_value: Union[int, float] = float(number_text) if "." in number_text else int(number_text)
+                if mode == "quantity":
+                    unit = text[number_match.end():].strip()
+                    return {"value": number_value, "unit": unit or None, "text": text}
+                return number_value
+        if mode in {"temporal", "date_time", "time"}:
+            return {"text": text, "type": mode}
+        if mode == "quoted":
+            return text.strip("'\"")
+        if mode == "boolean":
+            lowered = text.casefold()
+            if lowered in {"true", "yes", "y", "1"}:
+                return True
+            if lowered in {"false", "no", "n", "0"}:
+                return False
+        return text
+
+    def _validate_entity_value(self, value: Any, validator: str) -> bool:
+        mode = _lower(validator)
+        if mode in {"number"}:
+            return isinstance(value, (int, float))
+        if mode == "quantity":
+            return isinstance(value, Mapping) and isinstance(value.get("value"), (int, float))
+        if mode in {"email", "EMAIL".casefold()}:
+            return bool(re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", _text(value)))
+        if mode in {"url", "URL".casefold()}:
+            return _text(value).startswith(("http://", "https://", "www."))
+        return True
+
+    def _entities_to_frame_payload(self, entities: Sequence[EntityMention]) -> JsonMap:
+        grouped: Dict[str, List[Any]] = defaultdict(list)
+        for entity in entities:
+            grouped[entity.label].append(entity.value)
+            grouped[entity.label.lower()].append(entity.value)
+        payload: JsonMap = {}
+        for label, values in grouped.items():
+            unique = _dedupe(values)
+            payload[label] = unique[0] if len(unique) == 1 else unique
+        return payload
+
+    # ------------------------------------------------------------------
+    # Sentiment, modality, speech act, confidence
+    # ------------------------------------------------------------------
+    def _calculate_sentiment(self, text: str, *, tokens: Sequence[NLUInputToken]) -> float:
+        positive = _as_mapping(self.sentiment_lexicon.get("positive"))
+        negative = _as_mapping(self.sentiment_lexicon.get("negative"))
+        negators = {_lower(item) for item in _as_list(self.sentiment_lexicon.get("negators"))}
+        intensifiers = _as_mapping(self.sentiment_lexicon.get("intensifiers"))
+        score_sum = 0.0
+        weight_sum = 0.0
         negate_next = False
-        current_intensity = 1.0
-    
-        for word in tokens:
-            w_lower = word.lower()
-            if w_lower in negators:
-                negate_next = not negate_next 
+        intensity = 1.0
+        for token in tokens or self._fallback_tokens(text):
+            word = token.lower
+            lemma = _lower(token.lemma)
+            if word in negators or lemma in negators:
+                negate_next = not negate_next
                 continue
-            
-            if w_lower in intensifiers:
-                current_intensity *= intensifiers[w_lower]
+            if word in intensifiers:
+                intensity *= float(intensifiers[word])
                 continue
-    
-            score = positive_words.get(w_lower, 0.0) + negative_words.get(w_lower, 0.0)
-    
-            if score != 0:
+            raw = float(positive.get(word, positive.get(lemma, 0.0)) or 0.0) + float(negative.get(word, negative.get(lemma, 0.0)) or 0.0)
+            # Wordlist sentiment can supplement external lexicon.
+            entry = self.wordlist.query(lemma) if hasattr(self.wordlist, "query") else None
+            if raw == 0.0 and entry:
+                raw = float(entry.get("sentiment", 0.0) or 0.0)
+            if raw != 0.0:
                 if negate_next:
-                    score *= -1
-                    negate_next = False  
-                
-                effective_score = score * current_intensity
-                sentiment_score += effective_score
-                weight_sum += abs(effective_score) 
-                current_intensity = 1.0  
-        
-        if weight_sum > 0:
-            normalized_score = sentiment_score / weight_sum
-            return max(-1.0, min(1.0, normalized_score))
-        return 0.0
-    
+                    raw *= -1.0
+                    negate_next = False
+                raw *= intensity
+                score_sum += raw
+                weight_sum += abs(raw)
+                intensity = 1.0
+        if weight_sum == 0.0:
+            return 0.0
+        return _clamp(score_sum / weight_sum, -1.0, 1.0, 0.0)
+
+    def _detect_modality(self, text: str, *, tokens: Sequence[NLUInputToken], grammar_result: Optional[Any]) -> str:
+        stripped = text.strip()
+        lower_text = stripped.casefold()
+        token_lowers = [token.lower for token in tokens]
+        if stripped.endswith("?"):
+            return "interrogative"
+        first_word = token_lowers[0] if token_lowers else ""
+        if first_word in {_lower(item) for item in _as_list(self.modality_markers.get("imperative"))}:
+            return "imperative"
+        for modality in ("conditional", "deontic", "epistemic", "dynamic", "interrogative"):
+            markers = {_lower(item) for item in _as_list(self.modality_markers.get(modality)) if _strip_text(item) and item != "?"}
+            if any(re.search(r"\b" + re.escape(marker) + r"\b", lower_text) for marker in markers):
+                return modality
+        if first_word in {"who", "what", "where", "when", "why", "how"}:
+            return "interrogative"
+        return "declarative"
+
+    def _speech_act_for(self, intent: str, modality: str, best: Optional[IntentCandidate]) -> SpeechActType:
+        configured = _lower(best.act_type if best else None)
+        if configured:
+            mapping = {
+                "assertive": SpeechActType.ASSERTIVE,
+                "representative": SpeechActType.ASSERTIVE,
+                "directive": SpeechActType.DIRECTIVE,
+                "commissive": SpeechActType.COMMISSIVE,
+                "expressive": SpeechActType.EXPRESSIVE,
+                "declaration": SpeechActType.DECLARATION,
+                "declarative": SpeechActType.DECLARATION,
+            }
+            if configured in mapping:
+                return mapping[configured]
+        intent_lower = intent.casefold()
+        if modality in {"interrogative", "imperative"} or any(marker in intent_lower for marker in ("request", "question", "help", "find", "create", "update", "delete", "clarification")):
+            return SpeechActType.DIRECTIVE
+        if any(marker in intent_lower for marker in ("thanks", "gratitude", "greeting", "farewell", "apology")):
+            return SpeechActType.EXPRESSIVE
+        return SpeechActType.ASSERTIVE
+
+    def _lexical_coverage(self, tokens: Sequence[NLUInputToken]) -> float:
+        lexical = [token for token in tokens if not token.is_punct and token.text.strip()]
+        if not lexical:
+            return 0.0
+        known = 0
+        for token in lexical:
+            if token.lower in self.wordlist or (token.lemma and token.lemma in self.wordlist):
+                known += 1
+        return known / len(lexical)
+
+    def _overall_confidence(self, *, best_intent: IntentCandidate, entities: Sequence[EntityMention], sentiment: float, lexical_coverage: float) -> float:
+        entity_bonus = min(0.12, 0.03 * len(entities))
+        coverage_bonus = min(0.12, lexical_coverage * 0.12)
+        sentiment_bonus = min(0.04, abs(sentiment) * 0.04)
+        return _clamp(best_intent.confidence + entity_bonus + coverage_bonus + sentiment_bonus)
+
+    def _build_frame(self, *, text: str, intents: Sequence[IntentCandidate], entities: Sequence[EntityMention], sentiment: float, modality: str, lexical_coverage: float) -> LinguisticFrame:
+        best = intents[0] if intents else IntentCandidate(self.default_intent, 0.0, IntentMatchSource.FALLBACK)
+        confidence = self._overall_confidence(best_intent=best, entities=entities, sentiment=sentiment, lexical_coverage=lexical_coverage)
+        act_type = self._speech_act_for(best.intent, modality, best)
+        return LinguisticFrame(
+            intent=best.intent,
+            entities=self._entities_to_frame_payload(entities),
+            sentiment=sentiment,
+            modality=modality,
+            confidence=confidence,
+            act_type=act_type,
+            propositional_content=text,
+            illocutionary_force=self._illocutionary_force(best.intent, modality, act_type),
+        )
+
+    def _illocutionary_force(self, intent: str, modality: str, act_type: SpeechActType) -> str:
+        if act_type == SpeechActType.DIRECTIVE:
+            return "request_information" if modality == "interrogative" else "request_action"
+        if act_type == SpeechActType.EXPRESSIVE:
+            return "express_attitude"
+        if act_type == SpeechActType.COMMISSIVE:
+            return "commit_action"
+        if act_type == SpeechActType.DECLARATION:
+            return "declare_state"
+        return "inform"
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers from the old NLUEngine
+    # ------------------------------------------------------------------
+    def _match_intent_by_pattern(self, text: str) -> List[Tuple[str, str, float]]:
+        candidates = self._rank_intents(text, tokens=self._fallback_tokens(text), entities=(), context=None, grammar_result=None)
+        return [(item.intent, item.matched_text or " ".join(item.evidence), item.confidence) for item in candidates]
+
+    def _tokenize(self, text: str) -> List[str]:
+        return [token for token, _span in _word_tokenize(text)]
+
     def _calculate_confidence(self, matches: List[Tuple[str, str, float]]) -> float:
-        """Calculate intent confidence based on match quality"""
         if not matches:
             return 0.0
-        
-        # Get the best match score
-        best_score = matches[0][2]
-        
-        # Normalize score to 0.0-1.0 range
-        normalized_score = min(1.0, best_score * 1.5)  # Boost longer matches
-        
-        # Apply minimum confidence for any match
-        return max(0.5, normalized_score)  # Minimum 50% confidence for any match
-
-    def _detect_modality(self, text: str) -> str:
-        """Hierarchical modality detection"""
-        printer.status("INIT", "Modalities detector initialized", "info")
-
-        text_lower = text.lower()
-    
-        modality_markers_data = {}
-        if self.modality_markers_path:
-            try:
-                with open(self.modality_markers_path, 'r', encoding='utf-8') as f:
-                    modality_markers_data = json.load(f)
-            except FileNotFoundError:
-                logger.error(f"Modality markers file not found: {self.modality_markers_path}")
-            except json.JSONDecodeError:
-                logger.error(f"Error decoding JSON from modality markers file: {self.modality_markers_path}")
-            except Exception as e:
-                logger.error(f"Failed to load modality markers: {e}")
-        else:
-            logger.warning("Modality markers path not configured.")
-    
-        # Priority detection order based on typical marker strength
-        modality_rules = [
-            ('interrogative', modality_markers_data.get('interrogative', []) + ['?']),
-            ('imperative', modality_markers_data.get('imperative', [])),
-            ('conditional', modality_markers_data.get('conditional', [])),
-            ('epistemic', modality_markers_data.get('epistemic', [])),
-            ('deontic', modality_markers_data.get('deontic', [])),
-            ('dynamic', modality_markers_data.get('dynamic', [])),
-            ('alethic', modality_markers_data.get('alethic', [])),
-        ]
-        
-        # Check for question mark first for interrogative
-        if text_lower.strip().endswith('?'):
-            return 'interrogative'
-    
-        for mod_type, markers in modality_rules:
-            # Ensure marker is not None or empty before using in re.escape
-            if any(re.search(r'\b' + re.escape(marker) + r'\b', text_lower) for marker in markers if marker):
-                return mod_type
-        
-        tokens = self._tokenize(text_lower)
-        if tokens:
-            if tokens[0] in ["tell", "give", "show", "create", "delete", "update"] and len(tokens) > 1: # Imperative verbs
-                # Ensure q_word is not None or empty
-                if not any(q_word in tokens for q_word in modality_markers_data.get('interrogative', []) if q_word):
-                    return 'imperative'
-    
-        return 'declarative' # Default
+        return _clamp(max(float(match[2]) for match in matches))
 
     def _calculate_overall_confidence(self, text: str, frame: LinguisticFrame) -> float:
-        """Calculate overall confidence based on multiple factors."""
-        printer.status("INIT", "Confidence calculations initialized", "info")
+        tokens = self._fallback_tokens(text)
+        coverage = self._lexical_coverage(tokens)
+        base = _clamp(frame.confidence)
+        return _clamp(base + min(0.12, coverage * 0.12) + min(0.12, 0.03 * len(frame.entities or {})))
 
-        # Base confidence from intent detection
-        confidence_score = frame.confidence # This was max_confidence_for_intent
+    def _normalize_text(self, text: str) -> str:
+        return re.sub(r"\s+", " ", _text(text)).strip()
 
-        # Factor in entity presence and validation (simple heuristic)
-        if frame.entities:
-            confidence_score += 0.1 * len(frame.entities)
-        
-        # Factor in lexical coverage (words in text that are in wordlist)
-        # This requires the main Wordlist object
-        if hasattr(self.wordlist, 'query'):
-            tokens = self._tokenize(text)
-            if tokens:
-                known_tokens = sum(1 for token in tokens if self.wordlist.query(token))  # Remove extra argument
-                coverage = known_tokens / len(tokens)
-                confidence_score += 0.2 * coverage
-        
-        return min(1.0, max(0.0, confidence_score))
-    
+    def _record_analysis(self, result: NLUAnalysisResult) -> None:
+        self.history.append({
+            "timestamp": datetime_module.datetime.utcnow().isoformat() + "Z",
+            "intent": result.frame.intent,
+            "confidence": result.frame.confidence,
+            "entity_count": len(result.entities),
+            "issue_count": len(result.issues),
+            "text_preview": result.text[:160],
+        })
+        if self.memory is not None and hasattr(self.memory, "add_intent"):
+            try:
+                self.memory.add_intent(result.frame.intent, confidence=result.frame.confidence, frame=result.frame, source="nlu")
+            except Exception as exc:
+                logger.warning("Could not store NLU intent in language memory: %s", exc)
 
-@dataclass
-class DependencyRelation:
-    head: str
-    relation: str
-    dependent: str
+    def stats(self) -> NLUStats:
+        return NLUStats(
+            parse_calls=self._parse_calls,
+            pattern_count=len(self.intent_recognizers),
+            entity_pattern_count=len(self.entity_recognizers),
+            wordlist_size=len(self.wordlist) if hasattr(self.wordlist, "__len__") else 0,
+            diagnostics_count=len(self.diagnostics),
+            history_length=len(self.history),
+            has_shared_nlp_engine=self.nlp_engine is not None,
+            tokenizer_attached=self.tokenizer is not None,
+            transformer_attached=self.transformer is not None,
+        )
 
+    def diagnostics_result(self) -> List[JsonMap]:
+        return [issue.to_dict() for issue in self.diagnostics]
+
+    def to_dict(self) -> JsonMap:
+        return {
+            "component": self.__class__.__name__,
+            "version": self.VERSION,
+            "stats": self.stats().to_dict(),
+            "intent_patterns": self.intent_patterns,
+            "entity_pattern_count": len(self.entity_recognizers),
+            "diagnostics": self.diagnostics_result(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Enhanced NLU
+# ---------------------------------------------------------------------------
 class EnhancedNLU(NLUEngine):
-    """Implements advanced NLU techniques"""
-    def __init__(self, wordlist_instance: Wordlist):
-        super().__init__(wordlist_instance)
-        self.config = load_global_config()
-        self.enlu_config = get_config_section('nlu')
+    """Extended analysis facade that preserves the old class name without undefined parser dependencies."""
 
-        # Psycholinguistic features
-        # self.lexical_diversity_tool = lex.lex() #might need setup e.g. lex(my_lex) from src.agents.language.my_lex import my_lex
-        self.readability_tool = textstat
+    def __init__(self, wordlist_instance: Optional[Wordlist] = None, **kwargs: Any) -> None:
+        super().__init__(wordlist_instance=wordlist_instance, **kwargs)
+        self.context_history: Optional[Deque[Any]] = None
         logger.info("EnhancedNLU initialized.")
 
-        # Store context history if needed by coreference resolver
-        self.context_history: Optional[deque] = None
-
-    def set_context_history(self, history: deque):
+    def set_context_history(self, history: Deque[Any]) -> None:
         self.context_history = history
 
-    def analyze_text_fully(self, text: str) -> Dict[str, Any]:
-        """
-        Run full NLU pipeline: coref resolution + dependency parsing + base parsing.
-        """
-        # Stage 0: Coreference resolution (if context history is available)
-        resolved_text = self.coref_resolver.resolve(text, history=self.context_history)
-        
-        # Stage 1: Basic NLU parsing (intent, entities, sentiment, modality)
-        # Use super().parse() to get the LinguisticFrame from the base NLUEngine
-        linguistic_frame_obj = super().parse(resolved_text)
+    def analyze_text_fully(self, text: str, *, nlp_tokens: Optional[Sequence[Any]] = None, context: Optional[Any] = None,
+                           dependencies: Optional[Sequence[Any]] = None, grammar_result: Optional[Any] = None,
+                           nlp_result: Optional[Any] = None) -> Dict[str, Any]:
+        result = self.analyze(
+            text,
+            nlp_tokens=nlp_tokens,
+            dependencies=dependencies,
+            grammar_result=grammar_result,
+            nlp_result=nlp_result,
+            context=context,
+        )
+        payload = result.to_dict()
+        payload["psycholinguistic"] = self._psycholinguistic_features(result.tokens)
+        payload["intent_alternatives"] = [candidate.to_dict() for candidate in result.intents[1:]]
+        return payload
 
-        # Stage 2: Dependency parsing on resolved text
-        parse_tree_dict = self.dependency_parser.parse(resolved_text) # This needs to return a dict like {'root': ..., 'nodes': ...}
-                                                                    # or List[DependencyRelation] based on its actual implementation.
-                                                                    # For now, assuming it returns a dict as expected by downstream methods.
-
-        # Stage 3: Enhanced sentiment and modality using parse tree
-        linguistic_frame_obj.sentiment = self._enhanced_sentiment(resolved_text, parse_tree_dict)
-        linguistic_frame_obj.modality = self._detect_modality_from_tree(parse_tree_dict) # Renamed from _detect_modality
-
-        # Convert LinguisticFrame to dict for the final output structure of analyze_text_fully
-        analysis_result = asdict(linguistic_frame_obj)
-        analysis_result["resolved_text"] = resolved_text
-        analysis_result["dependencies"] = parse_tree_dict # Or however dependencies are represented
-
-        # Add psycholinguistic features
-        try:
-            # analysis_result["lexical_diversity"] = self.lexical_diversity_tool.ttr(resolved_text) # Example
-            analysis_result["flesch_reading_ease"] = self.readability_tool.flesch_reading_ease(resolved_text)
-        except Exception as e:
-            logger.warning(f"Could not compute some psycholinguistic features: {e}")
-            # analysis_result["lexical_diversity"] = None
-            analysis_result["flesch_reading_ease"] = None
-            
-        return analysis_result
-
-    def _enhanced_sentiment(self, text: str, parse_tree: Dict) -> float:
-        """Sentiment analysis considering negation and intensity from parse tree"""
-        # Implementation based on Socher et al. (2013) Recursive Neural Networks (Conceptual)
-        # This requires parse_tree to have specific structure, e.g., nodes with 'relation', 'word', 'intensity'
-        sentiment = 0.0
-        if not parse_tree or 'nodes' not in parse_tree or not isinstance(parse_tree['nodes'], list):
-            logger.warning("Parse tree is not in expected format for enhanced sentiment. Falling back to text-based.")
-            return super()._calculate_sentiment(text) # Fallback to base NLU sentiment
-
-        for node in parse_tree['nodes']:
-            if not isinstance(node, dict): continue # Skip if node is not a dict
-
-            word = node.get('word')
-            relation = node.get('relation')
-            intensity = node.get('intensity', 1.0) # Default intensity
-
-            if relation == 'neg': # Assuming 'neg' relation for negation
-                sentiment -= 0.5 * intensity # Example impact of negation
-            elif word and hasattr(self.wordlist, 'query'):
-                word_data = self.wordlist.query(word)
-                # Assuming wordlist query returns dict with 'sentiment' score if available
-                word_sentiment = word_data.get('sentiment', 0) if word_data else 0 
-                sentiment += word_sentiment * intensity
-        
-        return math.tanh(sentiment)  # Squash to [-1, 1]
-
-    def _detect_modality_from_tree(self, parse_tree: Dict) -> str:
-        """Detect speech modality using verb patterns from parse tree"""
-        # Inspired by Austin's Speech Act Theory (1975)
-        if not parse_tree or 'root' not in parse_tree or not isinstance(parse_tree['root'], dict):
-            logger.warning("Parse tree is not in expected format for modality detection.")
-            return "statement" # Fallback
-
-        main_verb_lemma = parse_tree['root'].get('lemma')
-        
-        # Example modality map based on main verb lemma
-        modality_map = {
-            'ask': 'query', 'enquire': 'query', 'question': 'query',
-            'request': 'command', 'order': 'command', 'tell': 'command', # 'tell' can be ambiguous
-            'suggest': 'proposal', 'propose': 'proposal',
-            'can': 'epistemic', 'may': 'epistemic', 'might': 'epistemic', # Modals
-            'should': 'deontic', 'must': 'deontic',
+    def _psycholinguistic_features(self, tokens: Sequence[NLUInputToken]) -> JsonMap:
+        lexical = [token.text for token in tokens if not token.is_punct]
+        unique = {item.casefold() for item in lexical}
+        lengths = [len(item) for item in lexical if item]
+        return {
+            "token_count": len(lexical),
+            "type_count": len(unique),
+            "type_token_ratio": 0.0 if not lexical else len(unique) / len(lexical),
+            "mean_token_length": 0.0 if not lengths else statistics.mean(lengths),
         }
-        
-        if main_verb_lemma and main_verb_lemma in modality_map:
-            return modality_map[main_verb_lemma]
-            
-        # Further checks can be added here, e.g., for question words, imperative mood markers in the tree
-        
-        return 'statement' # Default
-    
+
 
 if __name__ == "__main__":
-    print("\n=== Running Natural Language Understanding Engine (NLU Engine) ===\n")
-    printer.status("Init", "NLU Engine initialized", "success")
+    print("\n=== Running NLU Engine ===\n")
+    printer.status("TEST", "NLU Engine initialized", "info")
 
-    n=3
+    wordlist = Wordlist()
+    engine = NLUEngine(wordlist_instance=wordlist)
 
-    list = Wordlist(n=n)
-    engine = NLUEngine(wordlist_instance=Wordlist)
-    engine2 = EnhancedNLU(wordlist_instance=Wordlist)
-    print(f"Suggestions: {list}")
-    print(f"Suggestions: {engine}")
-    print(f"Suggestions: {engine2}")
+    samples = [
+        "Hello, can you help me find the current time?",
+        "Please create a reminder for tomorrow at 09:30.",
+        "I really love how helpful this language agent is.",
+        "What do you mean by 'shared NLP engine'?",
+    ]
 
-    print("\n* * * * * Phase 2 * * * * *\n")
-    label= ("speaker", "segment1")
-    word ="speaker"
-    order_counts = defaultdict(int, {
-        ('the', 'cat'): 4,
-        ('cat', 'sat'): 2
-    })
-    lower_order_counts = defaultdict(int, {
-        ('the',): 6,
-        ('cat',): 3
-    })
+    for sample in samples:
+        result = engine.analyze(sample)
+        printer.pretty("NLU_RESULT", result.to_dict(), "success")
 
-    segment=list._process_segment(label=label, word_iterable=word)
-    smoothing=list._witten_bell_smoothing(order_counts=order_counts, lower_order_counts=lower_order_counts)
-    
-    printer.pretty("GloVe", list._load_glove_vectors(), "success")
-    printer.pretty("segment", segment, "success")
-    printer.pretty("Smoothing", smoothing, "success")
+    enhanced = EnhancedNLU(wordlist_instance=wordlist)
+    full = enhanced.analyze_text_fully("Could you explain this tomorrow?")
+    printer.pretty("ENHANCED_NLU", full, "success")
+    printer.pretty("STATS", engine.stats().to_dict(), "success")
 
-    print("\n* * * * * Phase 3 Patterns * * * * *\n")
-    printer.status("entity", engine.get_entities(), "success")
-    printer.status("intent", engine.get_intents(), "success")
-    printer.status("lexicon", engine.get_lexicons(), "success")
-    printer.status("modality", engine.get_modalities(), "success")
-    printer.status("morphology", engine.get_morphologies(), "success")
-
-    print("\n* * * * * Phase 4 * * * * *\n")
-    entity={"2024-11-10"}
-
-    printer.pretty("temporal", engine._validate_temporal(entity=entity), "success")
-    printer.pretty("quantity", engine._validate_quantity(entity=entity), "success")
-    printer.pretty("technical", engine._validate_technical(entity=entity), "success")
-    printer.pretty("duration", engine._validate_duration(entity=entity), "success")
-    printer.pretty("term", engine._validate_term(entity=entity), "success")
-    printer.pretty("boolean", engine._validate_boolean(entity=entity), "success")
-    printer.pretty("norm", engine._normalize_entity(entity=entity), "success")
-
-    print("\n* * * * * Phase 5 * * * * *\n")
-    text="There aren't any resources where we are going, so get packing friend."
-
-    printer.pretty("validate", list._validate_word_entries(), "success")
-    printer.pretty("precompute", list._precompute_linguistic_data(), "success")
-
-
-    print("\n=== Successfully Ran NLU Engine ===\n")
+    print("\n=== Test ran successfully ===\n")

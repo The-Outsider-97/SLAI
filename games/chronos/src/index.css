@@ -1,0 +1,157 @@
+/* @import "tailwindcss"; */
+
+.text-sky-blue { color: #0071a4; }
+.bg-sky-blue { background-color: #0071a4; }
+.border-sky-blue { border-color: #0071a4; }
+.text-traffic-red { color: #cb0605; }
+.bg-traffic-red { background-color: #cb0605; }
+.border-traffic-red { border-color: #cb0605; }
+
+@theme {
+  --color-signal-white: #efefef;
+  --color-black-brown: #181818;
+  --color-traffic-red: #cb0605;
+  --color-brown-red: #781c1c;
+  --color-sky-blue: #0071a4;
+  --color-p1-blue: #006094;
+  --color-p2-white: #d9d9d9;
+  --color-piece-border: #1a1a1a;
+}
+
+body {
+  background-color: #0a0a0a;
+  color: #efefef;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+}
+
+/* Elegant scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(239, 239, 239, 0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(239, 239, 239, 0.2);
+}
+
+.piece-p1 {
+  background-color: rgba(0, 96, 148, 0.75);
+  box-shadow: 0 0 25px rgba(0, 96, 148, 0.4), inset 0 0 10px rgba(255, 255, 255, 0.2);
+}
+
+.piece-p2 {
+  background-color: rgba(217, 217, 217, 0.75);
+  box-shadow: 0 0 25px rgba(255, 255, 255, 0.3), inset 0 0 10px rgba(0, 0, 0, 0.05);
+}
+
+.neon-text {
+  text-shadow: 0 0 15px rgba(0, 113, 164, 0.4);
+}
+
+.glow-blue {
+  box-shadow: 0 0 25px rgba(0, 96, 148, 0.6), inset 0 0 10px rgba(255, 255, 255, 0.3);
+}
+
+.glow-white {
+  box-shadow: 0 0 25px rgba(255, 255, 255, 0.4), inset 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.glass-panel {
+  background: rgba(24, 24, 24, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(239, 239, 239, 0.05);
+}
+
+#board {
+  box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+}
+
+.cell-transition {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2s infinite;
+}
+
+.page-bg-lights {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.03), transparent 55%);
+}
+
+.page-bg-grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  background-image:
+    linear-gradient(rgba(239, 239, 239, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(239, 239, 239, 0.12) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.8), transparent 88%);
+}
+
+.page-bg-beam {
+  position: absolute;
+  width: 200vw;          /* Cover entire viewport width */
+  height: 200vh;         /* Cover entire viewport height */
+  max-width: none;
+  max-height: none;
+  border-radius: 999px;
+  filter: blur(150px);   /* More blur for a diffused glow */
+  opacity: 0.6;          /* Slightly lower for subtlety */
+  mix-blend-mode: screen;
+}
+
+.page-bg-beam--sky {
+  background: radial-gradient(circle at 30% 50%, rgba(0, 113, 164, 0.5), rgba(0, 113, 164, 0.05) 60%, transparent 100%);
+  animation: drift-sky 16s linear infinite;
+}
+
+.page-bg-beam--red {
+  background: radial-gradient(circle at 70% 50%, rgba(203, 6, 5, 0.42), rgba(203, 6, 5, 0.05) 68%, transparent 100%);
+  animation: drift-red 20s linear infinite;
+}
+
+@keyframes drift-sky {
+  0% {
+    transform: translate(-80vw, -30vh) rotate(-12deg);
+  }
+  50% {
+    transform: translate(80vw, 40vh) rotate(12deg);
+  }
+  100% {
+    transform: translate(-80vw, -30vh) rotate(-12deg);
+  }
+}
+
+@keyframes drift-red {
+  0% {
+    transform: translate(80vw, 50vh) rotate(15deg);
+  }
+  50% {
+    transform: translate(-70vw, 10vh) rotate(-10deg);
+  }
+  100% {
+    transform: translate(80vw, 50vh) rotate(15deg);
+  }
+}
+
+body > * {
+  position: relative;
+  z-index: 1;
+}

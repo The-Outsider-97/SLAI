@@ -1,82 +1,114 @@
-# Knowledge Agent Architecture
+# Knowledge Subsystem Architecture
+
+This folder contains the production knowledge subsystem used by `KnowledgeAgent`.
+The system is designed around a **single orchestrator-driven lifecycle** with
+clear separation between retrieval, memory, governance, actions, and runtime observability.
 
 ---
 
-## Architecture Components
+## Design Goals
 
-### KnowledgeAgent
-Core orchestrator for RAG-style retrieval, ontology management, and inference.
-Implements TF-IDF + rule-based inference with ontology support.
-Maintains a structured knowledge base (knowledge_agent) and long-term local memory (knowledge_memory).
-Integrates a Governor for ethical auditing and a RuleEngine for inference.
+- **Single ownership for subsystem lifecycle** (start/stop/health).
+- **No double initialization** of core dependencies (cache/governor/action executor).
+- **Strong governance defaults** for bias and policy auditing.
+- **Consistent shared-memory integration** for cross-agent visibility.
+- **Operational readiness** with runtime health and metrics.
 
-### KnowledgeMemory
-Local memory unit focused on relevance-weighted, context-aware storage.
-Supports TTL-based expiration, metadata filtering, and custom relevance heuristics.
-Use .update() to insert knowledge, .recall() to retrieve filtered entries.
+---
 
-### KnowledgeCache
+## Components
 
-Encrypted LRU cache with semantic hashing support.
-Configurable with SimHash/MD5 for query grouping.
-Optional AES encryption via cryptography.fernet.
+### `KnowledgeOrchestrator` (subsystem coordinator)
+- Central wiring point for:
+  - `KnowledgeMemory`
+  - `KnowledgeCache`
+  - `RuleEngine`
+  - `Governor`
+  - `KnowledgeSynchronizer`
+  - `KnowledgeMonitor`
+  - `PerformAction`
+- Exposes lifecycle methods (`start`, `stop`), explicit sync/audit calls, and health snapshots.
+- Reduces circular ownership by centralizing subsystem dependency creation/attachment.
 
-### KnowledgeMonitor
-Watches for academic integrity and data tampering.
-Validates knowledge sources (papers, datasets) for domain trust and freshness.
-Computes and compares integrity hashes.
-Raises alerts or quarantines assets if violations are found.
+### `KnowledgeAgent` (application-level entrypoint)
+- Performs retrieval (TF-IDF / dense / hybrid).
+- Uses ontology expansion and optional governance/bias checks.
+- Publishes retrieval context to shared memory for downstream consumers.
+- Delegates subsystem operations to `KnowledgeOrchestrator` where appropriate.
 
-### Governor
-Enforces ethical constraints and monitors agent behavior.
-Loads principles and restrictions from configurable YAML/JSON guidelines.
-Audits memory against rules via the RuleEngine.
-Performs real-time and scheduled audits with enforcement actions (alert, restrict, etc.).
+### `KnowledgeMemory`
+- Relevance-weighted, context-aware memory with TTL and metadata filtering.
+- Supports persistence and retrieval ranking.
 
-### PerformAction
-Execution layer that performs actions extracted from documents.
-Extracts structured action:type:payload commands.
-Executes via HTTP, database, or shell (with sandboxing).
-Supports concurrency limits and retry policies.
+### `KnowledgeCache`
+- LRU-style cache with configurable hashing and optional encryption hooks.
+- Used for fast query-result short-circuiting.
 
-### RuleEngine
-Sector-specific, pluggable rule system for inference.
-Supports dynamic rule loading from JSON templates.
-Categorizes rules by domain (medical, economic, technological, etc.).
-Applies rules either globally or by inferred sector.
+### `Governor`
+- Policy and ethics enforcement layer.
+- Audits retrieval/memory behavior and tracks violation thresholds.
 
+### `RuleEngine`
+- Template-backed rule evaluation and inference.
+- Supports domain-specific rule sets and dynamic discovery.
+
+### `KnowledgeMonitor`
+- Data-integrity and source-quality checks for knowledge assets.
+- Can trigger alert/quarantine behavior based on policy.
+
+### `PerformAction`
+- Executes validated action directives extracted from knowledge payloads.
+- Handles retry, throttling, and execution logging.
+
+### `runtime/` package (`RTHealth`, `RTMetrics`)
+- Health probes (liveness/readiness/component checks).
+- Thread-safe metrics collection and Prometheus export.
+
+---
+
+## High-Level Flow
 
 ```mermaid
 graph TD
-    A[User Input / Task Request] --> B[KnowledgeAgent]
+    U[User Query] --> KA[KnowledgeAgent]
+    KA --> KO[KnowledgeOrchestrator]
 
-    subgraph Core Memory & Reasoning
-        B --> KM[KnowledgeMemory]
-        B --> KC[KnowledgeCache]
-        B --> RE[RuleEngine]
-    end
+    KO --> KM[KnowledgeMemory]
+    KO --> KC[KnowledgeCache]
+    KO --> RE[RuleEngine]
+    KO --> GOV[Governor]
+    KO --> MON[KnowledgeMonitor]
+    KO --> SYNC[KnowledgeSynchronizer]
+    KO --> ACT[PerformAction]
 
-    B --> GOV[Governor]
-    GOV -->|Audit Memory| KM
-    GOV -->|Check Violations| RE
-
-    B --> MON[KnowledgeMonitor]
-    MON -->|Verify Sources| GOV
-    MON -->|Check Integrity| KC
-
-    B --> ACT[PerformAction]
-    ACT -->|Execute Commands| Output[External Systems / Actions]
-
-    subgraph Optional Enhancements
-        B --> LANG[LanguageAgent]
-    end
-
-    GOV -->|Alerts / Enforcement| Output
+    KA --> SHM[SharedMemory]
+    KO --> RT[Runtime Health + Metrics]
 ```
+
+---
+
+## Shared Memory Conventions (recommended keys)
+
+- `knowledge:last_retrieval`: structured retrieval payload (query, mode, top results, timestamp).
+- `retrieved_knowledge`: compatibility key containing only retrieved text list.
+- `knowledge:metrics:KnowledgeAgent:retrieval_count`: monotonically increasing retrieval counter.
+- `knowledge:<tag>:*`: broadcast payloads for latest knowledge snapshots.
+
+These keys keep integration stable with existing consumers while enabling richer telemetry.
+
+---
+
+## Runtime Documentation
+
+For operational details, health checks, and metrics naming conventions, see:
+
+- [`runtime/RUNTIME.md`](runtime/RUNTIME.md)
+
 ---
 
 ## Use Cases
-- Medical AI: Clinical guideline retrieval, symptom-treatment inference.
-- Legal Agents: Cross-reference case law, statute analysis with ethical checks.
-- Supply Chains: Predict logistical risks using pattern rules.
-- AI Safety: Detect bias, enforce behavior policies, and handle violations.
+
+- Medical AI: policy-aware guideline retrieval + action tracing.
+- Legal assistants: concept expansion + rule-constrained recommendations.
+- Supply-chain copilots: retrieval + inferred risk rules + sync monitoring.
+- AI safety layers: governance auditing, bias detection, and runtime observability.

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aether Shift</title>
+    <link rel="icon" type="image/x-icon" href="../img/Logo01.svg" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="./src/index.css" />
+  </head>
+
+  <body>
+    <a href="/" class="home-btn">Home</a>
+
+    <main class="aether-shell">
+      <header class="top-bar">
+        <div>
+          <div class="title-row">
+            <h1>AETHER SHIFT</h1>
+            <button id="guide-toggle" class="guide-btn" aria-expanded="false" aria-controls="quick-guide">i</button>
+          </div>
+          <p class="subtitle">TACTICAL SPATIAL WARFARE</p>
+          <div id="quick-guide" class="quick-guide hidden" role="dialog" aria-label="Quick Guide">
+            <h3>Quick Guide</h3>
+            <ul>
+              <li>Goal: Connect your edge (Red: Top, Blue: Bottom) to the opposite side OR capture 3 Power Wells.</li>
+              <li>Turn: Pick 2 actions from the cards below.</li>
+            </ul>
+            <p><strong>Actions</strong></p>
+            <ul>
+              <li>Shift: Click edge tiles to slide rows/cols.</li>
+              <li>Attune: Lock a tile &amp; capture Wells.</li>
+              <li>Place: a tile</li>
+              <li>Rotate: Rotate a tile</li>
+              <li>Advance: Move character to the adjacent connected tile</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="status-right">
+          <h2 id="turn-label">Red Architect's Turn</h2>
+          <p id="actions-label">ACTIONS: 2</p>
+          <div class="mode-wrap">
+            <label for="mode-select">MODE:</label>
+            <select id="mode-select">
+              <option value="PVAI">VS AI (AI STARTS)</option>
+              <option value="PVP">PLAYER VS PLAYER</option>
+            </select>
+          </div>
+        </div>
+      </header>
+
+      <section class="board-row">
+        <aside id="player-1" class="player-card red active">
+          <h3>Red Architect</h3>
+          <p><span>Resonators</span><strong id="p1-resonators"></strong></p>
+          <p><span>Power Wells</span><strong id="p1-wells"></strong></p>
+          <hr />
+          <p class="objective"><b>Objective:</b> Connect TOP edge to BOTTOM edge OR capture 3 Wells.</p>
+        </aside>
+
+        <div class="board-wrap">
+          <div class="lane red"></div>
+          <div id="board" class="board"></div>
+          <div class="lane blue"></div>
+        </div>
+
+        <aside id="player-2" class="player-card blue">
+          <h3>Blue Architect</h3>
+          <p><span>Resonators</span><strong id="p2-resonators"></strong></p>
+          <p><span>Power Wells</span><strong id="p2-wells"></strong></p>
+          <hr />
+          <p class="objective"><b>Objective:</b> Connect BOTTOM edge to TOP edge OR capture 3 Wells.</p>
+        </aside>
+      </section>
+
+      <section class="action-deck">
+        <h4>ACTION DECK</h4>
+        <div id="action-cards" class="cards"></div>
+      </section>
+    </main>
+
+    <aside id="right-sidebar" class="right-sidebar">
+      <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle sidebar">❮</button>
+      <div class="sidebar-inner">
+        <div class="tabs">
+          <button data-tab="comms" class="tab active">COMMS</button>
+          <button data-tab="score" class="tab">SCOREBOARD</button>
+        </div>
+        <div id="comms-panel" class="panel">
+          <h5>SYSTEM LOG</h5>
+          <div id="log-box" class="log-box"></div>
+        </div>
+        <div id="score-panel" class="panel hidden">
+          <h5>MATCH STATUS</h5>
+          <div class="log-box score-status-box">
+            <p id="score-mode">Mode: -</p>
+            <p id="score-turn">Turn: -</p>
+            <p id="score-wells">Wells — Red: 0 / Blue: 0</p>
+            <p id="score-winner">Winner: In Progress</p>
+            <p id="score-score">Score: 0</p>
+            <p id="score-points">Points: 0</p>
+          </div>
+          <h5>RESULT HISTORY</h5>
+          <div id="score-history" class="score-history"></div>
+        </div>
+      </div>
+    </aside>
+
+    <div id="endgame-overlay" class="endgame-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="endgame-headline">
+      <div class="endgame-card">
+        <h2 id="endgame-headline">VICTORY</h2>
+        <p id="endgame-subtitle" class="endgame-subtitle">Edge link established.</p>
+        <p id="endgame-winner" class="endgame-winner">Red Architect wins the match.</p>
+        <button id="restart-btn" type="button" class="restart-btn">Start New Match</button>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,401 @@
+structural_quality:
+  enabled: true
+  auto_record_to_memory: true
+  default_window: latest
+  ids:
+    record_id_candidates:
+    - record_id
+    - id
+    - row_id
+    - sample_id
+    - uuid
+  scoring:
+    pass_threshold: 0.9
+    warn_threshold: 0.75
+    weights:
+      schema: 0.35
+      required: 0.25
+      range: 0.15
+      domain: 0.15
+      coercion: 0.1
+  schema:
+    strict_unknown_fields: false
+    allow_missing_schema: false
+    read_expected_schema_from_memory: true
+    write_schema_to_memory: true
+    enforce_schema_version_match: true
+    infer_types_from_samples: true
+    max_schema_inference_records: 100
+  completeness:
+    allow_empty_strings: false
+    warn_missing_record_rate: 0.05
+    block_missing_record_rate: 0.15
+    warn_missing_field_rate: 0.08
+    block_missing_field_rate: 0.2
+  coercion:
+    enabled: true
+    apply_coerced_values: false
+    warn_rate: 0.05
+    block_rate: 0.2
+    truthy_values:
+    - 'true'
+    - '1'
+    - 'yes'
+    - y
+    - 'on'
+    falsy_values:
+    - 'false'
+    - '0'
+    - 'no'
+    - n
+    - 'off'
+    datetime_formats:
+    - '%Y-%m-%dT%H:%M:%S'
+    - '%Y-%m-%d %H:%M:%S'
+    - '%Y-%m-%d'
+    - '%Y/%m/%d'
+  constraints:
+    range_warn_violation_rate: 0.03
+    range_block_violation_rate: 0.1
+    domain_warn_violation_rate: 0.03
+    domain_block_violation_rate: 0.1
+    regex_warn_violation_rate: 0.02
+    regex_block_violation_rate: 0.08
+    unknown_field_warn_rate: 0.05
+    unknown_field_block_rate: 0.15
+  remediation:
+    schema_actions:
+    - normalize_schema
+    - drop_invalid_records
+    - re_fetch_malformed_records
+    - align_schema_version
+    required_actions:
+    - impute_required_fields
+    - re_fetch_incomplete_records
+    - quarantine_incomplete_records
+    - enforce_required_field_contract
+    range_actions:
+    - clamp_numeric_range
+    - quarantine_out_of_range_records
+    - review_upstream_transformations
+    domain_actions:
+    - normalize_enum_values
+    - quarantine_invalid_domain_records
+    - review_source_contract
+    coercion_actions:
+    - stabilize_type_casting
+    - review_upstream_serialization
+    - tighten_reader_normalization
+  memory:
+    record_quality_snapshot: true
+    register_schema_version: true
+    rule_id_prefix: structural
+
+statistical_quality:
+  enabled: true
+  auto_record_to_memory: true
+  default_window: latest
+  ids:
+    record_id_candidates:
+    - record_id
+    - id
+    - row_id
+    - sample_id
+    - uuid
+  baseline:
+    auto_register_if_missing: true
+    read_from_memory: true
+    write_to_memory: true
+  scoring:
+    pass_threshold: 0.9
+    warn_threshold: 0.75
+    weights:
+      drift: 0.35
+      missingness: 0.25
+      duplicates: 0.2
+      outliers: 0.2
+  missingness:
+    required_fields: []
+    warn_total_rate: 0.05
+    block_total_rate: 0.12
+    warn_field_rate: 0.1
+    block_field_rate: 0.25
+    anomaly_stddev_multiplier: 2.0
+  duplicates:
+    warn_rate: 0.03
+    block_rate: 0.1
+    fingerprint_fields_exclude:
+    - id
+    - record_id
+    - uuid
+    - created_at
+    - updated_at
+    - timestamp
+    key_fields:
+    - value
+    - score
+    - category
+    - status
+  outliers:
+    enabled: true
+    min_numeric_observations: 8
+    zscore_threshold: 3.0
+    iqr_multiplier: 1.5
+    warn_rate: 0.04
+    block_rate: 0.1
+    max_fields: 100
+  drift:
+    enabled: true
+    min_observations: 12
+    warn_score: 0.35
+    block_score: 0.7
+    numeric_mean_relative_warn: 0.2
+    numeric_mean_relative_block: 0.45
+    numeric_std_ratio_warn: 1.75
+    numeric_std_ratio_block: 2.5
+    categorical_js_warn: 0.08
+    categorical_js_block: 0.18
+    missing_rate_delta_warn: 0.05
+    missing_rate_delta_block: 0.12
+    exclude_fields:
+    - record_id
+    - id
+    - row_id
+    - sample_id
+    - uuid
+    - created_at
+    - updated_at
+    - timestamp
+    - batch_id
+  remediation:
+    missingness_actions:
+    - impute_missing_values
+    - re_fetch_incomplete_records
+    - quarantine_incomplete_records
+    duplicate_actions:
+    - drop_duplicate_records
+    - merge_duplicate_records
+    - enforce_identity_constraints
+    - review_source_replay
+    outlier_actions:
+    - winsorize_extreme_values
+    - quarantine_outlier_records
+    - review_numeric_scaling
+    - revalidate_sensor_or_source
+    drift_warn_actions:
+    - monitor_next_batches
+    - compare_to_recent_baseline
+    - review_segment_distribution
+    drift_block_actions:
+    - quarantine_shifted_batch
+    - revalidate_baseline
+    - segment_source_distribution
+    - re_fetch_recent_data
+  memory:
+    record_quality_snapshot: true
+    rule_id_prefix: statistical
+
+semantic_quality:
+  enabled: true
+  auto_record_to_memory: true
+  default_label_field: label
+  default_window: latest
+
+  ids:
+    record_id_candidates:
+      - record_id
+      - id
+      - row_id
+      - sample_id
+      - uuid
+
+  scoring:
+    pass_threshold: 0.90
+    warn_threshold: 0.75
+    weights:
+      leakage: 0.45
+      consistency: 0.30
+      provenance: 0.25
+
+  leakage_detection:
+    exact_match_block_threshold: 0.20
+    exact_match_warn_threshold: 0.05
+    normalized_similarity_threshold: 0.97
+    high_risk_confidence: 0.90
+    suspicious_name_block_terms:
+      - label
+      - target
+      - answer_key
+      - ground_truth
+      - expected_output
+      - gold_label
+    suspicious_name_warn_terms:
+      - hint
+      - class
+      - predicted
+      - resolved_label
+    future_terms:
+      - future
+      - outcome
+      - post_event
+      - resolution
+    suspicious_text_fields:
+      - text
+      - content
+      - prompt
+      - context
+      - description
+    fingerprint_fields_exclude:
+      - id
+      - record_id
+      - uuid
+      - start_time
+      - end_time
+      - created_at
+      - updated_at
+      - timestamp
+      - source_id
+      - batch_id
+
+  cross_field_consistency:
+    max_record_inconsistency_rate_warn: 0.05
+    max_record_inconsistency_rate_block: 0.15
+    duplicate_entity_fields:
+      - entity_id
+      - item_id
+      - document_id
+    label_conflict_block_threshold: 0.10
+    rules:
+      - rule_id: start_before_end
+        type: temporal_order
+        earlier_field: start_time
+        later_field: end_time
+        severity: high
+        message: Start time must not occur after end time.
+      - rule_id: created_before_updated
+        type: temporal_order
+        earlier_field: created_at
+        later_field: updated_at
+        severity: medium
+        message: Created timestamp must not occur after updated timestamp.
+      - rule_id: resolved_requires_resolution_time
+        type: required_if
+        if_field: status
+        if_equals: resolved
+        required_field: resolved_at
+        severity: medium
+        message: Resolved records must include resolved_at.
+      - rule_id: source_matches_input_source
+        type: equals_if_present
+        field: source_id
+        compare_to_value_ref: input.source_id
+        severity: high
+        message: Record source_id must match the evaluation source_id when present.
+
+  provenance:
+    min_trust_score: 0.65
+    block_below_trust: 0.45
+    block_on_missing_required: false
+    required_fields:
+      - source_id
+      - source_type
+      - collected_at
+    optional_fields:
+      - checksum
+      - lineage_id
+      - collector
+      - uri
+      - schema_version
+    confidence_weights:
+      memory_reliability: 0.45
+      metadata_completeness: 0.25
+      recency: 0.15
+      checksum: 0.10
+      lineage: 0.05
+    freshness_windows_seconds:
+      fresh: 86400
+      acceptable: 604800
+
+  remediation:
+    leakage_block_actions:
+      - quarantine_records
+      - drop_leaking_features
+      - re_fetch_labels
+      - review_feature_selection
+    leakage_warn_actions:
+      - review_feature_selection
+      - mask_leaking_tokens
+      - run_manual_audit
+    consistency_actions:
+      - normalize_cross_fields
+      - quarantine_conflicting_records
+      - enforce_schema_rules
+      - review_duplicate_entities
+    provenance_actions:
+      - manual_attestation
+      - reduce_source_weight
+      - re_fetch_provenance
+      - verify_lineage
+
+  memory:
+    record_source_reliability: true
+    record_quality_snapshot: true
+    rule_id_prefix: semantic
+
+workflow_control: {}
+
+quality_memory:
+  enabled: true
+  backend: hybrid
+  auto_persist: true
+  bootstrap_on_start: true
+  persist_every_n_writes: 1
+
+  defaults:
+    default_window: latest
+    default_verdict: warn
+    default_source_reliability: 0.5
+
+  validation:
+    score_bounds:
+      min: 0.0
+      max: 1.0
+
+  persistence:
+    storage_dir: quality/storage/quality_memory
+    state_filename: quality_memory_state.json
+    journal_filename: quality_memory_journal.jsonl
+    fsync_on_write: false
+
+  journaling:
+    enabled: true
+
+  retention:
+    max_snapshots_per_source: 2000
+    max_drift_baselines_per_metric: 250
+    max_drift_observations_per_metric: 2000
+    max_schema_versions_per_source: 200
+    max_threshold_decisions_per_rule: 250
+    max_remediation_outcomes_per_rule: 1000
+    max_conflicts_per_scope: 500
+    max_source_reliability_events: 1000
+
+  conflict_resolution:
+    default_strategy: weighted_consensus
+    block_on_critical: true
+    quarantine_on_high_disagreement: true
+    checker_weight:
+      default: 1.0
+      structural: 1.0
+      statistical: 1.15
+      semantic: 1.2
+      workflow: 1.1
+    verdict_rank:
+      pass: 0
+      warn: 1
+      block: 2
+    severity_rank:
+      low: 1
+      medium: 2
+      high: 3
+      critical: 4

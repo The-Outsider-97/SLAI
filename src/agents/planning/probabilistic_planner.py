@@ -1,242 +1,341 @@
+"""
+Probabilistic Planner – Value iteration for stochastic shortest‑path problems.
 
-import time
+This module defines a probabilistic action and a planner that uses value iteration
+to find a policy that maximises the probability of reaching a goal state.
+"""
+
 import copy
+import threading
 
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Callable, Tuple
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.agents.planning.utils.config_loader import load_global_config, get_config_section
 from src.agents.planning.planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
 
-logger = get_logger("ProbabilisticPlanner")
+logger = get_logger("Probabilistic Planner")
 printer = PrettyPrinter
 
-# Type definitions consistent with your architecture
+# Type definitions
 StateTuple = Tuple[Tuple[str, Any], ...]
-Policy = Dict[StateTuple, 'ProbabilisticAction']
+Policy = Dict[StateTuple, "ProbabilisticAction"]
+
 
 @dataclass
 class ProbabilisticAction:
     """
-    Defines an action with probabilistic outcomes, central to PPDDL-style planning.
+    Defines an action with probabilistic outcomes, central to PPDDL‑style planning.
+
+    Attributes:
+        name: Unique identifier.
+        preconditions: Callable that returns True if the action can be executed.
+        outcomes: List of (probability, effect_function) pairs.
+        cost: Execution cost (not used in value iteration, but may be used later).
+        failure_modes: Optional mapping from failure type to probability.
     """
+
     name: str
-    probability: float
     preconditions: Callable[[Dict[str, Any]], bool]
     outcomes: List[Tuple[float, Callable[[Dict[str, Any]], None]]]
-    effects: List[Callable] = field(default_factory=list)
     cost: float = 1.0
-    success_rate: float = 0.0
-    failure_modes: Dict[str, float] = field(default_factory=dict)  # Failure type: probability
+    failure_modes: Dict[str, float] = field(default_factory=dict)
 
-    def __post_init__(self):
-        # Validate that outcome probabilities sum to 1.0
-        total_prob = sum(prob for prob, _ in self.outcomes)
-        if not abs(total_prob - 1.0) < 1e-6:
-            raise ValueError(f"Probabilities for action '{self.name}' do not sum to 1.0 (got {total_prob})")
+    def __post_init__(self) -> None:
+        # Validate outcome probabilities sum to 1.0
+        total = sum(p for p, _ in self.outcomes)
+        if not abs(total - 1.0) < 1e-6:
+            raise ValueError(f"Action '{self.name}' outcome probabilities sum to {total} (not 1.0)")
 
     def to_policy_format(self) -> Dict:
-        """Convert to policy execution format"""
+        """Convert to a policy execution format (for external use)."""
         return {
-            'action': self.name,
-            'probability': self.probability,
-            'outcomes': [
-                {'probability': 1 - self.probability, 'effect': self._failure_effect(fail_mode)}
-                for fail_mode in self.failure_modes
-            ]
+            "action": self.name,
+            "outcomes": [
+                {"probability": p, "effect": effect.__name__ if hasattr(effect, "__name__") else str(effect)}
+                for p, effect in self.outcomes
+            ],
         }
-        
-    def _failure_effect(self, fail_mode: str) -> Callable:
-        """Generate failure effect based on failure mode"""
-        # Implementation would vary based on failure mode
-        return lambda state: state.update({'status': f'failed_{fail_mode}'})
 
-class ProbabilisticPlanner():
+
+class ProbabilisticPlanner:
     """
-    A planner that handles uncertainty by computing a policy that maximizes the
-    probability of reaching a goal state. It uses Value Iteration to solve
-    the underlying stochastic shortest-path problem.
+    Planner that computes a policy maximising the probability of reaching a goal
+    using value iteration on a stochastic shortest‑path problem.
+
+    The planner is thread‑safe and caches Q‑values internally.
     """
-    def __init__(self):
+
+    def __init__(self) -> None:
         self.config = load_global_config()
-        self.pp_config = get_config_section('probabilistic_planner')
-        
+        self.pp_config = get_config_section("probabilistic_planner")
+
         # Algorithm parameters
-        self.gamma = self.pp_config.get('gamma')  # Discount factor
-        self.convergence_threshold = self.pp_config.get('convergence_threshold')
-        self.max_iterations = self.pp_config.get('max_iterations')
-        
+        self.gamma = self.pp_config.get("gamma", 0.99)  # Discount factor
+        self.convergence_threshold = self.pp_config.get("convergence_threshold", 0.0001)
+        self.max_iterations = self.pp_config.get("max_iterations", 1000)
+
         # Planner state
-        self.probabilistic_actions: Dict[str, ProbabilisticAction] = {}
-        self.value_function: Dict[StateTuple, float] = defaultdict(float)
-        self.policy: Policy = {}
-        self.memory = PlanningMemory()
+        self._actions: Dict[str, ProbabilisticAction] = {}
+        self._value_function: Dict[StateTuple, float] = defaultdict(float)
+        self._policy: Policy = {}
+        self._q_cache: Dict[Tuple[str, StateTuple], float] = {}  # (action_name, state_tuple) -> Q-value
 
-    def register_action(self, action: ProbabilisticAction):
-        """Registers a probabilistic action available to the planner."""
-        self.probabilistic_actions[action["task_name"]] = action
+        self._lock = threading.RLock()
+        logger.info("Probabilistic Planner successfully initialized")
 
+    # -------------------------------------------------------------------------
+    # Action registration
+    # -------------------------------------------------------------------------
+    def register_action(self, action: Union[ProbabilisticAction, Dict]) -> None:
+        """
+        Register a probabilistic action. If a dict is provided, it must contain
+        'task_name', 'probability', 'preconditions', and 'effect' keys.
+        """
+        if isinstance(action, dict):
+            success_prob = float(action.get("probability", 1.0))
+            success_prob = min(1.0, max(0.0, success_prob))
+            action = ProbabilisticAction(
+                name=action.get("task_name", "unnamed"),
+                preconditions=action.get("preconditions", lambda s: True),
+                outcomes=[
+                    (success_prob, action.get("effect", lambda s: s)),
+                    (1.0 - success_prob, lambda s: s),
+                ],
+            )
+        with self._lock:
+            self._actions[action.name] = action
+        logger.debug(f"Registered action: {action.name}")
+
+    # -------------------------------------------------------------------------
+    # Public planning entry point
+    # -------------------------------------------------------------------------
     def perform_task(self, task_data: Dict[str, Any]) -> Optional[Policy]:
         """
-        Computes the optimal policy for a given probabilistic planning problem.
+        Compute the optimal policy for a given problem.
 
         Args:
-            task_data: A dictionary containing:
-                - 'initial_state': The starting world state dictionary.
-                - 'goal_state': A dictionary defining the goal conditions.
-                - 'success_threshold': The minimum acceptable probability of success.
-        
+            task_data: Dict containing:
+                - "initial_state": The starting world state (dict).
+                - "goal_state": Goal condition (dict).
+                - "success_threshold": Minimum acceptable success probability (optional, default 0.9).
+
         Returns:
-            An optimal policy mapping states to actions, or None if no policy meets the threshold.
+            Policy (dict mapping StateTuple to ProbabilisticAction) if a policy
+            meeting the threshold is found, otherwise None.
         """
-        initial_state = task_data.get('initial_state')
-        goal_state = task_data.get('goal_state')
+        initial_state = task_data.get("initial_state")
+        goal_state = task_data.get("goal_state")
+        success_threshold = task_data.get("success_threshold", 0.9)
 
-        if not all([initial_state, goal_state]):
-            logger.error("Probabilistic planning requires 'initial_state' and 'goal_state'.")
+        if initial_state is None or goal_state is None:
+            logger.error("Both 'initial_state' and 'goal_state' must be provided")
             return None
 
-        self._compute_optimal_policy(initial_state, goal_state)
-        
-        initial_state_tuple = self._state_to_tuple(initial_state)
-        success_probability = self.value_function.get(initial_state_tuple, 0.0)
-        
-        printer.status(f"Policy computed.", f"Estimated success probability from initial state: {success_probability:.4f}", "info")
+        with self._lock:
+            self._compute_optimal_policy(initial_state, goal_state)
 
-        if success_probability >= task_data.get('success_threshold', 0.9):
-            return self.policy
+            initial_tuple = self._state_to_tuple(initial_state)
+            success_prob = self._value_function.get(initial_tuple, 0.0)
+
+        printer.status(
+            "PPDDL",
+            f"Estimated success probability from initial state: {success_prob:.4f}",
+            "info",
+        )
+
+        if success_prob >= success_threshold:
+            return self._policy
         else:
-            logger.warning(f"Could not find a policy with success probability >= {task_data.get('success_threshold', 0.9)}")
+            logger.warning(f"Policy success probability {success_prob:.4f} < threshold {success_threshold}")
             return None
 
-    def _compute_optimal_policy(self, initial_state: Dict[str, Any], goal_state: Dict[str, Any]):
+    # -------------------------------------------------------------------------
+    # Value iteration
+    # -------------------------------------------------------------------------
+    def _compute_optimal_policy(self, initial_state: Dict[str, Any], goal_state: Dict[str, Any]) -> None:
         """
-        Executes the Value Iteration algorithm to find the optimal value function
-        and then extracts the corresponding policy.
+        Execute value iteration to compute optimal value function and policy.
         """
-        printer.status("PPDDL", "Starting Value Iteration to compute optimal policy.")
+        printer.status("PPDDL", "Starting Value Iteration", "info")
+        self._q_cache.clear()
         reachable_states = self._get_reachable_states(initial_state, goal_state)
 
-        for i in range(self.max_iterations):
+        for iteration in range(self.max_iterations):
             max_delta = 0.0
-            
+
             for state_tuple in reachable_states:
                 if self._is_goal_state(state_tuple, goal_state):
-                    self.value_function[state_tuple] = 1.0
+                    self._value_function[state_tuple] = 1.0
                     continue
 
-                old_value = self.value_function[state_tuple]
-                
-                q_values = {
-                    action.name: self._calculate_q_value(state_tuple, action, goal_state)
-                    for action in self._get_applicable_actions(state_tuple)
-                }
-                
+                old_value = self._value_function[state_tuple]
+                q_values = {}
+                for action in self._get_applicable_actions(state_tuple):
+                    q_val = self._calculate_q_value(state_tuple, action, goal_state)
+                    q_values[action.name] = q_val
+
                 new_value = max(q_values.values()) if q_values else 0.0
-                self.value_function[state_tuple] = new_value
+                self._value_function[state_tuple] = new_value
                 max_delta = max(max_delta, abs(new_value - old_value))
-            
+
             if max_delta < self.convergence_threshold:
-                logger.info(f"Value function converged after {i+1} iterations.")
+                logger.info(f"Value function converged after {iteration + 1} iterations")
                 break
+            # Q values depend on V(s) and must be recomputed every iteration.
+            self._q_cache.clear()
         else:
-            logger.warning(f"Value Iteration did not converge after {self.max_iterations} iterations.")
+            logger.warning(f"Value iteration did not converge after {self.max_iterations} iterations")
 
         self._extract_policy(reachable_states, goal_state)
 
-    def _extract_policy(self, states: set, goal_state: Dict[str, Any]):
+    def _extract_policy(self, states: set, goal_state: Dict[str, Any]) -> None:
         """
-        Extracts the best policy from the converged value function.
-        For each state, it finds the action that leads to the highest expected value.
+        Extract the optimal policy from the converged value function.
         """
-        printer.status("PPDDL", "Extracting policy from value function.", "info")
-        self.policy.clear()
+        printer.status("PPDDL", "Extracting policy", "info")
+        self._policy.clear()
         for state_tuple in states:
             if self._is_goal_state(state_tuple, goal_state):
                 continue
 
-            applicable_actions = self._get_applicable_actions(state_tuple)
-            if not applicable_actions:
+            applicable = self._get_applicable_actions(state_tuple)
+            if not applicable:
                 continue
 
             best_action = max(
-                applicable_actions,
-                key=lambda action: self._calculate_q_value(state_tuple, action, goal_state)
+                applicable,
+                key=lambda a: self._calculate_q_value(state_tuple, a, goal_state),
             )
-            self.policy[state_tuple] = best_action
+            self._policy[state_tuple] = best_action
 
-    def _calculate_q_value(self, state_tuple: StateTuple, action: ProbabilisticAction, goal_state: Dict[str, Any]) -> float:
+    # -------------------------------------------------------------------------
+    # Q‑value calculation (with caching)
+    # -------------------------------------------------------------------------
+    def _calculate_q_value(
+        self, state_tuple: StateTuple, action: ProbabilisticAction, goal_state: Dict[str, Any]
+    ) -> float:
         """
-        Calculates the expected value (Q-value) of taking a specific action in a given state.
-        Q(s, a) = Σ [p(s'|s, a) * (R(s, a, s') + γ * V(s'))]
+        Compute Q(s, a) = Σ p(s'|s,a) * (reward(s') + γ * V(s')).
+        Cached internally for performance.
         """
-        memo_key = ('q_value', state_tuple, action.name)
-        cached = self.memory.base_state.get(memo_key)
-        if cached:
-            return cached
+        cache_key = (action.name, state_tuple)
+        if cache_key in self._q_cache:
+            return self._q_cache[cache_key]
 
-        expected_value = 0.0
-        current_state_dict = dict(state_tuple)
+        expected = 0.0
+        state_dict = dict(state_tuple)
 
-        for prob, effect_func in action.outcomes:
-            if prob == 0:
+        for prob, effect in action.outcomes:
+            if prob == 0.0:
                 continue
-            
-            next_state_dict = copy.deepcopy(current_state_dict)
-            effect_func(next_state_dict)
-            next_state_tuple = self._state_to_tuple(next_state_dict)
-            
-            reward = 1.0 if self._is_goal_state(next_state_tuple, goal_state) else 0.0
-            
-            expected_value += prob * (reward + self.gamma * self.value_function[next_state_tuple])
+            next_dict = copy.deepcopy(state_dict)
+            effect(next_dict)
+            next_tuple = self._state_to_tuple(next_dict)
+            reward = 1.0 if self._is_goal_state(next_tuple, goal_state) else 0.0
+            expected += prob * (reward + self.gamma * self._value_function[next_tuple])
 
-        self.memory.base_state[memo_key] = expected_value
-        return expected_value
+        self._q_cache[cache_key] = expected
+        return expected
 
+    # -------------------------------------------------------------------------
+    # State space exploration
+    # -------------------------------------------------------------------------
     def _get_reachable_states(self, initial_state: Dict[str, Any], goal_state: Dict[str, Any]) -> set:
         """
-        Performs a forward search (BFS) to find all states reachable from the initial state.
+        Perform BFS from initial state to discover all reachable states.
         """
-        printer.status("PPDDL", "Discovering reachable state space...", "info")
+        printer.status("PPDDL", "Discovering reachable state space", "info")
         initial_tuple = self._state_to_tuple(initial_state)
-        queue = [initial_tuple]
         visited = {initial_tuple}
+        queue = [initial_tuple]
 
         while queue:
-            current_state_tuple = queue.pop(0)
-
-            if self._is_goal_state(current_state_tuple, goal_state):
+            current = queue.pop(0)
+            if self._is_goal_state(current, goal_state):
                 continue
 
-            for action in self._get_applicable_actions(current_state_tuple):
-                current_state_dict = dict(current_state_tuple)
-                for prob, effect_func in action.outcomes:
+            for action in self._get_applicable_actions(current):
+                cur_dict = dict(current)
+                for prob, effect in action.outcomes:
                     if prob > 0:
-                        next_state_dict = copy.deepcopy(current_state_dict)
-                        effect_func(next_state_dict)
-                        next_state_tuple = self._state_to_tuple(next_state_dict)
-                        if next_state_tuple not in visited:
-                            visited.add(next_state_tuple)
-                            queue.append(next_state_tuple)
-        
-        logger.info(f"Discovered {len(visited)} reachable states.")
+                        next_dict = copy.deepcopy(cur_dict)
+                        effect(next_dict)
+                        next_tuple = self._state_to_tuple(next_dict)
+                        if next_tuple not in visited:
+                            visited.add(next_tuple)
+                            queue.append(next_tuple)
+
+        logger.info(f"Discovered {len(visited)} reachable states")
         return visited
 
     def _get_applicable_actions(self, state_tuple: StateTuple) -> List[ProbabilisticAction]:
-        """Returns a list of actions whose preconditions are met in the given state."""
+        """Return actions whose preconditions hold in the given state."""
         state_dict = dict(state_tuple)
-        return [
-            action for action in self.probabilistic_actions.values()
-            if action.preconditions(state_dict)
-        ]
+        with self._lock:
+            return [a for a in self._actions.values() if a.preconditions(state_dict)]
 
+    # -------------------------------------------------------------------------
+    # Goal test and state conversion
+    # -------------------------------------------------------------------------
     def _is_goal_state(self, state_tuple: StateTuple, goal_state: Dict[str, Any]) -> bool:
-        """Checks if a state satisfies the goal conditions."""
+        """Check if state satisfies all goal conditions."""
         state_dict = dict(state_tuple)
-        return all(state_dict.get(key) == value for key, value in goal_state.items())
+        return all(state_dict.get(k) == v for k, v in goal_state.items())
 
-    def _state_to_tuple(self, state_dict: Dict[str, Any]) -> StateTuple:
-        """Converts a mutable state dictionary to an immutable, hashable tuple."""
+    @staticmethod
+    def _state_to_tuple(state_dict: Dict[str, Any]) -> StateTuple:
+        """Convert a mutable dict to an immutable, hashable tuple."""
         return tuple(sorted(state_dict.items()))
+
+
+# -------------------------------------------------------------------------
+# Test
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    print("\n=== Running Probabilistic Planner ===\n")
+    printer.status("TEST", "Starting Probabilistic Planner tests", "info")
+
+    planner = ProbabilisticPlanner()
+
+    # Simple world: robot at A or B
+    initial_state = {"robot_at": "A"}
+    goal_state = {"robot_at": "B"}
+
+    # Action: move from A to B (succeeds 80%, stays at A 20%)
+    def pre_move(state):
+        return state.get("robot_at") == "A"
+
+    def effect_success(state):
+        state["robot_at"] = "B"
+
+    def effect_fail(state):
+        state["robot_at"] = "A"
+
+    move_action = ProbabilisticAction(
+        name="move_A_to_B",
+        preconditions=pre_move,
+        outcomes=[(0.8, effect_success), (0.2, effect_fail)],
+        cost=1.0,
+    )
+
+    planner.register_action(move_action)
+
+    task_data = {
+        "initial_state": initial_state,
+        "goal_state": goal_state,
+        "success_threshold": 0.7,
+    }
+
+    policy = planner.perform_task(task_data)
+
+    if policy:
+        printer.status("TEST", f"Policy found with {len(policy)} state-action pairs", "success")
+        for state, action in policy.items():
+            print(f"  {state} -> {action.name}")
+    else:
+        printer.status("TEST", "No policy meeting threshold found", "warning")
+
+    print("\n=== All tests completed successfully! ===\n")

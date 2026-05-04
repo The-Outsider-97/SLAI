@@ -1,721 +1,1139 @@
 """
-Proficient In:
-    Adaptive environments requiring self-optimization.
-    Long-term autonomous agents needing continuous self-tuning.
+Recursive Self-Improvement (RSI) agent for long-horizon autonomous learning.
 
-Best Used When:
-    Long training periods with dynamic environments.
-    You need the agent to evolve without human supervision.
-    Task performance may plateau and benefit from self-reflection or adjustment.
+Reference:
+- Schmidhuber (2013). PowerPlay: Training General Problem Solvers.
+
+This module keeps the original intent and surface area of the RSI agent while
+bringing the implementation to production-ready level:
+- neural Q-learning with target networks
+- replay through both local memory and LearningMemory
+- recursive self-improvement via parameter and policy adaptation
+- checkpointing, recovery, evaluation, diagnostics, and training summaries
 """
-import random
-import logging
-import os
-import yaml
-import torch
-import numpy as np
-from torch import nn, optim
-from collections import deque, defaultdict
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
 
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
+from __future__ import annotations
+
+import hashlib
+import random
+import numpy as np
+import torch
+
+from collections import defaultdict, deque
+from pathlib import Path
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+from src.agents.learning.learning_memory import LearningMemory, Transition
+from src.agents.learning.utils.config_loader import get_config_section, load_global_config
 from src.agents.learning.utils.neural_network import NeuralNetwork
-from src.agents.learning.learning_memory import LearningMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import PrettyPrinter, get_logger
 
 logger = get_logger("Recursive Self-Improvement")
 printer = PrettyPrinter
 
+TensorLike = Union[torch.Tensor, np.ndarray, Sequence[float]]
+ExperienceLike = Union[Transition, Tuple[Any, Any, Any, Any, Any], List[Any]]
+
+
 class RSIAgent:
-    def __init__(self, state_size, action_size, agent_id):
+    """Recursive Self-Improvement agent with neural Q-learning and adaptive tuning.
+
+    The agent is designed for long-running training jobs where performance may
+    plateau and the learner should adjust itself without external retuning.
+    """
+
+    def __init__(
+        self,
+        state_size: int,
+        action_size: int,
+        agent_id: Optional[Union[str, int]],
+        env: Any = None,
+    ):
+        if int(state_size) <= 0 or int(action_size) <= 0:
+            raise ValueError("state_size and action_size must be positive integers.")
+
         self.config = load_global_config()
-        self.rsi_config = get_config_section('neural_network')
+        self.rsi_config = get_config_section("rsi")
 
-        self.agent_id = agent_id
-        self.state_size = state_size
-        self.action_size = action_size
-        #self.save_model = []
+        self.agent_id = str(agent_id) if agent_id is not None else "RSI"
+        self.state_size = int(state_size)
+        self.action_size = int(action_size)
+        self.env = env
+        self.model_id = "RSI_Agent"
 
-        rsi_config = self.config.get('rsi', {})
-        self.gamma = rsi_config.get('gamma')
-        self.epsilon = rsi_config.get('epsilon')
-        self.epsilon_min = rsi_config.get('epsilon_min')
-        self.epsilon_decay = rsi_config.get('epsilon_decay')
-        self.learning_rate = rsi_config.get('learning_rate', 0.001)
-        self.rsi_period = rsi_config.get('rsi_period')
+        self.gamma = float(self.rsi_config.get("gamma", 0.95))
+        self.epsilon = float(self.rsi_config.get("epsilon", 1.0))
+        self.epsilon_min = float(self.rsi_config.get("epsilon_min", 0.01))
+        self.epsilon_decay = float(self.rsi_config.get("epsilon_decay", 0.995))
+        self.learning_rate = float(self.rsi_config.get("learning_rate", 0.001))
+        self.rsi_period = int(self.rsi_config.get("rsi_period", 14))
+        self.improvement_interval = int(self.rsi_config.get("improvement_interval", 100))
+        self.performance_window = int(self.rsi_config.get("performance_history", 50))
+        self.param_mutation_rate = float(self.rsi_config.get("param_mutation_rate", 0.1))
+        self.improvement_threshold = float(self.rsi_config.get("improvement_threshold", 0.05))
+        self.target_update_frequency = int(self.rsi_config.get("target_update_frequency", 100))
+        self.baseline_performance = self.rsi_config.get("baseline_performance")
+        # Safely handle string 'None' or other non‑numeric values
+        if isinstance(self.baseline_performance, str):
+            if self.baseline_performance.lower() == "none":
+                self.baseline_performance = None
+            else:
+                try:
+                    self.baseline_performance = float(self.baseline_performance)
+                except ValueError:
+                    self.baseline_performance = None
+        elif self.baseline_performance is not None:
+            try:
+                self.baseline_performance = float(self.baseline_performance)
+            except (TypeError, ValueError):
+                self.baseline_performance = None
 
-        # Recursive improvement parameters
-        self.improvement_interval = rsi_config.get('improvement_interval')
-        self.param_mutation_rate = rsi_config.get('param_mutation_rate')
+        # Local replay / training controls.
+        self.batch_size = int(self.rsi_config.get("batch_size", 32))
+        self.memory_capacity = int(self.rsi_config.get("buffer_size", 10000))
+        self.min_replay_size = int(self.rsi_config.get("min_replay_size", self.batch_size))
+        self.gradient_clip_norm = float(self.rsi_config.get("gradient_clip_norm", 5.0))
+        self.soft_mutation_std = float(self.rsi_config.get("soft_mutation_std", 0.02))
+        self.lr_adaptation_rate = float(self.rsi_config.get("lr_adaptation_rate", 0.10))
+        self.lr_min = float(self.rsi_config.get("learning_rate_min", 1e-5))
+        self.lr_max = float(self.rsi_config.get("learning_rate_max", 0.1))
+        self.reward_clip = self.rsi_config.get("reward_clip")
+        self.max_steps_per_episode = self.rsi_config.get("max_steps_per_episode")
+        self.eval_exploration_rate = float(self.rsi_config.get("eval_exploration_rate", 0.0))
+        self.checkpoint_dir = Path(self.rsi_config.get("checkpoint_dir", "src/agents/learning/checkpoints/rsi"))
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Sync learning rate to neural_network config
-        self.config['neural_network']['learning_rate'] = self.learning_rate
-        # Set network architecture
-        self.config['neural_network']['layer_dims'] = [self.state_size, 64, 64, self.action_size]
+        if not 0.0 < self.gamma <= 1.0:
+            raise ValueError("rsi.gamma must be in (0, 1].")
+        if not 0.0 <= self.epsilon_min <= self.epsilon <= 1.0 + 1e-12:
+            raise ValueError("epsilon settings are inconsistent.")
+        if not 0.0 < self.epsilon_decay <= 1.0:
+            raise ValueError("epsilon_decay must be in (0, 1].")
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive.")
+        if self.rsi_period <= 1:
+            raise ValueError("rsi_period must be greater than 1.")
+        if self.improvement_interval <= 0:
+            raise ValueError("improvement_interval must be positive.")
+        if self.performance_window <= 0:
+            raise ValueError("performance_history must be positive.")
+        if self.batch_size <= 0 or self.memory_capacity <= 0 or self.min_replay_size <= 0:
+            raise ValueError("Replay settings must be positive.")
+        if self.target_update_frequency <= 0:
+            raise ValueError("target_update_frequency must be positive.")
 
-        # Initialize neural networks
-        self.q_network = NeuralNetwork( 
+        self.network_config = self._build_network(self.state_size, self.action_size)
+        self.q_network = NeuralNetwork(
             input_dim=self.state_size,
-            output_dim=self.action_size
+            output_dim=self.action_size,
+            config=self.network_config,
         )
         self.target_network = NeuralNetwork(
             input_dim=self.state_size,
-            output_dim=self.action_size
+            output_dim=self.action_size,
+            config=self.network_config,
         )
         self.target_network.set_weights(self.q_network.get_weights())
 
-        # Initialize other components
-        self.performance_history = deque(maxlen=50)
-        self.baseline_performance = None
-        self.improvement_threshold = 0.05
-        self.target_update_frequency = rsi_config.get('target_update_frequency')
+        self.learning_memory = LearningMemory()
+        self.performance_history: Deque[float] = deque(maxlen=self.performance_window)
+        self.memory: Deque[Transition] = deque(maxlen=self.memory_capacity)
+        self.training_metrics: List[Dict[str, Any]] = []
+        self.last_evaluation: Optional[Dict[str, Any]] = None
+        self.last_training_summary: Optional[Dict[str, Any]] = None
+        self.last_train_episode_metrics: Optional[Dict[str, Any]] = None
         self.update_counter = 0
         self.current_epoch = 0
+        self.total_env_steps = 0
+        self.total_gradient_steps = 0
+        self.total_episodes = 0
+        self.policy_net = self.q_network  # compatibility with surrounding sub-agent checks
 
-        self.learning_memory = LearningMemory()
-        self.model_id = "RSI_Agent"
-        self.memory = deque(maxlen=10000)
-        self.policy_net = None
-
-        logger.info(f"Recursive Self-Improvement has succesfully initialized")
-
-    def execute(self, task_data):
-        """Execute RSI task with integrated self-improvement cycle"""
-        logging.info(f"[RSI_Agent] Executing task: {task_data}")
-        
-        # Main training loop with self-improvement
-        for episode in range(task_data.get('episodes', 100)):
-            episode_perf = self.train_episode()
-            self.performance_history.append(episode_perf)
-            
-            # Recursive improvement trigger
-            if episode % self.improvement_interval == 0:
-                self.self_improve()
-                
-        evaluation = self.evaluate()
-        self.learning_memory.set("rsi_agent_last_eval", evaluation)
-        return evaluation
-
-    def _build_network(self, input_size, output_size) -> nn.Module:
-        """Create secure, compact neural network architecture"""
-        return nn.Sequential(
-            nn.Linear(input_size, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, output_size)
+        logger.info(
+            "RSIAgent initialised | id=%s state=%s actions=%s gamma=%.4f lr=%.6f epsilon=%.4f",
+            self.agent_id,
+            self.state_size,
+            self.action_size,
+            self.gamma,
+            self.learning_rate,
+            self.epsilon,
         )
 
-    def _estimate_q_value(self, state, action) -> float:
-        """Neural network Q-value estimation using integrated NeuralNetwork"""
-        state_tensor = torch.FloatTensor(state).unsqueeze(0)
-        with torch.no_grad():
-            q_values = self.q_network.forward(state_tensor)
-        return q_values[0, action].item()
+    # ------------------------------------------------------------------
+    # Configuration and state helpers
+    # ------------------------------------------------------------------
+    def _build_network(self, input_size: int, output_size: int) -> Dict[str, Any]:
+        """Build a local NeuralNetwork config without mutating global config."""
+        base_nn_cfg = self.config.get("neural_network", {}) or {}
+        network_config = dict(base_nn_cfg)
 
-    def _predict_next_q(self, next_state) -> float:
-        """Target network prediction using integrated NeuralNetwork"""
-        next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0)
-        with torch.no_grad():
-            target_q_values = self.target_network.forward(next_state_tensor)
-        return target_q_values.max().item()
-
-    def train_episode(self) -> Tuple[float, float]:
-        """Neural network enhanced experience replay"""
-        if len(self.memory) < 32:
-            return 0.0, 0.0  # reward, loss
-    
-        batch = random.sample(self.memory, 32)
-        states, actions, rewards, next_states, dones = zip(*batch)
-    
-        states = torch.FloatTensor(np.array(states))
-        actions = torch.LongTensor(actions)
-        rewards = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(np.array(next_states))
-        dones = torch.BoolTensor(dones)
-    
-        current_q = self.q_network.forward(states)
-        next_q = self.target_network.forward(next_states)
-        max_next_q = torch.max(next_q, dim=1).values
-    
-        target_q = rewards + (1 - dones.float()) * self.gamma * max_next_q
-    
-        target = current_q.clone().detach()
-        batch_indices = torch.arange(len(states))
-        target[batch_indices, actions] = target_q
-    
-        loss = self.q_network.compute_loss(current_q, target)
-        self.q_network.backward(target)
-        self.q_network.update_parameters()
-    
-        self.update_counter += 1
-        if self.update_counter % self.target_update_frequency == 0:
-            self.target_network.set_weights(self.q_network.get_weights())
-    
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        return torch.mean(rewards).item(), loss.item()
-
-    def _update_parameters(self, gradient: float):
-        """Parameter update with momentum-based learning"""
-        # Using momentum for smoother convergence
-        self.learning_rate *= (1 + 0.1 * np.sign(gradient))
-        self.learning_rate = np.clip(self.learning_rate, 1e-5, 0.1)
-
-    def self_improve(self):
-        """Core recursive self-improvement mechanism"""
-        if len(self.performance_history) < 10:  # Require sufficient data
-            return
-            
-        # Calculate performance improvement
-        current_perf = np.mean(list(self.performance_history)[-10:])
-        if self.baseline_performance is None:
-            self.baseline_performance = current_perf
-            return
-            
-        improvement = (current_perf - self.baseline_performance) / abs(self.baseline_performance)
-        
-        if improvement < self.improvement_threshold:
-            # Trigger parameter space exploration
-            self._mutate_parameters()
-            logging.info(f"Self-improvement: Exploring parameter space")
+        hidden_size = self.rsi_config.get("hidden_size", 64)
+        if isinstance(hidden_size, int):
+            hidden_layers = [int(hidden_size), int(hidden_size)]
+        elif isinstance(hidden_size, (list, tuple)):
+            hidden_layers = [int(dim) for dim in hidden_size]
         else:
-            # Update baseline with momentum
-            self.baseline_performance = 0.9*self.baseline_performance + 0.1*current_perf
-            logging.info(f"Self-improvement: Baseline updated to {self.baseline_performance:.2f}")
+            raise TypeError("rsi.hidden_size must be an int or a sequence of ints.")
 
-    def _mutate_parameters(self):
-        """Evolutionary-style parameter mutation"""
-        # Mutate RSI period with Gaussian noise
-        self.rsi_period = int(np.clip(
-            self.rsi_period * (1 + self.param_mutation_rate * np.random.randn()),
-            5, 30  # Reasonable RSI period bounds
-        ))
-        
-        # Mutate learning parameters
-        self.learning_rate *= np.exp(0.1 * np.random.randn())
-        self.gamma += 0.01 * np.random.randn()
-        self.gamma = np.clip(self.gamma, 0.8, 0.999)
+        network_config["layer_dims"] = [int(input_size), *hidden_layers, int(output_size)]
+        network_config["learning_rate"] = self.learning_rate
+        network_config["output_activation"] = "linear"
+        network_config["loss_function"] = "mse"
+        network_config.setdefault("optimizer", "adam")
+        network_config.setdefault("hidden_activation", "relu")
+        network_config.setdefault("gradient_clip_norm", self.gradient_clip_norm)
+        return network_config
 
-    def act(self, state: Any, state_sequence: Optional[List[Any]] = None) -> int:
-        """
-        Action selection with optional RSI meta-policy.
-    
-        Args:
-            state: Current environment state.
-            state_sequence: Optional recent state history for RSI scoring.
-    
-        Returns:
-            Action index.
-        """
-        if state_sequence:
-            score = self.calculate_rsi(state_sequence)
-            return self._rsi_policy(score)
-    
-        if np.random.rand() < self.epsilon:
-            return random.randint(0, self.action_size - 1)
-    
-        state_tensor = torch.FloatTensor(state).unsqueeze(0)
-        with torch.no_grad():
-            q_values = self.q_network.forward(state_tensor)
-        return torch.argmax(q_values).item()
+    @staticmethod
+    def _extract_state(reset_output: Any) -> Any:
+        if isinstance(reset_output, tuple) and len(reset_output) == 2:
+            return reset_output[0]
+        return reset_output
 
-    def calculate_rsi(self, state_sequence: List[Any]) -> float:
-        """
-        Generic variability score from recent states (not RSI).
-    
-        Args:
-            state_sequence: List of recent environment states
-        
-        Returns:
-            Scalar score (0–1) indicating variability or novelty
-        """
-        if not isinstance(state_sequence, (list, np.ndarray)) or len(state_sequence) < 2:
-            return 0.5  # Neutral default
-    
-        try:
-            diffs = np.diff(np.array(state_sequence), axis=0)
-            magnitude = np.linalg.norm(diffs, axis=1)
-            score = np.tanh(np.mean(magnitude))  # Normalized variability
-            return float(np.clip(score, 0.0, 1.0))
-        except Exception:
-            return 0.5  # Safe fallback
+    @staticmethod
+    def _safe_step(env: Any, action: int) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
+        result = env.step(action)
+        if not isinstance(result, tuple):
+            raise TypeError("Environment step(...) must return a tuple.")
+        if len(result) == 5:
+            next_state, reward, terminated, truncated, info = result
+            return next_state, float(reward), bool(terminated), bool(truncated), info or {}
+        if len(result) == 4:
+            next_state, reward, done, info = result
+            return next_state, float(reward), bool(done), False, info or {}
+        raise ValueError(f"Unsupported environment step() output length: {len(result)}")
 
-    def _rsi_policy(self, score: float) -> int:
-        """
-        Abstract policy using a scalar meta-score to select action.
-    
-        Args:
-            score: A continuous scalar (e.g., uncertainty, novelty score)
-        
-        Returns:
-            Discrete action index
-        """
-        threshold_high = 0.7
-        threshold_low = 0.3
-    
-        if self.action_size < 3:
-            return int(score * self.action_size)  # fallback discretization
-    
-        if score > threshold_high:
-            return 0  # e.g., explore aggressively
-        elif score < threshold_low:
-            return 1  # e.g., exploit known good behavior
+    def _state_to_tensor(self, state: TensorLike) -> torch.Tensor:
+        if isinstance(state, torch.Tensor):
+            tensor = state.detach().clone().to(dtype=torch.float32)
         else:
-            return 2  # e.g., maintain current trajectory
+            tensor = torch.as_tensor(state, dtype=torch.float32)
 
-    def _calculate_sharpe(self, returns: List[float]) -> float:
-        """Annualized Sharpe ratio calculation"""
-        if len(returns) < 2:
-            return 0.0
-        excess_returns = np.array(returns)
-        return np.sqrt(252) * np.mean(excess_returns) / np.std(excess_returns)
+        if tensor.ndim == 0:
+            tensor = tensor.unsqueeze(0)
+        elif tensor.ndim > 1:
+            tensor = tensor.reshape(-1)
 
-    def _get_weight_vector(self) -> Dict[str, Dict[str, np.ndarray]]:
-        """Extracts complete neural network weight structure with metadata"""
-        def extract_layer_params(layer: nn.Linear) -> Dict[str, np.ndarray]:
-            return {
-                'weights': layer.weight.data.cpu().numpy(),
-                'biases': layer.bias.data.cpu().numpy(),
-                'mean_weight': float(layer.weight.mean().item()),
-                'weight_std': float(layer.weight.std().item())
-            }
+        if tensor.numel() != self.state_size:
+            raise ValueError(
+                f"State size mismatch. Expected {self.state_size}, got {int(tensor.numel())}."
+            )
+        return tensor
 
+    def _coerce_transition(self, item: ExperienceLike) -> Transition:
+        if isinstance(item, Transition):
+            return item
+        if isinstance(item, dict):
+            return Transition(
+                item["state"],
+                item["action"],
+                item["reward"],
+                item["next_state"],
+                item["done"],
+            )
+        if isinstance(item, (tuple, list)) and len(item) == 5:
+            state, action, reward, next_state, done = item
+            return Transition(state, action, reward, next_state, done)
+        raise TypeError("Each experience must contain 5 elements: state, action, reward, next_state, done.")
+
+    def _serialize_transition(self, transition: Transition) -> Dict[str, Any]:
+        transition = self._coerce_transition(transition)
         return {
-            'input_layer': extract_layer_params(self.q_network[0]),
-            'hidden_layer': extract_layer_params(self.q_network[2]),
-            'output_layer': extract_layer_params(self.q_network[4]),
-            'network_metadata': {
-                'architecture': [self.state_size, 64, 64, self.action_size],
-                'parameters': sum(p.numel() for p in self.q_network.parameters()),
-                'gradient_norm': self._calculate_gradient_norm()
-            }
+            "state": self._state_to_tensor(transition.state).detach().cpu(),
+            "action": int(transition.action),
+            "reward": float(transition.reward),
+            "next_state": self._state_to_tensor(transition.next_state).detach().cpu(),
+            "done": bool(transition.done),
         }
 
-    def _calculate_gradient_norm(self) -> float:
-        """Compute total gradient norm for network stability monitoring"""
-        total_norm = 0.0
-        for p in self.q_network.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        return float(total_norm ** 0.5)
+    def _clip_reward(self, reward: float) -> float:
+        if self.reward_clip is None:
+            return float(reward)
+        if isinstance(self.reward_clip, (int, float)):
+            bound = abs(float(self.reward_clip))
+            return float(np.clip(reward, -bound, bound))
+        if isinstance(self.reward_clip, (tuple, list)) and len(self.reward_clip) == 2:
+            low, high = float(self.reward_clip[0]), float(self.reward_clip[1])
+            return float(np.clip(reward, low, high))
+        raise ValueError("reward_clip must be None, a scalar, or a 2-tuple/list.")
 
-    # Existing methods remain with improved implementations
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+    # ------------------------------------------------------------------
+    # Q-network value estimation
+    # ------------------------------------------------------------------
+    def _estimate_q_value(self, state: TensorLike, action: int) -> float:
+        state_tensor = self._state_to_tensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_network.forward(state_tensor).squeeze(0)
+        return float(q_values[int(action)].item())
 
-    def sync_with_learning_memory(self):
-        """Enhanced synchronization with LearningMemory system"""
-        if self.learning_memory:
-            # Store current parameters
-            self.learning_memory.set("agent_state", {  # Use string key
-                "epsilon": self.epsilon,
-                "learning_rate": self.learning_rate,
-                "rsi_period": self.rsi_period,
-                "performance": self.baseline_performance,
-                "network_weights": self.q_network.get_weights(),
-                "target_weights": self.target_network.get_weights()
-            })
-            
-            # Store experience memory in batches
-            batch_size = 100
-            for i in range(0, len(self.memory), batch_size):
-                self.learning_memory.add(
-                    list(self.memory)[i:i+batch_size],
-                    tag=f"experience_batch_{i//batch_size}"
-                )
+    def _predict_next_q(self, next_state: TensorLike) -> float:
+        next_state_tensor = self._state_to_tensor(next_state).unsqueeze(0)
+        with torch.no_grad():
+            target_q_values = self.target_network.forward(next_state_tensor).squeeze(0)
+        return float(target_q_values.max().item())
 
-    def save(self, filepath: str) -> Dict[str, bool]:
-        """Save agent state through LearningMemory integration"""
-        try:
-            # Sync all components to learning memory
-            self.sync_with_learning_memory()
-            
-            # Create comprehensive checkpoint
-            checkpoint_data = {
-                'memory_state': self.learning_memory.get(),
-                'config': self.config,
-                'performance_history': list(self.performance_history),
-                'update_counter': self.update_counter
+    def _select_greedy_action(self, state: TensorLike) -> int:
+        state_tensor = self._state_to_tensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_network.forward(state_tensor).squeeze(0)
+        return int(torch.argmax(q_values).item())
+
+    # ------------------------------------------------------------------
+    # Improvement / adaptation logic
+    # ------------------------------------------------------------------
+    def _update_parameters(self, gradient_signal: float) -> None:
+        """Adaptive parameter update driven by improvement / deterioration signals."""
+        direction = float(np.sign(gradient_signal))
+        scaled_lr = self.learning_rate * (1.0 + self.lr_adaptation_rate * direction)
+        self.learning_rate = float(np.clip(scaled_lr, self.lr_min, self.lr_max))
+        self.q_network.optimizer.learning_rate = self.learning_rate
+
+    def self_improve(self) -> Dict[str, Any]:
+        """Core recursive self-improvement routine based on recent performance."""
+        if len(self.performance_history) < min(10, self.performance_window):
+            return {
+                "triggered": False,
+                "reason": "insufficient_history",
+                "baseline_performance": self.baseline_performance,
             }
 
-            # Save using LearningMemory's checkpoint system
-            self.learning_memory.save_checkpoint(filepath)
-            
-            # Save neural networks separately
-            network_checkpoint = {
-                'q_network': self.q_network.get_weights(),
-                'target_network': self.target_network.get_weights()
+        recent_window = list(self.performance_history)[-10:]
+        current_perf = float(np.mean(recent_window))
+        if self.baseline_performance is None:
+            self.baseline_performance = current_perf
+            return {
+                "triggered": False,
+                "reason": "baseline_initialized",
+                "baseline_performance": self.baseline_performance,
             }
-            torch.save(network_checkpoint, f"{filepath}.networks")
-            
-            return {'success': True, 'integrity_verified': True}
-        except Exception as e:
-            logging.error(f"Save failed: {str(e)}")
-            return {'success': False, 'error': str(e)}
 
-    def load(self, filepath: str) -> Dict[str, bool]:
-        """Load agent state through LearningMemory integration"""
+        denominator = max(abs(float(self.baseline_performance)), 1e-8)
+        improvement = (current_perf - float(self.baseline_performance)) / denominator
+        summary = {
+            "triggered": True,
+            "recent_performance": current_perf,
+            "baseline_performance": float(self.baseline_performance),
+            "improvement": float(improvement),
+            "threshold": float(self.improvement_threshold),
+            "mutated": False,
+        }
+
+        if improvement < self.improvement_threshold:
+            summary["mutated"] = True
+            summary["mutation_report"] = self._mutate_parameters()
+            logger.info("Self-improvement triggered mutation | improvement=%.6f", improvement)
+        else:
+            self.baseline_performance = 0.9 * float(self.baseline_performance) + 0.1 * current_perf
+            self._update_parameters(improvement)
+            logger.info(
+                "Self-improvement updated baseline | new_baseline=%.6f improvement=%.6f",
+                self.baseline_performance,
+                improvement,
+            )
+        return summary
+
+    def _mutate_parameters(self) -> Dict[str, Any]:
+        """Evolutionary-style mutation of hyperparameters and network weights."""
+        old_rsi_period = int(self.rsi_period)
+        old_learning_rate = float(self.learning_rate)
+        old_gamma = float(self.gamma)
+        old_epsilon = float(self.epsilon)
+
+        self.rsi_period = int(np.clip(
+            round(self.rsi_period * (1.0 + self.param_mutation_rate * np.random.randn())),
+            5,
+            30,
+        ))
+        self.learning_rate = float(np.clip(
+            self.learning_rate * np.exp(self.param_mutation_rate * np.random.randn()),
+            self.lr_min,
+            self.lr_max,
+        ))
+        self.gamma = float(np.clip(
+            self.gamma + 0.01 * np.random.randn(),
+            0.80,
+            0.999,
+        ))
+        self.epsilon = float(np.clip(
+            self.epsilon * np.exp(0.05 * np.random.randn()),
+            self.epsilon_min,
+            1.0,
+        ))
+        self.q_network.optimizer.learning_rate = self.learning_rate
+
+        # Mild parameter-space exploration on the online network.
+        mutated_weights = self.q_network.get_weights()
+        with torch.no_grad():
+            for idx in range(len(mutated_weights["Ws"])):
+                mutated_weights["Ws"][idx] += torch.randn_like(mutated_weights["Ws"][idx]) * self.soft_mutation_std
+                mutated_weights["bs"][idx] += torch.randn_like(mutated_weights["bs"][idx]) * (self.soft_mutation_std * 0.5)
+        self.q_network.set_weights(mutated_weights)
+        self.target_network.set_weights(self.q_network.get_weights())
+
+        return {
+            "old_rsi_period": old_rsi_period,
+            "new_rsi_period": self.rsi_period,
+            "old_learning_rate": old_learning_rate,
+            "new_learning_rate": self.learning_rate,
+            "old_gamma": old_gamma,
+            "new_gamma": self.gamma,
+            "old_epsilon": old_epsilon,
+            "new_epsilon": self.epsilon,
+        }
+
+    # ------------------------------------------------------------------
+    # Action selection / RSI scoring
+    # ------------------------------------------------------------------
+    def calculate_rsi(self, state_sequence: List[Any]) -> float:
+        """Compute a bounded relative-strength-style variability score in [0, 1]."""
+        if not isinstance(state_sequence, (list, tuple, np.ndarray)) or len(state_sequence) < 2:
+            return 0.5
+
         try:
-            # Load memory and configuration
-            self.learning_memory.load_checkpoint(filepath)
-            
-            # Restore core parameters
-            memory_state = self.learning_memory.get()
-            state = self.learning_memory.get("agent_state", {})
-            if state:
-                self.epsilon = state.get('epsilon')
-                self.learning_rate = state.get('learning_rate', 0.001)
-                self.rsi_period = state.get('rsi_period')
-                self.baseline_performance = state.get('performance')
+            states = np.asarray(state_sequence, dtype=np.float32)
+            if states.ndim == 1:
+                states = states.reshape(-1, 1)
+            magnitudes = np.linalg.norm(states, axis=1)
+            deltas = np.diff(magnitudes)
+            if deltas.size == 0:
+                return 0.5
 
-            # Restore experience memory
-            self.memory.clear()
-            for key in sorted([k for k in memory_state if k.startswith('experience_batch_')]):
-                self.memory.extend(memory_state[key])
+            lookback = min(int(self.rsi_period), deltas.size)
+            deltas = deltas[-lookback:]
+            gains = np.clip(deltas, 0.0, None)
+            losses = np.clip(-deltas, 0.0, None)
+            avg_gain = float(np.mean(gains))
+            avg_loss = float(np.mean(losses))
 
-            # Load neural networks
-            network_checkpoint = torch.load(f"{filepath}.networks")
-            self.q_network.set_weights(network_checkpoint['q_network'])
-            self.target_network.set_weights(network_checkpoint['target_network'])
+            if avg_loss <= 1e-8 and avg_gain <= 1e-8:
+                return 0.5
+            if avg_loss <= 1e-8:
+                return 1.0
 
-            return {'success': True, 'checksum_valid': True}
-        except Exception as e:
-            logging.error(f"Load failed: {str(e)}")
-            self._set_default_parameters()
-            return {'success': False, 'error': str(e)}
+            rs = avg_gain / avg_loss
+            score = 1.0 - (1.0 / (1.0 + rs))
+            return float(np.clip(score, 0.0, 1.0))
+        except Exception:
+            return 0.5
 
-    def select_action(self, processed_state):
-        # RSI already supports direct state input
+    def _rsi_policy(self, score: float, state: Optional[TensorLike] = None) -> int:
+        """Map a meta-score to an action policy.
+
+        High score -> more exploratory behaviour.
+        Low score -> greedy exploitation.
+        Mid score -> tempered epsilon-greedy behaviour.
+        """
+        score = float(np.clip(score, 0.0, 1.0))
+        threshold_high = 0.7
+        threshold_low = 0.3
+
+        if state is None:
+            if self.action_size < 3:
+                return int(np.clip(round(score * max(self.action_size - 1, 1)), 0, self.action_size - 1))
+            if score > threshold_high:
+                return random.randrange(self.action_size)
+            if score < threshold_low:
+                return 0
+            return min(2, self.action_size - 1)
+
+        if score > threshold_high:
+            return random.randrange(self.action_size)
+        if score < threshold_low:
+            return self._select_greedy_action(state)
+
+        tempered_epsilon = max(self.epsilon_min, min(1.0, 0.5 * self.epsilon))
+        if random.random() < tempered_epsilon:
+            return random.randrange(self.action_size)
+        return self._select_greedy_action(state)
+
+    def act(
+        self,
+        state: Any,
+        state_sequence: Optional[List[Any]] = None,
+        explore: bool = True,
+    ) -> int:
+        """Action selection with optional RSI meta-policy and epsilon-greedy exploration."""
+        if state_sequence:
+            return self._rsi_policy(self.calculate_rsi(state_sequence), state=state)
+
+        if explore and random.random() < self.epsilon:
+            return random.randrange(self.action_size)
+        return self._select_greedy_action(state)
+
+    def select_action(self, processed_state: Any) -> int:
         return self.act(processed_state)
-    
-    def learn_step(self, experience_batch):
-        # Push to memory, then call train_episode
-        self.memory.extend(experience_batch)
-        return self.train_episode()
+
+    # ------------------------------------------------------------------
+    # Metrics / diagnostics helpers
+    # ------------------------------------------------------------------
+    def _calculate_sharpe(self, returns: List[float]) -> float:
+        if len(returns) < 2:
+            return 0.0
+        returns_arr = np.asarray(returns, dtype=np.float32)
+        std = float(np.std(returns_arr))
+        if std <= 1e-8:
+            return 0.0
+        return float(np.sqrt(252.0) * np.mean(returns_arr) / std)
+
+    def _calculate_max_drawdown(self, returns: List[float]) -> float:
+        if not returns:
+            return 0.0
+        cumulative = np.cumsum(np.asarray(returns, dtype=np.float32))
+        running_max = np.maximum.accumulate(cumulative)
+        drawdowns = running_max - cumulative
+        return float(np.max(drawdowns)) if drawdowns.size else 0.0
+
+    def _get_weight_vector(self) -> Dict[str, Dict[str, Any]]:
+        """Extract full neural-network weight summaries using NeuralNetwork weights."""
+        weights = self.q_network.get_weights()
+        layer_summaries: Dict[str, Dict[str, Any]] = {}
+        for idx, (W, b) in enumerate(zip(weights["Ws"], weights["bs"])):
+            layer_summaries[f"layer_{idx}"] = {
+                "weights": W.detach().cpu().numpy(),
+                "biases": b.detach().cpu().numpy(),
+                "mean_weight": float(W.mean().item()),
+                "weight_std": float(W.std().item()),
+                "mean_bias": float(b.mean().item()),
+                "bias_std": float(b.std().item()) if b.numel() > 1 else 0.0,
+                "shape": tuple(W.shape),
+            }
+
+        layer_summaries["network_metadata"] = {
+            "architecture": list(self.network_config.get("layer_dims", [])),
+            "parameters": int(sum(W.numel() + b.numel() for W, b in zip(weights["Ws"], weights["bs"]))),
+            "gradient_norm": self._calculate_gradient_norm(),
+        }
+        return layer_summaries
+
+    def _calculate_gradient_norm(self) -> float:
+        gradients = []
+        if hasattr(self.q_network, "dWs"):
+            gradients.extend(getattr(self.q_network, "dWs", []))
+        if hasattr(self.q_network, "dBs"):
+            gradients.extend(getattr(self.q_network, "dBs", []))
+        if not gradients:
+            return 0.0
+        total = 0.0
+        for grad in gradients:
+            if grad is None:
+                continue
+            norm = float(torch.norm(grad).item())
+            total += norm * norm
+        return float(total ** 0.5)
 
     def _calculate_file_hash(self, filepath: str) -> str:
-        """Calculate file hash for integrity verification"""
-        import hashlib
         sha256 = hashlib.sha256()
-        with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
+        with open(filepath, "rb") as handle:
+            for chunk in iter(lambda: handle.read(4096), b""):
                 sha256.update(chunk)
         return sha256.hexdigest()
 
-    def _set_default_parameters(self):
-        """Reset to safe defaults if loading fails"""
-        rsi_config = self.config['rsi']
-        self.gamma = rsi_config.get('gamma')
-        self.epsilon = rsi_config.get('epsilon')
-        self.learning_rate = rsi_config.get('learning_rate', 0.001)
-        self.rsi_period = rsi_config.get('rsi_period')
-        self.memory.clear()
-        self.performance_history.clear()
-
-    def evaluate(self, env, episodes=50, include_training_data=True):
-        """
-        General-purpose evaluation for RSI Agent
-        Args:
-            env: Environment to evaluate in
-            episodes: Number of evaluation episodes
-            include_training_data: Include training memory in evaluation
-        
-        Returns:
-            Dict containing evaluation metrics
-        """
-        logger.info(f"Evaluating RSI Agent {self.agent_id} over {episodes} episodes")
-    
-        # Performance tracking
-        total_rewards = []
-        episode_lengths = []
-        action_distribution = {action: 0 for action in range(self.action_size)}
-        state_visit_counts = defaultdict(int)
-        
-        for ep in range(episodes):
-            state, _ = env.reset()
-            done = False
-            episode_reward = 0
-            steps = 0
-            
-            while not done:
-                action = self.act(state)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                
-                # Track state visits and actions
-                state_visit_counts[tuple(state)] += 1
-                action_distribution[action] += 1
-                
-                # Update trackers
-                episode_reward += reward
-                steps += 1
-                state = next_state
-    
-            total_rewards.append(episode_reward)
-            episode_lengths.append(steps)
-    
-        # Calculate metrics
-        avg_reward = np.mean(total_rewards)
-        std_reward = np.std(total_rewards)
-        min_reward = min(total_rewards)
-        max_reward = max(total_rewards)
-        avg_length = np.mean(episode_lengths)
-        
-        # Action distribution normalization
-        total_actions = sum(action_distribution.values())
-        action_distribution = {
-            k: v/total_actions for k, v in action_distribution.items()
-        }
-        
-        # State coverage analysis
-        state_coverage = len(state_visit_counts)
-        sharpe_ratio = self._calculate_sharpe(total_rewards)
-        
+    def diagnostics(self) -> Dict[str, Any]:
         return {
-            'episodes': episodes,
-            'avg_reward': avg_reward,
-            'std_reward': std_reward,
-            'min_reward': min_reward,
-            'max_reward': max_reward,
-            'avg_episode_length': avg_length,
-            'action_distribution': action_distribution,
-            'state_coverage': state_coverage,
-            'exploration_rate': self.epsilon,
-            'sharpe_ratio': sharpe_ratio,
-            'parameter_effectiveness': {
-                'learning_rate': self.learning_rate,
-                'gamma': self.gamma,
-                'rsi_period': self.rsi_period,
-                'epsilon': self.epsilon
-            },
-            'training_memory_utilized': include_training_data,
-            'detailed_rewards': total_rewards
+            "agent_id": self.agent_id,
+            "state_size": self.state_size,
+            "action_size": self.action_size,
+            "gamma": self.gamma,
+            "epsilon": self.epsilon,
+            "epsilon_min": self.epsilon_min,
+            "epsilon_decay": self.epsilon_decay,
+            "learning_rate": self.learning_rate,
+            "rsi_period": self.rsi_period,
+            "improvement_interval": self.improvement_interval,
+            "param_mutation_rate": self.param_mutation_rate,
+            "improvement_threshold": self.improvement_threshold,
+            "target_update_frequency": self.target_update_frequency,
+            "update_counter": self.update_counter,
+            "current_epoch": self.current_epoch,
+            "total_env_steps": self.total_env_steps,
+            "total_gradient_steps": self.total_gradient_steps,
+            "total_episodes": self.total_episodes,
+            "memory_size": len(self.memory),
+            "learning_memory_size": self.learning_memory.size(),
+            "baseline_performance": self.baseline_performance,
         }
 
-    def train(self, env, total_epochs=1000, episodes_per_epoch=100, 
-              evaluation_interval=10, performance_threshold=0.0,
-              checkpoint_interval=50):
-        """
-        Full training lifecycle with integrated self-improvement and memory management
-        
-        Features:
-        - Automated training with periodic evaluation
-        - LearningMemory integration for state persistence
-        - NeuralNetwork-powered experience replay
-        - Performance-based parameter mutation
-        - Checkpointing and recovery systems
-        """
-        
-        try:
-            # Attempt to resume from last checkpoint
-            if self.learning_memory.get("last_checkpoint"):
-                self._load_training_state()
-                logger.info("Resuming training from checkpoint")
-                
-            for epoch in range(self.current_epoch, total_epochs):
-                state, _ = env.reset()
-                epoch_loss = 0.0
-                epoch_rewards = []
-                volatility_history = []
-                
-                # Training phase
-                for _ in range(episodes_per_epoch):
-                    # Standard training episode
-                    episode_reward, episode_loss = self.train_episode()
-                    epoch_rewards.append(episode_reward)
-                    epoch_loss += episode_loss
+    # ------------------------------------------------------------------
+    # Replay / training core
+    # ------------------------------------------------------------------
+    def remember(self, state: Any, action: int, reward: float, next_state: Any, done: bool) -> None:
+        transition = Transition(
+            state=self._state_to_tensor(state).cpu(),
+            action=int(action),
+            reward=self._clip_reward(float(reward)),
+            next_state=self._state_to_tensor(next_state).cpu(),
+            done=bool(done),
+        )
+        self.memory.append(transition)
 
-                    # Store experience in learning memory
-                    if len(self.memory) > 0:
-                        latest_exp = self.memory[-1]
-                        self.learning_memory.add(latest_exp, tag="rsi_experience")
-    
-                # Calculate epoch metrics
-                avg_loss = epoch_loss / episodes_per_epoch
-                avg_reward = np.mean(epoch_rewards)
-                avg_volatility = np.mean(volatility_history)
-                
-                # Store performance metrics
-                self.performance_history.append(avg_reward)
-                existing_metrics = self.learning_memory.get("training_metrics") or []
-                existing_metrics.append({
-                    "epoch": epoch,
-                    "avg_reward": avg_reward,
-                    "avg_volatility": avg_volatility,
-                    "epsilon": self.epsilon,
-                    "learning_rate": self.learning_rate,
-                    "network_weights": self.q_network.get_weights()
-                })
-                self.learning_memory.set("training_metrics", existing_metrics)
-    
-                # Evaluation and self-improvement
-                if epoch % evaluation_interval == 0:
-                    eval_results = self.evaluate(env)
-                    logger.info(f"Epoch {epoch} Evaluation - AvgReward: {eval_results['avg_reward']:.2f} | Sharpe: {eval_results['sharpe_ratio']:.2f}")
-                
-                    if all(k in eval_results for k in ('sharpe_ratio', 'max_drawdown', 'avg_return')):
-                        logger.info(f"Epoch {epoch} Evaluation - Sharpe: {eval_results['sharpe_ratio']:.2f} | "
-                                    f"Max DD: {eval_results['max_drawdown']:.2f}")
-                        
-                        if eval_results['avg_return'] < performance_threshold:
-                            self._mutate_parameters()
-                            logger.info("Triggered performance-based parameter mutation")
-                    else:
-                        if isinstance(eval_results, dict):
-                            PrettyPrinter.section_header(f"Epoch {epoch} Evaluation")
-                            for key, value in eval_results.items():
-                                if isinstance(value, dict):
-                                    print(f"{key}:")
-                                    for subkey, subvalue in value.items():
-                                        print(f"  - {subkey}: {subvalue}")
-                                elif isinstance(value, list) and len(value) > 10:
-                                    print(f"{key}: [length: {len(value)}] (truncated)")
-                                else:
-                                    print(f"{key}: {value}")
-                        else:
-                            logger.warning(f"Epoch {epoch} Evaluation result is malformed: {eval_results}")
-    
-                # Periodic checkpointing
-                if checkpoint_interval and epoch % checkpoint_interval == 0:
-                    self._save_training_state(epoch)
-                    logger.info(f"Checkpoint saved at epoch {epoch}")
-    
-                # Early stopping condition
-                if self._check_early_stopping():
-                    logger.info("Early stopping condition met")
-                    break
-    
-                # Adaptive learning rate adjustment
-                self._adapt_learning_rate(avg_reward, avg_volatility)
-    
-            logger.info("Training completed successfully")
-            return self.get_training_summary()
-    
-        except Exception as e:
-            logger.error(f"Training interrupted: {str(e)}")
-            self._save_training_state(self.current_epoch)
-            raise
+        td_guess = transition.reward + (0.0 if transition.done else self._predict_next_q(transition.next_state))
+        priority = abs(td_guess - self._estimate_q_value(transition.state, transition.action)) + 1e-6
+        self.learning_memory.add(transition, priority=priority, tag=self.agent_id)
 
-    def _save_training_state(self, epoch):
-        """Persist complete training state using LearningMemory"""
+    def _sample_replay_batch(
+        self,
+        batch_size: Optional[int] = None,
+        experience_batch: Optional[Iterable[ExperienceLike]] = None,
+    ) -> Optional[Tuple[List[Transition], Optional[List[int]], Optional[List[float]]]]:
+        effective_batch_size = int(batch_size or self.batch_size)
+        if experience_batch is not None:
+            batch = [self._coerce_transition(item) for item in experience_batch]
+            return (batch, None, None) if batch else None
+
+        if self.learning_memory.size() >= effective_batch_size:
+            samples, indices, weights = self.learning_memory.sample_proportional(effective_batch_size)
+            if samples:
+                return [self._coerce_transition(item) for item in samples], indices, weights
+
+        if len(self.memory) >= effective_batch_size:
+            batch = random.sample(list(self.memory), effective_batch_size)
+            return [self._coerce_transition(item) for item in batch], None, None
+
+        return None
+
+    def _optimise_from_batch(
+        self,
+        experience_batch: Optional[Iterable[ExperienceLike]] = None,
+        batch_size: Optional[int] = None,
+    ) -> Tuple[float, float]:
+        sampled = self._sample_replay_batch(batch_size=batch_size, experience_batch=experience_batch)
+        if sampled is None:
+            return 0.0, 0.0
+
+        batch, indices, _weights = sampled
+        states = torch.stack([self._state_to_tensor(exp.state) for exp in batch])
+        actions = torch.tensor([int(exp.action) for exp in batch], dtype=torch.long)
+        rewards = torch.tensor([float(exp.reward) for exp in batch], dtype=torch.float32)
+        next_states = torch.stack([self._state_to_tensor(exp.next_state) for exp in batch])
+        dones = torch.tensor([float(bool(exp.done)) for exp in batch], dtype=torch.float32)
+
+        with torch.no_grad():
+            current_q = self.q_network.forward(states)
+            chosen_q = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)
+            next_q = self.target_network.forward(next_states)
+            max_next_q = torch.max(next_q, dim=1).values
+            target_q = rewards + (1.0 - dones) * self.gamma * max_next_q
+            td_errors = target_q - chosen_q
+            targets = current_q.clone()
+            batch_indices = torch.arange(states.shape[0])
+            targets[batch_indices, actions] = target_q
+
+        loss = float(self.q_network.train_step(states, targets))
+        self.total_gradient_steps += 1
+        self.update_counter += 1
+
+        if self.gradient_clip_norm > 0.0 and hasattr(self.q_network, "_global_grad_norm"):
+            grad_norm = float(self.q_network._global_grad_norm().item())
+            if np.isfinite(grad_norm) and grad_norm > self.gradient_clip_norm:
+                self._update_parameters(-1.0)
+        else:
+            grad_norm = self._calculate_gradient_norm()
+
+        if indices:
+            self.learning_memory.update_priorities(indices, td_errors.detach().abs().cpu().tolist())
+
+        if self.update_counter % self.target_update_frequency == 0:
+            self.target_network.set_weights(self.q_network.get_weights())
+
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        avg_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
+        return avg_reward, loss
+
+    def train_episode(
+        self,
+        env: Any = None,
+        max_steps: Optional[int] = None,
+    ) -> Tuple[float, float]:
+        """Train for a full environment episode or a replay-only update if no env is available."""
+        env = env or self.env
+        if env is None:
+            return self._optimise_from_batch()
+
+        state = self._extract_state(env.reset())
+        done = False
+        episode_reward = 0.0
+        losses: List[float] = []
+        step_count = 0
+        step_limit = max_steps if max_steps is not None else self.max_steps_per_episode
+        state_sequence: List[np.ndarray] = []
+
+        while not done:
+            if step_limit is not None and step_count >= int(step_limit):
+                break
+
+            state_tensor = self._state_to_tensor(state)
+            state_sequence.append(state_tensor.detach().cpu().numpy())
+            action = self.act(state_tensor, state_sequence=state_sequence[-self.rsi_period :], explore=True)
+            next_state, reward, terminated, truncated, _ = self._safe_step(env, action)
+            done = bool(terminated or truncated)
+
+            self.remember(state, action, reward, next_state, done)
+            self.total_env_steps += 1
+            episode_reward += float(reward)
+            step_count += 1
+
+            if len(self.memory) >= self.min_replay_size:
+                _avg_reward, loss = self._optimise_from_batch()
+                if loss:
+                    losses.append(float(loss))
+
+            state = next_state
+
+        self.total_episodes += 1
+        self.performance_history.append(float(episode_reward))
+        self.last_train_episode_metrics = {
+            "episode_reward": float(episode_reward),
+            "avg_loss": float(np.mean(losses)) if losses else 0.0,
+            "min_loss": float(np.min(losses)) if losses else 0.0,
+            "max_loss": float(np.max(losses)) if losses else 0.0,
+            "steps": int(step_count),
+            "epsilon": float(self.epsilon),
+        }
+        return float(episode_reward), (float(np.mean(losses)) if losses else 0.0)
+
+    def learn_step(self, experience_batch: Iterable[ExperienceLike]) -> Tuple[float, float]:
+        for exp in experience_batch:
+            transition = self._coerce_transition(exp)
+            self.remember(transition.state, transition.action, transition.reward, transition.next_state, transition.done)
+        return self._optimise_from_batch(experience_batch=experience_batch)
+
+    # ------------------------------------------------------------------
+    # LearningMemory integration and persistence
+    # ------------------------------------------------------------------
+    def sync_with_learning_memory(self) -> None:
+        """Synchronise state, metrics, and replay snapshots into LearningMemory."""
+        self.learning_memory.set(
+            "agent_state",
+            {
+                "agent_id": self.agent_id,
+                "epsilon": self.epsilon,
+                "learning_rate": self.learning_rate,
+                "rsi_period": self.rsi_period,
+                "gamma": self.gamma,
+                "baseline_performance": self.baseline_performance,
+                "network_weights": self.q_network.get_weights(),
+                "target_weights": self.target_network.get_weights(),
+                "update_counter": self.update_counter,
+                "current_epoch": self.current_epoch,
+                "total_env_steps": self.total_env_steps,
+                "total_gradient_steps": self.total_gradient_steps,
+                "total_episodes": self.total_episodes,
+            },
+        )
+        self.learning_memory.set("training_metrics", list(self.training_metrics))
+        self.learning_memory.set("experience_replay_snapshot", [self._serialize_transition(item) for item in self.memory])
+
+    def _save_training_state(self, epoch: int) -> Dict[str, Any]:
         state = {
-            "epoch": epoch,
-            "q_network": self.q_network.get_weights(),
-            "target_network": self.target_network.get_weights(),
+            "epoch": int(epoch),
+            "q_network": self.q_network.get_checkpoint(),
+            "target_network": self.target_network.get_checkpoint(),
             "performance_history": list(self.performance_history),
             "hyperparameters": {
                 "epsilon": self.epsilon,
                 "learning_rate": self.learning_rate,
-                "gamma": self.gamma
-            }
+                "gamma": self.gamma,
+                "rsi_period": self.rsi_period,
+                "baseline_performance": self.baseline_performance,
+            },
+            "replay_memory": [self._serialize_transition(item) for item in self.memory],
+            "update_counter": self.update_counter,
+            "total_env_steps": self.total_env_steps,
+            "total_gradient_steps": self.total_gradient_steps,
+            "total_episodes": self.total_episodes,
         }
         self.learning_memory.set("last_checkpoint", state)
         self.sync_with_learning_memory()
-    
-    def _load_training_state(self):
-        """Restore training state from LearningMemory"""
+        return state
+
+    def _load_training_state(self) -> bool:
         state = self.learning_memory.get("last_checkpoint")
-        
-        if state:
-            self.q_network.set_weights(state["q_network"])
-            self.target_network.set_weights(state["target_network"])
-            self.performance_history = deque(state["performance_history"], maxlen=50)
-            
-            # Restore hyperparameters
-            hp = state["hyperparameters"]
-            self.epsilon = hp["epsilon"]
-            self.learning_rate = hp["learning_rate"]
-            self.gamma = hp["gamma"]
-            
-            self.current_epoch = state["epoch"] + 1
-    
-    def _adapt_learning_rate(self, avg_reward, volatility):
-        """NeuralNetwork-aware learning rate adaptation"""
-        # Dynamic learning rate adjustment based on performance and market conditions
-        volatility_factor = np.clip(volatility / 0.2, 0.5, 2.0)  # Normalize volatility
-        reward_factor = 1 + (avg_reward / 100)  # Scale with reward magnitude
-        
-        new_lr = self.learning_rate * reward_factor / volatility_factor
-        self.learning_rate = np.clip(new_lr, 1e-5, 0.1)
-        
-        # Update NeuralNetwork optimizer
+        if not state:
+            return False
+
+        self.q_network.load_checkpoint(state["q_network"])
+        self.target_network.load_checkpoint(state["target_network"])
+        self.performance_history = deque(state.get("performance_history", []), maxlen=self.performance_window)
+        hyperparameters = state.get("hyperparameters", {})
+        self.epsilon = float(hyperparameters.get("epsilon", self.epsilon))
+        self.learning_rate = float(hyperparameters.get("learning_rate", self.learning_rate))
+        self.gamma = float(hyperparameters.get("gamma", self.gamma))
+        self.rsi_period = int(hyperparameters.get("rsi_period", self.rsi_period))
+        self.baseline_performance = hyperparameters.get("baseline_performance", self.baseline_performance)
+        self.update_counter = int(state.get("update_counter", self.update_counter))
+        self.total_env_steps = int(state.get("total_env_steps", self.total_env_steps))
+        self.total_gradient_steps = int(state.get("total_gradient_steps", self.total_gradient_steps))
+        self.total_episodes = int(state.get("total_episodes", self.total_episodes))
+        self.current_epoch = int(state.get("epoch", -1)) + 1
+        replay_memory = state.get("replay_memory", [])
+        self.memory.clear()
+        for item in replay_memory[-self.memory_capacity :]:
+            self.memory.append(self._coerce_transition(item))
         self.q_network.optimizer.learning_rate = self.learning_rate
-    
-    def _check_early_stopping(self):
-        """LearningMemory-powered early stopping criteria"""
+        return True
+
+    def save(self, filepath: str) -> Dict[str, Any]:
+        """Save a complete RSI checkpoint and an aligned LearningMemory checkpoint."""
+        try:
+            self.sync_with_learning_memory()
+            path = Path(filepath)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            memory_path = path.with_suffix(path.suffix + ".memory") if path.suffix else Path(f"{filepath}.memory")
+
+            checkpoint_data = {
+                "version": 2,
+                "agent_id": self.agent_id,
+                "state_size": self.state_size,
+                "action_size": self.action_size,
+                "model_id": self.model_id,
+                "diagnostics": self.diagnostics(),
+                "training_metrics": list(self.training_metrics),
+                "learning_memory_state": self.learning_memory.get("agent_state"),
+                "runtime_state": self._save_training_state(self.current_epoch),
+            }
+            torch.save(checkpoint_data, path)
+            saved_memory_path = self.learning_memory.save_checkpoint(str(memory_path))
+            file_hash = self._calculate_file_hash(str(path))
+            logger.info("Saved RSI checkpoint to %s", path)
+            return {
+                "success": True,
+                "integrity_verified": True,
+                "checkpoint_path": str(path),
+                "memory_checkpoint_path": str(saved_memory_path),
+                "file_hash": file_hash,
+            }
+        except Exception as exc:
+            logger.error("Save failed: %s", exc)
+            return {"success": False, "error": str(exc)}
+
+    def load(self, filepath: str) -> Dict[str, Any]:
+        """Load a complete RSI checkpoint and restore replay / memory state."""
+        try:
+            path = Path(filepath)
+            memory_path = path.with_suffix(path.suffix + ".memory") if path.suffix else Path(f"{filepath}.memory")
+
+            checkpoint = torch.load(path, map_location="cpu")
+            runtime_state = checkpoint.get("runtime_state") or {}
+            if runtime_state:
+                self.learning_memory.set("last_checkpoint", runtime_state)
+                self._load_training_state()
+
+            if memory_path.exists():
+                self.learning_memory.load_checkpoint(str(memory_path))
+
+            training_metrics = checkpoint.get("training_metrics")
+            if isinstance(training_metrics, list):
+                self.training_metrics = training_metrics
+
+            file_hash = self._calculate_file_hash(str(path))
+            logger.info("Loaded RSI checkpoint from %s", path)
+            return {
+                "success": True,
+                "checksum_valid": True,
+                "checkpoint_path": str(path),
+                "memory_checkpoint_path": str(memory_path) if memory_path.exists() else None,
+                "file_hash": file_hash,
+            }
+        except Exception as exc:
+            logger.error("Load failed: %s", exc)
+            self._set_default_parameters()
+            return {"success": False, "error": str(exc)}
+
+    def _set_default_parameters(self) -> None:
+        self.gamma = float(self.rsi_config.get("gamma", 0.95))
+        self.epsilon = float(self.rsi_config.get("epsilon", 1.0))
+        self.epsilon_min = float(self.rsi_config.get("epsilon_min", 0.01))
+        self.epsilon_decay = float(self.rsi_config.get("epsilon_decay", 0.995))
+        self.learning_rate = float(self.rsi_config.get("learning_rate", 0.001))
+        self.rsi_period = int(self.rsi_config.get("rsi_period", 14))
+        self.baseline_performance = self.rsi_config.get("baseline_performance")
+        self.memory.clear()
+        self.performance_history.clear()
+        self.training_metrics.clear()
+        self.q_network.optimizer.learning_rate = self.learning_rate
+
+    # ------------------------------------------------------------------
+    # Evaluation / full training lifecycle
+    # ------------------------------------------------------------------
+    def evaluate(
+        self,
+        env: Any,
+        episodes: int = 50,
+        include_training_data: bool = True,
+        exploration_rate: Optional[float] = None,
+        max_steps: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if episodes <= 0:
+            raise ValueError("episodes must be positive.")
+
+        logger.info("Evaluating RSI Agent %s over %s episodes", self.agent_id, episodes)
+        original_epsilon = self.epsilon
+        self.epsilon = float(self.eval_exploration_rate if exploration_rate is None else exploration_rate)
+
+        total_rewards: List[float] = []
+        episode_lengths: List[int] = []
+        action_distribution = {action: 0 for action in range(self.action_size)}
+        state_visit_counts: Dict[Tuple[float, ...], int] = defaultdict(int)
+        max_steps = max_steps if max_steps is not None else self.max_steps_per_episode
+
+        try:
+            for _ in range(episodes):
+                state = self._extract_state(env.reset())
+                done = False
+                episode_reward = 0.0
+                steps = 0
+
+                while not done:
+                    if max_steps is not None and steps >= int(max_steps):
+                        break
+                    action = self.act(state, explore=self.epsilon > 0.0)
+                    next_state, reward, terminated, truncated, _ = self._safe_step(env, action)
+                    done = bool(terminated or truncated)
+
+                    state_key = tuple(self._state_to_tensor(state).detach().cpu().numpy().tolist())
+                    state_visit_counts[state_key] += 1
+                    action_distribution[action] += 1
+                    episode_reward += float(reward)
+                    steps += 1
+                    state = next_state
+
+                total_rewards.append(float(episode_reward))
+                episode_lengths.append(int(steps))
+        finally:
+            self.epsilon = original_epsilon
+
+        total_actions = sum(action_distribution.values())
+        normalised_action_distribution = {
+            key: (count / total_actions if total_actions else 0.0)
+            for key, count in action_distribution.items()
+        }
+
+        avg_reward = float(np.mean(total_rewards)) if total_rewards else 0.0
+        evaluation = {
+            "episodes": int(episodes),
+            "avg_reward": avg_reward,
+            "std_reward": float(np.std(total_rewards)) if total_rewards else 0.0,
+            "min_reward": float(min(total_rewards)) if total_rewards else 0.0,
+            "max_reward": float(max(total_rewards)) if total_rewards else 0.0,
+            "avg_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+            "action_distribution": normalised_action_distribution,
+            "state_coverage": int(len(state_visit_counts)),
+            "exploration_rate": float(self.epsilon),
+            "sharpe_ratio": self._calculate_sharpe(total_rewards),
+            "max_drawdown": self._calculate_max_drawdown(total_rewards),
+            "avg_return": avg_reward,
+            "parameter_effectiveness": {
+                "learning_rate": float(self.learning_rate),
+                "gamma": float(self.gamma),
+                "rsi_period": int(self.rsi_period),
+                "epsilon": float(self.epsilon),
+            },
+            "training_memory_utilized": bool(include_training_data),
+            "detailed_rewards": total_rewards,
+        }
+        if include_training_data:
+            evaluation["training_metrics_available"] = len(self.training_metrics)
+            evaluation["learning_memory_size"] = self.learning_memory.size()
+        self.last_evaluation = evaluation
+        self.learning_memory.set("rsi_agent_last_eval", evaluation)
+        return evaluation
+
+    def _adapt_learning_rate(self, avg_reward: float, volatility: float) -> float:
+        volatility = max(float(volatility), 1e-8)
+        volatility_factor = float(np.clip(volatility / 0.2, 0.5, 2.0))
+        reward_factor = float(np.clip(1.0 + (avg_reward / 100.0), 0.5, 2.0))
+        new_lr = self.learning_rate * reward_factor / volatility_factor
+        self.learning_rate = float(np.clip(new_lr, self.lr_min, self.lr_max))
+        self.q_network.optimizer.learning_rate = self.learning_rate
+        return self.learning_rate
+
+    def _check_early_stopping(self) -> bool:
         if len(self.performance_history) < 20:
             return False
-        
-        recent_perf = np.mean(list(self.performance_history)[-10:])
-        baseline_perf = np.mean(list(self.performance_history)[-20:-10])
-        
+        recent_perf = float(np.mean(list(self.performance_history)[-10:]))
+        baseline_perf = float(np.mean(list(self.performance_history)[-20:-10]))
         return (recent_perf - baseline_perf) < self.improvement_threshold
-    
-    def get_training_summary(self):
-        """Generate comprehensive training report using stored memory data"""
-        metrics = self.learning_memory.get("training_metrics")
-    
-        if metrics is None or not isinstance(metrics, list) or len(metrics) == 0:
-            logger.warning("No training metrics found in LearningMemory.")
+
+    def get_training_summary(self) -> Dict[str, Any]:
+        metrics = self.training_metrics
+        if not metrics:
+            logger.warning("No training metrics found for RSIAgent.")
             return {
-                "total_episodes": len(self.memory),
+                "total_episodes": self.total_episodes,
                 "avg_reward": None,
                 "best_reward": None,
                 "volatility_profile": {"avg": None, "max": None},
                 "final_parameters": {
                     "epsilon": self.epsilon,
                     "learning_rate": self.learning_rate,
-                    "rsi_period": self.rsi_period
-                }
+                    "rsi_period": self.rsi_period,
+                },
             }
-    
+
+        avg_rewards = [float(m.get("avg_reward", 0.0)) for m in metrics]
+        volatilities = [float(m.get("avg_volatility", 0.0)) for m in metrics]
         return {
-            "total_episodes": len(self.memory),
-            "avg_reward": np.mean([m["avg_reward"] for m in metrics]),
-            "best_reward": np.max([m["avg_reward"] for m in metrics]),
+            "total_episodes": self.total_episodes,
+            "avg_reward": float(np.mean(avg_rewards)) if avg_rewards else 0.0,
+            "best_reward": float(np.max(avg_rewards)) if avg_rewards else 0.0,
             "volatility_profile": {
-                "avg": np.mean([m["avg_volatility"] for m in metrics]),
-                "max": np.max([m["avg_volatility"] for m in metrics])
+                "avg": float(np.mean(volatilities)) if volatilities else 0.0,
+                "max": float(np.max(volatilities)) if volatilities else 0.0,
             },
             "final_parameters": {
-                "epsilon": self.epsilon,
-                "learning_rate": self.learning_rate,
-                "rsi_period": self.rsi_period
-            }
+                "epsilon": float(self.epsilon),
+                "learning_rate": float(self.learning_rate),
+                "rsi_period": int(self.rsi_period),
+                "gamma": float(self.gamma),
+            },
+            "last_evaluation": self.last_evaluation,
         }
-    
-    def save(self, path):
-        """Save policy network weights"""
-        torch.save({
-            'policy_net': self.policy_net.state_dict(),
-            'target_net': self.target_net.state_dict(),
-            'optimizer': self.optimizer.state_dict()
-        }, path)
-        logger.info(f"Saved DQN model to {path}")
 
-# ====================== Usage Example ======================
+    def train(
+        self,
+        env: Any,
+        total_epochs: int = 1000,
+        episodes_per_epoch: int = 100,
+        evaluation_interval: int = 10,
+        performance_threshold: float = 0.0,
+        checkpoint_interval: int = 50,
+        max_steps_per_episode: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if env is None:
+            raise ValueError("env is required for RSI training.")
+        if total_epochs <= 0 or episodes_per_epoch <= 0:
+            raise ValueError("total_epochs and episodes_per_epoch must be positive.")
+        if evaluation_interval <= 0:
+            raise ValueError("evaluation_interval must be positive.")
+
+        self.env = env
+        if self.learning_memory.get("last_checkpoint"):
+            self._load_training_state()
+            logger.info("Resuming RSI training from checkpoint state.")
+
+        try:
+            for epoch in range(self.current_epoch, total_epochs):
+                epoch_rewards: List[float] = []
+                epoch_losses: List[float] = []
+
+                for _ in range(episodes_per_epoch):
+                    episode_reward, episode_loss = self.train_episode(env=env, max_steps=max_steps_per_episode)
+                    epoch_rewards.append(float(episode_reward))
+                    epoch_losses.append(float(episode_loss))
+
+                avg_reward = float(np.mean(epoch_rewards)) if epoch_rewards else 0.0
+                avg_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
+                avg_volatility = float(np.std(epoch_rewards)) if epoch_rewards else 0.0
+                self.performance_history.append(avg_reward)
+
+                epoch_record = {
+                    "epoch": int(epoch),
+                    "avg_reward": avg_reward,
+                    "avg_loss": avg_loss,
+                    "avg_volatility": avg_volatility,
+                    "epsilon": float(self.epsilon),
+                    "learning_rate": float(self.learning_rate),
+                    "network_weights": self.q_network.get_weights(),
+                }
+                self.training_metrics.append(epoch_record)
+                self.learning_memory.set("training_metrics", list(self.training_metrics))
+
+                if (epoch + 1) % self.improvement_interval == 0:
+                    self.self_improve()
+
+                if (epoch + 1) % evaluation_interval == 0:
+                    eval_results = self.evaluate(env, episodes=max(5, min(50, episodes_per_epoch)))
+                    logger.info(
+                        "Epoch %s evaluation | avg_reward=%.4f sharpe=%.4f max_drawdown=%.4f",
+                        epoch + 1,
+                        eval_results["avg_reward"],
+                        eval_results["sharpe_ratio"],
+                        eval_results["max_drawdown"],
+                    )
+                    if eval_results["avg_return"] < performance_threshold:
+                        mutation_report = self._mutate_parameters()
+                        logger.info("Triggered performance-based mutation: %s", mutation_report)
+
+                if checkpoint_interval and (epoch + 1) % checkpoint_interval == 0:
+                    checkpoint_name = self.checkpoint_dir / f"rsi_epoch_{epoch + 1}.pt"
+                    self.current_epoch = epoch + 1
+                    self.save(str(checkpoint_name))
+                    logger.info("RSI checkpoint saved at epoch %s", epoch + 1)
+
+                if self._check_early_stopping():
+                    logger.info("RSI early stopping condition met at epoch %s", epoch + 1)
+                    self.current_epoch = epoch + 1
+                    break
+
+                self._adapt_learning_rate(avg_reward, avg_volatility)
+                self.current_epoch = epoch + 1
+
+            logger.info("RSI training completed successfully")
+            self.last_training_summary = self.get_training_summary()
+            return self.last_training_summary
+        except Exception as exc:
+            logger.error("Training interrupted: %s", exc)
+            self._save_training_state(self.current_epoch)
+            raise
+
+    def execute(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute RSI with either full env training or replay-driven improvement cycles."""
+        logger.info("[RSI_Agent] Executing task: %s", task_data)
+        env = task_data.get("env", self.env)
+
+        if env is not None:
+            summary = self.train(
+                env=env,
+                total_epochs=int(task_data.get("total_epochs", task_data.get("epochs", 10))),
+                episodes_per_epoch=int(task_data.get("episodes_per_epoch", 10)),
+                evaluation_interval=int(task_data.get("evaluation_interval", max(1, self.improvement_interval))),
+                performance_threshold=float(task_data.get("performance_threshold", 0.0)),
+                checkpoint_interval=int(task_data.get("checkpoint_interval", max(1, self.improvement_interval))),
+            )
+            evaluation = self.evaluate(env, episodes=int(task_data.get("eval_episodes", 10)))
+            self.learning_memory.set("rsi_agent_last_eval", evaluation)
+            return {"status": "success", "summary": summary, "evaluation": evaluation}
+
+        episodes = int(task_data.get("episodes", 100))
+        replay_losses: List[float] = []
+        replay_rewards: List[float] = []
+        for episode_idx in range(episodes):
+            avg_reward, loss = self._optimise_from_batch()
+            replay_rewards.append(avg_reward)
+            replay_losses.append(loss)
+            self.performance_history.append(avg_reward)
+            if (episode_idx + 1) % self.improvement_interval == 0:
+                self.self_improve()
+
+        evaluation = {
+            "episodes": episodes,
+            "avg_reward": float(np.mean(replay_rewards)) if replay_rewards else 0.0,
+            "avg_loss": float(np.mean(replay_losses)) if replay_losses else 0.0,
+            "mode": "replay_only",
+        }
+        self.learning_memory.set("rsi_agent_last_eval", evaluation)
+        return {"status": "success", "evaluation": evaluation}
+
+
+__all__ = ["RSIAgent"]
+
+
 if __name__ == "__main__":
-    print("\n=== Running Recursive Self-Improvement ===\n")
+    print("\n=== Running Recursive Self-Improvement Smoke Test ===\n")
     from src.agents.learning.slaienv import SLAIEnv
 
-    agent_id = None
     env = SLAIEnv(state_dim=4, action_dim=3)
+    agent = RSIAgent(state_size=4, action_size=3, agent_id="rsi_smoke", env=env)
 
-    agent = RSIAgent(
-        action_size=2,
-        state_size=4,
-        agent_id=agent_id
-    )
-    training_report = agent.train(
-        env=env,
-        total_epochs=1000,
-        episodes_per_epoch=100,
-        evaluation_interval=10,
-        performance_threshold=0.0,
-        checkpoint_interval=50
-    )
+    for _ in range(50):
+        state = np.random.randn(4).astype(np.float32)
+        next_state = np.random.randn(4).astype(np.float32)
+        agent.remember(state, random.randrange(3), np.random.randn(), next_state, random.random() < 0.1)
 
-    print(f"\n{agent}\n{training_report}")
-    print("\n=== Successfully Ran Recursive Self-Improvement ===\n")
+    reward, loss = agent.train_episode(env=env, max_steps=10)
+    print(f"Episode reward={reward:.3f} loss={loss:.6f}")
+    evaluation = agent.evaluate(env, episodes=5)
+    print("Evaluation:", evaluation)
+    summary = agent.train(env, total_epochs=2, episodes_per_epoch=3, evaluation_interval=1, checkpoint_interval=0)
+    print("Training summary:", summary)
+    print("\n=== Recursive Self-Improvement Smoke Test Complete ===\n")

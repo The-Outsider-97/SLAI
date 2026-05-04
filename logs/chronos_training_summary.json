@@ -1,0 +1,871 @@
+{
+  "episodes": 200,
+  "depth": 2,
+  "counter_playouts": 8,
+  "board_sizes": [
+    9,
+    11,
+    13
+  ],
+  "wins": {
+    "9": 67,
+    "11": 67,
+    "13": 66
+  },
+  "losses": {
+    "9": 0,
+    "11": 0,
+    "13": 0
+  },
+  "draw_like": {
+    "9": 0,
+    "11": 0,
+    "13": 0
+  },
+  "explored_states": 75464,
+  "counter_evals": 15704,
+  "completed_episodes": 200,
+  "health": {
+    "agent_status": "ready",
+    "initialized_at": "2026-04-16T00:26:15.846883",
+    "agents": [
+      "knowledge",
+      "planning",
+      "execution",
+      "learning",
+      "adaptive"
+    ],
+    "adaptive_agent_available": true,
+    "game": "chronos",
+    "stats": {
+      "games_played": 252,
+      "wins": 227,
+      "losses": 25,
+      "draws": 0,
+      "average_reward": 165.0971,
+      "average_final_score": 28.67,
+      "last_result": "win",
+      "last_updated": "2026-04-16T09:29:25.611028"
+    },
+    "action_weights": {
+      "move": -8.0,
+      "claim": 12.0
+    },
+    "zone_weights": {
+      "core": 10.0,
+      "near_core": -5.15,
+      "perimeter": -0.5
+    },
+    "adaptive_state": {
+      "pace_preference": 0.18333333333333324,
+      "risk_appetite": -0.43000000000000005,
+      "opponent_aggression": 0.35,
+      "opponent_claim_pressure": 0.0,
+      "opponent_focus_core": 0.0,
+      "confidence": 0.73,
+      "last_stance": "conversion",
+      "history": [
+        {
+          "timestamp": 1776331251.8337574,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331258.8025217,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331262.7150607,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331266.735289,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331272.3334224,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331276.5147552,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331280.7627745,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331285.2947462,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331290.4162135,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331296.615858,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331302.7455578,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331307.9438834,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331313.8172495,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331319.1819675,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331326.20328,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331332.5705912,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331339.5260577,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331342.3468113,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331345.5557818,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331350.510764,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331354.051194,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331357.6264522,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331361.3905911,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331365.5745723,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331371.2632568,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331377.156677,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331382.0505831,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331387.4643419,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331393.1696107,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331400.2781842,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331406.6074681,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331413.2114952,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331416.0739813,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331419.3608744,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331424.32811,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331427.837071,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331431.4167423,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331435.794623,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331440.068793,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331446.2497957,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331451.9711504,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331456.521395,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331461.9282892,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331467.4559762,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331475.434432,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331482.6403272,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331490.6916077,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331493.9980955,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331497.6922486,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331502.5987022,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331506.522892,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331510.1942527,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331514.2309978,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331518.586932,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331525.148632,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331531.5195897,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331536.0051322,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331541.1468532,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331546.5101235,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331553.8498847,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331560.9676566,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331569.3111231,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331572.8129835,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331576.2626882,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331582.5696378,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331587.1363955,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331590.685051,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331594.778298,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331599.196056,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331604.9375427,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331611.4378335,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331617.7195597,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331623.6188445,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331629.5163999,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331637.2630794,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331643.852846,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331650.479821,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331653.301162,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331656.4038696,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331661.0884023,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331664.995186,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331669.149835,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331673.7172115,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331678.5459988,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331685.5828397,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331691.2138948,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17368421052631577,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331696.1729496,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1756097560975609,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331701.6847475,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331707.655065,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1777777777777777,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331716.1312864,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18297872340425536,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331724.031505,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18541666666666656,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331731.1840582,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16153846153846152,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331734.037343,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16551724137931034,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331737.4647298,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17714285714285716,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331742.1427584,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18055555555555547,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        },
+        {
+          "timestamp": 1776331745.7550452,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.16874999999999996,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331749.2494588,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.17142857142857137,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331753.123039,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.1743589743589743,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331757.1227167,
+          "stance": "balanced",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 0.0
+        },
+        {
+          "timestamp": 1776331762.7627556,
+          "stance": "conversion",
+          "confidence": 0.7,
+          "initiative": 0.18333333333333324,
+          "enemy_pressure": 0.35,
+          "core_balance": 1.0
+        }
+      ]
+    }
+  }
+}

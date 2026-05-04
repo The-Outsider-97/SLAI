@@ -1,318 +1,255 @@
-import torch
 import math
-import yaml
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-from src.agents.perception.utils.config_loader import load_global_config, get_config_section
-from src.agents.perception.utils.common import TensorOps, Parameter
-from logs.logger import get_logger, PrettyPrinter
+from typing import Optional
+
+from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.common import TensorOps, Parameter
+from ...base.modules.activation_engine import (
+    get_activation,
+    he_init, lecun_normal, xavier_uniform, xavier_normal
+)
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("FeedForward")
 printer = PrettyPrinter
 
-class FeedForward(torch.nn.Module):
-    """Enhanced Position-wise Feed-Forward Network with configurable components"""
+
+class FeedForward(nn.Module):
+    """Enhanced position‑wise feed‑forward network with configurable components."""
     def __init__(self):
         super().__init__()
         self.config = load_global_config()
         self.embed_dim = self.config.get('embed_dim')
         self.initializer = self.config.get('initializer', 'xavier_uniform')
-        self.device = self.config.get('device')
-        self.dropout_rate = self.config.get('dropout_rate')
-        self.training = self.config.get('training')
-        self.ff_dim = self.config.get('ff_dim')
-        self.activation = self.config.get('activation')
-        self.norm_type = self.config.get('norm_type')
+        self.device = self.config.get('device', 'cpu')
+        self.dropout_rate = self.config.get('dropout_rate', 0.1)
+        self.ff_dim = self.config.get('ff_dim', self.embed_dim * 4)
+        self.activation_name = self.config.get('activation', 'relu')
+        self.norm_type = self.config.get('norm_type', 'layernorm')
 
         self.ff_config = get_config_section('feedforward')
-        self.use_bias = self.ff_config.get('use_bias')
+        self.use_bias = self.ff_config.get('use_bias', True)
         self.use_residual = self.ff_config.get('use_residual', True)
-        self.fusion_type = self.ff_config.get('fusion_type')
-        self.context_dim = self.ff_config.get('context_dim', None)
+        self.fusion_type = self.ff_config.get('fusion_type', None)
+        self.context_dim = self.ff_config.get('context_dim', self.embed_dim)
 
-        # Initialize normalization layer
+        # Activation from engine
+        self.activation = get_activation(self.activation_name)
+
+        # Normalization layer
         self._init_normalization()
 
-        # Initialize fusion parameters if needed
+        # Fusion parameters (if needed)
         self._init_fusion()
 
-        # Initialize parameters
+        # Linear layers
         self._init_parameters()
 
-        # Intermediate values cache
-        self._cache = {}
-        
-        # Activation derivatives mapping
-        self._activation_derivatives = {
-            'gelu': self._gelu_derivative,
-            'relu': self._relu_derivative,
-            'swish': self._swish_derivative
-        }
-        
-        logger.info(f"FeedForward initialized: "
-                    f"embed_dim={self.embed_dim}, ff_dim={self.ff_dim}, "
-                    f"activation={self.activation}, use_bias={self.use_bias}, "
-                    f"residual={self.use_residual}, norm={self.norm_type}, "
-                    f"fusion={self.fusion_type}")
+        logger.info(f"FeedForward initialized: embed_dim={self.embed_dim}, ff_dim={self.ff_dim}, "
+                    f"activation={self.activation_name}, use_bias={self.use_bias}, "
+                    f"residual={self.use_residual}, norm={self.norm_type}, fusion={self.fusion_type}")
 
     def _init_normalization(self):
-        """Initialize normalization layer based on config"""
+        """Initialize the normalization layer based on config."""
         if self.norm_type == 'layernorm':
-            self.norm = torch.nn.LayerNorm(self.embed_dim)
+            self.norm = nn.LayerNorm(self.embed_dim, eps=1e-5)
         elif self.norm_type == 'instancenorm':
-            self.norm = torch.nn.InstanceNorm1d(self.embed_dim)
-        elif self.norm_type is None:
+            # InstanceNorm expects (batch, channels, seq) – we'll adapt in forward
+            self.norm = nn.InstanceNorm1d(self.embed_dim, affine=True)
+        elif self.norm_type is None or self.norm_type == 'none':
             self.norm = None
         else:
             raise ValueError(f"Unsupported normalization type: {self.norm_type}")
 
     def _init_fusion(self):
-        """Initialize parameters for multi-modal fusion"""
-        if self.fusion_type is None:
-            return
-        if self.fusion_type == 'concat':    # Increase first linear layer input size
+        """Initialize parameters for multi‑modal fusion."""
+        self.film_gamma = None
+        self.film_beta = None
+        self.context_proj = None
+
+        if self.fusion_type == 'concat':
+            # First linear layer input dimension will be increased
             self.fused_embed_dim = self.embed_dim + self.context_dim
-        elif self.fusion_type == 'film':    # FiLM parameters (Feature-wise Linear Modulation)
+        elif self.fusion_type == 'film':
+            # Feature‑wise Linear Modulation: learnable scales and shifts
             self.film_gamma = Parameter(torch.ones(1, self.embed_dim, device=self.device))
             self.film_beta = Parameter(torch.zeros(1, self.embed_dim, device=self.device))
+            # Project context to match embedding dimension if needed
+            if self.context_dim != self.embed_dim:
+                self.context_proj = nn.Linear(self.context_dim, self.embed_dim, bias=False)
+                self._init_layer(self.context_proj)
         elif self.fusion_type == 'add':
-            # No additional parameters needed
+            # No extra parameters
             pass
-        else:
+        elif self.fusion_type is not None:
             raise ValueError(f"Unsupported fusion type: {self.fusion_type}")
 
-    def _init_parameters(self):
-        """Initialize weights and biases with configurable scheme"""
-        # Weight initialization mapping
-        init_fns = {
-            'he': TensorOps.he_init,
-            'xavier': TensorOps.xavier_uniform,
-            'lecun': TensorOps.lecun_normal
+    def _init_layer(self, layer):
+        """Helper to initialize a linear layer with the configured initializer."""
+        init_map = {
+            'he': he_init,
+            'lecun': lecun_normal,
+            'xavier_uniform': xavier_uniform,
+            'xavier_normal': xavier_normal,
         }
-        init_fn = init_fns.get(self.initializer, TensorOps.xavier_uniform)
+        init_fn = init_map.get(self.initializer, xavier_uniform)
+        weight_shape = layer.weight.shape
+        with torch.no_grad():
+            layer.weight.data = init_fn(weight_shape, device=self.device)
 
-        # Determine input dimension for first linear layer
+    def _init_parameters(self):
+        """Initialize weights and biases for linear layers."""
+        # Input dimension for first layer (may be increased by concat fusion)
         input_dim = self.embed_dim
         if self.fusion_type == 'concat':
             input_dim = self.fused_embed_dim
 
+        init_map = {
+            'he': he_init,
+            'lecun': lecun_normal,
+            'xavier_uniform': xavier_uniform,
+            'xavier_normal': xavier_normal,
+        }
+        init_fn = init_map.get(self.initializer, xavier_uniform)
+
         # First linear transformation
-        self.w1 = Parameter(
-            init_fn((input_dim, self.ff_dim), 
-            input_dim, 
-            device=self.device
-        ))
-        self.b1 = Parameter(
-            torch.zeros(self.ff_dim, device=self.device) 
-            if self.use_bias else None
-        )
+        w1_shape = (input_dim, self.ff_dim)
+        self.w1 = Parameter(init_fn(w1_shape, device=self.device))
+        self.b1 = Parameter(torch.zeros(self.ff_dim, device=self.device)) if self.use_bias else None
 
         # Second linear transformation
-        self.w2 = Parameter(
-            init_fn((self.ff_dim, self.embed_dim), 
-            self.ff_dim, 
-            device=self.device
-        ))
-        self.b2 = Parameter(
-            torch.zeros(self.embed_dim, device=self.device) 
-            if self.use_bias else None
-        )
+        w2_shape = (self.ff_dim, self.embed_dim)
+        self.w2 = Parameter(init_fn(w2_shape, device=self.device))
+        self.b2 = Parameter(torch.zeros(self.embed_dim, device=self.device)) if self.use_bias else None
 
+    def _apply_fusion(self, x, context):
+        """Apply multi‑modal fusion (modifies x in place or returns new tensor)."""
+        if self.fusion_type == 'add':
+            # Simple addition (context must have same shape as x)
+            if context.shape != x.shape:
+                # Project context to match if needed
+                if not hasattr(self, '_add_proj'):
+                    self._add_proj = nn.Linear(context.shape[-1], self.embed_dim, bias=False).to(x.device)
+                    self._init_layer(self._add_proj)
+                context = self._add_proj(context)
+            return x + context
+
+        elif self.fusion_type == 'concat':
+            # Concatenate along feature dimension
+            # Ensure context has same batch and sequence dimensions as x
+            if context.dim() == 2:  # (batch, features) -> add sequence dim
+                context = context.unsqueeze(1).expand(-1, x.size(1), -1)
+            elif context.dim() == 3 and context.size(1) == 1:
+                context = context.expand(-1, x.size(1), -1)
+            # If context dims still don't match, project
+            if context.size(-1) != self.context_dim:
+                context = context[..., :self.context_dim]  # truncate or pad? For simplicity, truncate
+            return torch.cat([x, context], dim=-1)
+
+        elif self.fusion_type == 'film':
+            # Feature‑wise Linear Modulation
+            # Context may be global (batch, features) or sequence (batch, seq, features)
+            if context.dim() == 2:
+                context = context.unsqueeze(1)  # (batch, 1, features)
+            # Project context to embedding dimension if needed
+            if self.context_proj is not None:
+                context = self.context_proj(context)
+            gamma = self.film_gamma * context
+            beta = self.film_beta * context
+            return x * gamma + beta
+
+        else:
+            return x
 
     def forward(self, x, context=None):
         """
-        Forward pass with optional normalization, residual connection, and multi-modal fusion
-        
+        Forward pass.
+
         Args:
             x: Input tensor of shape (batch, seq_len, embed_dim)
-            context: Context tensor for multi-modal fusion
+            context: Optional context tensor for multi‑modal fusion.
         """
-        x = x.to(self.device)
         residual = x  # Save for residual connection
-        
-        # Apply normalization if configured
+
+        # Apply normalization
         if self.norm is not None:
-            if isinstance(self.norm, torch.nn.InstanceNorm1d):
-                # InstanceNorm requires (batch, channels, seq)
+            if isinstance(self.norm, nn.InstanceNorm1d):
+                # InstanceNorm expects (batch, channels, seq)
                 x = x.permute(0, 2, 1)
                 x = self.norm(x)
                 x = x.permute(0, 2, 1)
             else:
                 x = self.norm(x)
-        
-        # Apply multi-modal fusion
+
+        # Apply multi‑modal fusion
         if context is not None:
-            context = context.to(self.device)
             x = self._apply_fusion(x, context)
-        
-        self._cache['x'] = x
-        
-        # First projection
+
+        # First linear projection
         h = torch.matmul(x, self.w1)
         if self.use_bias and self.b1 is not None:
             h += self.b1
-        self._cache['pre_act'] = h.clone()
-        
-        # Activation function
-        h_act = self._apply_activation(h)
-        self._cache['act'] = h_act.clone()
-        
-        # Apply dropout
+
+        # Activation
+        h_act = self.activation(h)
+
+        # Dropout
         if self.training and self.dropout_rate > 0:
-            mask = (torch.rand_like(h_act) > self.dropout_rate).float()
-            scale = 1.0 / (1.0 - self.dropout_rate)
-            h_drop = h_act * mask * scale
-            self._cache['dropout_mask'] = mask
-        else:
-            h_drop = h_act
-            
-        self._cache['dropped_act'] = h_drop.clone()
-        
-        # Second projection
-        output = torch.matmul(h_drop, self.w2)
+            h_act = F.dropout(h_act, p=self.dropout_rate, training=self.training)
+
+        # Second linear projection
+        out = torch.matmul(h_act, self.w2)
         if self.use_bias and self.b2 is not None:
-            output += self.b2
-        
-        # Apply residual connection
+            out += self.b2
+
+        # Residual connection
         if self.use_residual:
-            output = residual + output
-            
-        return output
+            out = residual + out
 
-    def _apply_fusion(self, x, context):
-        """Apply multi-modal fusion"""
-        if self.fusion_type == 'add':
-            # Simple addition
-            return x + context
-        
-        elif self.fusion_type == 'concat':
-            # Concatenate along feature dimension
-            return torch.cat([x, context], dim=-1)
-        
-        elif self.fusion_type == 'film':
-            # Feature-wise Linear Modulation
-            gamma = self.film_gamma
-            beta = self.film_beta
-            
-            # Handle different context dimensions
-            if context.dim() == 2:  # Global context (batch, features)
-                context = context.unsqueeze(1)  # Add sequence dimension
-            
-            # Compute modulation parameters from context
-            if context.size(-1) != self.embed_dim:
-                # Project context to match embedding dimension
-                projection = torch.nn.Linear(context.size(-1), self.embed_dim, device=self.device)
-                context = projection(context)
-                
-            gamma = gamma * context
-            beta = beta * context
-            
-            return x * gamma + beta
-        
-        return x
-
-    def _apply_activation(self, x):
-        """Apply activation function with numerical stability"""
-        if self.activation == 'gelu':
-            return 0.5 * x * (1 + torch.tanh(
-                math.sqrt(2 / math.pi) * (x + 0.044715 * x ** 3)
-            ))
-        elif self.activation == 'relu':
-            return torch.relu(x)
-        elif self.activation == 'swish':
-            return x * torch.sigmoid(x)
-        else:
-            raise ValueError(f"Unsupported activation: {self.activation}")
-
-    def _gelu_derivative(self, d_act_input):
-        """Compute gradient for GELU activation"""
-        pre_act = self._cache['pre_act'].reshape(d_act_input.shape)
-        sqrt_2_over_pi = math.sqrt(2 / math.pi)
-        tanh_in = sqrt_2_over_pi * (pre_act + 0.044715 * pre_act ** 3)
-        tanh_term = torch.tanh(tanh_in)
-        
-        derivative = 0.5 * (1 + tanh_term) + \
-            0.5 * pre_act * (1 - tanh_term ** 2) * \
-            sqrt_2_over_pi * (1 + 3 * 0.044715 * pre_act ** 2)
-            
-        return d_act_input * derivative
-
-    def _relu_derivative(self, d_act_input):
-        """Compute gradient for ReLU activation"""
-        pre_act = self._cache['pre_act'].reshape(d_act_input.shape)
-        return d_act_input * (pre_act > 0).float()
-
-    def _swish_derivative(self, d_act_input):
-        """Compute gradient for Swish activation"""
-        pre_act = self._cache['pre_act'].reshape(d_act_input.shape)
-        sig = torch.sigmoid(pre_act)
-        return d_act_input * (sig + pre_act * sig * (1 - sig))
-
-    def parameters(self):
-        """Return all learnable parameters"""
-        params = [self.w1, self.w2]
-        if self.use_bias:
-            if self.b1 is not None: 
-                params.append(self.b1)
-            if self.b2 is not None: 
-                params.append(self.b2)
-        return params
-
-    def train(self, mode=True):
-        """Set training mode"""
-        self.training = mode
-        return self
-
-    def eval(self):
-        """Set evaluation mode"""
-        return self.train(False)
+        return out
 
     def load_pretrained(self, weights, prefix=''):
-        """Load pretrained weights from dictionary"""
-        weight_key = f'{prefix}intermediate.dense.weight'
-        bias_key = f'{prefix}intermediate.dense.bias'
-        
-        if weight_key in weights:
-            self.w1 = weights[weight_key].to(self.device)
-        if bias_key in weights and self.use_bias and self.b1 is not None:
-            self.b1 = weights[bias_key].to(self.device)
-        
-        weight_key = f'{prefix}output.dense.weight'
-        bias_key = f'{prefix}output.dense.bias'
-        
-        if weight_key in weights:
-            self.w2 = weights[weight_key].to(self.device)
-        if bias_key in weights and self.use_bias and self.b2 is not None:
-            self.b2 = weights[bias_key].to(self.device)
+        """Load pretrained weights from a dictionary (e.g., from HuggingFace)."""
+        # Map keys
+        w1_key = f'{prefix}intermediate.dense.weight'
+        b1_key = f'{prefix}intermediate.dense.bias'
+        w2_key = f'{prefix}output.dense.weight'
+        b2_key = f'{prefix}output.dense.bias'
 
+        if w1_key in weights:
+            self.w1.data = weights[w1_key].to(self.device)
+        if b1_key in weights and self.use_bias and self.b1 is not None:
+            self.b1.data = weights[b1_key].to(self.device)
+
+        if w2_key in weights:
+            self.w2.data = weights[w2_key].to(self.device)
+        if b2_key in weights and self.use_bias and self.b2 is not None:
+            self.b2.data = weights[b2_key].to(self.device)
+
+
+# ----------------------------------------------------------------------
+# Test block
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n=== Running FeedForward ===\n")
     model = FeedForward()
-
     print("Initialized FeedForward module:")
     print(model)
 
     x = torch.randn(4, 128, 512)
     print(f"\nInput shape: {x.shape}")
 
-    # Set to training mode
     model.train()
     print("\nMode: Training")
-    y_train = model.forward(x)
-    print("Forward output (train):\n", y_train)
+    y_train = model(x)
+    print("Forward output (train):", y_train.shape)
 
-    # Simulate dummy loss gradient
-    dout = torch.ones_like(y_train)
-
-    # Perform simple SGD step
-    lr = 0.01
-    for param in model.parameters():
-        param.step(lr)
-        param.zero_grad()
-
-    # Switch to evaluation mode
     model.eval()
     print("\nMode: Evaluation")
-    y_eval = model.forward(x)
-    print("Forward output (eval):\n", y_eval)
+    y_eval = model(x)
+    print("Forward output (eval):", y_eval.shape)
 
     print("\n=== Successfully Ran FeedForward ===\n")

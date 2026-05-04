@@ -1,31 +1,36 @@
 import math
 import torch
-import yaml
 import torch.nn as nn
 
 from typing import Optional
-from abc import ABC, abstractmethod
 
-from src.agents.perception.utils.config_loader import load_global_config, get_config_section
-from src.agents.perception.utils.taskheads import (TaskHead, ClassificationHead, MultiTaskHead,
-                                RegressionHead, Seq2SeqHead, MultiModalClassificationHead)
-from src.agents.perception.utils.common import TensorOps, Parameter
-from src.agents.perception.modules.attention import (EfficientAttention, BaseAttention,
-                                        CosineAttention, MultiQueryAttention, CrossAttention)
-from src.agents.perception.modules.feedforward import FeedForward
-from src.agents.perception.perception_memory import PerceptionMemory
-from src.agents.base.utils.base_transformer import BaseTransformer
-from logs.logger import get_logger, PrettyPrinter
+from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.taskheads import (
+    TaskHead, ClassificationHead, MultiTaskHead,
+    RegressionHead, Seq2SeqHead, MultiModalClassificationHead
+)
+from ..utils.common import TensorOps, Parameter
+from .attention import (
+    EfficientAttention, BaseAttention,
+    CosineAttention, MultiQueryAttention, CrossAttention
+)
+from .feedforward import FeedForward
+from ..perception_memory import PerceptionMemory
+from ...base.modules.base_transformer import BaseTransformer
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Transformer")
 printer = PrettyPrinter
 
-class Transformer(BaseTransformer, nn.Module):
+
+class Transformer(BaseTransformer):
+    """
+    Enhanced transformer with custom attention, feedforward, task heads,
+    and production‑ready features like gradient checkpointing and layer freezing.
+    """
     def __init__(self):
-        BaseTransformer.__init__(self)
-        nn.Module.__init__(self)
+        super().__init__()
         self.config = load_global_config()
-        # self.training = self.config.get('training')
         self.embed_dim = self.config.get('embed_dim')
         self.num_heads = self.config.get('num_heads')
         self.dropout_rate = self.config.get('dropout_rate')
@@ -33,252 +38,247 @@ class Transformer(BaseTransformer, nn.Module):
         self.num_styles = self.config.get('num_styles')
         self.max_position_embeddings = self.config.get('max_position_embeddings')
         self.trans_config = get_config_section('transformer')
-        self.return_hidden = self.trans_config.get('return_hidden')
+        self.return_hidden = self.trans_config.get('return_hidden', False)
+        self.use_checkpointing = self.trans_config.get('use_gradient_checkpointing', True)
 
-        self.memory = PerceptionMemory()
+        self.memory = PerceptionMemory(enable_checkpointing=self.use_checkpointing)
 
-        # Choose attention type from config
-        self.attn_selector = lambda input_shape, task_type=None, context=None: self.select_attention(
-            input_shape=input_shape, task_type=task_type, context=context
+        # Style embeddings (additional token‑level style control)
+        self.style_embeddings = Parameter(
+            torch.randn(self.num_styles, self.embed_dim) * 0.02
         )
 
-        # Choose taskhead type from config
-        self.task_head = self.select_taskhead(task_type=self.config.get("task_type", "classification"))
-
-        # Initialize modules
+        # Build custom layers
         self.layers = nn.ModuleList()
-        for i in range(self.num_layers):
-            attn = self.attn_selector(input_shape=(1, self.max_position_embeddings, self.embed_dim), task_type="classification")
+        for _ in range(self.num_layers):
+            attn = self.select_attention(
+                input_shape=(1, self.max_position_embeddings, self.embed_dim),
+                task_type="classification"
+            )
             self.layers.append(nn.ModuleDict({
                 'attention': attn,
                 'ff': FeedForward(),
                 'norm1': nn.LayerNorm(self.embed_dim),
                 'norm2': nn.LayerNorm(self.embed_dim),
             }))
-        
-        # Positional and style embeddings
-        self.positional_encoding = Parameter(
-            self._init_positional_encoding(
-                self.embed_dim,
-                self.max_position_embeddings
-            ), 
-            requires_grad=True
-        )
-        self.style_embeddings = Parameter(
-            torch.randn(self.num_styles, self.embed_dim) * 0.02
-        )
-        
-        # Apply weight initialization to our custom components
-        self._init_custom_weights()
-        logger.info(f"Transformer initialized with {self.num_layers} layers")
 
-    def _init_positional_encoding(self, d_model, max_len=5000):
-        """Sinusoidal positional encoding (Vaswani et al. 2017)"""
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        return pe
+        # Task head
+        self.task_head = self.select_taskhead(task_type=self.config.get("task_type", "classification"))
+
+        # Initialize custom weights (but base already initialised some; we may override)
+        self._init_custom_weights()
+
+        logger.info(f"Transformer initialized with {self.num_layers} layers, "
+                    f"checkpointing={'on' if self.use_checkpointing else 'off'}")
 
     def _init_custom_weights(self):
-        """Apply weight initialization to custom components"""
+        """Apply custom weight initialization to all modules (avoids bias for embeddings)."""
         for module in self.modules():
-            # Skip base class modules
-            if module is self:
-                continue
-                
-            # Initialize our custom layers
-            if isinstance(module, (nn.Linear, nn.Embedding)):
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
                 module.weight.data.normal_(mean=0.0, std=0.02)
             elif isinstance(module, nn.LayerNorm):
                 module.bias.data.zero_()
                 module.weight.data.fill_(1.0)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
 
     def select_attention(self, input_shape, task_type=None, context=None):
         """
-        Attention selector implements:
-        - Memory-aware selection
-        - Device capability checks
-        - Sequence length thresholds
-        - Fallback mechanisms
-        - Task-specific optimizations
+        Attention selector based on sequence length, device, and task type.
+        Uses config flags for bucket sizes and memory efficiency.
         """
-        # Get sequence length and device info
         seq_len = input_shape[1]
-        device = self.config.get('device')
+        device = self.config.get('device', 'cpu')
         device_type = 'cuda' if 'cuda' in device else 'cpu'
         max_seq_len = self.max_position_embeddings
 
-        # Calculate memory requirements
-        approx_mem_req = (seq_len ** 2) * 4 * 4  # Approx memory in bytes
-        device_mem = torch.cuda.get_device_properties(device).total_memory if 'cuda' in device else 4e9  # 4GB for CPU
+        # Approximate memory requirement
+        approx_mem_req = (seq_len ** 2) * 4 * 4  # bytes (rough)
+        device_mem = torch.cuda.get_device_properties(device).total_memory if device_type == 'cuda' else 4e9
 
-        # Priority 1: Cross-attention when context is provided
+        # Cross‑attention if context is provided
         if context is not None:
             logger.debug("Selecting CrossAttention due to context presence")
             return CrossAttention()
 
-        # Priority 2: Memory-efficient attention for long sequences
+        # Memory‑efficient for long sequences
         if seq_len > 1024 or approx_mem_req > device_mem * 0.3:
-            logger.debug(f"Selecting EfficientAttention for long sequence (length={seq_len})")
+            logger.debug(f"Selecting EfficientAttention for long sequence (len={seq_len})")
             return EfficientAttention()
 
-        # Priority 3: Task-specific attention
-        task_specific_map = {
+        # Task‑specific choices
+        task_map = {
             "similarity": CosineAttention(seq_len=seq_len),
             "classification": MultiQueryAttention() if seq_len <= 512 else BaseAttention(),
             "regression": BaseAttention(),
             "seq2seq": MultiQueryAttention(),
             "multimodal": CosineAttention(seq_len=seq_len)
         }
+        if task_type in task_map:
+            logger.debug(f"Selecting {type(task_map[task_type]).__name__} for task '{task_type}'")
+            return task_map[task_type]
 
-        if task_type in task_specific_map:
-            logger.debug(f"Selecting {type(task_specific_map[task_type]).__name__} for task '{task_type}'")
-            return task_specific_map[task_type]
-
-        # Priority 4: Hardware-optimized selection
+        # Hardware‑optimized
         if device_type == 'cuda' and seq_len > 512:
-            logger.debug("Selecting MemoryEfficientAttention for CUDA device")
+            logger.debug("Selecting EfficientAttention for CUDA device")
             return EfficientAttention()
 
-        # Fallback to BaseAttention
+        # Default
         logger.debug("Selecting BaseAttention as default")
-        return BaseAttention()    
-
-    def set_task_head(self, task_type):
-        self.task_head = self.select_taskhead(task_type)
+        return BaseAttention()
 
     def select_taskhead(self, task_type=None, **kwargs):
-        """
-        Ttask head selector implements:
-        - Multi-task support
-        - Dynamic parameter configuration
-        - Fallback mechanisms
-        - Custom head registration
-        """
+        """Select the appropriate task head."""
         task_type = task_type or self.config.get("task_type", "classification")
         task_config = self.config.get("task_heads", {}).get(task_type, {})
-        
-        # Task head registry with default parameters
-        task_head_registry = {
-            "classification": {
-                "class": ClassificationHead,
-                "params": {"hidden_dim": self.embed_dim}
-            },
-            "regression": {
-                "class": RegressionHead,
-                "params": {"hidden_dim": self.embed_dim}
-            },
-            "seq2seq": {
-                "class": Seq2SeqHead,
-                "params": {"hidden_dim": self.embed_dim}
-            },
-            "multimodal": {
-                "class": MultiModalClassificationHead,
-                "params": {"hidden_dims": [self.embed_dim, self.embed_dim//2]}
-            },
-            "multitask": {
-                "class": MultiTaskHead,
-                "params": {"task_configs": task_config.get("tasks", [])}
-            }
-        }
-        
-        # Get task head specification
-        head_spec = task_head_registry.get(task_type)
-        
-        if not head_spec:
-            # Try partial match
-            for key in task_head_registry:
-                if key in task_type:
-                    head_spec = task_head_registry[key]
-                    logger.warning(f"Using partial match for task type '{task_type}' -> '{key}'")
-                    break
-        
-        # Fallback to base TaskHead if no match found
-        if not head_spec:
-            logger.error(f"Unknown task type: {task_type}. Using base TaskHead")
-            return TaskHead()
-        
-        # Merge parameters: default -> config overrides -> runtime kwargs
-        params = head_spec["params"].copy()
-        params.update(task_config.get("params", {}))
-        params.update(kwargs)  # Add runtime parameters
-        
-        # Instantiate the task head
-        logger.info(f"Initializing {head_spec['class'].__name__} for task '{task_type}'")
-        return head_spec["class"](**params)
 
-    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, context_mask: Optional[torch.Tensor] = None,
-                style_id: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Accept the commonly used alias to keep compatibility with encoder callers.
+        registry = {
+            "classification": (ClassificationHead, {"hidden_dim": self.embed_dim}),
+            "regression": (RegressionHead, {"hidden_dim": self.embed_dim}),
+            "seq2seq": (Seq2SeqHead, {"hidden_dim": self.embed_dim}),
+            "multimodal": (MultiModalClassificationHead, {"hidden_dims": [self.embed_dim, self.embed_dim//2]}),
+            "multitask": (MultiTaskHead, {"task_configs": task_config.get("tasks", [])})
+        }
+
+        if task_type in registry:
+            head_class, default_params = registry[task_type]
+            params = default_params.copy()
+            params.update(task_config.get("params", {}))
+            params.update(kwargs)
+            logger.info(f"Initializing {head_class.__name__} for task '{task_type}'")
+            return head_class(**params)
+
+        # Fallback
+        logger.error(f"Unknown task type: {task_type}. Using base TaskHead.")
+        return TaskHead()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        style_id: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass.
+
+        Args:
+            x: Input tensor (batch, seq_len, embed_dim)
+            context: Optional context for cross‑attention
+            context_mask: Attention mask for context
+            style_id: Style embedding IDs (batch,)
+            attention_mask: Alias for context_mask
+
+        Returns:
+            Output tensor (batch, seq_len, embed_dim) if return_hidden, else task head output.
+        """
         if context_mask is None and attention_mask is not None:
             context_mask = attention_mask
-        # Add positional and style embeddings
-        seq_len = x.shape[1]
-        x = x + self.positional_encoding[:seq_len, :].unsqueeze(0)
 
-        # Handle style embeddings
+        # Add positional encoding (from base class)
+        if hasattr(self, 'pos_encoder'):
+            x = self.pos_encoder(x)
+        else:
+            # Fallback (should not happen)
+            logger.warning("No positional encoder found; using identity.")
+
+        # Add style embeddings
         if style_id is None:
             style_id = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-
-        # Get style embeddings and reshape for broadcasting
-        style_emb = self.style_embeddings[style_id]  # Shape: (B, embed_dim)
-        style_emb = style_emb.unsqueeze(1)  # Shape: (B, 1, embed_dim)
+        style_emb = self.style_embeddings[style_id].unsqueeze(1)  # (batch, 1, embed_dim)
         x = x + style_emb
-    
+
         # Process through transformer layers
         for i, layer in enumerate(self.layers):
             # Attention block
             residual = x
             x = layer['norm1'](x)
-            x_attn = self.memory.run_checkpointed(
+            attn_out = self.memory.run_checkpointed(
                 layer['attention'],
                 x,
                 context,
                 context_mask
             )
-            x = residual + torch.nn.functional.dropout(
-                x_attn,
-                p=self.dropout_rate,
-                training=self.training
-            )
+            # If attention returns (output, weights), take output
+            if isinstance(attn_out, tuple):
+                attn_out = attn_out[0]
+            x = residual + nn.functional.dropout(attn_out, p=self.dropout_rate, training=self.training)
 
-            # Cache intermediate attention output
-            self.memory.cache_item(
-                tensor=x,
-                key=f"layer_{i}_attn_out",
-                tags=["layer_output", f"layer_{i}"],
-                metadata={"block": "attention"}
-            )
+            # Cache attention output (optional, for debugging)
+            if self.training:
+                self.memory.cache_item(
+                    tensor=x,
+                    key=f"layer_{i}_attn_out",
+                    tags=["layer_output", f"layer_{i}"],
+                    metadata={"block": "attention"}
+                )
 
             # Feedforward block
             residual = x
             x = layer['norm2'](x)
-            x_ff = self.memory.run_checkpointed(layer['ff'], x, context)
-            x = residual + torch.nn.functional.dropout(
-                x_ff,
-                p=self.dropout_rate,
-                training=self.training
-            )
+            ff_out = self.memory.run_checkpointed(layer['ff'], x, context)
+            x = residual + nn.functional.dropout(ff_out, p=self.dropout_rate, training=self.training)
 
-            # Cache final layer output
-            self.memory.cache_item(
-                tensor=x,
-                key=f"layer_{i}_ff_out",
-                tags=["layer_output", f"layer_{i}"],
-                metadata={"block": "feedforward"}
-            )
+            if self.training:
+                self.memory.cache_item(
+                    tensor=x,
+                    key=f"layer_{i}_ff_out",
+                    tags=["layer_output", f"layer_{i}"],
+                    metadata={"block": "feedforward"}
+                )
 
         if self.return_hidden:
             return x
         else:
             return self.task_head(x)
 
-    def load_pretrained(self, weights):
-        """Load weights with flexible key patterns"""
+    def freeze_layers(self, layer_indices: Optional[list] = None):
+        """
+        Freeze specific layers (or all layers) to prevent gradient updates.
+        Useful for fine‑tuning.
+        """
+        if layer_indices is None:
+            # Freeze all custom layers
+            for param in self.layers.parameters():
+                param.requires_grad = False
+            for param in self.style_embeddings.parameters():
+                param.requires_grad = False
+            for param in self.task_head.parameters():
+                param.requires_grad = False
+            logger.info("All custom layers frozen.")
+        else:
+            for idx in layer_indices:
+                if 0 <= idx < len(self.layers):
+                    for param in self.layers[idx].parameters():
+                        param.requires_grad = False
+                    logger.info(f"Layer {idx} frozen.")
+                else:
+                    logger.warning(f"Layer index {idx} out of range.")
+
+    def unfreeze_layers(self, layer_indices: Optional[list] = None):
+        """Unfreeze specific layers (or all layers)."""
+        if layer_indices is None:
+            for param in self.layers.parameters():
+                param.requires_grad = True
+            for param in self.style_embeddings.parameters():
+                param.requires_grad = True
+            for param in self.task_head.parameters():
+                param.requires_grad = True
+            logger.info("All custom layers unfrozen.")
+        else:
+            for idx in layer_indices:
+                if 0 <= idx < len(self.layers):
+                    for param in self.layers[idx].parameters():
+                        param.requires_grad = True
+                    logger.info(f"Layer {idx} unfrozen.")
+                else:
+                    logger.warning(f"Layer index {idx} out of range.")
+
+    def load_pretrained(self, weights: dict):
+        """Load pretrained weights from a dictionary (e.g., from HuggingFace)."""
         for i, layer in enumerate(self.layers):
             # Try different key patterns for attention
             attn_prefixes = [
@@ -286,15 +286,14 @@ class Transformer(BaseTransformer, nn.Module):
                 f'layers.{i}.',
                 f'transformer.layer_{i}.'
             ]
-            
             for prefix in attn_prefixes:
                 try:
                     layer['attention'].load_from_dict(weights, prefix)
-                    break  # Stop if successful
+                    break
                 except KeyError:
                     continue
-            
-            # Try different patterns for LayerNorm
+
+            # Load layer norms
             norm_patterns = {
                 'norm1': [
                     f'{prefix}attention.output.LayerNorm.weight',
@@ -306,7 +305,6 @@ class Transformer(BaseTransformer, nn.Module):
                     f'{prefix}ffn_norm.weight'
                 ]
             }
-            
             for norm_name, patterns in norm_patterns.items():
                 for pattern in patterns:
                     if pattern in weights:
@@ -318,6 +316,10 @@ class Transformer(BaseTransformer, nn.Module):
                         layer[norm_name].bias.data = weights[bias_pattern]
                         break
 
+
+# ----------------------------------------------------------------------
+# Test block
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n=== Running Transformer ===\n")
     model = Transformer()
@@ -325,14 +327,17 @@ if __name__ == "__main__":
 
     x = torch.randn(4, 128, model.embed_dim)
     style_id = torch.tensor([0, 1, 2, 3])
-    
     print(f"\nInput shape: {x.shape}")
-    output = model(x, style_id)
+    output = model(x, style_id=style_id)
     print("Output shape:", output.shape)
 
-    print("\n* * * * * Phase 2 * * * * *\n")
-    X = torch.tensor([[[5.0]]], dtype=torch.float32)
-    style_id=torch.randint(0, model.num_styles, (X.shape[0],))
+    # Test with return_hidden
+    model.return_hidden = True
+    hidden = model(x, style_id=style_id)
+    print("Hidden shape:", hidden.shape)
 
-    printer.pretty("TEST2", model.forward(x=X, style_id=style_id))
+    # Test freezing
+    model.freeze_layers([0, 1])
+    model.unfreeze_layers([2])
+
     print("\n=== Successfully Ran Transformer ===\n")

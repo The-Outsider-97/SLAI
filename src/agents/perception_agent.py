@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 """
 Perception Agent:
@@ -9,14 +9,15 @@ Perception Agent:
 - Gradient infrastructure
 """
 
-from datetime import timedelta
 import random
 import math
+import hashlib
 import yaml
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from datetime import timedelta
 from pathlib import Path
 from collections import OrderedDict
 from typing import Dict, Any, Optional, List, Tuple, Union
@@ -93,23 +94,13 @@ class PerceptionAgent(BaseAgent, nn.Module):
         self.audio_encoder = AudioEncoder().to(self.device)
 
         # Audio encoder with transformer configured to return hidden states
-        self.audio_encoder = AudioEncoder().to(self.device)
         if hasattr(self.audio_encoder, 'transformer'):
             self.audio_encoder.transformer.return_hidden = True  # Force hidden state output
 
-        # Full decoders for generation tasks would be more complex
-        self.text_prediction_head = nn.Linear(self.embed_dim, self.tokenizer.get_vocab_size()).to(self.device)
-
-        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
-        self.vision_prediction_head = nn.Linear(self.embed_dim, vision_patch_dim).to(self.device)
-
-        audio_patch_dim = self.audio_encoder.in_channels * (self.audio_encoder.patch_size ** 2) # If patch-based
-        self.audio_prediction_head = nn.Linear(self.embed_dim, audio_patch_dim).to(self.device)
-
         # Full decoders for generation tasks (optional, can be loaded on demand)
         self.text_generator = TextDecoder(encoder=self.text_encoder).to(self.device)
-        self.vision_generator = VisionDecoder().to(self.device) # Assumes VisionDecoder can init without encoder
-        self.audio_generator = AudioDecoder().to(self.device)   # Assumes AudioDecoder can init without encoder
+        self.vision_generator = VisionDecoder().to(self.device) # VisionDecoder can init without encoder
+        self.audio_generator = AudioDecoder().to(self.device)   # AudioDecoder can init without encoder
 
         self.global_projection_param = Parameter(torch.randn(self.embed_dim, self.embed_dim), requires_grad=True)
 
@@ -158,6 +149,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
             'vision': nn.Linear(self.vision_encoder.embed_dim, self.embed_dim),
             'audio': nn.Linear(self.audio_encoder.embed_dim, self.embed_dim)
         }).to(self.device)
+        self.task_heads = nn.ModuleDict()
 
         # Move components to device
         self.mask_tokens = self.mask_tokens.to(self.device)
@@ -460,6 +452,64 @@ class PerceptionAgent(BaseAgent, nn.Module):
         if modality_type == 'audio': return 'audio_values'
         raise ValueError(f"Unknown modality type: {modality_type}")
 
+    def _encode_midi_events(self, midi_events: Union[List[Dict[str, Any]], torch.Tensor]) -> torch.Tensor:
+        """
+        Convert MIDI events into a compact numeric tensor usable by audio encoders.
+        Expected event fields: note, velocity, delta_time, channel.
+        """
+        if isinstance(midi_events, torch.Tensor):
+            return midi_events.float()
+
+        if not midi_events:
+            return torch.zeros((1, 4), dtype=torch.float32)
+
+        rows = []
+        for event in midi_events:
+            rows.append([
+                float(event.get('note', 0)),
+                float(event.get('velocity', 0)),
+                float(event.get('delta_time', 0.0)),
+                float(event.get('channel', 0)),
+            ])
+        return torch.tensor(rows, dtype=torch.float32)
+
+    def _normalize_modality_input(self, modality: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize heterogeneous payload keys into a stable PerceptionAgent API.
+        Supports microphone, MIDI, and video-oriented ingress aliases.
+        """
+        if modality == "text":
+            if 'input_ids' not in input_data:
+                if 'tokens' in input_data:
+                    input_data['input_ids'] = input_data['tokens']
+            return input_data
+
+        if modality == "vision":
+            if 'pixel_values' not in input_data:
+                for alias in ('video_frames', 'frames', 'frame_sequence'):
+                    if alias in input_data:
+                        input_data['pixel_values'] = input_data[alias]
+                        break
+            return input_data
+
+        if modality == "audio":
+            if 'audio_values' not in input_data:
+                for alias in ('waveform', 'microphone_buffer', 'mic_buffer', 'audio_stream'):
+                    if alias in input_data:
+                        input_data['audio_values'] = input_data[alias]
+                        break
+            if 'midi_events' in input_data and 'audio_values' not in input_data:
+                input_data['audio_values'] = self._encode_midi_events(input_data['midi_events'])
+            return input_data
+
+        if modality == "multimodal":
+            for sub_modality in ('text', 'vision', 'audio'):
+                if sub_modality in input_data and isinstance(input_data[sub_modality], dict):
+                    input_data[sub_modality] = self._normalize_modality_input(sub_modality, input_data[sub_modality])
+            return input_data
+
+        return input_data
+
     def _pretrain_temporal_coherence(self, sequence_data: torch.Tensor, modality: str) -> torch.Tensor:
         """
         Enhanced temporal coherence learning with configurable loss types,
@@ -564,13 +614,13 @@ class PerceptionAgent(BaseAgent, nn.Module):
             total_loss = torch.tensor(0.0, device=self.device)
 
             if objective == 'mlm': # Masked Language Modeling
-                loss = self._pretrain_masked_modality(task_data['text_data'], 'text')
+                loss = self._pretrain_masked_modality('text', task_data['text_data'])
                 total_loss = total_loss + loss
             elif objective == 'mpm': # Masked Patch Modeling
-                loss = self._pretrain_masked_modality(task_data['vision_data'], 'vision')
+                loss = self._pretrain_masked_modality('vision', task_data['vision_data'])
                 total_loss = total_loss + loss
             elif objective == 'mam': # Masked Audio Modeling
-                loss = self._pretrain_masked_modality(task_data['audio_data'], 'audio')
+                loss = self._pretrain_masked_modality('audio', task_data['audio_data'])
                 total_loss = total_loss + loss
             elif objective == 'contrastive_text_image':
                 loss = self._pretrain_contrastive(task_data['text_data'], task_data['vision_data'], 'text', 'vision')
@@ -653,6 +703,37 @@ class PerceptionAgent(BaseAgent, nn.Module):
 
         self.load_state_dict(model_state_dict)
 
+    def _get_task_head(self, downstream_task: str, input_dim: int, num_classes: Optional[int] = None) -> nn.Module:
+        """
+        Lazily create and cache task heads for downstream fine-tuning/inference.
+        """
+        task_lower = downstream_task.lower()
+        if "classification" in task_lower:
+            head_type = "classification"
+        elif "regression" in task_lower:
+            head_type = "regression"
+        else:
+            head_type = "seq2seq"
+
+        key = f"{head_type}:{input_dim}:{num_classes}"
+        if key in self.task_heads:
+            return self.task_heads[key]
+
+        if head_type == "classification":
+            head = ClassificationHead(hidden_dim=input_dim)
+            if num_classes is not None:
+                classifier = getattr(head, "classifier", None)
+                if isinstance(classifier, nn.Sequential) and len(classifier) > 0 and isinstance(classifier[-1], nn.Linear):
+                    in_features = classifier[-1].in_features
+                    classifier[-1] = nn.Linear(in_features, num_classes)
+        elif head_type == "regression":
+            head = RegressionHead(hidden_dim=input_dim)
+        else:
+            head = Seq2SeqHead(hidden_dim=input_dim)
+
+        self.task_heads[key] = head.to(self.device)
+        return self.task_heads[key]
+
     def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:
         self.train()
         self.optimizer.zero_grad()
@@ -668,8 +749,9 @@ class PerceptionAgent(BaseAgent, nn.Module):
             pixel_values = task_data['vision_data']['pixel_values'].to(self.device)
             embeddings = self.vision_encoder(pixel_values, style_id=task_data['vision_data'].get('style_id'))
         elif 'audio_data' in task_data:
-            waveform = task_data['audio_data']['waveform'].to(self.device)
-            embeddings = self.audio_encoder(waveform, style_id=task_data['audio_data'].get('style_id'))
+            audio_data = self._normalize_modality_input('audio', task_data['audio_data'])
+            audio_values = audio_data['audio_values'].to(self.device)
+            embeddings = self.audio_encoder(audio_values, style_id=audio_data.get('style_id'))
         # Add handling for multimodal fine-tuning if necessary, by concatenating/fusing embeddings
         
         if embeddings is None:
@@ -683,9 +765,9 @@ class PerceptionAgent(BaseAgent, nn.Module):
 
         # Get task head
         num_classes = task_data.get('num_classes') # Required for classification
-        task_head = self.transformer.select_taskhead(
-            downstream_task, 
-            input_dim=self.embed_dim,
+        task_head = self._get_task_head(
+            downstream_task=downstream_task,
+            input_dim=pooled_embeddings.size(-1),
             num_classes=num_classes
         )
         
@@ -709,7 +791,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
         self.eval() # Set agent to evaluation mode
         with torch.no_grad():
             modality = task_data['modality']
-            input_data = task_data['input_data']
+            input_data = self._normalize_modality_input(modality, task_data['input_data'])
             downstream_task = task_data.get('downstream_task', None) # Optional: for task-specific heads
 
             embeddings = None
@@ -722,13 +804,18 @@ class PerceptionAgent(BaseAgent, nn.Module):
                 pixel_values = input_data['pixel_values'].to(self.device)
                 embeddings = self.vision_encoder(pixel_values, style_id=style_id)
             elif modality == 'audio':
-                waveform = input_data['waveform'].to(self.device)
-                embeddings = self.audio_encoder(waveform, style_id=style_id)
+                audio_values = input_data['audio_values'].to(self.device)
+                embeddings = self.audio_encoder(audio_values, style_id=style_id)
             elif modality == 'multimodal': # Example for multimodal inference
                 text_emb = self.text_encoder(input_data['text']['input_ids'].to(self.device), style_id=input_data['text'].get('style_id'))[:,0,:]
                 vis_emb = self.vision_encoder(input_data['vision']['pixel_values'].to(self.device), style_id=input_data['vision'].get('style_id'))[:,0,:]
-                # Simple concatenation for fusion, more sophisticated fusion can be added
-                embeddings = torch.cat((text_emb, vis_emb), dim=-1) 
+                if 'audio' in input_data and 'audio_values' in input_data['audio']:
+                    aud_emb = self.audio_encoder(input_data['audio']['audio_values'].to(self.device), style_id=input_data['audio'].get('style_id'))
+                    aud_emb = aud_emb[:, 0, :] if aud_emb.ndim == 3 else aud_emb
+                    embeddings = torch.cat((text_emb, vis_emb, aud_emb), dim=-1)
+                else:
+                    # Simple concatenation for fusion, more sophisticated fusion can be added
+                    embeddings = torch.cat((text_emb, vis_emb), dim=-1) 
 
             else:
                 return {'output': None, 'status': f'unknown_modality:{modality}'}
@@ -767,17 +854,16 @@ class PerceptionAgent(BaseAgent, nn.Module):
         if task_data.get('use_cached_state', False):
             if self.load_state_from_shared_memory():
                 logger.info("Using model state from shared memory")
-
-            task_type = task_data.get('task_type')
-            if task_type == 'pretrain':
-                return self._pretraining_step(task_data)
-            elif task_type == 'finetune':
-                return self._finetune_step(task_data)
-            elif task_type == 'inference':
-                return self._inference_step(task_data)
-            else:
-                logger.error(f"Unsupported task_type: {task_type}")
-                return {'status': 'error', 'message': f"Unsupported task_type: {task_type}"}
+        task_type = task_data.get('task_type')
+        if task_type == 'pretrain':
+            result = self._pretraining_step(task_data)
+        elif task_type == 'finetune':
+            result = self._finetune_step(task_data)
+        elif task_type == 'inference':
+            result = self._inference_step(task_data)
+        else:
+            logger.error(f"Unsupported task_type: {task_type}")
+            result = {'status': 'error', 'message': f"Unsupported task_type: {task_type}"}
 
         # Save state after critical operations
         if task_data.get('save_state_after', False):
@@ -791,7 +877,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
         This is separate from the main optimizer.
         """
         if not isinstance(rewards, torch.Tensor):
-            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float3T)
+            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
         
         # Ensure global_projection_param requires grad for this update logic
         if not self.global_projection_param.requires_grad:
@@ -815,7 +901,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
             self.global_projection_param.grad.detach_() # Detach from computation graph
             self.global_projection_param.grad.zero_()
         
-        logger.debug(f"Updated global_projection_param: {self.global_projection_param.item()}")
+        logger.debug("Updated global_projection_param with reward-driven pseudo-gradient")
 
     def load_pretrained_weights(self, checkpoint_path: Union[str, Path], source_format: str = "custom_audio"):
         """Loads pretrained weights, handling different source formats."""
@@ -1250,13 +1336,17 @@ class PerceptionAgent(BaseAgent, nn.Module):
 
     def cache_embeddings(self, modality: str, inputs: torch.Tensor, embeddings: torch.Tensor):
         """Cache computed embeddings in shared memory"""
-        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        serialized = inputs.detach().cpu().numpy().tobytes()
+        digest = hashlib.sha1(serialized).hexdigest()
+        key = f"{self.sm_keys['embeddings']}:{modality}:{digest}"
         self.shared_memory.put(key, embeddings.detach().cpu())
         logger.debug(f"Cached embeddings: {key}")
 
     def get_cached_embeddings(self, modality: str, inputs: torch.Tensor):
         """Retrieve cached embeddings if available"""
-        key = f"{self.sm_keys['embeddings']}:{modality}:{hash(inputs.cpu().numpy().tobytes())}"
+        serialized = inputs.detach().cpu().numpy().tobytes()
+        digest = hashlib.sha1(serialized).hexdigest()
+        key = f"{self.sm_keys['embeddings']}:{modality}:{digest}"
         return self.shared_memory.get(key)
 
 

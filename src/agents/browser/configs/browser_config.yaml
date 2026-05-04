@@ -1,1 +1,972 @@
-{}
+browser_memory:
+  enabled: true
+  default_namespace: default
+  max_entries: 5000
+  max_entries_per_namespace: 1000
+  default_ttl_seconds: null
+  auto_prune: true
+  prune_interval_seconds: 60
+  copy_values_on_write: true
+  copy_values_on_read: true
+  redact_on_export: true
+  include_values_in_snapshots: true
+  max_value_chars: 20000
+
+  query:
+    default_limit: 50
+    max_limit: 500
+    default_sort_by: updated_at
+    default_descending: true
+
+  scoring:
+    default_score: 1.0
+    min_score: 0.0
+    max_score: 1.0
+
+  event_log:
+    enabled: true
+    max_events: 500
+
+  persistence:
+    enabled: false
+    path: storage/browser_memory.json
+    autosave: false
+    autosave_interval_seconds: 30
+    atomic_write: true
+    load_on_startup: false
+
+  namespaces:
+    default:
+      max_entries: 1000
+      ttl_seconds: null
+    pages:
+      max_entries: 1000
+      ttl_seconds: 86400
+    search:
+      max_entries: 1500
+      ttl_seconds: 43200
+    actions:
+      max_entries: 2000
+      ttl_seconds: 21600
+    workflows:
+      max_entries: 500
+      ttl_seconds: 604800
+    security:
+      max_entries: 500
+      ttl_seconds: 604800
+    scratch:
+      max_entries: 500
+      ttl_seconds: 3600
+
+
+browser_functions:
+  description: Production orchestration facade for browser function modules, workflow dispatch, screenshots, extraction, and memory recording.
+  enabled: true
+  schema_version: '1.0'
+  require_driver_for_browser_actions: true
+  normalize_function_names: true
+  record_history: true
+  max_history_entries: 250
+  default_scroll_mode: by
+  screenshot_format: base64
+  memory:
+    enabled: true
+    namespace: actions
+    record_successes: true
+    record_errors: true
+    record_page_extracts: true
+  diagnostics:
+    include_call_params_in_result: false
+    include_function_metadata: true
+    include_page_state_after_action: false
+    include_traceback_on_error: false
+    screenshot_on_error: false
+    screenshot_format: base64
+  workflow:
+    stop_on_error: true
+    record_each_step: true
+    supported_step_shape:
+      action: canonical function name or alias
+      params: mapping of keyword arguments passed to the action
+  extraction:
+    preview_only: false
+    max_page_text_chars: 25000
+    max_html_chars: 100000
+  aliases:
+    go_to_url: navigate
+    open_url: navigate
+    navigate_to: navigate
+    go_back: back
+    go_forward: forward
+    refresh_page: refresh
+    get_current_url: current_url
+    get_navigation_history: history
+    click_element: click
+    do_click: click
+    do_type: type
+    type_text: type
+    enter_text: type
+    input_text: type
+    type_element: type
+    clear_text: clear
+    scroll_element: scroll
+    scroll_to_element: scroll
+    scroll_direction: scroll
+    copy_element: copy
+    cut_element: cut
+    paste_element: paste
+    drag_element: drag_and_drop
+    drop_element: drag_and_drop
+    drag_to_element: drag_and_drop
+    drag_by_offset: drag_and_drop
+    do_drag_and_drop: drag_and_drop
+    take_screenshot: screenshot
+    screenshot_page: screenshot
+    extract: extract_page
+    get_dom: extract_page
+    extract_page_content: extract_page
+    page_content: extract_page
+    get_page_state: page_state
+    workflow: execute_workflow
+    run_workflow: execute_workflow
+  functions:
+    navigate:
+      category: navigation
+      requires_driver: true
+      description: Open a URL in the active browser tab.
+    back:
+      category: navigation
+      requires_driver: true
+      description: Move one browser history entry backward.
+    forward:
+      category: navigation
+      requires_driver: true
+      description: Move one browser history entry forward.
+    refresh:
+      category: navigation
+      requires_driver: true
+      description: Reload the active tab.
+    current_url:
+      category: navigation
+      requires_driver: true
+      description: Return the current URL.
+    history:
+      category: navigation
+      requires_driver: false
+      description: Return function and navigation history.
+    click:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoClick
+    type:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoType
+    clear:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoType
+    press_key:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoType
+    scroll:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoScroll
+    copy:
+      category: clipboard
+      requires_driver: true
+      delegates_to: DoCopyCutPaste
+    cut:
+      category: clipboard
+      requires_driver: true
+      delegates_to: DoCopyCutPaste
+    paste:
+      category: clipboard
+      requires_driver: true
+      delegates_to: DoCopyCutPaste
+    drag_and_drop:
+      category: interaction
+      requires_driver: true
+      delegates_to: DoDragAndDrop
+    screenshot:
+      category: diagnostics
+      requires_driver: true
+      description: Capture a browser screenshot.
+    extract_page:
+      category: content
+      requires_driver: true
+      description: Extract URL, title, visible text, and optional HTML.
+    page_state:
+      category: diagnostics
+      requires_driver: true
+      description: Return URL, title, ready state, and timestamp.
+    execute_workflow:
+      category: workflow
+      requires_driver: false
+      description: Execute a list of browser function steps.
+  parameters:
+    - name: function_name
+      type: string
+      description: Registered browser function name or alias.
+    - name: params
+      type: mapping
+      description: Keyword arguments passed to the selected function.
+    - name: workflow
+      type: list[mapping]
+      description: Workflow steps with action and params keys.
+
+
+browser_driver:
+  enabled: true
+  auto_start: true
+  browser: chrome
+  remote_url: null
+
+  headless: true
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  window_size: [1366, 920]
+  page_load_strategy: normal
+
+  timeouts:
+    implicit_wait_seconds: 0.0
+    page_load_timeout_seconds: 45.0
+    script_timeout_seconds: 30.0
+
+  chrome:
+    args:
+      - "--no-sandbox"
+      - "--disable-dev-shm-usage"
+    experimental_options: {}
+    prefs: {}
+
+  lifecycle:
+    configure_attached_driver: true
+    close_owned_driver: true
+    detach_on_close: false
+    close_on_del: true
+    restart_on_unhealthy: false
+
+  startup:
+    retries: 0
+    sleep_enabled: true
+    base_delay: 0.5
+    max_delay: 5.0
+    multiplier: 2.0
+    jitter: 0.05
+
+  health_check_script: "return document.readyState"
+  health_check_timeout_seconds: 2.0
+
+  diagnostics:
+    include_capabilities: false
+    include_driver_repr: false
+    include_state_on_success: true
+    event_history_limit: 100
+
+
+browser_errors: {}
+
+
+browser_helpers: {}
+
+
+content_handling:
+  enabled: true
+  normalize_text: true
+  collapse_whitespace: false
+
+  requests:
+    timeout: 15.0
+    connect_timeout: 5.0
+    read_timeout: 15.0
+    stream_downloads: true
+    follow_redirects: true
+    verify_ssl: true
+    max_redirects: 8
+    user_agent: "Mozilla/5.0 (compatible; BrowserAgentContentHandling/1.0)"
+
+  limits:
+    max_download_bytes: 12000000
+    max_text_chars: 20000
+    preview_chars: 2000
+    min_extracted_chars: 0
+
+  pdf:
+    max_pages: 25
+    password: null
+
+  arxiv:
+    body_fallback_chars: 4000
+    strip_abstract_label: true
+
+  classification:
+    from_headers: true
+    from_url: true
+
+  diagnostics:
+    include_metadata: true
+    include_raw_html: false
+    include_page_snapshot: false
+    include_headers: false
+    redact_headers: true
+
+  memory:
+    enabled: true
+    namespace: "content"
+    ttl_seconds: 86400
+
+  policy:
+    raise_on_failure: false
+    unsupported_content_policy: "text_fallback"  # text_fallback | skip | error
+    safe_result_text_on_error: true
+
+  retry:
+    max_attempts: 1
+    base_delay: 0.25
+    multiplier: 1.8
+    max_delay: 3.0
+    jitter: 0.05
+
+
+security_features:
+  indicator_template_path: scr/agents/browser/templates/indicators.json
+  indicator_template_enabled: true
+  indicator_template_reload_on_init: true
+  indicator_template_merge_policy: template_overrides_config
+  indicator_template_fail_on_missing: true
+  indicator_template_required_categories:
+  - captcha
+  - bot_detection_block
+  - rate_limit
+  - login_auth_wall
+  - unsafe_url_scheme
+  - private_network_or_local_target
+  - credential_or_secret_exposure
+  indicator_overrides:
+    description: Deployment-specific additions or disables. Keep canonical indicators
+      in templates/indicators.json.
+    disabled_categories: []
+    additional_text_indicators: {}
+    additional_regex_indicators: {}
+    additional_selectors: {}
+
+
+workflow:
+  enabled: true
+  schema_version: "1.0"
+
+  # Validation limits
+  allow_empty_workflow: false
+  max_steps: 100
+  max_repeat_iterations: 10
+
+  # Strictness
+  strict_actions: true
+  strict_params: true
+  strict_variables: true
+  validate_selectors: true
+  validate_urls: true
+  normalize_aliases: true
+
+  # Compilation output
+  include_disabled_steps: false
+  compile_disabled_steps: false
+  include_original_step: true
+  include_metadata: true
+  preserve_unknown_step_fields: true
+  default_stop_on_error: true
+  default_optional: false
+
+  supported_actions:
+    - navigate
+    - search
+    - click
+    - type
+    - scroll
+    - copy
+    - cut
+    - paste
+    - extract
+    - screenshot
+    - page_state
+    - drag_and_drop
+    - back
+    - forward
+    - refresh
+    - current_url
+    - history
+    - clear
+    - press_key
+
+  aliases:
+    go_to_url: navigate
+    open_url: navigate
+    navigate_to: navigate
+    url: navigate
+    go_back: back
+    browser_back: back
+    go_forward: forward
+    browser_forward: forward
+    refresh_page: refresh
+    reload: refresh
+    get_current_url: current_url
+    navigation_history: history
+    google: search
+    query: search
+    extract_page: extract
+    extract_page_content: extract
+    get_dom: extract
+    page_content: extract
+    take_screenshot: screenshot
+    screenshot_page: screenshot
+    get_page_state: page_state
+    click_element: click
+    do_click: click
+    do_type: type
+    type_text: type
+    enter_text: type
+    input_text: type
+    clear_text: clear
+    scroll_element: scroll
+    scroll_to_element: scroll
+    scroll_element_into_view: scroll
+    copy_element: copy
+    cut_element: cut
+    paste_element: paste
+    drag_element: drag_and_drop
+    drop_element: drag_and_drop
+    drag_to_element: drag_and_drop
+    drag_by_offset: drag_and_drop
+    do_drag_and_drop: drag_and_drop
+    drag_drop: drag_and_drop
+
+  required_params:
+    navigate: [url]
+    search: [query]
+    click: [selector]
+    type: [selector, text]
+    copy: [selector]
+    cut: [selector]
+    paste: [selector]
+    clear: [selector]
+    press_key: [selector, key]
+    drag_and_drop: [source_selector]
+
+  param_aliases:
+    navigate:
+      target: url
+      href: url
+      link: url
+    search:
+      text: query
+      q: query
+    click:
+      target: selector
+      element: selector
+    type:
+      target: selector
+      input: text
+      value: text
+      raw_input: text
+    scroll:
+      target: selector
+    copy:
+      target: selector
+      element: selector
+    cut:
+      target: selector
+      element: selector
+    paste:
+      target: selector
+      element: selector
+      value: text
+    drag_and_drop:
+      source: source_selector
+      from: source_selector
+      target: target_selector
+      to: target_selector
+      x: offset_x
+      y: offset_y
+    clear:
+      target: selector
+      element: selector
+    press_key:
+      key_name: key
+      value: key
+
+
+do_click:
+  description: Production click executor for Selenium-backed browser interactions.
+  timeout: 10.0
+  poll_frequency: 0.1
+  wait_before_execution: 0.0
+  wait_after_click: 0.0
+  retries: 2
+  retry_backoff_base: 0.25
+  retry_backoff_multiplier: 1.8
+  retry_backoff_max: 3.0
+  retry_jitter: 0.05
+  require_visible: true
+  require_enabled: true
+  require_clickable: true
+  scroll_into_view: true
+  scroll_position: center
+  scroll_behavior: auto
+  hover_before_click: false
+  focus_before_click: false
+  verify_after_click: true
+  wait_for_page_load_after_click: false
+  page_load_timeout: 5.0
+  include_page_snapshot: false
+  include_element_html: true
+  max_element_text_chars: 500
+  max_element_html_chars: 1500
+  screenshot_on_error: false
+  allow_javascript_fallback: true
+  allow_keyboard_fallback: true
+  allow_dispatch_event_fallback: true
+  strategies:
+  - native
+  - action_chains
+  - javascript
+  - dispatch_event
+  - keyboard
+  parameters:
+  - name: selector
+    type: string
+    description: CSS selector of the element to click.
+  - name: timeout
+    type: float
+    description: Maximum seconds to wait for the element to become ready for clicking.
+    default: 10.0
+  - name: strategies
+    type: list[string]
+    description: Ordered click strategies to attempt.
+    default:
+    - native
+    - action_chains
+    - javascript
+    - dispatch_event
+    - keyboard
+
+
+do_copy_cut_paste:
+  description: Production copy/cut/paste executor for Selenium-backed browser interactions.
+  timeout: 10.0
+  poll_frequency: 0.1
+  wait_before_execution: 0.0
+  wait_after_action: 0.0
+  retries: 1
+  retry_backoff_base: 0.2
+  retry_backoff_multiplier: 1.7
+  retry_backoff_max: 2.5
+  retry_jitter: 0.05
+  require_visible: false
+  require_enabled_for_write: true
+  scroll_into_view: true
+  scroll_position: center
+  scroll_behavior: auto
+  focus_before_action: true
+  select_before_keyboard_action: true
+  preserve_clipboard_on_failure: false
+  verify_clipboard_write: true
+  verify_element_mutation: true
+  include_page_snapshot: false
+  include_element_html: true
+  include_clipboard_text: true
+  redact_clipboard_text: false
+  max_text_chars: 5000
+  max_element_text_chars: 500
+  max_element_html_chars: 1500
+  screenshot_on_error: false
+  clear_before_paste: true
+  append_on_paste: false
+  allow_javascript_fallback: true
+  allow_keyboard_fallback: true
+  copy_strategies:
+    - element_text
+    - selection_keyboard
+    - javascript_selection
+  cut_strategies:
+    - native_clear
+    - keyboard_shortcut
+    - javascript_clear
+  paste_strategies:
+    - send_keys
+    - keyboard_shortcut
+    - javascript_set_value
+  parameters:
+    - name: action
+      type: string
+      description: Clipboard action to perform copy, cut, or paste.
+      required: true
+    - name: selector
+      type: string
+      description: CSS selector of the element to operate on.
+      required: true
+    - name: text
+      type: string
+      description: Optional explicit text to paste. If omitted, paste reads from the current clipboard.
+      required: false
+    - name: timeout
+      type: float
+      description: Maximum seconds to wait for the target element.
+      default: 10.0
+    - name: copy_strategies
+      type: list[string]
+      description: Ordered copy strategies to attempt.
+      default:
+        - element_text
+        - selection_keyboard
+        - javascript_selection
+    - name: cut_strategies
+      type: list[string]
+      description: Ordered cut strategies to attempt.
+      default:
+        - native_clear
+        - keyboard_shortcut
+        - javascript_clear
+    - name: paste_strategies
+      type: list[string]
+      description: Ordered paste strategies to attempt.
+      default:
+        - send_keys
+        - keyboard_shortcut
+        - javascript_set_value
+
+
+do_drag_and_drop:
+  description: Production drag-and-drop executor for Selenium-backed browser interactions.
+  timeout: 10.0
+  poll_frequency: 0.1
+  wait_before_execution: 0.0
+  wait_after_drop: 0.0
+  retries: 2
+  retry_backoff_base: 0.25
+  retry_backoff_multiplier: 1.8
+  retry_backoff_max: 3.0
+  retry_jitter: 0.05
+  require_source_visible: true
+  require_source_enabled: true
+  require_target_visible: true
+  scroll_source_into_view: true
+  scroll_target_into_view: true
+  scroll_position: center
+  scroll_behavior: auto
+  hover_source_before_drag: false
+  hover_target_before_drop: false
+  focus_source_before_drag: false
+  verify_after_drop: true
+  wait_for_page_load_after_drop: false
+  page_load_timeout: 5.0
+  include_page_snapshot: false
+  include_element_html: true
+  max_element_text_chars: 500
+  max_element_html_chars: 1500
+  screenshot_on_error: false
+  drag_duration: 0.35
+  drag_steps: 8
+  hold_pause: 0.08
+  move_pause: 0.03
+  release_pause: 0.05
+  default_offset_x: 0
+  default_offset_y: 0
+  allow_javascript_fallback: true
+  allow_dispatch_event_fallback: true
+  allow_offset_fallback: true
+  strategies:
+    - action_chains_drag_and_drop
+    - action_chains_hold_move_release
+    - action_chains_offset
+    - incremental_offset
+    - javascript_html5
+    - dispatch_events
+  parameters:
+    - name: source_selector
+      type: string
+      description: CSS selector of the source element to drag.
+    - name: target_selector
+      type: string
+      description: Optional CSS selector of the drop target element.
+      required: false
+    - name: target_offset
+      type: tuple[int, int]
+      description: Optional x/y offset used when no target selector is provided.
+      required: false
+    - name: strategies
+      type: list[string]
+      description: Ordered drag strategies to attempt.
+      default:
+        - action_chains_drag_and_drop
+        - action_chains_hold_move_release
+        - action_chains_offset
+        - incremental_offset
+        - javascript_html5
+        - dispatch_events
+
+
+do_navigate:
+  description: Production navigation executor for Selenium-backed browser interactions.
+  timeout: 10.0
+  poll_frequency: 0.1
+  wait_before_execution: 0.0
+  wait_after_navigation: 0.0
+  retries: 1
+  retry_backoff_base: 0.25
+  retry_backoff_multiplier: 1.8
+  retry_backoff_max: 3.0
+  retry_jitter: 0.05
+  default_scheme: https
+  allowed_schemes:
+    - http
+    - https
+  normalize_urls: true
+  remove_tracking_params: true
+  strip_fragment: false
+  require_netloc: true
+  wait_for_page_load: true
+  acceptable_ready_states:
+    - complete
+  verify_after_navigation: true
+  verify_url_available: true
+  verify_not_blank: false
+  allow_same_url_navigation: true
+  record_history: true
+  max_history_entries: 250
+  include_page_snapshot: false
+  include_performance_timing: true
+  include_screenshot_on_error: false
+  include_url_parts: true
+  redact_urls_in_logs: true
+  history_capture_state: true
+  operations:
+    navigate:
+      description: Open an absolute or normalizable HTTP(S) URL in the active tab.
+      method: driver.get
+      retryable: true
+      validates_url: true
+    back:
+      description: Move one browser history entry backward in the active tab.
+      method: driver.back
+      retryable: true
+      validates_url: false
+    forward:
+      description: Move one browser history entry forward in the active tab.
+      method: driver.forward
+      retryable: true
+      validates_url: false
+    refresh:
+      description: Reload the active tab.
+      method: driver.refresh
+      retryable: true
+      validates_url: false
+    get_current_url:
+      description: Return the active tab URL with redacted and parsed forms.
+      method: driver.current_url
+      retryable: true
+      validates_url: false
+  diagnostics:
+    include_before_after_state: true
+    include_attempt_history: true
+    include_correlation_id: true
+    include_ready_state: true
+    include_title: true
+    redact_urls: true
+  parameters:
+    - name: url
+      type: string
+      description: URL to navigate to. Missing schemes are normalized with default_scheme when normalize_urls is true.
+      required: true
+    - name: timeout
+      type: float
+      description: Maximum seconds to wait for the page to reach an acceptable document.readyState.
+      default: 10.0
+    - name: wait_for_page_load
+      type: boolean
+      description: Whether to wait for document.readyState after navigation/history/refresh actions.
+      default: true
+    - name: acceptable_ready_states
+      type: list[string]
+      description: document.readyState values that count as loaded.
+      default:
+        - complete
+    - name: retries
+      type: integer
+      description: Number of retry attempts after the first navigation attempt fails.
+      default: 1
+
+
+do_scroll:
+  # Default wait behavior for Selenium element lookup and scroll settling.
+  default_timeout: 5.0
+  poll_frequency: 0.1
+
+  # Default movement behavior.
+  default_amount: 600
+  max_amount: 10000
+  smooth_default: false
+  default_behavior: auto   # auto | smooth | instant
+  require_scroll_change: false
+
+  # Coordinate handling. Keep negative coordinates allowed for browser-native
+  # compatibility, but expose clamping for stricter test/automation runs.
+  clamp_coordinates: false
+  allow_negative_coordinates: true
+  scroll_margin_x: 0
+  scroll_margin_y: 0
+
+  element:
+    default_position: center   # start | center | end | nearest
+    supported_positions:
+      - start
+      - center
+      - end
+      - nearest
+
+  settle:
+    enabled: true
+    timeout: 1.5
+    poll_frequency: 0.05
+    stable_samples: 2
+
+  retry:
+    max_retries: 1
+    base_delay: 0.15
+    max_delay: 1.5
+    multiplier: 2.0
+    jitter: 0.05
+
+  limits:
+    max_amount: 10000
+    max_until_end_steps: 20
+    clamp_coordinates: false
+    allow_negative_coordinates: true
+
+  until_end_pause_seconds: 0.15
+
+  diagnostics:
+    include_page_state: true
+    include_element_metadata: true
+    include_attempt_history: true
+    include_screenshot_on_error: false
+    include_page_snapshot_on_error: false
+    max_text_length: 1000
+
+
+do_type:
+  description: Production text-entry executor for Selenium-backed browser interactions.
+  timeout: 10.0
+  poll_frequency: 0.1
+  wait_before_execution: 0.0
+  wait_after_type: 0.0
+  retries: 2
+  retry_backoff_base: 0.2
+  retry_backoff_multiplier: 1.8
+  retry_backoff_max: 2.5
+  retry_jitter: 0.05
+  clear_before: true
+  append_mode: false
+  require_visible: true
+  require_enabled: true
+  require_writable: true
+  scroll_into_view: true
+  scroll_position: center
+  scroll_behavior: auto
+  focus_before_type: true
+  click_before_type: false
+  blur_after_type: false
+  submit_after_type: false
+  press_enter_after_type: false
+  dispatch_input_events: true
+  verify_after_type: true
+  verify_mode: contains
+  page_load_timeout: 5.0
+  allow_javascript_fallback: true
+  allow_contenteditable_fallback: true
+  strategies:
+    - native_send_keys
+    - human_send_keys
+    - action_chains
+    - javascript_value
+    - contenteditable_javascript
+
+  preparation:
+    require_visible: true
+    require_enabled: true
+    require_writable: true
+    scroll_into_view: true
+    scroll_position: center
+    scroll_behavior: auto
+    focus_before_type: true
+    click_before_type: false
+
+  typing:
+    strategies:
+      - native_send_keys
+      - human_send_keys
+      - action_chains
+      - javascript_value
+      - contenteditable_javascript
+    human_min_delay: 0.03
+    human_max_delay: 0.12
+    dispatch_input_events: true
+
+  clear:
+    strategies:
+      - native_clear
+      - keyboard_select_delete
+      - javascript_clear
+
+  retry:
+    max_attempts: 2
+    base_delay: 0.2
+    multiplier: 1.8
+    max_delay: 2.5
+    jitter: 0.05
+
+  verification:
+    enabled: true
+    mode: contains
+
+  text:
+    max_length: 100000
+    newline_mode: literal
+    allow_sensitive_text_in_result: false
+    include_text_preview: false
+    preview_chars: 120
+
+  diagnostics:
+    include_page_snapshot: false
+    include_element_html: true
+    max_element_text_chars: 500
+    max_element_html_chars: 1500
+    screenshot_on_error: false
+
+  fallbacks:
+    javascript: true
+    contenteditable: true
+
+  parameters:
+    - name: selector
+      type: string
+      description: CSS selector of the writable element to type into.
+      required: true
+    - name: text
+      type: string
+      description: Text to type into the selected element. Redacted from result payloads by default.
+      required: true
+    - name: clear_before
+      type: boolean
+      description: Whether to clear the field before typing.
+      default: true
+    - name: strategies
+      type: list[string]
+      description: Ordered typing strategies to attempt.
+      default:
+        - native_send_keys
+        - human_send_keys
+        - action_chains
+        - javascript_value
+        - contenteditable_javascript

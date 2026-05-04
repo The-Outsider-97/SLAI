@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Project: MindWeave | R-Games</title>
+  <link rel="icon" type="image/x-icon" href="../img/Logo01.svg" />
+  <link rel="stylesheet" href="src/index.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Import Map for Three.js -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body class="bg-black text-white overflow-hidden select-none font-sans">
+  
+  <!-- 3D Canvas Container -->
+  <div id="canvas-container" class="absolute inset-0 z-0"></div>
+
+  <!-- CRT Scanline Overlay -->
+  <div class="scanlines z-10 pointer-events-none"></div>
+
+  <!-- UI Overlay -->
+  <main class="relative z-20 w-full h-screen p-4 lg:p-6 pointer-events-none">
+    <div class="h-full grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <section class="lg:col-span-3 flex flex-col gap-4 pointer-events-auto">
+        <div class="glass-panel p-4 rounded-xl border border-white/10">
+          <h1 class="text-xl font-bold text-[var(--traffic-red)] tracking-widest uppercase text-shadow">MindWeave</h1>
+          <p class="text-xs text-slate-400 font-mono mt-1">Status: <span id="api-status" class="text-yellow-400">Verifying Uplink...</span></p>
+          <div class="mt-3 text-[11px] text-slate-400 font-mono space-y-1">
+            <p>Role: Weaver Diplomat-Engineer</p>
+            <p>Mission: Rebuild the Fractured Grid</p>
+          </div>
+          <div class="mt-4 space-y-2">
+            <div>
+              <div class="flex justify-between text-[10px] text-slate-400 uppercase tracking-widest mb-1"><span>IQ Load</span><span id="iq-value">48%</span></div>
+              <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden"><div id="iq-bar" class="bg-[var(--neural-blue)] h-full w-[48%] shadow-glow-blue transition-all duration-500"></div></div>
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] text-slate-400 uppercase tracking-widest mb-1"><span>EQ Sync</span><span id="eq-sync-value">82%</span></div>
+              <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden"><div id="eq-sync-bar" class="bg-[var(--traffic-red)] h-full w-[82%] shadow-glow-red transition-all duration-500"></div></div>
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] text-slate-400 uppercase tracking-widest mb-1"><span>Mission Completion</span><span id="progress-value">0%</span></div>
+              <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden"><div id="progress-bar" class="bg-emerald-400 h-full w-0 transition-all duration-500"></div></div>
+            </div>
+            <button id="btn-academy" class="w-full mt-3 px-3 py-2 rounded-lg border border-cyan-300/30 bg-cyan-500/10 text-[10px] font-mono uppercase tracking-[0.2em] text-cyan-200 hover:bg-cyan-500/20 transition-colors">
+              Weaver Academy
+            </button>
+          </div>
+        </div>
+
+        <div class="glass-panel p-4 rounded-xl border border-white/10 flex-1 overflow-auto scrollbar-hide">
+          <h2 class="text-xs font-mono text-slate-400 uppercase tracking-widest mb-3">Campaign Protocols</h2>
+          <div class="space-y-2 text-xs font-mono" id="phase-list">
+            <button data-phase="briefing" class="phase-btn phase-active">1. Mission Briefing</button>
+            <button data-phase="iq" class="phase-btn">2. IQ Systems Repair</button>
+            <button data-phase="eq" class="phase-btn">3. EQ Diplomacy & Regulation</button>
+            <button data-phase="debrief" class="phase-btn">4. Metacognitive Debrief</button>
+          </div>
+          <div class="text-[10px] text-slate-400 mt-4 space-y-1" id="objective-log"></div>
+        </div>
+
+        <div class="mindweave-fixed-actions space-y-2 pointer-events-auto">
+          <button id="btn-home" class="glass-panel w-full px-4 py-2 rounded-lg border border-white/10 text-xs tracking-widest uppercase hover:bg-white/10 transition-colors">Home</button>
+          <button id="btn-settings" class="glass-panel w-full px-4 py-2 rounded-lg border border-white/10 text-xs tracking-widest uppercase hover:bg-white/10 transition-colors">Settings</button>
+          <button id="btn-new-game" class="glass-panel w-full px-4 py-2 rounded-lg border border-white/10 text-xs tracking-widest uppercase hover:bg-white/10 transition-colors">New Game</button>
+          <button id="btn-exit" class="glass-panel w-full px-4 py-2 rounded-lg border border-white/10 text-xs tracking-widest uppercase hover:bg-white/10 transition-colors">Abort Session</button>
+        </div>
+      </section>
+
+      <section class="lg:col-span-6 pointer-events-auto flex flex-col gap-4">
+        <div class="glass-panel border border-white/10 rounded-2xl mindweave-entity-panel flex flex-col overflow-hidden">
+          <div class="bg-black/40 px-4 py-2 border-b border-white/10 flex justify-between items-center">
+            <span class="text-xs font-mono text-[var(--neural-blue)] uppercase tracking-wider">Entity: Architect-7</span>
+            <span id="emotion-indicator" class="text-[10px] uppercase text-slate-400 bg-white/5 px-2 py-1 rounded">Analysis: Neutral</span>
+          </div>
+          <div id="chat-history" class="flex-1 p-4 overflow-y-auto font-mono text-sm space-y-4 scrollbar-hide"></div>
+          <div class="p-3 bg-black/40 border-t border-white/10 flex gap-2">
+            <input type="text" id="player-input" class="flex-1 bg-black/50 border border-slate-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--traffic-red)] transition-colors text-white placeholder-slate-600" placeholder="Analyze, regulate, and respond..." autocomplete="off" disabled>
+            <button id="btn-send" class="bg-[var(--traffic-red)] text-white px-4 py-2 rounded font-mono text-sm uppercase tracking-wider hover:bg-red-600 transition-colors disabled:opacity-50" disabled>Transmit</button>
+          </div>
+        </div>
+
+        <div class="glass-panel border border-white/10 rounded-2xl flex-1 p-4 overflow-y-auto scrollbar-hide">
+          <h3 id="phase-title" class="text-sm font-mono uppercase tracking-widest text-slate-300 mb-3">Mission Briefing</h3>
+          <div id="phase-content" class="text-sm text-slate-200"></div>
+        </div>
+      </section>
+
+      <section class="lg:col-span-3 pointer-events-auto">
+        <div class="glass-panel p-4 rounded-2xl border border-white/10 h-full flex flex-col gap-4 overflow-y-auto scrollbar-hide">
+          <div>
+            <h3 class="text-xs font-mono text-slate-400 uppercase tracking-widest mb-3 border-b border-white/10 pb-2">Active Protocols</h3>
+            <button id="btn-empathy-ping" class="protocol-btn">Active Listening Ping <span class="text-[var(--traffic-red)]">[EQ]</span></button>
+            <button id="btn-reset-iq" class="protocol-btn">Reset IQ Trials <span class="text-[var(--neural-blue)]">[IQ]</span></button>
+            <button id="btn-regulate" class="protocol-btn">Regulation Pulse <span class="text-emerald-400">[BIO]</span></button>
+          </div>
+          <div>
+            <h3 class="text-xs font-mono text-slate-400 uppercase tracking-widest mb-2">Telemetry</h3>
+            <div id="telemetry" class="text-[11px] font-mono text-slate-400 space-y-1"></div>
+          </div>
+          <div>
+            <h3 class="text-xs font-mono text-slate-400 uppercase tracking-widest mb-2">Final Score</h3>
+            <div class="mindweave-card space-y-2">
+              <p id="final-score" class="text-lg font-bold text-emerald-300">0 / 100</p>
+              <div id="protocol-score-list" class="text-[11px] font-mono text-slate-400 space-y-1"></div>
+            </div>
+            <div class="mt-2 space-y-2">
+              <button id="btn-iq-test" class="protocol-btn" disabled>IQ Test <span class="text-slate-500">[locked]</span></button>
+              <button id="btn-eq-test" class="protocol-btn" disabled>EQ Test <span class="text-slate-500">[locked]</span></button>
+            </div>
+          </div>
+          <div class="text-[9px] text-slate-500 uppercase tracking-widest text-center mt-auto">
+            Project MindWeave v1.1.0<br>Full Training Loop Enabled
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="settings-modal" class="settings-modal hidden" aria-hidden="true">
+    <div class="settings-card glass-panel">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-mono uppercase tracking-widest text-slate-200">Audio Settings</h3>
+        <button id="settings-close" class="settings-close-btn" type="button">✕</button>
+      </div>
+
+      <div class="space-y-3 text-xs font-mono text-slate-300">
+        <div class="mindweave-card">
+          <div class="flex justify-between items-center gap-3">
+            <label for="bgm-volume">BGM Volume</label>
+            <input id="bgm-mute" type="checkbox" />
+            <label for="bgm-mute">Mute</label>
+          </div>
+          <input id="bgm-volume" type="range" min="0" max="1" step="0.01" value="0.45" class="w-full mt-2" />
+        </div>
+
+        <div class="mindweave-card">
+          <div class="flex justify-between items-center gap-3">
+            <label for="sfx-volume">SFX Volume</label>
+            <input id="sfx-mute" type="checkbox" />
+            <label for="sfx-mute">Mute</label>
+          </div>
+          <input id="sfx-volume" type="range" min="0" max="1" step="0.01" value="0.75" class="w-full mt-2" />
+        </div>
+
+        <div class="mindweave-card">
+          <div class="flex justify-between items-center gap-3">
+            <label for="voice-volume">Voice Volume</label>
+            <input id="voice-mute" type="checkbox" />
+            <label for="voice-mute">Mute</label>
+          </div>
+          <input id="voice-volume" type="range" min="0" max="1" step="0.01" value="1" class="w-full mt-2" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="endgame-modal" class="settings-modal hidden" aria-hidden="true">
+    <div class="settings-card glass-panel">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-mono uppercase tracking-widest text-emerald-200">Campaign Complete</h3>
+        <button id="endgame-close" class="settings-close-btn" type="button">✕</button>
+      </div>
+      <div class="mindweave-card text-xs space-y-3">
+        <p class="text-slate-300">Final score: <span id="endgame-final-score" class="text-emerald-300 font-bold">0 / 100</span></p>
+        <div id="endgame-summary" class="text-slate-300 space-y-1"></div>
+      </div>
+      <div class="mt-3 flex gap-2 justify-end">
+        <button id="endgame-restart" class="mindweave-action" type="button">Run New Campaign</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

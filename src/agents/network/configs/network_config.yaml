@@ -1,0 +1,1061 @@
+network_memory:
+  key_prefix: "network"
+  default_ttl_seconds: 0
+  max_entries: 5000
+  auto_prune_on_write: true
+  prune_interval_seconds: 60
+  evict_oldest_on_capacity: true
+  sanitize_logs: true
+
+  max_event_log_size: 1000
+  max_route_history_size: 250
+  max_delivery_history_size: 500
+  max_retry_history_size: 500
+  max_policy_history_size: 250
+
+  route_snapshot_ttl_seconds: 900
+  delivery_state_ttl_seconds: 7200
+  endpoint_health_ttl_seconds: 600
+  session_snapshot_ttl_seconds: 1800
+  policy_decision_ttl_seconds: 1800
+  channel_metrics_ttl_seconds: 600
+  error_snapshot_ttl_seconds: 7200
+
+
+network_helpers:
+  default_protocol: "http"
+  default_timeout_ms: 5000
+  min_timeout_ms: 1
+  max_timeout_ms: 300000
+  default_encoding: "utf-8"
+  max_payload_bytes: 10485760
+  default_content_type: "application/json"
+  sensitive_keys: []
+
+
+network_adapters:
+  enabled: true
+  sanitize_logs: true
+  auto_register_defaults: true
+  reuse_adapter_instances: true
+  close_replaced_instances: true
+  record_registry_snapshots: true
+  require_registered_adapter: true
+  prefer_connected_instances: true
+  prefer_secure_for_tls_endpoints: true
+
+  default_adapter: "http"
+  default_protocol: "http"
+  default_channel: "http"
+  selection_strategy: "priority"
+
+  max_active_adapters: 64
+  registry_snapshot_ttl_seconds: 1800
+  active_snapshot_ttl_seconds: 600
+  event_history_max: 250
+
+  priority_order: ["http", "websocket", "grpc", "queue"]
+
+  adapter_defaults:
+    http:
+      enabled: true
+      priority: 140
+      reuse_instances: true
+      config_section: "network_http_adapter"
+      protocols: ["http", "https"]
+      channels: ["http"]
+      aliases: ["rest"]
+
+    websocket:
+      enabled: true
+      priority: 130
+      reuse_instances: true
+      config_section: "network_websocket_adapter"
+      protocols: ["websocket", "ws", "wss"]
+      channels: ["websocket"]
+      aliases: ["ws", "wss", "socket"]
+
+    grpc:
+      enabled: true
+      priority: 120
+      reuse_instances: true
+      config_section: "network_grpc_adapter"
+      protocols: ["grpc", "grpcs"]
+      channels: ["grpc"]
+      aliases: ["rpc"]
+
+    queue:
+      enabled: true
+      priority: 110
+      reuse_instances: true
+      config_section: "network_queue_adapter"
+      protocols: ["queue", "amqp", "amqps", "mq", "sqs", "kafka", "pubsub"]
+      channels: ["queue"]
+      aliases: ["broker", "mq"]
+
+
+network_base_adapter:
+  default_timeout_ms: 5000
+  connect_timeout_ms: 5000
+  receive_timeout_ms: 5000
+  session_idle_ttl_seconds: 1800
+  delivery_ttl_seconds: 7200
+  max_payload_bytes: 10485760
+  max_receive_payload_bytes: 10485760
+  failure_health_status: "degraded"
+  initial_health_status: "unknown"
+  closed_health_status: "idle"
+  require_endpoint_on_connect: true
+  record_delivery_state: true
+  record_endpoint_health: true
+  record_session_snapshots: true
+  strict_ack_support: false
+  strict_receive_support: false
+  auto_normalize_endpoint: true
+  auto_generate_correlation_id: true
+  emit_log_safe_payloads: true
+
+  supports_streaming: false
+  supports_bidirectional_streaming: false
+  supports_ack: true
+  supports_nack: true
+  supports_batch_send: false
+  supports_headers: true
+  supports_tls: true
+  supports_reconnect: true
+  supports_receive: true
+  supports_request_reply: true
+  auth_modes: ["none"]
+  content_types: ["application/json", "text/plain", "application/octet-stream"]
+  capabilities_metadata: {}
+
+
+network_http_adapter:
+  endpoint: null
+  protocol: "http"
+  default_method: "POST"
+  receive_method: "GET"
+  healthcheck_method: "HEAD"
+  receive_path: null
+  healthcheck_path: "/health"
+
+  verify_tls: true
+  allow_insecure_tls: false
+  tls_minimum_version: "TLSv1_2"
+  ca_file: null
+  cert_file: null
+  key_file: null
+
+  follow_redirects: true
+  max_redirects: 3
+  allow_redirect_downgrade: false
+  raise_for_status: true
+  strict_response_deserialization: false
+
+  persistent_connections: true
+  cache_responses_for_recv: true
+  consume_cached_responses_on_recv: true
+  use_cookie_jar: true
+  allow_body_on_get: false
+  healthcheck_on_connect: false
+
+  default_headers: {}
+  default_query_params: {}
+  default_accept: "application/json, text/plain, */*"
+  user_agent: "SLAI-NetworkAgent/1.0"
+
+  max_response_history_size: 100
+  max_stored_response_body_bytes: 262144
+  success_status_min: 200
+  success_status_max: 299
+
+  supports_ack: false
+  supports_nack: false
+  supports_receive: true
+  supports_request_reply: true
+  supports_streaming: false
+  supports_bidirectional_streaming: false
+  supports_batch_send: false
+  supports_headers: true
+  supports_tls: true
+  supports_reconnect: true
+  auth_modes: ["none", "basic", "bearer", "custom_header"]
+  content_types: ["application/json", "text/plain", "application/octet-stream"]
+  capabilities_metadata:
+    transport_family: "http"
+    adapter_tier: "specialized"
+
+
+network_websocket_adapter:
+  endpoint: null
+  protocol: websocket
+  verify_tls: true
+  allow_insecure_tls: false
+  ping_on_connect: false
+  ping_timeout_ms: 5000
+  ping_payload: ping
+  close_status_code: 1000
+  close_timeout_seconds: 3
+  default_send_mode: auto
+  ack_mode: synthetic
+  nack_mode: synthetic
+  reconnect_on_send_if_closed: true
+  reconnect_on_receive_if_closed: false
+  auto_detect_json_messages: true
+  capture_sent_messages: true
+  capture_received_messages: true
+  strict_subprotocol_match: false
+  include_origin_header: false
+  origin: null
+  host_header: null
+  subprotocols: []
+  extra_headers: {}
+  ssl_options: {}
+  max_message_history_size: 200
+  max_queued_inbound_messages: 200
+  supports_streaming: true
+  supports_bidirectional_streaming: true
+  supports_ack: true
+  supports_nack: true
+  supports_headers: true
+  supports_tls: true
+  supports_reconnect: true
+  supports_receive: true
+  supports_request_reply: false
+  auth_modes:
+  - none
+  - bearer
+  - custom_header
+  - cookie
+  content_types:
+  - application/json
+  - text/plain
+  - application/octet-stream
+  capabilities_metadata:
+    transport_family: websocket
+    adapter_tier: specialized
+
+
+network_grpc_adapter:
+  endpoint: null
+  protocol: grpc
+  service_name: null
+  default_method: null
+  default_call_type: unary_unary
+  healthcheck_method: null
+  healthcheck_on_connect: false
+  require_method_on_send: true
+  use_tls: true
+  authority: null
+  default_metadata: {}
+  receive_from_buffer: true
+  consume_buffered_messages_on_recv: true
+  strict_method_format: false
+  default_deadline_ms: 5000
+  max_response_history_size: 200
+  max_stream_buffer_size: 250
+  ack_mode: synthetic
+  nack_mode: synthetic
+  supports_streaming: true
+  supports_bidirectional_streaming: true
+  supports_ack: true
+  supports_nack: true
+  supports_headers: true
+  supports_tls: true
+  supports_reconnect: true
+  supports_receive: true
+  supports_request_reply: true
+  auth_modes:
+  - none
+  - bearer
+  - mtls
+  - metadata
+  content_types:
+  - application/json
+  - application/octet-stream
+  - text/plain
+  capabilities_metadata:
+    transport_family: grpc
+    adapter_tier: specialized
+
+
+network_queue_adapter:
+  endpoint: null
+  protocol: "queue"
+
+  default_queue: null
+  dead_letter_queue: null
+  default_exchange: null
+  default_routing_key: null
+
+  ack_mode: "transport"
+  nack_mode: "transport"
+
+  auto_declare: true
+  durable: true
+  exclusive: false
+  auto_delete: false
+  auto_ack_on_receive: false
+  receive_from_buffer: true
+  consume_buffered_messages_on_recv: true
+  capture_sent_messages: true
+  capture_received_messages: true
+  requeue_on_nack: true
+  purge_on_close: false
+
+  prefetch_count: 10
+  visibility_timeout_ms: null
+  max_message_history_size: 250
+  max_queued_inbound_messages: 250
+
+  supports_streaming: false
+  supports_bidirectional_streaming: false
+  supports_ack: true
+  supports_nack: true
+  supports_batch_send: true
+  supports_headers: true
+  supports_tls: true
+  supports_reconnect: true
+  supports_receive: true
+  supports_request_reply: false
+  auth_modes: ["none", "userpass", "token", "mTLS"]
+  content_types: ["application/json", "text/plain", "application/octet-stream"]
+  capabilities_metadata:
+    transport_family: "queue"
+    adapter_tier: "specialized"
+
+
+network_metrics:
+  enabled: true
+  sanitize_logs: true
+  emit_memory_snapshots: true
+  store_endpoint_metrics: true
+  store_route_metrics: true
+  store_recent_events_in_memory: true
+
+  default_snapshot_ttl_seconds: 600
+  channel_snapshot_ttl_seconds: 600
+  endpoint_snapshot_ttl_seconds: 600
+  route_snapshot_ttl_seconds: 600
+  global_snapshot_ttl_seconds: 600
+  recent_events_snapshot_ttl_seconds: 300
+
+  max_event_history_size: 2000
+  max_broadcast_history_size: 250
+  max_latency_samples_per_scope: 500
+
+  degraded_latency_ms_threshold: 1000.0
+  degraded_success_rate_threshold: 0.95
+  degraded_error_rate_threshold: 0.10
+  unhealthy_success_rate_threshold: 0.80
+  unhealthy_error_rate_threshold: 0.25
+  unhealthy_consecutive_failures_threshold: 5
+
+
+network_policy:
+  enabled: true
+  sanitize_logs: true
+  record_policy_decisions: true
+
+  decision_ttl_seconds: 1800
+  max_decision_history_size: 500
+  max_rate_buckets: 2000
+  default_rate_window_seconds: 60
+
+  enforce_destination_policy: true
+  enforce_protocol_policy: true
+  enforce_port_policy: true
+  enforce_tls_policy: true
+  enforce_certificate_policy: true
+  enforce_rate_limits: true
+
+  require_tls_by_default: true
+  allow_private_hosts: false
+  allow_loopback_hosts: false
+  allow_ip_hosts: true
+
+  deny_self_signed_certificates: true
+  deny_expired_certificates: true
+  require_hostname_match: true
+  require_certificate_info_for_tls: false
+
+  allowed_protocols: ["http", "https", "websocket", "grpc", "queue"]
+  denied_protocols: []
+  allowed_channels: []
+  denied_channels: []
+  allowed_ports: []
+  denied_ports: []
+  allowed_destination_patterns: []
+  denied_destination_patterns: []
+  insecure_destination_patterns: []
+  tls_required_protocols: ["https", "grpc"]
+  allowed_certificate_authorities: []
+
+  rate_limits:
+    default:
+      limit: 1000
+      window_seconds: 60
+    strict:
+      limit: 100
+      window_seconds: 60
+    burst:
+      limit: 5000
+      window_seconds: 60
+
+
+network_channel_selector:
+  enabled: true
+  sanitize_logs: true
+  record_selection_snapshots: true
+
+  selection_ttl_seconds: 900
+  candidate_history_size: 500
+  default_top_k: 3
+  max_candidates_to_score: 50
+
+  default_strategy: "weighted"
+  prefer_secure_channels: true
+  prefer_connected_adapters: true
+  prefer_healthy_endpoints: true
+  allow_degraded_endpoints: true
+  exclude_open_circuit_endpoints: true
+
+  channel_priority_order: ["http", "websocket", "grpc", "queue"]
+  streaming_priority_order: ["websocket", "grpc", "http", "queue"]
+  request_reply_priority_order: ["http", "grpc", "websocket", "queue"]
+
+  score_weights:
+    priority: 0.25
+    latency: 0.20
+    reliability: 0.20
+    health: 0.20
+    cost: 0.10
+    policy: 0.05
+
+  latency_thresholds_ms:
+    excellent: 100.0
+    good: 300.0
+    degraded: 1000.0
+
+  reliability_thresholds:
+    healthy_success_rate: 0.95
+    degraded_success_rate: 0.80
+
+
+network_endpoint_registry:
+  enabled: true
+  sanitize_logs: true
+  record_registry_snapshots: true
+
+  registry_snapshot_ttl_seconds: 1800
+  endpoint_snapshot_ttl_seconds: 600
+  default_endpoint_ttl_seconds: 1800
+
+  max_registry_entries: 5000
+  prune_on_write: true
+  allow_endpoint_updates: true
+  normalize_endpoints: true
+
+  default_status: "unknown"
+  default_weight: 1.0
+  stale_after_seconds: 600
+  expire_after_seconds: 3600
+
+  prefer_explicit_region_match: true
+  prefer_same_protocol_family: true
+
+  allowed_statuses: ["unknown", "healthy", "degraded", "unhealthy", "down"]
+  default_tags: []
+
+
+network_route_policy:
+  enabled: true
+  sanitize_logs: true
+  record_policy_decisions: true
+
+  decision_ttl_seconds: 1800
+  max_decision_history_size: 500
+  max_candidates_to_evaluate: 50
+  default_top_k: 3
+
+  default_strategy: "balanced"
+  allow_secondary_routes: true
+  require_policy_pass: true
+  require_endpoint_health: true
+  allow_degraded_routes: true
+  deny_open_circuit_routes: true
+
+  prefer_secure_routes: true
+  prefer_same_region: true
+  prefer_lower_cost: true
+  prefer_higher_reliability: true
+
+  score_weights:
+    latency: 0.25
+    reliability: 0.30
+    health: 0.20
+    cost: 0.10
+    affinity: 0.10
+    policy: 0.05
+
+  thresholds:
+    minimum_reliability: 0.70
+    degraded_health_score: 0.50
+    minimum_total_score: 0.00
+
+
+network_stream:
+  enabled: true
+  sanitize_logs: true
+  record_route_snapshots: true
+  record_session_snapshots: true
+  use_endpoint_registry: true
+  include_registered_adapters: true
+  allow_direct_endpoint_candidates: true
+  auto_connect_adapters: true
+  auto_close_ephemeral_adapters: false
+  fallback_to_secondary_route: true
+  require_route_selection: true
+  prefer_preconnected_channels: true
+  require_registered_endpoints: false
+  default_protocol: "http"
+  default_channel: "http"
+  default_region: null
+  default_operation: "send"
+  default_request_timeout_ms: 5000
+  default_receive_timeout_ms: 5000
+  selection_ttl_seconds: 900
+  session_ttl_seconds: 1800
+  history_ttl_seconds: 3600
+  max_history_size: 500
+  max_candidate_routes: 32
+  default_primary_count: 1
+  default_secondary_count: 1
+
+
+network_lifecycle:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+
+  auto_mark_processing_on_begin: true
+  auto_complete_idempotency_on_ack: true
+  auto_fail_idempotency_on_failure: true
+  auto_release_idempotency_on_cancel: true
+  auto_build_response_on_complete: true
+  auto_build_retry_envelope: true
+  auto_build_dead_letter_envelope: true
+  auto_expire_on_read: true
+
+  fail_on_duplicate_active: true
+  enable_dead_letter: true
+  require_correlation_id: true
+  require_idempotency_key: true
+
+  default_protocol: "http"
+  default_channel: "http"
+  default_delivery_mode: "at_least_once"
+  default_receive_operation: "receive"
+
+  default_request_timeout_ms: 5000
+  default_receive_timeout_ms: 5000
+
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_history_size: 1000
+
+
+network_delivery_state_machine:
+  enabled: true
+  sanitize_logs: true
+  record_transition_history: true
+  record_memory_snapshots: true
+  strict_transitions: true
+  enforce_idempotency: true
+  allow_terminal_reentry: false
+  auto_expire_on_read: true
+  auto_register_on_transition: false
+  auto_increment_retry_on_retrying: true
+  enable_dead_letter: true
+  require_correlation_id: true
+  require_idempotency_key: true
+
+  default_protocol: "http"
+  default_channel: "http"
+  default_initial_state: "queued"
+  default_delivery_mode: "at_least_once"
+
+  default_ttl_seconds: 7200
+  pending_expire_after_seconds: 1800
+  sent_expire_after_seconds: 7200
+  failed_expire_after_seconds: 7200
+  dead_letter_ttl_seconds: 86400
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_deliveries: 5000
+  max_history_size: 1000
+  max_transition_history_per_message: 50
+  default_max_attempts: 3
+
+  terminal_states: ["acked", "expired", "dead_lettered", "cancelled"]
+  active_states: ["initialized", "queued", "selected", "sent", "received", "retrying", "failed", "nacked"]
+  state_order: ["initialized", "queued", "selected", "sent", "received", "acked", "nacked", "retrying", "failed", "expired", "dead_lettered", "cancelled"]
+
+  allowed_transitions:
+    initialized: ["queued", "selected", "failed", "expired", "cancelled"]
+    queued: ["selected", "sent", "failed", "expired", "cancelled"]
+    selected: ["queued", "sent", "failed", "expired", "cancelled"]
+    sent: ["received", "acked", "nacked", "retrying", "failed", "expired", "dead_lettered"]
+    received: ["acked", "nacked", "retrying", "failed", "expired", "dead_lettered"]
+    nacked: ["retrying", "queued", "failed", "dead_lettered", "expired"]
+    retrying: ["queued", "selected", "sent", "failed", "dead_lettered", "expired"]
+    failed: ["retrying", "queued", "dead_lettered", "expired"]
+    acked: []
+    expired: []
+    dead_lettered: []
+    cancelled: []
+
+
+network_envelope:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+  normalize_endpoints: true
+  require_correlation_id: true
+  require_idempotency_key: true
+  require_channel: true
+  require_protocol: true
+  require_content_type: true
+  include_payload_fingerprint: true
+  preserve_payload_in_memory: true
+  enforce_known_delivery_modes: true
+  default_protocol: http
+  default_channel: http
+  default_delivery_mode: at_least_once
+  default_operation: send
+  default_reply_channel: null
+  default_dead_letter_queue: null
+  default_timeout_ms: 5000
+  response_timeout_ms: 5000
+  default_expires_in_seconds: 0
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_envelopes: 5000
+  max_history_size: 1000
+  max_payload_bytes: 10485760
+
+
+network_idempotency:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  strict_fingerprint_validation: true
+  allow_completed_replay: true
+  allow_failed_reacquire: true
+  require_fingerprint: true
+  auto_prune_expired: true
+  enforce_owner_match: false
+
+  default_scope: "network"
+  default_status: "reserved"
+  reservation_ttl_seconds: 1800
+  completed_ttl_seconds: 86400
+  failed_ttl_seconds: 7200
+  expired_ttl_seconds: 3600
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+
+  max_records: 5000
+  max_history_size: 1000
+  max_transitions_per_key: 50
+
+  statuses:
+    reserved: "reserved"
+    in_progress: "in_progress"
+    completed: "completed"
+    failed: "failed"
+    expired: "expired"
+    released: "released"
+    replayed: "replayed"
+
+  replayable_statuses:
+    - "completed"
+    - "replayed"
+
+  reacquirable_statuses:
+    - "failed"
+    - "expired"
+    - "released"
+
+
+network_reliability:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+  retry_enabled: true
+  circuit_breaker_enabled: true
+  failover_enabled: true
+  auto_record_success_to_circuit: true
+  auto_record_failure_to_circuit: true
+  evaluate_failover_on_blocked_request: true
+  failover_on_retry_exhausted: true
+  prefer_component_reason: true
+  require_current_route_for_failover: true
+  default_retry_profile: "default"
+  default_circuit_profile: "default"
+  default_failover_profile: "default"
+  default_scope_type: "endpoint"
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_history_size: 1000
+  max_attempts: 3
+  initial_backoff_ms: 250
+  max_backoff_ms: 5000
+  backoff_multiplier: 2.0
+  jitter_ratio: 0.20
+  backoff_strategy: "exponential"
+  jitter_mode: "full"
+  failure_threshold: 5
+  consecutive_failure_threshold: 5
+  success_threshold: 2
+  half_open_max_requests: 1
+  open_timeout_ms: 30000
+  failure_window_seconds: 60
+  minimum_request_volume: 1
+  max_candidate_routes: 16
+  minimum_health_score: 0.0
+  max_cost_multiplier: 2.0
+
+
+network_retry_policy:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+
+  use_retry_after: true
+  failover_enabled: true
+  require_idempotent_for_unsafe_retries: true
+  classify_http_statuses: true
+  classify_network_errors: true
+  classify_unknown_errors_as_retryable: false
+  prefer_error_disposition: true
+  use_deterministic_jitter: true
+
+  default_profile: "default"
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_history_size: 1000
+  max_profiles: 32
+
+  max_attempts: 3
+  initial_backoff_ms: 250
+  max_backoff_ms: 5000
+  backoff_multiplier: 2.0
+  backoff_strategy: "exponential"
+  jitter_ratio: 0.20
+  jitter_mode: "full"
+
+  profiles:
+    default:
+      max_attempts: 3
+      initial_backoff_ms: 250
+      max_backoff_ms: 5000
+      backoff_multiplier: 2.0
+      backoff_strategy: "exponential"
+      jitter_ratio: 0.20
+      jitter_mode: "full"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: false
+      retry_on_duplicate_active: false
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 409, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 410, 413, 422]
+
+    aggressive:
+      max_attempts: 5
+      initial_backoff_ms: 150
+      max_backoff_ms: 3000
+      backoff_multiplier: 1.8
+      backoff_strategy: "exponential"
+      jitter_ratio: 0.25
+      jitter_mode: "full"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: true
+      retry_on_duplicate_active: false
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 409, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 410, 413, 422]
+
+    conservative:
+      max_attempts: 2
+      initial_backoff_ms: 500
+      max_backoff_ms: 8000
+      backoff_multiplier: 2.0
+      backoff_strategy: "exponential"
+      jitter_ratio: 0.10
+      jitter_mode: "equal"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: false
+      retry_on_duplicate_active: false
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 409, 410, 413, 422]
+
+    streaming:
+      max_attempts: 3
+      initial_backoff_ms: 200
+      max_backoff_ms: 4000
+      backoff_multiplier: 1.75
+      backoff_strategy: "decorrelated"
+      jitter_ratio: 0.20
+      jitter_mode: "decorrelated"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: false
+      retry_on_duplicate_active: false
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 409, 410, 413, 422]
+
+
+network_circuit_breaker:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+  auto_transition_half_open: true
+  allow_forced_states: true
+  use_retry_after: true
+  classify_http_statuses: true
+  classify_network_errors: true
+  count_only_retryable_errors: false
+  auto_expire_idle_circuits: true
+
+  default_profile: "default"
+  default_scope: "endpoint"
+
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_history_size: 1000
+  max_profiles: 32
+  max_circuits: 5000
+  idle_ttl_seconds: 86400
+
+  failure_threshold: 5
+  consecutive_failure_threshold: 5
+  success_threshold: 2
+  half_open_max_requests: 1
+  open_timeout_ms: 30000
+  failure_window_seconds: 60
+  minimum_request_volume: 1
+
+  profiles:
+    default:
+      failure_threshold: 5
+      consecutive_failure_threshold: 5
+      success_threshold: 2
+      half_open_max_requests: 1
+      open_timeout_ms: 30000
+      failure_window_seconds: 60
+      minimum_request_volume: 1
+      count_timeouts: true
+      count_connection_errors: true
+      count_transport_errors: true
+      count_server_errors: true
+      count_rate_limits: false
+      count_unknown_errors: false
+      track_only_retryable_errors: false
+      reopen_on_half_open_failure: true
+      close_on_consecutive_successes: true
+
+    aggressive:
+      failure_threshold: 3
+      consecutive_failure_threshold: 3
+      success_threshold: 1
+      half_open_max_requests: 1
+      open_timeout_ms: 15000
+      failure_window_seconds: 30
+      minimum_request_volume: 1
+      count_timeouts: true
+      count_connection_errors: true
+      count_transport_errors: true
+      count_server_errors: true
+      count_rate_limits: true
+      count_unknown_errors: false
+      track_only_retryable_errors: false
+      reopen_on_half_open_failure: true
+      close_on_consecutive_successes: true
+
+    conservative:
+      failure_threshold: 6
+      consecutive_failure_threshold: 6
+      success_threshold: 2
+      half_open_max_requests: 1
+      open_timeout_ms: 45000
+      failure_window_seconds: 120
+      minimum_request_volume: 2
+      count_timeouts: true
+      count_connection_errors: true
+      count_transport_errors: true
+      count_server_errors: true
+      count_rate_limits: false
+      count_unknown_errors: false
+      track_only_retryable_errors: false
+      reopen_on_half_open_failure: true
+      close_on_consecutive_successes: true
+
+    streaming:
+      failure_threshold: 4
+      consecutive_failure_threshold: 3
+      success_threshold: 1
+      half_open_max_requests: 1
+      open_timeout_ms: 10000
+      failure_window_seconds: 30
+      minimum_request_volume: 1
+      count_timeouts: true
+      count_connection_errors: true
+      count_transport_errors: true
+      count_server_errors: true
+      count_rate_limits: false
+      count_unknown_errors: false
+      track_only_retryable_errors: false
+      reopen_on_half_open_failure: true
+      close_on_consecutive_successes: true
+
+
+network_failover_manager:
+  enabled: true
+  sanitize_logs: true
+  record_memory_snapshots: true
+  record_history: true
+
+  use_route_policy: true
+  use_endpoint_registry: true
+  fail_on_no_viable_failover: true
+  allow_explicit_candidates_only: false
+
+  allow_degraded_endpoints: true
+  allow_unhealthy_endpoints: false
+  disallow_open_circuit: true
+  allow_same_endpoint_if_different_route: false
+
+  prefer_same_region: true
+  prefer_same_protocol: true
+  prefer_same_channel: true
+  prefer_secure_routes: true
+  prefer_healthy_endpoints: true
+  respect_required_failover_disposition: true
+
+  default_profile: "default"
+  default_scope: "endpoint"
+
+  snapshot_ttl_seconds: 1800
+  history_ttl_seconds: 7200
+  max_history_size: 1000
+  max_profiles: 32
+  max_candidates: 64
+
+  max_attempts: 3
+  max_candidate_routes: 16
+  minimum_health_score: 0.0
+  max_cost_multiplier: 2.0
+
+  profiles:
+    default:
+      max_attempts: 3
+      max_candidates: 16
+      require_different_endpoint: true
+      exclude_current_endpoint: false
+      exclude_current_route: true
+      allow_protocol_change: true
+      allow_channel_change: true
+      prefer_same_protocol: true
+      prefer_same_channel: true
+      prefer_same_region: true
+      prefer_secure_routes: true
+      allow_degraded_endpoints: true
+      allow_unhealthy_endpoints: false
+      disallow_open_circuit: true
+      respect_required_failover_disposition: true
+      minimum_health_score: 0.0
+      max_cost_multiplier: 2.0
+
+    aggressive:
+      max_attempts: 4
+      max_candidates: 20
+      require_different_endpoint: true
+      exclude_current_endpoint: false
+      exclude_current_route: true
+      allow_protocol_change: true
+      allow_channel_change: true
+      prefer_same_protocol: true
+      prefer_same_channel: true
+      prefer_same_region: true
+      prefer_secure_routes: true
+      allow_degraded_endpoints: true
+      allow_unhealthy_endpoints: false
+      disallow_open_circuit: true
+      respect_required_failover_disposition: true
+      minimum_health_score: 0.0
+      max_cost_multiplier: 2.5
+
+    conservative:
+      max_attempts: 2
+      max_candidates: 8
+      require_different_endpoint: true
+      exclude_current_endpoint: true
+      exclude_current_route: true
+      allow_protocol_change: false
+      allow_channel_change: false
+      prefer_same_protocol: true
+      prefer_same_channel: true
+      prefer_same_region: true
+      prefer_secure_routes: true
+      allow_degraded_endpoints: false
+      allow_unhealthy_endpoints: false
+      disallow_open_circuit: true
+      respect_required_failover_disposition: true
+      minimum_health_score: 0.5
+      max_cost_multiplier: 1.5
+
+    streaming:
+      max_attempts: 3
+      max_candidates: 12
+      require_different_endpoint: true
+      exclude_current_endpoint: false
+      exclude_current_route: true
+      allow_protocol_change: false
+      allow_channel_change: false
+      prefer_same_protocol: true
+      prefer_same_channel: true
+      prefer_same_region: true
+      prefer_secure_routes: true
+      allow_degraded_endpoints: true
+      allow_unhealthy_endpoints: false
+      disallow_open_circuit: true
+      respect_required_failover_disposition: true
+      minimum_health_score: 0.3
+      max_cost_multiplier: 2.0

@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Parallax Protocol — Visual Mockup</title>
+  <style>
+    :root {
+      --bg: #070b16;
+      --panel: #0f1930;
+      --panel-2: #13213f;
+      --accent: #68e0ff;
+      --danger: #ff6b7a;
+      --ok: #7dffbf;
+      --text: #d9ebff;
+      --muted: #8fa8cb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 10%, #101f40 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: Inter, Segoe UI, Roboto, sans-serif;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .frame {
+      display: grid;
+      grid-template-columns: 270px 1fr 320px;
+      gap: 14px;
+      height: calc(100vh - 40px);
+    }
+    .panel {
+      background: linear-gradient(180deg, var(--panel) 0%, #0b1428 100%);
+      border: 1px solid #2a3f68;
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 0 0 1px rgba(104,224,255,.08), 0 18px 40px rgba(0,0,0,.35);
+    }
+    h1,h2,h3 { margin: 0 0 8px; font-weight: 700; letter-spacing: .4px; }
+    h1 { font-size: 20px; color: var(--accent); }
+    h2 { font-size: 14px; color: #bcd8ff; text-transform: uppercase; }
+    p,li { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    .core {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 12px;
+    }
+
+    .hud {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+    }
+    .stat { background: var(--panel-2); border: 1px solid #304d7e; border-radius: 10px; padding: 10px; }
+    .val { font-size: 22px; font-weight: 700; color: white; }
+    .ok { color: var(--ok); }
+    .danger { color: var(--danger); }
+
+    .board-wrap {
+      display: grid;
+      place-items: center;
+      background: #0b1428;
+      border-radius: 14px;
+      border: 1px solid #2a3f68;
+      padding: 10px;
+      position: relative;
+      overflow: hidden;
+    }
+    .orbit {
+      width: 580px;
+      height: 580px;
+      border-radius: 50%;
+      border: 2px dashed #39598b;
+      display: grid;
+      place-items: center;
+      position: relative;
+    }
+    .core-node {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #9beeff, #2a5d86 70%);
+      box-shadow: 0 0 35px rgba(104,224,255,.45);
+      border: 2px solid #a5edff;
+      z-index: 2;
+    }
+    .node {
+      position: absolute;
+      width: 72px;
+      height: 72px;
+      border-radius: 14px;
+      border: 2px solid #6ba9ff;
+      background: linear-gradient(160deg,#1c325f,#0f1d3d);
+      display: grid;
+      place-items: center;
+      color: #cbe5ff;
+      font-size: 11px;
+      text-align: center;
+      padding: 6px;
+    }
+    .n1 { top: 12%; left: 22%; }
+    .n2 { top: 6%; right: 24%; }
+    .n3 { right: 6%; top: 42%; }
+    .n4 { right: 18%; bottom: 12%; }
+    .n5 { left: 18%; bottom: 12%; }
+    .n6 { left: 6%; top: 42%; }
+
+    .phase {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .phase div {
+      background: #132543;
+      border: 1px solid #2f4e80;
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 11px;
+      text-align: center;
+      color: #aac8f3;
+    }
+    .phase .active {
+      background: #1a3860;
+      color: #dff6ff;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(104,224,255,.5) inset;
+    }
+
+    .choices { display: grid; gap: 8px; }
+    .card {
+      background: #122242;
+      border: 1px solid #2f4e80;
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .card strong { display: block; font-size: 13px; margin-bottom: 4px; }
+    .btn {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 11px;
+      color: #001626;
+      background: var(--accent);
+      padding: 5px 8px;
+      border-radius: 999px;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <aside class="panel">
+      <h1>Parallax Protocol</h1>
+      <p>Stabilize the orbital array while balancing trust, resources, and cascading failures.</p>
+      <h2>Mission Feed</h2>
+      <ul>
+        <li>Critical surge in Sector Kappa.</li>
+        <li>Faction Helios offers support (confidence: 62%).</li>
+        <li>Signal ghost detected in Relay N-3.</li>
+      </ul>
+      <h2>Round Objectives</h2>
+      <ul>
+        <li>Keep stability above 60%.</li>
+        <li>Repair 2 relays in one turn.</li>
+        <li>Avoid trust collapse with any faction.</li>
+      </ul>
+    </aside>
+
+    <main class="core panel">
+      <section class="hud">
+        <div class="stat"><div>Array Stability</div><div class="val ok">74%</div></div>
+        <div class="stat"><div>Faction Trust</div><div class="val">68</div></div>
+        <div class="stat"><div>Cascade Risk</div><div class="val danger">41%</div></div>
+      </section>
+
+      <section class="board-wrap">
+        <div class="orbit">
+          <div class="core-node"></div>
+          <div class="node n1">Relay A2<br/>Overheated</div>
+          <div class="node n2">Relay B1<br/>Stable</div>
+          <div class="node n3">Relay C4<br/>Compromised</div>
+          <div class="node n4">Relay D3<br/>Stable</div>
+          <div class="node n5">Relay E2<br/>Signal loss</div>
+          <div class="node n6">Relay F6<br/>Stable</div>
+        </div>
+      </section>
+
+      <section class="phase">
+        <div>Forecast</div>
+        <div class="active">Commit</div>
+        <div>Resolve</div>
+        <div>Debrief</div>
+      </section>
+    </main>
+
+    <aside class="panel">
+      <h2>Action Commit (2)</h2>
+      <div class="choices">
+        <div class="card">
+          <strong>Hard Reset: Relay C4</strong>
+          <p>Reduces cascade risk by 14%, but costs 18 energy.</p>
+          <span class="btn">COMMIT</span>
+        </div>
+        <div class="card">
+          <strong>Negotiate: Faction Helios</strong>
+          <p>Potential +20 trust if honest, -12 if deceptive.</p>
+          <span class="btn">COMMIT</span>
+        </div>
+        <div class="card">
+          <strong>Reroute through N-3</strong>
+          <p>High variance move. Could stabilize two relays at once.</p>
+          <span class="btn">COMMIT</span>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

@@ -37,9 +37,16 @@ This agent architecture is suitable for a variety of applications:
     *   Handles task dependencies, retries, timeouts, and progress tracking.
 *   **`ActionSelector` (in `action_selector.py`):**
     *   Responsible for choosing the most appropriate action from a list of available actions based on the current context and a configured strategy (e.g., priority-based, utility-based, hybrid).
+    *   Honors recovery signals in context: `force_idle` and `disallowed_actions`.
 *   **`BaseAction` (in `base_action.py`) & Subclasses (`MoveToAction`, `PickObjectAction`, `IdleAction`):**
     *   Define specific, executable behaviors.
     *   Each action has preconditions (what must be true to execute), postconditions (what becomes true after execution), a cost, and its own execution logic.
+*   **`ExecutionValidator` (in `execution_validator.py`):**
+    *   Performs strict pre-execution feasibility checks.
+    *   `move_to` validation is navigation-specific (optional `max_navigation_distance` + map bounds checks), while `pick_object` / `place_object` use manipulation distance checks (`max_object_distance`).
+*   **`ExecutionRecovery` (in `execution_recovery.py`):**
+    *   Runs strategy-specific recovery on action failure.
+    *   For unreachable `move_to` failures, recovery reports success only if movement preconditions actually changed; otherwise it marks `move_to` disallowed and fails the retry path.
 *   **`ExecutionMemory` (in `execution_memory.py`):**
     *   Provides multi-level caching (in-memory, disk), versioned checkpointing for saving/restoring agent state, and secure cookie management. Utilizes compression for efficiency.
 *   **`DeadlineAwareScheduler` (in `task_scheduler.py`):**
@@ -119,4 +126,9 @@ graph TD
 ```
 This is the heart of the agent's decision-making and action cycle.
 
+## Validation + Recovery Contract Notes
 
+1. A failed validation in `_validate_action` is a hard signal that current preconditions are insufficient for that action.
+2. Recovery should only return success when it materially changes preconditions relevant to the failed action.
+3. If recovery determines `move_to` remains impossible (e.g., unreachable target with unchanged movement preconditions), it marks `move_to` in `disallowed_actions`.
+4. The execution retry loop propagates `disallowed_actions`, and the selector filters those actions out, preventing repeated selection of the same impossible action without new information.

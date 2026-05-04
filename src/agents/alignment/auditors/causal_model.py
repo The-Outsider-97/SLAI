@@ -6,33 +6,106 @@ Implements causal graph operations for counterfactual analysis through:
 - Doubly robust estimation (Bang & Robins, 2005)
 """
 
-import statsmodels.formula.api as smf
-import networkx as nx
-import pandas as pd
-import numpy as np
-import subprocess
-import itertools
-import tempfile
-import math
-import json, os
+from __future__ import annotations
 
-from scipy.stats import pearsonr, norm
-from typing import Dict, List, Optional, Set, Tuple, Union
+import itertools
+import json
+import math
+import os
+import subprocess
+import tempfile
+import networkx as nx
+import numpy as np
+import pandas as pd
+
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+from scipy.stats import pearsonr, norm
+from sklearn.covariance import GraphicalLasso
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
-from sklearn.covariance import GraphicalLasso
 from statsmodels.api import OLS
-from statsmodels.formula.api import ols
 from statsmodels.tools.tools import add_constant
 from statsmodels.regression.linear_model import RegressionResultsWrapper
-from statsmodels.sandbox.regression.gmm import IV2SLS # For Instrumental Variables
+from statsmodels.sandbox.regression.gmm import IV2SLS
 
-from src.agents.alignment.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.alignment_errors import *
+from ..utils.alignment_helpers import *
+from ..alignment_memory import AlignmentMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Causal Model")
 printer = PrettyPrinter
+
+@dataclass
+class CausalEffectEstimate:
+    """
+    Canonical container for causal effect estimation results.
+
+    The object keeps the effect estimate machine-readable while also preserving
+    contextual metadata required by audit logging, intervention reports, and
+    downstream model diagnostics.
+    """
+
+    treatment: str
+    outcome: str
+    method: str
+    effect: float
+    std_error: Optional[float] = None
+    p_value: Optional[float] = None
+    ci_lower: Optional[float] = None
+    ci_upper: Optional[float] = None
+    n_obs: Optional[int] = None
+    instrument: Optional[str] = None
+    adjustment_set: List[str] = field(default_factory=list)
+    mediator_set: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_series(self) -> pd.Series:
+        return pd.Series(self.to_dict())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "treatment": self.treatment,
+            "outcome": self.outcome,
+            "method": self.method,
+            "effect": self.effect,
+            "std_error": self.std_error,
+            "p_value": self.p_value,
+            "ci_lower": self.ci_lower,
+            "ci_upper": self.ci_upper,
+            "n_obs": self.n_obs,
+            "instrument": self.instrument,
+            "adjustment_set": list(self.adjustment_set),
+            "mediator_set": list(self.mediator_set),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class StructuralEquation:
+    """Container for a node-level structural equation."""
+
+    node: str
+    parents: List[str]
+    equation_type: str
+    model: Any = None
+    mean: Optional[float] = None
+    variance: Optional[float] = None
+    predictors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node": self.node,
+            "parents": list(self.parents),
+            "equation_type": self.equation_type,
+            "mean": self.mean,
+            "variance": self.variance,
+            "predictors": list(self.predictors),
+        }
+
 
 class CausalGraphBuilder:
     """
@@ -42,694 +115,892 @@ class CausalGraphBuilder:
     - Confounder detection via latent variable analysis
     """
 
-    def __init__(self):
+    DEFAULT_REQUIRED_CONFIG_KEYS = (
+        "conditional_independence_test",
+        "min_adjacency_confidence",
+        "max_parents",
+        "forbidden_edges",
+        "required_edges",
+        "structure_learning_method",
+        "latent_confounder_detection",
+        "tetrad_path",
+        "fci_max_conditioning_set",
+        "use_inverse_covariance",
+        "significance_level",
+    )
+
+    def __init__(
+        self,
+        config_section_name: str = "causal_model",
+        config_file_path: Optional[str] = None,
+        alignment_memory: Optional[AlignmentMemory] = None,
+    ):
         self.config = load_global_config()
-        self.causal_config = get_config_section('causal_model')
-        self.min_adjacency_confidence = self.causal_config.get('min_adjacency_confidence')
-        self.max_parents = self.causal_config.get('max_parents')
-        self.significance_level = self.causal_config.get('significance_level')
-        self.forbidden_edges = self.causal_config.get('forbidden_edges')
-        self.required_edges = self.causal_config.get('required_edges')
-        self.latent_confounder_detection = self.causal_config.get('latent_confounder_detection', True)
-        self.tetrad_path = self.causal_config.get('tetrad_path', '')
-        self.fci_max_conditioning_set = self.causal_config.get('fci_max_conditioning_set', 5)
-        self.pag = None
+        self.config_section_name = ensure_non_empty_string(
+            config_section_name,
+            "config_section_name",
+            error_cls=ConfigurationError,
+        )
+        self.config_file_path = config_file_path
+        self.causal_config = get_config_section(self.config_section_name)
+        self._validate_builder_config()
 
-        self.graph = nx.DiGraph()
-        self.nodes = []
-        self.separating_sets = {} # Store separating sets found by PC
+        self.min_adjacency_confidence = coerce_float(
+            self.causal_config.get("min_adjacency_confidence", 0.7),
+            field_name="min_adjacency_confidence",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.max_parents = coerce_positive_int(
+            self.causal_config.get("max_parents", 3),
+            field_name="max_parents",
+        )
+        self.significance_level = coerce_float(
+            self.causal_config.get("significance_level", 0.05),
+            field_name="significance_level",
+            minimum=1e-8,
+            maximum=0.5,
+        )
+        self.forbidden_edges = self._normalize_edge_constraints(
+            self.causal_config.get("forbidden_edges", [])
+        )
+        self.required_edges = self._normalize_edge_constraints(
+            self.causal_config.get("required_edges", [])
+        )
+        self.structure_learning_method = ensure_non_empty_string(
+            self.causal_config.get("structure_learning_method", "pc"),
+            "structure_learning_method",
+            error_cls=ConfigurationError,
+        ).lower()
+        self.latent_confounder_detection = coerce_bool(
+            self.causal_config.get("latent_confounder_detection", True),
+            field_name="latent_confounder_detection",
+        )
+        self.tetrad_path = str(self.causal_config.get("tetrad_path", "") or "")
+        self.fci_max_conditioning_set = coerce_positive_int(
+            self.causal_config.get("fci_max_conditioning_set", 5),
+            field_name="fci_max_conditioning_set",
+        )
+        self.use_inverse_covariance = coerce_bool(
+            self.causal_config.get("use_inverse_covariance", False),
+            field_name="use_inverse_covariance",
+        )
+        self.optimize_structure = coerce_bool(
+            self.causal_config.get("optimize_structure", True),
+            field_name="optimize_structure",
+        )
+        self.max_structure_iterations = coerce_positive_int(
+            self.causal_config.get("max_structure_iterations", 100),
+            field_name="max_structure_iterations",
+        )
+        self.ci_test_min_samples = coerce_positive_int(
+            self.causal_config.get("ci_test_min_samples", 10),
+            field_name="ci_test_min_samples",
+        )
+        self.enable_memory_logging = coerce_bool(
+            self.causal_config.get("enable_memory_logging", True),
+            field_name="enable_memory_logging",
+        )
+        self.allow_tetrad_fallback = coerce_bool(
+            self.causal_config.get("allow_tetrad_fallback", True),
+            field_name="allow_tetrad_fallback",
+        )
+        self.sensitive_attributes_as_roots = coerce_bool(
+            self.causal_config.get("sensitive_attributes_as_roots", True),
+            field_name="sensitive_attributes_as_roots",
+        )
+        self.random_seed = coerce_int(
+            self.causal_config.get("random_seed", 42),
+            field_name="random_seed",
+        )
+        self.graph_export_format = ensure_non_empty_string(
+            self.causal_config.get("graph_export_format", "gml"),
+            "graph_export_format",
+            error_cls=ConfigurationError,
+        ).lower()
 
-        logger.info(f"Causal Graph Builder succesfully initialized")
+        self.alignment_memory = alignment_memory or AlignmentMemory()
+        self.random_state = np.random.default_rng(self.random_seed)
 
-    def _partial_correlation(self, data: pd.DataFrame, i: str, j: str, conditioning_set: Set[str]) -> Tuple[float, float]:
-        """
-        Calculates the partial correlation between variables i and j, conditioned on the conditioning_set.
-        Uses linear regression to partial out the effect of the conditioning set.
-        Returns the partial correlation coefficient and the p-value.
-        """
-        if not conditioning_set:
-            corr, p_value = pearsonr(data[i], data[j])
-            return corr, p_value
+        self.graph: nx.DiGraph = nx.DiGraph()
+        self.nodes: List[str] = []
+        self.separating_sets: Dict[Tuple[str, str], Set[str]] = {}
+        self.pag: Optional[nx.DiGraph] = None
+        self.tetrad_result: Optional[Dict[str, Any]] = None
+        self.potential_latent_confounders: Set[Tuple[str, str]] = set()
 
-        # Regress i on conditioning_set
-        formula_i = f"{i} ~ {' + '.join(conditioning_set)}"
-        model_i = ols(formula_i, data=data).fit()
-        residuals_i = model_i.resid
+        if config_file_path:
+            logger.debug(
+                "CausalGraphBuilder received config_file_path=%s but retained global config loader handling.",
+                config_file_path,
+            )
 
-        # Regress j on conditioning_set
-        formula_j = f"{j} ~ {' + '.join(conditioning_set)}"
-        model_j = ols(formula_j, data=data).fit()
-        residuals_j = model_j.resid
+        logger.info(
+            "CausalGraphBuilder initialized | method=%s max_parents=%s significance_level=%.4f",
+            self.structure_learning_method,
+            self.max_parents,
+            self.significance_level,
+        )
 
-        # Correlation of residuals
-        corr, p_value = pearsonr(residuals_i, residuals_j)
-        return corr, p_value
+    # ------------------------------------------------------------------
+    # Configuration and validation
+    # ------------------------------------------------------------------
+    def _validate_builder_config(self) -> None:
+        try:
+            ensure_mapping(
+                self.causal_config,
+                self.config_section_name,
+                allow_empty=False,
+                error_cls=ConfigurationError,
+            )
+            for required_key in self.DEFAULT_REQUIRED_CONFIG_KEYS:
+                if required_key not in self.causal_config:
+                    raise ConfigurationError(
+                        f"Missing required causal model configuration key: '{required_key}'.",
+                        context={
+                            "config_section": self.config_section_name,
+                            "config_path": self.config.get("__config_path__"),
+                        },
+                    )
+        except Exception as exc:
+            raise wrap_alignment_exception(
+                exc,
+                target_cls=ConfigurationError,
+                message="CausalGraphBuilder configuration validation failed.",
+                context={
+                    "config_section": self.config_section_name,
+                    "config_path": self.config.get("__config_path__"),
+                },
+            ) from exc
 
+    def _normalize_edge_constraints(
+        self,
+        edges: Optional[Sequence[Any]],
+    ) -> List[Tuple[str, str]]:
+        if edges is None:
+            return []
+        normalized: List[Tuple[str, str]] = []
+        for edge in ensure_sequence(edges, "edges", allow_empty=True, error_cls=ConfigurationError):
+            if not isinstance(edge, (list, tuple)) or len(edge) != 2:
+                raise ConfigurationError(
+                    "Edge constraints must be two-item sequences [source, target].",
+                    context={"edge": edge},
+                )
+            src = ensure_non_empty_string(edge[0], "edge_source", error_cls=ConfigurationError)
+            dst = ensure_non_empty_string(edge[1], "edge_target", error_cls=ConfigurationError)
+            normalized.append((src, dst))
+        return normalized
 
-    def _fisher_z_test(self, data: pd.DataFrame, i: str, j: str, conditioning_set: Set[str]) -> bool:
-        r"""
-        Performs the Fisher-Z test for conditional independence.
-        H0: i and j are independent given conditioning_set.
-        Returns True if H0 is accepted (independent), False otherwise.
-
-        The Fisher-Z transformation is $Z = 0.5 * \ln((1 + r) / (1 - r))$, where $r$ is the
-        (partial) correlation coefficient.
-        The test statistic is $z = Z * \sqrt{n - |S| - 3}$, where $n$ is the sample size
-        and $|S|$ is the size of the conditioning set.
-        Under H0, $z$ follows a standard normal distribution $N(0, 1)$.
-        We reject H0 if $|z| > \Phi^{-1}(1 - \alpha / 2)$, where $\Phi^{-1}$ is the
-        inverse CDF of the standard normal distribution and $\alpha$ is the significance level.
-        """
-        n = len(data)
-        k = len(conditioning_set)
-
-        if n <= k + 3:
-             # Cannot perform test if sample size is too small relative to conditioning set
-             logger.warning(f"Skipping Fisher-Z test for ({i}, {j}) | {conditioning_set}: n <= k + 3")
-             return False # Assume dependence if test cannot be performed reliably
-
-        partial_corr, _ = self._partial_correlation(data, i, j, conditioning_set)
-
-        # Fisher-Z transformation
-        # Avoid division by zero or log of non-positive number if partial_corr is +/- 1
-        if abs(partial_corr) >= 1.0:
-            # If correlation is perfect, they are dependent unless conditioning set explains it away perfectly
-            # This case is complex; PC usually assumes faithfulness (no perfect correlations canceling out)
-            # For simplicity, treat as dependent.
-             return False
-
-        z_transform = 0.5 * np.log((1 + partial_corr) / (1 - partial_corr))
-
-        # Test statistic
-        test_statistic = abs(z_transform * np.sqrt(n - k - 3))
-
-        # Critical value from standard normal distribution
-        critical_value = norm.ppf(1 - self.significance_level / 2)
-
-        # Check for independence
-        is_independent = test_statistic < critical_value
-        if is_independent:
-            # Store the separating set
-            self.separating_sets[(i, j)] = conditioning_set
-            self.separating_sets[(j, i)] = conditioning_set
-
-        return is_independent
-
-
-    def construct_graph(self,
-                       data: pd.DataFrame,
-                       sensitive_attrs: List[str]) -> 'CausalModel':
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def construct_graph(
+        self,
+        data: pd.DataFrame,
+        sensitive_attrs: Optional[Sequence[str]] = None,
+    ) -> "CausalModel":
         """
         Builds domain-constrained causal DAG with:
         1. Feature causal ordering
         2. Confounder identification
         3. Sensitive attribute positioning
         """
-        self.nodes = list(data.columns)
-        self.graph = nx.Graph() # Start with undirected graph for PC skeleton
-        self.graph.add_nodes_from(self.nodes)
-        self.separating_sets = {}
+        try:
+            if not isinstance(data, pd.DataFrame):
+                raise TypeMismatchError(
+                    "Causal graph construction requires a pandas DataFrame.",
+                    context={"actual_type": type(data).__name__},
+                )
+            if data.empty:
+                raise DataValidationError("Input data for causal graph construction must not be empty.")
 
-        logger.info("Running PC Algorithm Skeleton Phase...")
+            sensitive_attributes = normalize_sensitive_attributes(
+                sensitive_attrs or [],
+                lowercase=False,
+                allow_empty=True,
+            )
+            if sensitive_attributes:
+                ensure_columns_present(
+                    data,
+                    sensitive_attributes,
+                    field_name="data",
+                    error_cls=DataValidationError,
+                )
+
+            learning_data = self._prepare_structure_learning_data(data)
+            self.nodes = [str(column) for column in learning_data.columns]
+            self.separating_sets = {}
+            self.potential_latent_confounders = set()
+
+            method = self.structure_learning_method
+            if method == "pc":
+                self._build_pc_graph(learning_data)
+            elif method == "fci":
+                self._run_fci_algorithm(learning_data)
+            elif method == "tetrad":
+                if not self.tetrad_path:
+                    raise ExternalDependencyError(
+                        "Tetrad structure learning requested but 'tetrad_path' is not configured.",
+                        context={"structure_learning_method": method},
+                    )
+                self.graph = self._run_tetrad_fci(learning_data)
+                if self.graph.number_of_nodes() == 0 and self.allow_tetrad_fallback:
+                    logger.warning("Tetrad returned an empty graph. Falling back to PC structure learning.")
+                    self._build_pc_graph(learning_data)
+            else:
+                raise ConfigurationError(
+                    "Unsupported structure_learning_method configured for causal model.",
+                    context={"structure_learning_method": method},
+                )
+
+            if self.sensitive_attributes_as_roots and sensitive_attributes:
+                self._enforce_sensitive_attribute_rooting(sensitive_attributes)
+
+            self._enforce_graph_constraints()
+
+            if self.optimize_structure and self.graph.number_of_nodes() > 0:
+                self._optimize_structure(learning_data)
+
+            if not nx.is_directed_acyclic_graph(self.graph):
+                self.graph = self._break_cycles(self.graph, learning_data)
+
+            if not nx.is_directed_acyclic_graph(self.graph):
+                raise CausalModelError(
+                    "Final causal graph contains cycles after structure learning and constraint enforcement.",
+                    context={"edges": list(self.graph.edges())},
+                )
+
+            if self.latent_confounder_detection:
+                self._detect_confounders(learning_data, list(sensitive_attributes))
+
+            # Store latent confounders in graph's metadata dictionary
+            self.graph.graph["potential_latent_confounders"] = set(self.potential_latent_confounders)
+
+            self._log_memory_metric(
+                metric="causal_graph_edges",
+                value=float(self.graph.number_of_edges()),
+                threshold=float(max(1, len(self.nodes) * self.max_parents)),
+                context={
+                    "structure_learning_method": method,
+                    "n_nodes": len(self.nodes),
+                    "latent_confounders": len(self.potential_latent_confounders),
+                },
+                source="causal_graph_builder",
+            )
+
+            return CausalModel(
+                graph=self.graph.copy(),
+                data=data.copy(),
+                config_section_name=self.config_section_name,
+                config_file_path=self.config_file_path,
+                alignment_memory=self.alignment_memory,
+            )
+        except Exception as exc:
+            raise wrap_alignment_exception(
+                exc,
+                target_cls=CausalModelError,
+                message="Failed to construct causal graph.",
+                context={
+                    "structure_learning_method": getattr(self, "structure_learning_method", None),
+                    "sensitive_attrs": list(sensitive_attrs or []),
+                },
+            ) from exc
+
+    def save_graph(self, path: Union[str, Path], *, include_metadata: bool = True) -> Path:
+        """Persist the learned graph to disk using the configured export format."""
+        try:
+            target_path = Path(path)
+            if self.graph_export_format == "gml":
+                export_graph = self.graph.copy()
+                if include_metadata:
+                    # Retrieve confounders from graph metadata (or fallback to instance attribute)
+                    confounders = self.graph.graph.get("potential_latent_confounders", set())
+                    if isinstance(confounders, set):
+                        # Convert each tuple to a string "a->b"
+                        export_graph.graph["potential_latent_confounders"] = [
+                            f"{a}->{b}" for a, b in confounders
+                        ]
+                    elif isinstance(confounders, list):
+                        export_graph.graph["potential_latent_confounders"] = [
+                            f"{item[0]}->{item[1]}" if isinstance(item, tuple) else str(item)
+                            for item in confounders
+                        ]
+                    else:
+                        export_graph.graph["potential_latent_confounders"] = str(confounders)
+                nx.write_gml(export_graph, target_path)
+            else:
+                raise ConfigurationError(
+                    "Unsupported graph_export_format configured for causal graph export.",
+                    context={"graph_export_format": self.graph_export_format},
+                )
+            return target_path
+        except Exception as exc:
+            raise wrap_alignment_exception(
+                exc,
+                target_cls=CausalModelError,
+                message="Failed to save causal graph.",
+                context={"path": str(path)},
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Core structure learning
+    # ------------------------------------------------------------------
+    def _prepare_structure_learning_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convert heterogeneous alignment-domain features into a numeric view for
+        structure learning while preserving column identity.
+        """
+        prepared = pd.DataFrame(index=data.index)
+        for column in data.columns:
+            series = data[column]
+            if pd.api.types.is_bool_dtype(series):
+                prepared[column] = series.astype(int)
+            elif pd.api.types.is_numeric_dtype(series):
+                prepared[column] = pd.to_numeric(series, errors="coerce")
+            else:
+                codes, _ = pd.factorize(series.astype(str), sort=True)
+                prepared[column] = codes.astype(float)
+
+        prepared = prepared.replace([np.inf, -np.inf], np.nan)
+        prepared = prepared.dropna(axis=0, how="any")
+        if prepared.empty:
+            raise DataValidationError(
+                "Structure learning data became empty after numeric preparation and NaN removal.",
+                context={"original_rows": len(data)},
+            )
+
+        low_variance = [
+            column for column in prepared.columns
+            if prepared[column].nunique(dropna=True) <= 1 or float(prepared[column].var(ddof=0)) < 1e-12
+        ]
+        if low_variance:
+            prepared = prepared.drop(columns=low_variance)
+        if prepared.empty:
+            raise DataValidationError(
+                "All columns were removed during structure learning preparation due to low variance.",
+                context={"dropped_columns": low_variance},
+            )
+        return prepared
+
+    def _build_pc_graph(self, data: pd.DataFrame) -> None:
+        # Temporary undirected graph; type checker expects DiGraph, we ignore this assignment
+        self.graph = nx.Graph()  # type: ignore[assignment]
+        self.graph.add_nodes_from(data.columns)
         self._run_pc_algorithm_skeleton(data)
+        self._run_pc_algorithm_orientation(data)
+        self.graph = self._orient_remaining_edges(self.graph)  # type: ignore[arg-type]
 
-        logger.info("Running PC Algorithm Orientation Phase...")
-        self._run_pc_algorithm_orientation(data) # Orient edges based on v-structures and rules
-
-        # Convert the potentially mixed graph (some undirected edges might remain) to Directed Acyclic Graph
-        # A common approach is to break cycles by removing weakest links or using background knowledge.
-        # For simplicity here. More robust methods exist.
-        self.graph = self._orient_remaining_edges(self.graph)
-
-        # Ensure it's a DAG after orientation
-        if not nx.is_directed_acyclic_graph(self.graph):
-             logger.warning("Graph contains cycles after PC orientation. Attempting to break cycles.")
-             # Implement cycle breaking logic if necessary (e.g., remove edges based on CI test strength)
-             # For now, we raise an error or return the graph with cycles noted.
-             # A simple strategy: remove edges involved in cycles arbitrarily or based on weak confidence.
-             # This part needs careful implementation depending on the desired robustness.
-             # Here we just log and proceed, assuming downstream checks handle cycles if needed.
-             pass # Placeholder for cycle breaking
-
-
-        logger.info("Enforcing domain constraints...")
-        self._enforce_graph_constraints() # Apply after PC
-
-        logger.info("Optimizing structure with BIC score...")
-        self._optimize_structure(data) # Fine-tune based on score
-
-        # Final check for DAG property
-        if not nx.is_directed_acyclic_graph(self.graph):
-            raise ValueError("Final graph structure contains cycles after optimization and constraints.")
-
-        logger.info("Detecting potential confounders...")
-        # Note: Confounder detection based on graph structure is complex.
-        # PC algorithm inherently tries to account for observed confounders.
-        # This step might involve looking for specific patterns or using domain knowledge.
-        self._detect_confounders(data, sensitive_attrs) # Placeholder
-
-        logger.info("Causal graph construction complete.")
-        return CausalModel(self.graph, data)
-
-    def _run_pc_algorithm_skeleton(self, data: pd.DataFrame):
-        """
-        Constraint-based causal discovery - Skeleton phase.
-        Starts with a fully connected undirected graph and removes edges
-        based on conditional independence tests.
-        """
-        node_pairs = list(itertools.combinations(self.nodes, 2))
-        # Initialize fully connected undirected graph
-        for i, j in node_pairs:
-            self.graph.add_edge(i, j)
-
-        l = 0 # Size of conditioning set
-        while True:
-            edges_removed_in_iteration = False
-            logger.info(f"PC Algorithm: Testing conditional independence with set size {l}")
-            edges_to_remove = []
-            # Iterate over edges present in the graph from the previous iteration
-            current_edges = list(self.graph.edges())
-            for i, j in current_edges:
-                # Get neighbors of i excluding j
-                neighbors_i = set(self.graph.neighbors(i)) - {j}
-                if len(neighbors_i) >= l:
-                    # Iterate through all conditioning sets S of size l from neighbors_i
-                    for conditioning_set in itertools.combinations(neighbors_i, l):
-                        cond_set = set(conditioning_set)
-                        # Perform conditional independence test: Is i _||_ j | S ?
-                        if self._fisher_z_test(data, i, j, cond_set):
-                            if self.graph.has_edge(i, j):
-                                edges_to_remove.append((i, j))
-                                edges_removed_in_iteration = True
-                                logger.debug(f"Removing edge ({i}, {j}) based on CI test with S={cond_set}")
-                                # Store separating set
-                                self.separating_sets[(i, j)] = cond_set
-                                self.separating_sets[(j, i)] = cond_set
-                            break # Found a separating set, no need to check others for this edge
-
-            # Remove edges identified in this iteration
-            for u, v in edges_to_remove:
-                 # Ensure edge still exists before removing (might be removed by symmetric test)
-                 if self.graph.has_edge(u, v):
-                     self.graph.remove_edge(u, v)
-
-
-            l += 1
-            # Termination condition: No more edges removed or l exceeds max possible neighbors
-            if not edges_removed_in_iteration or l > len(self.nodes) - 2:
-                break
-
-    def _run_pc_algorithm_orientation(self, data: pd.DataFrame):
-         """
-         Orient edges in the skeleton graph based on v-structures and orientation rules.
-         Converts the undirected graph to a CPDAG (Completed Partially Directed Acyclic Graph).
-         """
-         # Create a directed graph copy to store orientations
-         oriented_graph = nx.DiGraph()
-         oriented_graph.add_nodes_from(self.graph.nodes())
-
-         # 1. Identify v-structures (colliders): i -- k -- j where i and j are non-adjacent,
-         #    and k is NOT in the separating set of i and j.
-         for k in self.graph.nodes():
-             neighbors_k = list(self.graph.neighbors(k))
-             if len(neighbors_k) < 2:
-                 continue
-             for i, j in itertools.combinations(neighbors_k, 2):
-                 # Check if i and j are non-adjacent in the skeleton
-                 if not self.graph.has_edge(i, j):
-                     # Check if k is NOT in the separating set S_ij
-                     sep_set_ij = self.separating_sets.get((i, j))
-                     if sep_set_ij is None or k not in sep_set_ij:
-                         # Orient edges i -> k <- j
-                         logger.debug(f"Orienting v-structure: {i} -> {k} <- {j}")
-                         if not oriented_graph.has_edge(k, i): # Avoid double edges if already oriented opposite
-                             oriented_graph.add_edge(i, k)
-                         if not oriented_graph.has_edge(k, j):
-                             oriented_graph.add_edge(j, k)
-
-         # 2. Apply orientation rules iteratively until no more edges can be oriented:
-         #    Rule R1: If i -> k and k -- j (undirected) and i, j are non-adjacent, orient k -> j. (Avoids new v-structure)
-         #    Rule R2: If i -> k -> j, orient i -> j if i -- j is undirected. (Avoids cycle)
-         #    Rule R3: If i -- k -> l and i -- j -> l and k -- j, orient k -> j. (Complex, avoids cycle/new v-structure)
-
-         # Start with edges from v-structures
-         # Keep track of undirected edges from the skeleton
-         undirected_edges = set()
-         for u, v in self.graph.edges():
-              # If neither u->v nor v->u is in the oriented graph, it's currently undirected
-              if not oriented_graph.has_edge(u, v) and not oriented_graph.has_edge(v, u):
-                   undirected_edges.add(tuple(sorted((u, v))))
-
-
-         changed = True
-         while changed:
-              changed = False
-              edges_to_orient = [] # Store orientations found in this pass: (u, v) means orient u -> v
-
-              # Convert set of tuples to list for iteration
-              current_undirected = list(undirected_edges)
-
-              for u, v in current_undirected:
-                   # Check Rule R1: Search for w such that w -> u and w, v are non-adjacent
-                   for w in oriented_graph.predecessors(u):
-                        if not self.graph.has_edge(w, v) and not oriented_graph.has_edge(v,w): # Non-adjacent in original skeleton
-                             if not oriented_graph.has_edge(v, u): # Ensure u->v is not already oriented
-                                  edges_to_orient.append((u, v))
-                                  logger.debug(f"Orientation Rule R1: {w} -> {u}, {u}--{v}, {w} not adj {v} => Orient {u} -> {v}")
-                                  break # Orient u->v
-
-                   if (u,v) in edges_to_orient or (v,u) in edges_to_orient: continue # Already decided
-
-                   # Check Rule R1 symmetric: Search for w such that w -> v and w, u are non-adjacent
-                   for w in oriented_graph.predecessors(v):
-                        if not self.graph.has_edge(w, u) and not oriented_graph.has_edge(u,w): # Non-adjacent in original skeleton
-                             if not oriented_graph.has_edge(u, v): # Ensure v->u is not already oriented
-                                  edges_to_orient.append((v, u))
-                                  logger.debug(f"Orientation Rule R1 (sym): {w} -> {v}, {u}--{v}, {w} not adj {u} => Orient {v} -> {u}")
-                                  break # Orient v->u
-
-                   if (u,v) in edges_to_orient or (v,u) in edges_to_orient: continue
-
-                   # Check Rule R2: Search for path u -> w -> v
-                   for w in oriented_graph.successors(u):
-                        if oriented_graph.has_edge(w, v):
-                             if not oriented_graph.has_edge(v, u): # Ensure u->v is not already oriented
-                                 edges_to_orient.append((u, v))
-                                 logger.debug(f"Orientation Rule R2: Path {u} -> {w} -> {v} => Orient {u} -> {v}")
-                                 break # Orient u->v
-
-                   if (u,v) in edges_to_orient or (v,u) in edges_to_orient: continue
-
-                   # Check Rule R2 symmetric: Search for path v -> w -> u
-                   for w in oriented_graph.successors(v):
-                       if oriented_graph.has_edge(w, u):
-                           if not oriented_graph.has_edge(u, v): # Ensure v->u is not already oriented
-                               edges_to_orient.append((v, u))
-                               logger.debug(f"Orientation Rule R2 (sym): Path {v} -> {w} -> {u} => Orient {v} -> {u}")
-                               break # Orient v->u
-
-                   if (u,v) in edges_to_orient or (v,u) in edges_to_orient: continue
-
-                   # Check Rule R3: Find common neighbors w1, w2 of u, v such that
-                   # w1 -- u -- w2, w1 -> v, w2 -> v and w1, w2 are non-adjacent
-                   # This rule is more complex and less commonly implemented/needed. Skipping for brevity.
-
-              # Apply orientations found in this pass
-              if edges_to_orient:
-                   changed = True
-                   for u_orient, v_orient in edges_to_orient:
-                        if not oriented_graph.has_edge(v_orient, u_orient): # Avoid creating cycles immediately
-                           oriented_graph.add_edge(u_orient, v_orient)
-                           # Remove from undirected set
-                           undirected_edges.discard(tuple(sorted((u_orient, v_orient))))
-
-
-         # After rules, add remaining undirected edges (from skeleton) without creating cycles
-         # This step depends on the specific PC variant (e.g., PC-Stable handles this differently)
-         # For now, we update the main graph attribute with the oriented edges found.
-         self.graph = oriented_graph # Replace skeleton with the oriented graph (CPDAG)
-
-
-    def _orient_remaining_edges(self, graph: nx.DiGraph) -> nx.DiGraph:
-        """
-        Attempts to orient remaining undirected edges in the CPDAG to form a DAG.
-        This is a placeholder for more sophisticated methods. A simple approach
-        might be to orient based on some score or arbitrarily while avoiding cycles.
-        """
-        # This function needs a robust implementation. For now, it returns the graph as is.
-        # A potential strategy: Iterate through undirected edges, tentatively orient one way,
-        # check for cycles. If no cycle, keep orientation. If cycle, try other way.
-        # If both create cycles, or neither, use another criterion (e.g., BIC score change).
-        logger.warning("Orientation of remaining undirected edges is basic. Cycles might persist or orientation might be arbitrary.")
-        # Example (very basic, likely insufficient):
-        final_graph = graph.copy()
-        undirected = [(u, v) for u, v in graph.to_undirected().edges() if not graph.has_edge(u, v) and not graph.has_edge(v, u)]
-
-        for u, v in undirected:
-             if not final_graph.has_edge(u,v) and not final_graph.has_edge(v,u):
-                 # Try orienting u -> v
-                 final_graph.add_edge(u, v)
-                 if not nx.is_directed_acyclic_graph(final_graph):
-                      final_graph.remove_edge(u, v)
-                      # Try orienting v -> u
-                      if not final_graph.has_edge(v,u) : # Check if already exists from previous step
-                           final_graph.add_edge(v, u)
-                           if not nx.is_directed_acyclic_graph(final_graph):
-                                final_graph.remove_edge(v, u) # Cannot orient without cycle
-                                logger.warning(f"Could not orient edge ({u}, {v}) without creating a cycle.")
-                 # If u->v worked or v->u worked, the edge is now oriented.
-        return final_graph
-
-
-    def _enforce_graph_constraints(self):
-        """Apply domain-specific structural constraints"""
-        if not isinstance(self.graph, nx.DiGraph):
-             logger.warning("Graph is not directed before enforcing constraints. Constraints might not apply correctly.")
-             return # Or attempt conversion
-
-        for (u, v) in self.forbidden_edges:
-            if self.graph.has_edge(u, v):
-                logger.info(f"Removing forbidden edge: {u} -> {v}")
-                self.graph.remove_edge(u, v)
-
-        for (u, v) in self.required_edges:
-            if not self.graph.has_edge(u, v):
-                 # Adding required edges might create cycles. Check required.
-                 self.graph.add_edge(u, v)
-                 if not nx.is_directed_acyclic_graph(self.graph):
-                      logger.warning(f"Adding required edge {u} -> {v} created a cycle. Removing it.")
-                      self.graph.remove_edge(u, v)
-                      # Decide how to handle this conflict - maybe raise error or prioritize constraint vs DAG property
-                 else:
-                      logger.info(f"Adding required edge: {u} -> {v}")
-
-
-    def _calculate_bic(self, data: pd.DataFrame, graph: nx.DiGraph) -> float:
-        """
-        Calculates the Bayesian Information Criterion (BIC) for a given DAG structure.
-        BIC = sum over variables [log P(D_i | Pa(G, i), theta_i)] - 0.5 * log(N) * |Params|
-        Assuming linear Gaussian models:
-        log P(D_i | Pa(G, i), theta_i) = -N/2 * log(2*pi*sigma_i^2) - 1/(2*sigma_i^2) * RSS_i
-        BIC = -N/2 * sum(log(sigma_i^2)) - 0.5 * log(N) * K
-        Where N is sample size, K is total number of parameters (coefficients + variances).
-        sigma_i^2 is the residual variance for variable i.
-        """
-        N = len(data)
-        total_bic = 0
-        total_params = 0
-
-        for node in graph.nodes():
-            parents = list(graph.predecessors(node))
-            num_parents = len(parents)
-            num_params_node = num_parents + 1 # Coefficients for parents + intercept/mean
-            total_params += num_params_node + 1 # +1 for variance parameter
-
-            if not parents:
-                # Node with no parents (exogenous)
-                mean = data[node].mean()
-                variance = data[node].var(ddof=0) # Use population variance (ddof=0) for BIC consistency
-                if variance <= 0: variance = np.finfo(float).eps # Avoid log(0)
-                log_likelihood = -N/2 * np.log(2 * np.pi * variance) - N/2
-            else:
-                # Node with parents (endogenous)
-                formula = f"{node} ~ {' + '.join(parents)}"
-                try:
-                    model = ols(formula, data=data).fit()
-                    rss = np.sum(model.resid**2)
-                    variance = rss / N # ML estimate of variance
-                    if variance <= 0: variance = np.finfo(float).eps # Avoid log(0)
-                    # Log-likelihood for Gaussian model (up to constants)
-                    log_likelihood = -N/2 * np.log(variance) - N/2 * np.log(2*np.pi) - N/2
-
-                except Exception as e:
-                     logger.error(f"Error fitting OLS for BIC calculation on node {node} with parents {parents}: {e}")
-                     # Penalize heavily if model fails
-                     log_likelihood = -np.inf
-
-
-            total_bic += log_likelihood
-
-        bic_score = total_bic - 0.5 * np.log(N) * total_params
-        # Higher BIC is better (less negative)
-        return bic_score
-
-
-    def _optimize_structure(self, data: pd.DataFrame):
-        """
-        Score-based structure optimization using greedy search (Hill Climbing) with BIC score.
-        Starts from the structure learned by PC (or other initial graph) and iteratively
-        adds, deletes, or reverses edges to improve the BIC score, while maintaining acyclicity.
-        """
-        if not nx.is_directed_acyclic_graph(self.graph):
-             logger.warning("Initial graph for BIC optimization contains cycles. Skipping optimization.")
-             return
-
-        current_score = self._calculate_bic(data, self.graph)
-        logger.info(f"Initial BIC score: {current_score}")
-
-        nodes = list(self.graph.nodes())
-        max_iterations = 100 # Limit iterations to prevent infinite loops
-        iteration = 0
-
-        while iteration < max_iterations:
-            best_neighbor_graph = None
-            best_neighbor_score = -np.inf # BIC is often negative, seek less negative
-            operation_made = None # Track best operation: ('add', u, v), ('delete', u, v), ('reverse', u, v)
-
-            # Consider all possible single-edge modifications
-            for u, v in itertools.permutations(nodes, 2):
-                 temp_graph = self.graph.copy()
-                 operation_type = None
-
-                 # 1. Try adding edge u -> v
-                 if not temp_graph.has_edge(u, v) and not temp_graph.has_edge(v, u):
-                      temp_graph.add_edge(u, v)
-                      if nx.is_directed_acyclic_graph(temp_graph):
-                           score = self._calculate_bic(data, temp_graph)
-                           if score > best_neighbor_score:
-                                best_neighbor_score = score
-                                best_neighbor_graph = temp_graph.copy()
-                                operation_made = ('add', u, v)
-                      # Backtrack: remove the edge for the next potential modification
-                      temp_graph.remove_edge(u, v)
-
-
-                 # 2. Try deleting edge u -> v
-                 if self.graph.has_edge(u, v): # Use self.graph to check original edge
-                      temp_graph = self.graph.copy() # Start fresh from original graph
-                      temp_graph.remove_edge(u, v)
-                      # Deleting edges cannot create cycles if original graph was DAG
-                      score = self._calculate_bic(data, temp_graph)
-                      if score > best_neighbor_score:
-                           best_neighbor_score = score
-                           best_neighbor_graph = temp_graph.copy()
-                           operation_made = ('delete', u, v)
-
-                 # 3. Try reversing edge u -> v
-                 if self.graph.has_edge(u, v): # Use self.graph to check original edge
-                      temp_graph = self.graph.copy() # Start fresh
-                      temp_graph.remove_edge(u, v)
-                      temp_graph.add_edge(v, u)
-                      if nx.is_directed_acyclic_graph(temp_graph):
-                           score = self._calculate_bic(data, temp_graph)
-                           if score > best_neighbor_score:
-                                best_neighbor_score = score
-                                best_neighbor_graph = temp_graph.copy()
-                                operation_made = ('reverse', u, v)
-                      # No need to backtrack here as we start fresh for each potential reversal
-
-            # Check if the best modification improves the score
-            if best_neighbor_score > current_score:
-                 logger.info(f"Greedy BIC Step: Applying operation {operation_made} improving score from {current_score:.4f} to {best_neighbor_score:.4f}")
-                 self.graph = best_neighbor_graph
-                 current_score = best_neighbor_score
-                 iteration += 1
-            else:
-                 logger.info(f"Greedy BIC Optimization: No further improvement found. Final BIC score: {current_score:.4f}")
-                 break # Local optimum reached
-
-        if iteration == max_iterations:
-            logger.warning("Greedy BIC Optimization reached max iterations.")
-
-    def _run_fci_algorithm(self, data: pd.DataFrame):
-        """FCI algorithm implementation with latent variable handling"""
-        # Step 1: FCI Skeleton Phase
-        logger.info("Running FCI Skeleton Phase...")
-        self._run_fci_skeleton(data)
-        
-        # Step 2: FCI Orientation Phase
-        logger.info("Running FCI Orientation Phase...")
-        self._run_fci_orientation()
-        
-        # Step 3: Store PAG
-        self.pag = self.graph.copy()
-
-    def _run_fci_skeleton(self, data: pd.DataFrame):
-        """FCI skeleton phase with extended conditioning sets"""
-        # Initialize complete undirected graph
-        self.graph = nx.complete_graph(self.nodes, create_using=nx.Graph())
-        l = 0
-        
-        while l <= self.fci_max_conditioning_set:
-            edges_removed = False
-            current_edges = list(self.graph.edges())
-            
-            for i, j in current_edges:
-                neighbors_i = set(self.graph.neighbors(i)) - {j}
-                neighbors_j = set(self.graph.neighbors(j)) - {i}
-                possible_conditioning_sets = set()
-                
-                # Consider sets from both neighborhoods
-                for k in range(0, min(l, len(neighbors_i)) + 1):
-                    possible_conditioning_sets |= set(itertools.combinations(neighbors_i, k))
-                
-                for k in range(0, min(l, len(neighbors_j)) + 1):
-                    possible_conditioning_sets |= set(itertools.combinations(neighbors_j, k))
-                
-                for cond_set in possible_conditioning_sets:
-                    cond_set = set(cond_set)
-                    if self._fisher_z_test(data, i, j, cond_set):
-                        if self.graph.has_edge(i, j):
-                            self.graph.remove_edge(i, j)
-                            edges_removed = True
-                            self.separating_sets[(i, j)] = cond_set
-                            self.separating_sets[(j, i)] = cond_set
-                            break
-            
-            if not edges_removed or l >= self.fci_max_conditioning_set:
-                break
-            l += 1
-
-    def _run_fci_orientation(self):
-        """FCI orientation rules for PAG construction"""
-        # Initialize PAG with circle marks
-        pag = nx.DiGraph()
-        for u, v in self.graph.edges():
-            pag.add_edge(u, v, mark='o')
-            pag.add_edge(v, u, mark='o')
-        
-        # Rule 0: Orient colliders
-        for node in pag.nodes():
-            neighbors = list(pag.neighbors(node))
-            if len(neighbors) < 2:
-                continue
-                
-            for i, j in itertools.combinations(neighbors, 2):
-                if not pag.has_edge(i, j):
-                    sep_set = self.separating_sets.get((i, j), set())
-                    if node not in sep_set:
-                        # Orient i *-> node <-* j
-                        pag[i][node]['mark'] = '>' if pag[i][node]['mark'] != '<' else '<'
-                        pag[j][node]['mark'] = '>' if pag[j][node]['mark'] != '<' else '<'
-        
-        # Additional FCI orientation rules would be implemented here
-        # (Rules 1-4 for further edge orientation)
-        
-        # Store orientation marks in graph
-        self.graph = pag
-
-    def _detect_confounders(self, data: pd.DataFrame, sensitive_attrs: List[str]):
-        """Enhanced confounder detection with FCI and Tetrad integration"""
-        if not self.latent_confounder_detection:
-            logger.info("Latent confounder detection disabled in config")
-            return
-        
-        # Save the original graph state
-        original_graph = self.graph.copy()
-        
+    def _estimate_inverse_covariance(self, data: pd.DataFrame) -> Optional[np.ndarray]:
         try:
-            # Option 1: Use Tetrad if available
-            if self.tetrad_path and self._run_tetrad_fci(data):
-                self._analyze_tetrad_results(sensitive_attrs)
-                return
-                
-            # Option 2: Internal FCI implementation
-            self._run_fci_algorithm(data)
-            self._analyze_pag(sensitive_attrs)
-        except Exception as e:
-            logger.error(f"Confounder detection failed: {e}")
-        finally:
-            # Always restore the original graph after confounder detection
-            self.graph = original_graph
-
-    def _run_tetrad_fci(self, data: pd.DataFrame) -> nx.DiGraph:
-        tetrad_jar_path = self.tetrad_path
-        if not os.path.isfile(tetrad_jar_path):
-            logger.error(f"Tetrad JAR not found at path: {tetrad_jar_path}")
-            raise FileNotFoundError(f"Tetrad JAR not found: {tetrad_jar_path}")
-    
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-                data.to_csv(tmp.name, index=False)
-                tmp_path = tmp.name
-    
-            tetrad_cmd = [
-                "java", "-jar", tetrad_jar_path,  # this is where the error likely originated
-                "--algorithm", "fci",
-                "--data", tmp_path
-            ]
-            logger.info(f"Running Tetrad with command: {' '.join(tetrad_cmd)}")
-            result = subprocess.run(tetrad_cmd, capture_output=True, text=True, check=True)
-            # ...parse result.stdout into a graph...
-            return self._parse_tetrad_output(result.stdout)
-    
-        except Exception as e:
-            logger.error(f"Confounder detection failed: {e}")
-            return nx.DiGraph()
-
-    def _analyze_tetrad_results(self, sensitive_attrs: List[str]):
-        """Parse Tetrad output for latent confounders"""
-        confounders = set()
-        graph = self.tetrad_result['graph']
-        
-        for edge in graph['edges']:
-            if edge['endpoint1'] == 'ARROW' and edge['endpoint2'] == 'ARROW':
-                i, j = edge['node1'], edge['node2']
-                confounders.add((i, j))
-                if i in sensitive_attrs or j in sensitive_attrs:
-                    logger.warning(f"Tetrad detected latent confounder involving sensitive attribute: {i} <-> {j}")
-
-        self.graph.potential_latent_confounders = confounders
-        logger.info(f"Tetrad detected {len(confounders)} potential latent confounders")
-
-    def _analyze_pag(self, sensitive_attrs: List[str]):
-        """Analyze PAG for latent confounders"""
-        if not self.pag:
-            return
-            
-        confounders = set()
-        for u, v, data in self.pag.edges(data=True):
-            if data.get('mark', '') == '<' and self.pag[v][u].get('mark', '') == '<':
-                confounders.add((u, v))
-                if u in sensitive_attrs or v in sensitive_attrs:
-                    logger.warning(f"Detected latent confounder involving sensitive attribute: {u} <-> {v}")
-
-        self.graph.potential_latent_confounders = confounders
-        logger.info(f"Detected {len(confounders)} potential latent confounders")
-
-    def _estimate_inverse_covariance(self, data: pd.DataFrame):
-        """Estimate sparse inverse covariance for FCI tests"""
-        try:
-            cov_matrix = data.cov().values
-            model = GraphicalLasso()
-            model.fit(cov_matrix)
+            model = GraphicalLasso(alpha=0.01, max_iter=500)   # increased from 200
+            model.fit(data.values)
             return model.precision_
-        except Exception as e:
-            logger.error(f"Inverse covariance estimation failed: {str(e)}")
+        except Exception as exc:
+            logger.warning("Inverse covariance estimation failed: %s", exc)
             return None
 
-    # Update conditional independence test for FCI
-    def _partial_correlation(self, data: pd.DataFrame, i: str, j: str, conditioning_set: Set[str]) -> Tuple[float, float]:
-        """Enhanced with inverse covariance matrix option"""
-        n = len(data)
-        
-        if self.causal_config.get('use_inverse_covariance', False) and n > 50:
+    def _partial_correlation(
+        self,
+        data: pd.DataFrame,
+        i: str,
+        j: str,
+        conditioning_set: Set[str],
+    ) -> Tuple[float, float]:
+        """
+        Calculates partial correlation between variables i and j conditioned on
+        the conditioning_set using regression residualisation, optionally backed
+        by sparse inverse covariance when configured and feasible.
+        """
+        if i not in data.columns or j not in data.columns:
+            raise DataValidationError(
+                "Variables referenced in partial correlation were not found in data.",
+                context={"i": i, "j": j},
+            )
+
+        # Case 1: empty conditioning set -> simple Pearson correlation
+        if not conditioning_set:
+            corr_val, p_val = pearsonr(data[i], data[j])
+            return float(corr_val), float(p_val)
+
+        # Case 2: use inverse covariance if requested and feasible
+        if self.use_inverse_covariance and len(data) > max(50, len(conditioning_set) + 10):
             precision_matrix = self._estimate_inverse_covariance(data)
             if precision_matrix is not None:
                 idx_i = data.columns.get_loc(i)
                 idx_j = data.columns.get_loc(j)
-                cond_indices = [data.columns.get_loc(c) for c in conditioning_set if c in data.columns]
-                
-                # Calculate partial correlation using precision matrix
-                p_corr = -precision_matrix[idx_i, idx_j] / math.sqrt(
-                    precision_matrix[idx_i, idx_i] * precision_matrix[idx_j, idx_j])
-                
-                # Fisher Z-transform for p-value
-                n = len(data)
-                z = 0.5 * math.log((1 + p_corr) / (1 - p_corr))
-                se = 1 / math.sqrt(n - len(conditioning_set) - 3)
-                z_score = abs(z / se)
-                p_value = 2 * (1 - norm.cdf(z_score))
-                return p_corr, p_value
-            
+                numerator = -precision_matrix[idx_i, idx_j]
+                denominator = math.sqrt(
+                    max(precision_matrix[idx_i, idx_i], 1e-12) *
+                    max(precision_matrix[idx_j, idx_j], 1e-12)
+                )
+                partial_corr = float(np.clip(numerator / denominator, -0.999999, 0.999999))
+                z_transform = 0.5 * math.log((1 + partial_corr) / (1 - partial_corr))
+                se = 1.0 / math.sqrt(max(len(data) - len(conditioning_set) - 3, 1))
+                z_score = abs(z_transform / se)
+                p_val = 2 * (1 - norm.cdf(z_score))
+                return partial_corr, float(p_val)
+
+        # Case 3: fallback to regression residualisation
+        cond_columns = [column for column in conditioning_set if column in data.columns]
+        if not cond_columns:
+            corr_val, p_val = pearsonr(data[i], data[j])
+            return float(corr_val), float(p_val)
+
+        x_model = OLS(data[i], add_constant(data[cond_columns], has_constant="add")).fit()
+        y_model = OLS(data[j], add_constant(data[cond_columns], has_constant="add")).fit()
+        corr_val, p_val = pearsonr(x_model.resid, y_model.resid)
+        return float(corr_val), float(p_val)
+
+    def _fisher_z_test(
+        self,
+        data: pd.DataFrame,
+        i: str,
+        j: str,
+        conditioning_set: Set[str],
+    ) -> bool:
+        """
+        Performs the Fisher-Z test for conditional independence.
+        Returns True when independence is accepted and False otherwise.
+        """
+        n = len(data)
+        k = len(conditioning_set)
+        if n < max(self.ci_test_min_samples, k + 4):
+            return False
+
+        partial_corr, _ = self._partial_correlation(data, i, j, conditioning_set)
+        if abs(partial_corr) >= 1.0:
+            return False
+
+        z_transform = 0.5 * np.log((1 + partial_corr) / (1 - partial_corr))
+        test_statistic = abs(z_transform * np.sqrt(max(n - k - 3, 1)))
+        critical_value = norm.ppf(1 - self.significance_level / 2)
+        is_independent = bool(test_statistic < critical_value)
+        if is_independent:
+            self.separating_sets[(i, j)] = set(conditioning_set)
+            self.separating_sets[(j, i)] = set(conditioning_set)
+        return is_independent
+
+    def _run_pc_algorithm_skeleton(self, data: pd.DataFrame) -> None:
+        node_pairs = list(itertools.combinations(list(self.graph.nodes()), 2))
+        for i, j in node_pairs:
+            if not self.graph.has_edge(i, j):
+                self.graph.add_edge(i, j)
+
+        l = 0
+        while True:
+            edges_removed_in_iteration = False
+            current_edges = list(self.graph.edges())
+            for i, j in current_edges:
+                neighbors_i = set(self.graph.neighbors(i)) - {j}
+                if len(neighbors_i) < l:
+                    continue
+                for conditioning_tuple in itertools.combinations(neighbors_i, l):
+                    conditioning_set = set(conditioning_tuple)
+                    if self._fisher_z_test(data, i, j, conditioning_set):
+                        if self.graph.has_edge(i, j):
+                            self.graph.remove_edge(i, j)
+                            edges_removed_in_iteration = True
+                        break
+            l += 1
+            if not edges_removed_in_iteration or l > len(self.graph.nodes()) - 2:
+                break
+
+    def _run_pc_algorithm_orientation(self, data: pd.DataFrame) -> None:
+        oriented_graph = nx.DiGraph()
+        oriented_graph.add_nodes_from(self.graph.nodes())
+
+        for k in self.graph.nodes():
+            neighbors = list(self.graph.neighbors(k))
+            if len(neighbors) < 2:
+                continue
+            for i, j in itertools.combinations(neighbors, 2):
+                if self.graph.has_edge(i, j):
+                    continue
+                sep_set = self.separating_sets.get((i, j), set())
+                if k not in sep_set:
+                    if not oriented_graph.has_edge(k, i):
+                        oriented_graph.add_edge(i, k)
+                    if not oriented_graph.has_edge(k, j):
+                        oriented_graph.add_edge(j, k)
+
+        undirected_edges = {
+            tuple(sorted((u, v)))
+            for u, v in self.graph.edges()
+            if not oriented_graph.has_edge(u, v) and not oriented_graph.has_edge(v, u)
+        }
+
+        changed = True
+        while changed:
+            changed = False
+            for u, v in list(undirected_edges):
+                if self._apply_orientation_rules(oriented_graph, u, v):
+                    undirected_edges.discard(tuple(sorted((u, v))))
+                    changed = True
+
+        for u, v in undirected_edges:
+            if not oriented_graph.has_edge(u, v) and not oriented_graph.has_edge(v, u):
+                oriented_graph.add_edge(u, v)
+
+        self.graph = oriented_graph
+
+    def _apply_orientation_rules(self, graph: nx.DiGraph, u: str, v: str) -> bool:
+        for predecessor in graph.predecessors(u):
+            if predecessor == v:
+                continue
+            if not self.graph.has_edge(predecessor, v):
+                graph.add_edge(u, v)
+                return True
+
+        for predecessor in graph.predecessors(v):
+            if predecessor == u:
+                continue
+            if not self.graph.has_edge(predecessor, u):
+                graph.add_edge(v, u)
+                return True
+
+        for intermediate in graph.successors(u):
+            if graph.has_edge(intermediate, v):
+                graph.add_edge(u, v)
+                return True
+
+        for intermediate in graph.successors(v):
+            if graph.has_edge(intermediate, u):
+                graph.add_edge(v, u)
+                return True
+
+        return False
+
+    def _orient_remaining_edges(self, graph: Union[nx.Graph, nx.DiGraph]) -> nx.DiGraph:
+        final_graph = nx.DiGraph()
+        final_graph.add_nodes_from(graph.nodes())
+
+        if isinstance(graph, nx.Graph) and not isinstance(graph, nx.DiGraph):
+            edges = list(graph.edges())
         else:
-            # Fallback to original OLS method
-            return super()._partial_correlation(data, i, j, conditioning_set)
+            edges = list(graph.to_undirected().edges())
+
+        for u, v in edges:
+            if final_graph.has_edge(u, v) or final_graph.has_edge(v, u):
+                continue
+            final_graph.add_edge(u, v)
+            if not nx.is_directed_acyclic_graph(final_graph):
+                final_graph.remove_edge(u, v)
+                final_graph.add_edge(v, u)
+                if not nx.is_directed_acyclic_graph(final_graph):
+                    final_graph.remove_edge(v, u)
+        return final_graph
+
+    def _enforce_sensitive_attribute_rooting(self, sensitive_attrs: Sequence[str]) -> None:
+        if not isinstance(self.graph, nx.DiGraph):
+            return
+        for sensitive_attr in sensitive_attrs:
+            if sensitive_attr not in self.graph:
+                continue
+            for predecessor in list(self.graph.predecessors(sensitive_attr)):
+                self.graph.remove_edge(predecessor, sensitive_attr)
+
+    def _enforce_graph_constraints(self) -> None:
+        if not isinstance(self.graph, nx.DiGraph):
+            converted_graph = nx.DiGraph()
+            converted_graph.add_nodes_from(self.graph.nodes())
+            converted_graph.add_edges_from(self.graph.edges())
+            self.graph = converted_graph
+
+        for source, target in self.forbidden_edges:
+            if self.graph.has_edge(source, target):
+                self.graph.remove_edge(source, target)
+
+        for source, target in self.required_edges:
+            if source not in self.graph:
+                self.graph.add_node(source)
+            if target not in self.graph:
+                self.graph.add_node(target)
+            self.graph.add_edge(source, target)
+            if not nx.is_directed_acyclic_graph(self.graph):
+                self.graph.remove_edge(source, target)
+                raise CausalModelError(
+                    "Adding a required edge would violate DAG constraints.",
+                    context={"required_edge": (source, target)},
+                )
+
+        for node in list(self.graph.nodes()):
+            parents = list(self.graph.predecessors(node))
+            if len(parents) <= self.max_parents:
+                continue
+            parents_to_remove = parents[self.max_parents:]
+            for parent in parents_to_remove:
+                self.graph.remove_edge(parent, node)
+
+    def _calculate_bic(self, data: pd.DataFrame, graph: nx.DiGraph) -> float:
+        n_obs = len(data)
+        if n_obs == 0:
+            return float("-inf")
+
+        total_bic = 0.0
+        total_params = 0
+
+        for node in graph.nodes():
+            parents = list(graph.predecessors(node))
+            y = data[node]
+            if not parents:
+                variance = max(float(y.var(ddof=0)), 1e-12)
+                log_likelihood = -n_obs / 2 * np.log(2 * np.pi * variance) - n_obs / 2
+                total_params += 2
+            else:
+                X = add_constant(data[parents], has_constant="add")
+                model = OLS(y, X).fit()
+                rss = float(np.sum(model.resid ** 2))
+                variance = max(rss / n_obs, 1e-12)
+                log_likelihood = -n_obs / 2 * np.log(variance) - n_obs / 2 * np.log(2 * np.pi) - n_obs / 2
+                total_params += len(parents) + 2
+            total_bic += log_likelihood
+
+        return float(total_bic - 0.5 * np.log(max(n_obs, 1)) * total_params)
+
+    def _optimize_structure(self, data: pd.DataFrame) -> None:
+        if not nx.is_directed_acyclic_graph(self.graph):
+            return
+
+        current_score = self._calculate_bic(data, self.graph)
+        nodes = list(self.graph.nodes())
+
+        for _ in range(self.max_structure_iterations):
+            best_graph = None
+            best_score = current_score
+
+            for source, target in itertools.permutations(nodes, 2):
+                neighbor_graph = self.graph.copy()
+
+                if not neighbor_graph.has_edge(source, target) and not neighbor_graph.has_edge(target, source):
+                    neighbor_graph.add_edge(source, target)
+                    if nx.is_directed_acyclic_graph(neighbor_graph):
+                        score = self._calculate_bic(data, neighbor_graph)
+                        if score > best_score:
+                            best_graph = neighbor_graph.copy()
+                            best_score = score
+
+                if self.graph.has_edge(source, target):
+                    neighbor_graph = self.graph.copy()
+                    neighbor_graph.remove_edge(source, target)
+                    score = self._calculate_bic(data, neighbor_graph)
+                    if score > best_score:
+                        best_graph = neighbor_graph.copy()
+                        best_score = score
+
+                    neighbor_graph = self.graph.copy()
+                    neighbor_graph.remove_edge(source, target)
+                    neighbor_graph.add_edge(target, source)
+                    if nx.is_directed_acyclic_graph(neighbor_graph):
+                        score = self._calculate_bic(data, neighbor_graph)
+                        if score > best_score:
+                            best_graph = neighbor_graph.copy()
+                            best_score = score
+
+            if best_graph is None:
+                break
+            self.graph = best_graph
+            current_score = best_score
+
+    def _break_cycles(self, graph: nx.DiGraph, data: pd.DataFrame) -> nx.DiGraph:
+        candidate = graph.copy()
+        while not nx.is_directed_acyclic_graph(candidate):
+            cycle = nx.find_cycle(candidate, orientation="original")
+            if not cycle:
+                break
+
+            best_edge_to_remove = None
+            best_score = float("-inf")
+            for source, target, _ in cycle:
+                trial = candidate.copy()
+                trial.remove_edge(source, target)
+                if not nx.is_directed_acyclic_graph(trial):
+                    continue
+                score = self._calculate_bic(data, trial)
+                if score > best_score:
+                    best_score = score
+                    best_edge_to_remove = (source, target)
+
+            if best_edge_to_remove is None:
+                source, target, _ = cycle[0]
+                candidate.remove_edge(source, target)
+            else:
+                candidate.remove_edge(*best_edge_to_remove)
+        return candidate
+
+    # ------------------------------------------------------------------
+    # Latent confounders and Tetrad / FCI
+    # ------------------------------------------------------------------
+    def _run_fci_algorithm(self, data: pd.DataFrame) -> None:
+        # Temporary undirected graph; type checker expects DiGraph, we ignore this assignment
+        self.graph = nx.Graph()  # type: ignore[assignment]
+        self.graph.add_nodes_from(data.columns)
+        self._run_fci_skeleton(data)
+        self._run_fci_orientation()
+
+    def _run_fci_skeleton(self, data: pd.DataFrame) -> None:
+        self.graph = nx.complete_graph(list(data.columns), create_using=nx.Graph())
+        l = 0
+        while l <= self.fci_max_conditioning_set:
+            edges_removed = False
+            current_edges = list(self.graph.edges())
+            for i, j in current_edges:
+                neighbors_i = set(self.graph.neighbors(i)) - {j}
+                neighbors_j = set(self.graph.neighbors(j)) - {i}
+                candidate_sets: Set[Tuple[str, ...]] = set()
+                for base_neighbors in (neighbors_i, neighbors_j):
+                    if len(base_neighbors) < l:
+                        continue
+                    for conditioning_tuple in itertools.combinations(base_neighbors, l):
+                        candidate_sets.add(tuple(conditioning_tuple))
+
+                for conditioning_tuple in candidate_sets:
+                    conditioning_set = set(conditioning_tuple)
+                    if self._fisher_z_test(data, i, j, conditioning_set):
+                        if self.graph.has_edge(i, j):
+                            self.graph.remove_edge(i, j)
+                            edges_removed = True
+                        break
+            if not edges_removed:
+                break
+            l += 1
+
+    def _run_fci_orientation(self) -> None:
+        pag = nx.DiGraph()
+        pag.add_nodes_from(self.graph.nodes())
+
+        for node in self.graph.nodes():
+            neighbors = list(self.graph.neighbors(node))
+            if len(neighbors) < 2:
+                continue
+            for left, right in itertools.combinations(neighbors, 2):
+                if self.graph.has_edge(left, right):
+                    continue
+                if node not in self.separating_sets.get((left, right), set()):
+                    pag.add_edge(left, node)
+                    pag.add_edge(right, node)
+
+        self.pag = pag
+        self.graph = self._orient_remaining_edges(pag)
+
+    def _run_tetrad_fci(self, data: pd.DataFrame) -> nx.DiGraph:
+        tetrad_jar_path = Path(self.tetrad_path)
+        if not tetrad_jar_path.is_file():
+            raise ExternalDependencyError(
+                "Configured Tetrad JAR path does not exist.",
+                context={"tetrad_path": str(tetrad_jar_path)},
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp_file:
+            data.to_csv(tmp_file.name, index=False)
+            tmp_path = tmp_file.name
+
+        try:
+            command = [
+                "java",
+                "-jar",
+                str(tetrad_jar_path),
+                "--algorithm",
+                "fci",
+                "--data",
+                tmp_path,
+            ]
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return self._parse_tetrad_output(result.stdout, data.columns.tolist())
+        except subprocess.CalledProcessError as exc:
+            raise ExternalDependencyError(
+                "Tetrad FCI execution failed.",
+                context={"stderr": exc.stderr, "stdout": exc.stdout},
+                cause=exc,
+            ) from exc
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _parse_tetrad_output(self, output: str, nodes: Sequence[str]) -> nx.DiGraph:
+        graph = nx.DiGraph()
+        graph.add_nodes_from(nodes)
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or "->" not in line:
+                continue
+            parts = [part.strip() for part in line.split("->")]
+            if len(parts) != 2:
+                continue
+            source, target = parts
+            if source in graph and target in graph:
+                graph.add_edge(source, target)
+        return graph
+
+    def _detect_confounders(self, data: pd.DataFrame, sensitive_attrs: Sequence[str]) -> None:
+        if self.pag is not None:
+            self._analyze_pag(sensitive_attrs)
+
+        ancestors_by_sensitive_attr: Dict[str, Set[str]] = {}
+        for sensitive_attr in sensitive_attrs:
+            if sensitive_attr in self.graph:
+                ancestors_by_sensitive_attr[sensitive_attr] = set(nx.ancestors(self.graph, sensitive_attr))
+
+        common_ancestors = set.intersection(*ancestors_by_sensitive_attr.values()) if ancestors_by_sensitive_attr else set()
+        for candidate in common_ancestors:
+            for sensitive_attr in sensitive_attrs:
+                # Create a sorted tuple to avoid duplicate (a,b) vs (b,a)
+                if candidate < sensitive_attr:
+                    self.potential_latent_confounders.add((candidate, sensitive_attr))
+                else:
+                    self.potential_latent_confounders.add((sensitive_attr, candidate))
+
+    def _analyze_pag(self, sensitive_attrs: Sequence[str]) -> None:
+        if self.pag is None:
+            return
+        confounders: Set[Tuple[str, str]] = set()
+        for u, v in self.pag.edges():
+            if self.pag.has_edge(v, u):
+                confounders.add(tuple(sorted((u, v))))
+        self.potential_latent_confounders |= confounders
+        for left, right in confounders:
+            if left in sensitive_attrs or right in sensitive_attrs:
+                logger.warning(
+                    "Potential latent confounder detected involving a sensitive attribute: %s <-> %s",
+                    left,
+                    right,
+                )
+
+    # ------------------------------------------------------------------
+    # Memory logging
+    # ------------------------------------------------------------------
+    def _log_memory_metric(
+        self,
+        metric: str,
+        value: float,
+        threshold: float,
+        context: Mapping[str, Any],
+        *,
+        source: str,
+        tags: Optional[Iterable[Any]] = None,
+    ) -> None:
+        if not self.enable_memory_logging:
+            return
+        try:
+            self.alignment_memory.log_evaluation(
+                metric=metric,
+                value=float(value),
+                threshold=float(threshold),
+                context=dict(context),
+                source=source,
+                tags=tags,
+                metadata={"module": "causal_model"},
+            )
+        except Exception as exc:
+            logger.warning("Failed to log causal-model metric to AlignmentMemory: %s", exc)
 
 
-# ==================================================
-# Causal Model Class (includes IV, Backdoor, etc.)
-# ==================================================
 class CausalModel:
     """
     Structural Causal Model implementing:
@@ -739,806 +1010,889 @@ class CausalModel:
     - Instrumental Variable estimation
     """
 
-    def __init__(self, graph: nx.DiGraph, data: pd.DataFrame):
-        if not isinstance(graph, nx.DiGraph):
-             raise TypeError("Input graph must be a NetworkX DiGraph.")
-        if not nx.is_directed_acyclic_graph(graph):
-            # Attempt basic cycle breaking or raise error
-             logger.warning("Input graph contains cycles. Attempting to resolve or raise error.")
-             # For now, raise error. A robust solution would integrate cycle breaking earlier.
-             raise ValueError("Graph must be a directed acyclic graph (DAG).")
-
-        self.graph = graph
-        # Ensure data contains all nodes in the graph
-        missing_nodes = set(graph.nodes()) - set(data.columns)
-        if missing_nodes:
-            raise ValueError(f"Data is missing columns for nodes: {missing_nodes}")
-        self.data = data.copy() # Work with a copy
-        self.nodes = list(graph.nodes())
-        self._validate_graph() # Redundant check, but good practice
-        # Estimate SEM equations only if needed, can be computationally expensive
-        self.structural_equations = None # Lazy initialization: self._estimate_structural_equations()
-
-    def _validate_graph(self):
-        """Ensure graph is a valid DAG"""
-        if not nx.is_directed_acyclic_graph(self.graph):
-            raise ValueError("Graph must be a directed acyclic graph")
-
-    def _get_structural_equations(self) -> Dict[str, RegressionResultsWrapper]:
-        """Estimate and return structural equations (memoized)."""
-        if self.structural_equations is None:
-            logger.info("Estimating structural equations...")
-            equations = {}
-            # Sort nodes topologically to ensure parents are processed before children if needed
-            # Although OLS fitting doesn't strictly require this order here.
-            try:
-                sorted_nodes = list(nx.topological_sort(self.graph))
-            except nx.NetworkXUnfeasible:
-                raise ValueError("Graph contains cycles, cannot topologically sort for SEM estimation.")
-
-            for var in sorted_nodes:
-                parents = list(self.graph.predecessors(var))
-                if not parents:
-                    # Exogenous: Model might be just mean/variance, or skip if not predicting
-                    # Store mean for simple baseline prediction if needed later
-                    equations[var] = {'mean': self.data[var].mean(), 'type': 'exogenous'}
-                    continue
-                try:
-                    X = self.data[parents]
-                    X = add_constant(X, has_constant='add')
-                    y = self.data[var]
-                    # Handle missing data by dropping NaNs
-                    valid_idx = X.dropna().index.intersection(y.dropna().index)
-                    if len(valid_idx) == 0:
-                        logger.warning(f"No valid data for {var} ~ {parents}. Skipping.")
-                        continue
-                    model = OLS(y.loc[valid_idx], X.loc[valid_idx]).fit()
-                    equations[var] = model
-                    if not pd.api.types.is_numeric_dtype(self.data[var]):
-                        logger.warning(f"Outcome variable '{var}' for SEM is not numeric. Skipping equation estimation.")
-                        continue
-                    for p in parents:
-                        if not pd.api.types.is_numeric_dtype(self.data[p]):
-                            logger.warning(f"Parent variable '{p}' for node '{var}' is not numeric. Skipping equation estimation for '{var}'.")
-                            raise TypeError("Non-numeric parent") # Break inner loop
-
-                    # Check for sufficient data variance after NaN removal by OLS
-                    if X.dropna().shape[0] < 2 or X.dropna().shape[1] + 1 > X.dropna().shape[0] : # N < k+1
-                        logger.warning(f"Insufficient data points or high collinearity for OLS on {var} ~ {parents}. Skipping.")
-                        continue
-                    if y.loc[X.dropna().index].var() < 1e-9:
-                        logger.warning(f"Outcome variable {var} has near-zero variance for OLS. Skipping.")
-                        continue
-
-                    model = OLS(y.loc[valid_idx], X.loc[valid_idx]).fit()
-                    equations[var] = model # Store the fitted model object
-                except TypeError: # Catch non-numeric parent error
-                    continue # Skip this equation
-                except Exception as e:
-                    logger.error(f"Failed to estimate structural equation for {var} with parents {parents}: {e}")
-                    # Optionally store None or raise error depending on desired robustness
-                    equations[var] = None # Mark as failed
-
-            self.structural_equations = equations
-            logger.info("Structural equations estimated.")
-        return self.structural_equations
-
-    def estimate_effect(self,
-                      treatment: str,
-                      outcome: str,
-                      method: str = "backdoor.linear_regression",
-                      data: Optional[pd.DataFrame] = None,
-                      instrument: Optional[str] = None) -> Union[pd.Series, float, None]:
-        """
-        Causal effect estimation using various methods.
-
-        Args:
-            treatment (str): Name of the treatment variable.
-            outcome (str): Name of the outcome variable.
-            method (str): Estimation method ('backdoor.linear_regression',
-                          'backdoor.doubly_robust', 'iv.2sls', 'frontdoor.<method>').
-            data (pd.DataFrame, optional): Data to use for estimation. Defaults to self.data.
-            instrument (str, optional): Instrument variable name, required for 'iv' method.
-
-        Returns:
-            pd.Series or float or None: Effect estimate and stats (Series),
-                                       just the estimate (float), or None if estimation fails.
-                                       Format depends on the method.
-        """
-        if data is None:
-            data = self.data
-
-        # Validate inputs
-        if treatment not in self.graph: raise ValueError(f"Treatment '{treatment}' not in graph.")
-        if outcome not in self.graph: raise ValueError(f"Outcome '{outcome}' not in graph.")
-        if treatment == outcome: raise ValueError("Treatment and outcome must be different.")
-
-        if method.startswith("backdoor"):
-            logger.info(f"Estimating ATE({treatment} -> {outcome}) using Backdoor Adjustment ({method})")
-            return self._backdoor_adjustment(data, treatment, outcome, method)
-        elif method.startswith("iv"):
-            logger.info(f"Estimating ATE({treatment} -> {outcome}) using Instrumental Variable ({method})")
-            if instrument is None:
-                raise ValueError("Instrument variable must be provided for 'iv' method.")
-            if instrument not in self.graph:
-                raise ValueError(f"Instrument '{instrument}' not in graph.")
-            # Allow different IV estimators, e.g., 'iv.2sls'
-            iv_estimator = method.split('.')[-1] if '.' in method else '2sls' # Default to 2SLS
-            return self._instrumental_variables(data, treatment, outcome, instrument, estimator=iv_estimator)
-        elif method.startswith("frontdoor"):
-             logger.info(f"Estimating ATE({treatment} -> {outcome}) using Frontdoor Adjustment ({method})")
-             # Implementation requires finding mediating variables and applying the frontdoor formula
-             # Placeholder: return self._frontdoor_adjustment(data, treatment, outcome, method)
-             raise NotImplementedError("Frontdoor adjustment not yet implemented.")
-        else:
-            raise ValueError(f"Unknown estimation method: {method}")
-
-    # --- Backdoor Adjustment Methods ---
-
-    def _find_backdoor_paths(self, source: str, target: str) -> List[List[str]]:
-        """
-        Identifies all backdoor paths between source (treatment) and target (outcome).
-        A backdoor path is a path from source to target that starts with an edge pointing
-        into source (e.g., U -> source ... target, where U is unobserved or observed).
-        In a DAG context, it means any path between source and target that is not a directed path
-        from source to target, specifically paths containing an arrow pointing into source.
-
-        Algorithm:
-        1. Find all paths between source and target in the graph where edge directions are ignored (undirected graph).
-        2. For each path, check if it's a backdoor path: it must contain an edge pointing into `source`.
-           Specifically, the first edge on the path starting from `source` must be `X <- source`.
-
-        Refined Definition: A path $p$ between $X$ (treatment) and $Y$ (outcome) is a backdoor path
-        if it contains an arrow pointing into $X$. That is, $p = (..., W, X, ..., Y)$ where the
-        edge between $W$ and $X$ is $W \to X$.
-
-        Implementation Detail: We can find all paths in the undirected version and then filter.
-        Or, more directly, search backwards from X. Any path from a node Z to Y, where Z is a parent of X,
-        and the path does not go through X itself (except at Z->X), constitutes part of a backdoor path.
-        Let's use the simpler definition check on all undirected paths first.
-        """
-        backdoor_paths = []
-        undirected_graph = self.graph.to_undirected()
-
-        # Check if source and target are connected at all
-        if not nx.has_path(undirected_graph, source, target):
-             return []
-
-        # Limit path length reasonably? No, find all simple paths.
-        for path in nx.all_simple_paths(undirected_graph, source=source, target=target):
-            if len(path) >= 2:
-                # Check the first step away from source: is it source -> path[1] or source <- path[1]?
-                second_node = path[1]
-                # If the directed graph has an edge pointing INTO source from the second node, it's a backdoor path.
-                if self.graph.has_edge(second_node, source):
-                    # We need to be careful here. A path is backdoor if it's not causal *and* creates confounding.
-                    # Pearl's definition: A path containing an arrow into X.
-                    # Let's stick to that: if the path starts X <- W ... Y
-                     backdoor_paths.append(path)
-
-        logger.debug(f"Found {len(backdoor_paths)} potential undirected paths starting with arrow into '{source}'.")
-        # Further filter: Ensure path doesn't contain colliders that are blocked by conditioning? This is handled by adjustment set finding.
-
-        # Alternative check: A path is backdoor if it doesn't start with source -> ...
-        # This might be too broad. Let's stick to the "arrow into source" definition.
-
-        return backdoor_paths # Return the list of nodes in each path
-
-    def _is_blocked(self, path: List[str], conditioning_set: Set[str]) -> bool:
-         r"""
-         Checks if a path is blocked by a given conditioning set based on d-separation rules.
-         A path is blocked if:
-         1. It contains a chain X -> M -> Y where M is in the conditioning set.
-         2. It contains a fork X <- M -> Y where M is in the conditioning set.
-         3. It contains a collider X -> M <- Y where M is NOT in the conditioning set,
-            and none of M's descendants are in the conditioning set.
-         """
-         if len(path) < 3: # Paths of length 0 or 1 are always blocked (or non-existent)
-             return True
-
-         for i in range(len(path) - 2):
-             u, m, v = path[i], path[i+1], path[i+2]
-
-             is_chain = self.graph.has_edge(u, m) and self.graph.has_edge(m, v)
-             is_fork = self.graph.has_edge(m, u) and self.graph.has_edge(m, v)
-             is_collider = self.graph.has_edge(u, m) and self.graph.has_edge(v, m)
-
-             if (is_chain or is_fork) and m in conditioning_set:
-                 return True # Blocked by chain or fork
-
-             if is_collider:
-                  # Check if the collider M or any of its descendants are in the conditioning set
-                  descendants_m = nx.descendants(self.graph, m) | {m}
-                  if not descendants_m.intersection(conditioning_set):
-                       return True # Path is blocked by collider *not* conditioned on
-
-         return False # Path is not blocked
-
-    def _find_minimal_adjustment_set(self, treatment: str, outcome: str) -> Set[str]:
-        r"""
-        Identifies a minimal valid backdoor adjustment set using Pearl's backdoor criterion.
-        A set Z satisfies the backdoor criterion relative to (X, Y) if:
-        1. No node in Z is a descendant of X.
-        2. Z blocks every backdoor path between X and Y (paths with an arrow into X).
-
-        Algorithm (based on common heuristics, not guaranteed minimal in all cases but often sufficient):
-        1. Find all backdoor paths from X to Y.
-        2. Identify all nodes involved in these paths (excluding X and Y).
-        3. A potential adjustment set could be the parents of X (if they aren't descendants of X).
-           More generally, find a set Z that d-separates X from Y in G[V \ {Descendants(X)}]
-           Alternatively, consider nodes on backdoor paths.
-
-        A common constructive approach:
-        1. Start with the set of parents of X: Pa(X).
-        2. Remove any descendants of X from Pa(X).
-        3. Add other nodes necessary to block remaining backdoor paths, typically ancestors of X or Y
-           that are not descendants of X.
-
-        Simpler approach (often works for DAGs from PC): Use parents of X.
-        Pa(X) often satisfies the backdoor criterion if no element of Pa(X) is a descendant of X
-        (which is true in a DAG if Pa(X) are direct parents).
-        However, Pa(X) might not be minimal or block all paths if there's complex structure.
-
-        Let's implement a more general method:
-        Find all backdoor paths. Find all nodes on these paths. Try to find a minimal set of these nodes
-        that blocks all paths, excluding descendants of X.
-        Consider Ancestors(X union Y). Find subset Z of Ancestors that blocks paths.
-
-        Let's try the Parent-based approach first, common in practice:
-        """
-        parents_of_treatment = set(self.graph.predecessors(treatment))
-
-        # In a DAG, parents are not descendants. So condition 1 is met.
-        # Now check if Pa(X) blocks all backdoor paths.
-        adjustment_set = parents_of_treatment
-
-        # Verify this set blocks all backdoor paths
-        backdoor_paths = self._find_backdoor_paths(treatment, outcome)
-        unblocked_paths = []
-        for path in backdoor_paths:
-            if not self._is_blocked(path, adjustment_set):
-                 unblocked_paths.append(path)
-
-
-        if not unblocked_paths:
-             logger.info(f"Parents of treatment {parents_of_treatment} form a valid adjustment set.")
-             return adjustment_set
-        else:
-             logger.warning(f"Parents of {treatment} do not block all backdoor paths: {unblocked_paths}. Need a more complex adjustment set finding method.")
-             # Fallback / More Advanced Method Needed:
-             # A more robust approach involves graph surgery (e.g., graph G_alpha removing outgoing edges from X)
-             # and finding d-separation sets. Or analyzing paths directly.
-             # Placeholder: Return parents, acknowledging limitation. Or implement full criterion.
-             # For now, returning parents with a warning.
-             # Consider implementing Shpitser's adjustment set algorithm if needed.
-             return adjustment_set # Return parents as a common heuristic, but warn user.
-
-
-    def _linear_adjustment(self,
-                          data: pd.DataFrame,
-                          treatment: str,
-                          outcome: str,
-                          adjustment_set: Set[str]) -> pd.Series:
-        """Standard regression adjustment using statsmodels OLS."""
-        if not adjustment_set and not self.graph.predecessors(treatment):
-             logger.info("No adjustment set needed as treatment has no parents influencing it via backdoor paths.")
-             formula = f"{outcome} ~ {treatment}"
-        elif not adjustment_set and self.graph.predecessors(treatment):
-             logger.warning("Adjustment set is empty, but treatment has parents. Backdoor paths might not be blocked.")
-             formula = f"{outcome} ~ {treatment}" # Proceeding without adjustment
-        else:
-            # Ensure all adjustment variables are in the data
-            missing_adj = adjustment_set - set(data.columns)
-            if missing_adj:
-                raise ValueError(f"Adjustment variables {missing_adj} not found in provided data.")
-            # Filter out any adjustment variables that are the outcome itself (shouldn't happen with valid set)
-            valid_adj_vars = list(adjustment_set - {outcome})
-            # Construct the regression formula: Y ~ T + Z1 + Z2 + ...
-            formula = f"{outcome} ~ {treatment}"
-            if valid_adj_vars:
-                formula += " + " + " + ".join(valid_adj_vars)
-
-        logger.info(f"Fitting linear adjustment model: {formula}")
-        try:
-            # Fit OLS model using the provided data
-            model = ols(formula, data=data, missing='drop').fit()
-
-            # Extract treatment effect (coefficient of treatment variable)
-            # Handle case where treatment variable might be categorical/transformed by patsy
-            treatment_term = next((term for term in model.params.index if term.startswith(f"`{treatment}`")), None)
-            if treatment_term is None:
-                 # Try without backticks if lookup failed
-                 treatment_term = next((term for term in model.params.index if term == treatment), None)
-
-            if treatment_term is None:
-                 logger.error(f"Treatment term '{treatment}' not found in model results. Terms: {model.params.index}")
-                 # This might happen if treatment is perfectly collinear or has zero variance after NA drop
-                 return pd.Series({
-                     'effect': np.nan, 'std_error': np.nan, 'p_value': np.nan,
-                     'ci_lower': np.nan, 'ci_upper': np.nan, 'n_obs': model.nobs, 'formula': formula
-                 })
-
-
-            effect = model.params[treatment_term]
-            stderr = model.bse[treatment_term]
-            p_value = model.pvalues[treatment_term]
-            conf_int = model.conf_int().loc[treatment_term]
-
-            # Return results as a Series
-            return pd.Series({
-                'effect': effect,
-                'std_error': stderr,
-                'p_value': p_value,
-                'ci_lower': conf_int[0],
-                'ci_upper': conf_int[1],
-                'n_obs': model.nobs,
-                'formula': formula # Include formula for inspection
-            })
-        except Exception as e:
-             logger.error(f"Linear adjustment failed for formula '{formula}': {e}")
-             # Return NaNs or raise error
-             return pd.Series({
-                 'effect': np.nan, 'std_error': np.nan, 'p_value': np.nan,
-                 'ci_lower': np.nan, 'ci_upper': np.nan, 'n_obs': np.nan, 'formula': formula
-             })
-
-
-    def _doubly_robust_estimation(self,
-                                 data: pd.DataFrame,
-                                 treatment: str,
-                                 outcome: str,
-                                 adjustment_set: Set[str]) -> pd.Series:
-        """
-        Doubly robust estimator combining propensity score and outcome models.
-        Provides unbiased estimate if *either* the propensity model *or* the outcome model is correctly specified.
-
-        Formula (for binary treatment T):
-        ATE = E[ (T * Y / PS(Z)) - ((1 - T) * Y / (1 - PS(Z))) ]
-            + E[ (1 - T/PS(Z)) * E[Y | T=1, Z] ]
-            + E[ (1 - (1-T)/(1-PS(Z))) * E[Y | T=0, Z] ]
-
-        Simplified ATE estimation:
-        E[Y(1)] = E[ T*Y/PS(Z) + (1 - T/PS(Z))*mu1(Z) ]
-        E[Y(0)] = E[ (1-T)*Y/(1-PS(Z)) + (1 - (1-T)/(1-PS(Z)))*mu0(Z) ]
-        ATE = E[Y(1)] - E[Y(0)]
-
-        Where:
-        - Y is the outcome.
-        - T is the binary treatment (must be 0 or 1).
-        - Z is the adjustment set.
-        - PS(Z) = P(T=1 | Z) is the propensity score.
-        - mu1(Z) = E[Y | T=1, Z] is the expected outcome under treatment, given Z.
-        - mu0(Z) = E[Y | T=0, Z] is the expected outcome under control, given Z.
-        """
-        if not adjustment_set:
-             logger.warning("Doubly robust estimation called with empty adjustment set. Results may be biased if confounding exists.")
-             Z = pd.DataFrame(index=data.index) # Empty dataframe for covariates
-        else:
-             # Ensure adjustment set is valid
-             missing_adj = adjustment_set - set(data.columns)
-             if missing_adj: raise ValueError(f"Adjustment variables {missing_adj} not found in data.")
-             Z = data[list(adjustment_set)]
-
-        T = data[treatment]
-        Y = data[outcome]
-
-        # Check if treatment is binary (0 or 1)
-        if not T.isin([0, 1]).all():
-            raise ValueError("Doubly robust estimation currently requires a binary treatment variable (0 or 1).")
-
-        logger.info("Fitting propensity score model (Logistic Regression)...")
-        # Propensity score model P(T=1 | Z)
-        # Add constant for Logistic Regression if Z is not empty
-        Z_ps = add_constant(Z, has_constant='add') if not Z.empty else Z
-        ps_model = LogisticRegression(solver='liblinear', C=1e6) # High C = less regularization
-        try:
-            ps_model.fit(Z_ps, T)
-            # Predict probabilities P(T=1 | Z)
-            propensity_scores = ps_model.predict_proba(Z_ps)[:, 1]
-            # Clip scores to avoid division by zero/instability
-            propensity_scores = np.clip(propensity_scores, 1e-6, 1 - 1e-6)
-            logger.info("Propensity score model fitted.")
-        except Exception as e:
-             logger.error(f"Propensity score model fitting failed: {e}")
-             return pd.Series({'effect': np.nan, 'std_error': np.nan}) # Cannot proceed
-
-
-        logger.info("Fitting outcome models (Gradient Boosting Regressor)...")
-        # Outcome model E[Y | T, Z]
-        # We need E[Y | T=1, Z] (mu1) and E[Y | T=0, Z] (mu0)
-
-        # Prepare data for outcome models
-        XZ = Z.assign(**{treatment: T}) # Combine Z and T
-        XZ_1 = Z.assign(**{treatment: 1}) # Data if everyone was treated
-        XZ_0 = Z.assign(**{treatment: 0}) # Data if everyone was control
-
-        # Use Gradient Boosting Regressor (or another flexible model)
-        outcome_model = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        try:
-            outcome_model.fit(XZ, Y)
-            mu_hat = outcome_model.predict(XZ) # Predicted outcome E[Y|T,Z]
-            mu1_hat = outcome_model.predict(XZ_1) # Predicted E[Y|T=1,Z] for all units
-            mu0_hat = outcome_model.predict(XZ_0) # Predicted E[Y|T=0,Z] for all units
-            logger.info("Outcome model fitted.")
-        except Exception as e:
-             logger.error(f"Outcome model fitting failed: {e}")
-             return pd.Series({'effect': np.nan, 'std_error': np.nan}) # Cannot proceed
-
-
-        # Calculate components for DR estimator
-        dr_y1 = (T * Y / propensity_scores) + (1 - T / propensity_scores) * mu1_hat
-        dr_y0 = ((1 - T) * Y / (1 - propensity_scores)) + (1 - (1 - T) / (1 - propensity_scores)) * mu0_hat
-
-        # Estimate ATE
-        ate_dr = np.mean(dr_y1 - dr_y0)
-
-        # Estimate standard error (using influence functions or bootstrap)
-        # Influence function approach:
-        n = len(data)
-        psi_dr = (dr_y1 - dr_y0) - ate_dr
-        var_dr = np.mean(psi_dr**2) / n
-        se_dr = np.sqrt(var_dr)
-
-        logger.info(f"Doubly Robust ATE estimate: {ate_dr:.4f} (SE: {se_dr:.4f})")
-
-        return pd.Series({
-            'effect': ate_dr,
-            'std_error': se_dr
-            # P-value and CI can be calculated from estimate and SE assuming normality
-        })
-
-    def _backdoor_adjustment(self,
-                            data: pd.DataFrame,
-                            treatment: str,
-                            outcome: str,
-                            method: str) -> pd.Series:
-        """Helper to route backdoor adjustments."""
-        # Find valid adjustment set based on the graph structure
-        try:
-             adjustment_set = self._find_minimal_adjustment_set(treatment, outcome)
-             logger.info(f"Identified adjustment set for ({treatment}, {outcome}): {adjustment_set}")
-        except Exception as e:
-             logger.error(f"Failed to find adjustment set for ({treatment}, {outcome}): {e}")
-             # Return NaN series indicating failure
-             return pd.Series({'effect': np.nan, 'std_error': np.nan, 'p_value': np.nan, 'ci_lower': np.nan, 'ci_upper': np.nan})
-
-
-        if "linear_regression" in method:
-            return self._linear_adjustment(data, treatment, outcome, adjustment_set)
-        elif "doubly_robust" in method:
-            return self._doubly_robust_estimation(data, treatment, outcome, adjustment_set)
-        else:
-            raise ValueError(f"Unknown backdoor method specified: {method}")
-
-    # --- Instrumental Variable (IV) Methods ---
-    def _check_iv_conditions(self, instrument: str, treatment: str, outcome: str) -> Dict[str, bool]:
-        conditions = {
-            'relevance_path': False,
-            'exclusion': False,
-            'independence': False
-        }
-        
-        # 1. Relevance: Check for active paths between Z and X
-        if nx.has_path(self.graph.to_undirected(), instrument, treatment):
-            conditions['relevance_path'] = True
-        
-        # Create modified graph (remove outgoing edges from X)
-        graph_X = self.graph.copy()
-        for child in list(graph_X.successors(treatment)):
-            graph_X.remove_edge(treatment, child)
-        
-        # 2. Exclusion: No directed paths from Z to Y in modified graph
-        conditions['exclusion'] = not nx.has_path(graph_X, instrument, outcome)
-        
-        # 3. Independence: d-separation in modified graph
-        conditions['independence'] = self._are_d_separated(
-            graph_X, instrument, outcome, set()
+    def __init__(
+        self,
+        graph: nx.DiGraph,
+        data: pd.DataFrame,
+        config_section_name: str = "causal_model",
+        config_file_path: Optional[str] = None,
+        alignment_memory: Optional[AlignmentMemory] = None,
+    ):
+        self.config = load_global_config()
+        self.config_section_name = ensure_non_empty_string(
+            config_section_name,
+            "config_section_name",
+            error_cls=ConfigurationError,
         )
-        return conditions
-    
-    def _are_d_separated(self, graph, node1, node2, conditioning_set) -> bool:
-        """Check if node1 and node2 are d-separated given conditioning_set."""
-        if node1 not in graph or node2 not in graph:
-            return True
-        
-        # Check connectivity
-        if not nx.has_path(graph.to_undirected(), node1, node2):
-            return True
-        
-        # Examine all simple paths
-        try:
-            paths = nx.all_simple_paths(graph.to_undirected(), node1, node2)
-        except nx.NodeNotFound:
-            return True
-        
-        for path in paths:
-            if not self._is_blocked_path(graph, path, conditioning_set):
-                return False  # Active path exists → d-connected
-        return True  # All paths blocked
-    
-    def _is_blocked_path(self, graph, path: List[str], conditioning_set: Set[str]) -> bool:
-        """Check if a path is blocked by conditioning_set in a given graph."""
+        self.config_file_path = config_file_path
+        self.causal_config = get_config_section(self.config_section_name)
+
+        self._validate_model_config()
+
+        if not isinstance(graph, nx.DiGraph):
+            raise TypeMismatchError(
+                "Input graph must be a networkx.DiGraph.",
+                context={"actual_type": type(graph).__name__},
+            )
+        if data is None:
+            data = pd.DataFrame()
+        if not isinstance(data, pd.DataFrame):
+            raise TypeMismatchError(
+                "Input data for CausalModel must be a pandas DataFrame.",
+                context={"actual_type": type(data).__name__},
+            )
+
+        self.graph = graph.copy()
+        self.data = data.copy()
+        self.alignment_memory = alignment_memory or AlignmentMemory()
+        self.enable_memory_logging = coerce_bool(
+            self.causal_config.get("enable_memory_logging", True),
+            field_name="enable_memory_logging",
+        )
+        self.default_effect_method = ensure_non_empty_string(
+            self.causal_config.get("default_effect_method", "backdoor.linear_regression"),
+            "default_effect_method",
+            error_cls=ConfigurationError,
+        ).lower()
+        self.propensity_clip = coerce_float(
+            self.causal_config.get("propensity_clip", 1e-6),
+            field_name="propensity_clip",
+            minimum=1e-12,
+            maximum=0.49,
+        )
+        self.iv_relevance_threshold = coerce_float(
+            self.causal_config.get("iv_relevance_threshold", 5.0),
+            field_name="iv_relevance_threshold",
+            minimum=0.0,
+        )
+        self.counterfactual_predict_exogenous_strategy = ensure_non_empty_string(
+            self.causal_config.get("counterfactual_predict_exogenous_strategy", "retain_observed"),
+            "counterfactual_predict_exogenous_strategy",
+            error_cls=ConfigurationError,
+        ).lower()
+        self.random_seed = coerce_int(
+            self.causal_config.get("random_seed", 42),
+            field_name="random_seed",
+        )
+
+        self.nodes = list(self.graph.nodes())
+        self.graph_hash = stable_record_fingerprint(
+            {"nodes": self.nodes, "edges": list(self.graph.edges())},
+            namespace="causal_model_graph",
+        )
+        self.intervention_history: List[Dict[str, Any]] = []
+
+        if self.nodes:
+            missing_nodes = set(self.nodes) - set(self.data.columns)
+            if missing_nodes:
+                raise DataValidationError(
+                    "Data is missing columns required by the causal graph nodes.",
+                    context={"missing_nodes": sorted(missing_nodes)},
+                )
+
+        if self.graph.number_of_nodes() > 0 and not nx.is_directed_acyclic_graph(self.graph):
+            raise CausalModelError("CausalModel requires a directed acyclic graph (DAG).")
+
+        self.structural_equations: Optional[Dict[str, StructuralEquation]] = None
+
+    # ------------------------------------------------------------------
+    # Validation and serialization
+    # ------------------------------------------------------------------
+    def _validate_model_config(self) -> None:
+        ensure_mapping(
+            self.causal_config,
+            self.config_section_name,
+            allow_empty=False,
+            error_cls=ConfigurationError,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "nodes": list(self.graph.nodes()),
+            "edges": list(self.graph.edges()),
+            "n_rows": int(len(self.data)),
+            "graph_hash": self.graph_hash,
+            "structural_equations_built": self.structural_equations is not None,
+        }
+
+    # ------------------------------------------------------------------
+    # Graph logic and d-separation
+    # ------------------------------------------------------------------
+    def _find_backdoor_paths(self, treatment: str, outcome: str) -> List[List[str]]:
+        if treatment not in self.graph or outcome not in self.graph:
+            return []
+        undirected_graph = self.graph.to_undirected()
+        if not nx.has_path(undirected_graph, treatment, outcome):
+            return []
+
+        backdoor_paths: List[List[str]] = []
+        for path in nx.all_simple_paths(undirected_graph, source=treatment, target=outcome):
+            if len(path) < 2:
+                continue
+            second_node = path[1]
+            if self.graph.has_edge(second_node, treatment):
+                backdoor_paths.append(path)
+        return backdoor_paths
+
+    def _is_blocked_path(
+        self,
+        graph: nx.DiGraph,
+        path: List[str],
+        conditioning_set: Set[str],
+    ) -> bool:
         if len(path) < 3:
-            return True  # Trivially blocked
-        
-        for i in range(len(path) - 2):
-            u, m, v = path[i], path[i+1], path[i+2]
-            
-            # Chain (→ m →) or Fork (← m →)
-            if (graph.has_edge(u, m) and graph.has_edge(m, v)) or \
-               (graph.has_edge(m, u) and graph.has_edge(m, v)):
-                if m in conditioning_set:
-                    return True  # Blocked by conditioning
-            
-            # Collider (→ m ←)
-            elif graph.has_edge(u, m) and graph.has_edge(v, m):
-                descendants = nx.descendants(graph, m) | {m}
-                if not descendants & conditioning_set:  # No conditioning on collider/descendants
-                    return True  # Path blocked
-        return False  # Path not blocked
-    
-    # Update existing method to use new path-based check
+            return False
+
+        for idx in range(len(path) - 2):
+            left, middle, right = path[idx], path[idx + 1], path[idx + 2]
+
+            is_chain = graph.has_edge(left, middle) and graph.has_edge(middle, right)
+            is_fork = graph.has_edge(middle, left) and graph.has_edge(middle, right)
+            is_collider = graph.has_edge(left, middle) and graph.has_edge(right, middle)
+
+            if (is_chain or is_fork) and middle in conditioning_set:
+                return True
+
+            if is_collider:
+                descendants = nx.descendants(graph, middle) | {middle}
+                if not descendants.intersection(conditioning_set):
+                    return True
+        return False
+
     def _is_blocked(self, path: List[str], conditioning_set: Set[str]) -> bool:
         return self._is_blocked_path(self.graph, path, conditioning_set)
 
-    def _instrumental_variables(self,
-                               data: pd.DataFrame,
-                               treatment: str,
-                               outcome: str,
-                               instrument: str,
-                               estimator: str = '2sls') -> Union[float, pd.Series, None]:
-        r"""
-        Estimate causal effect using Instrumental Variables (IV).
-        Requires a valid instrument satisfying relevance, exclusion, and independence.
+    def _are_d_separated(
+        self,
+        graph: nx.DiGraph,
+        node1: str,
+        node2: str,
+        conditioning_set: Set[str],
+    ) -> bool:
+        if node1 not in graph or node2 not in graph:
+            return True
+        undirected_graph = graph.to_undirected()
+        if not nx.has_path(undirected_graph, node1, node2):
+            return True
+        for path in nx.all_simple_paths(undirected_graph, node1, node2):
+            if not self._is_blocked_path(graph, path, conditioning_set):
+                return False
+        return True
 
-        Common method: Two-Stage Least Squares (2SLS) for linear models.
-        Stage 1: Regress treatment (X) on instrument (Z) and exogenous covariates (W):
-                 $X = \delta_0 + \delta_1 Z + \delta_2 W + \epsilon$
-                 Get predicted treatment: $\hat{X}$
-        Stage 2: Regress outcome (Y) on predicted treatment ($\hat{X}$) and exogenous covariates (W):
-                 $Y = \beta_0 + \beta_{IV} \hat{X} + \beta_2 W + \nu$
-                 $\beta_{IV}$ is the IV estimate of the causal effect.
+    def _find_minimal_adjustment_set(self, treatment: str, outcome: str) -> Set[str]:
+        backdoor_paths = self._find_backdoor_paths(treatment, outcome)
+        if not backdoor_paths:
+            return set()
 
-        Args:
-            data (pd.DataFrame): Data for estimation.
-            treatment (str): Endogenous treatment variable X.
-            outcome (str): Outcome variable Y.
-            instrument (str): Instrument variable Z.
-            estimator (str): Specific IV estimator ('2sls').
+        descendants_of_treatment = nx.descendants(self.graph, treatment)
+        candidates: List[str] = []
+        for path in backdoor_paths:
+            for node in path[1:-1]:
+                if node in descendants_of_treatment or node == treatment or node == outcome:
+                    continue
+                if node not in candidates:
+                    candidates.append(node)
 
-        Returns:
-             float or pd.Series or None: IV estimate of the effect (float), or Series with stats, or None if failed.
+        greedy_set: Set[str] = set(parent for parent in self.graph.predecessors(treatment) if parent in candidates)
+        remaining_paths = [path for path in backdoor_paths if not self._is_blocked(path, greedy_set)]
+
+        while remaining_paths:
+            best_candidate = None
+            best_blocks = 0
+            for candidate in candidates:
+                if candidate in greedy_set:
+                    continue
+                blocked_count = sum(
+                    1 for path in remaining_paths
+                    if self._is_blocked(path, greedy_set | {candidate})
+                )
+                if blocked_count > best_blocks:
+                    best_candidate = candidate
+                    best_blocks = blocked_count
+            if best_candidate is None:
+                break
+            greedy_set.add(best_candidate)
+            remaining_paths = [path for path in backdoor_paths if not self._is_blocked(path, greedy_set)]
+
+        return greedy_set
+
+    def _find_frontdoor_mediators(self, treatment: str, outcome: str) -> List[str]:
+        mediators: List[str] = []
+        if treatment not in self.graph or outcome not in self.graph:
+            return mediators
+        for child in self.graph.successors(treatment):
+            if child == outcome:
+                continue
+            if nx.has_path(self.graph, child, outcome):
+                mediators.append(child)
+        return mediators
+
+    # ------------------------------------------------------------------
+    # Structural equations
+    # ------------------------------------------------------------------
+    def _prepare_modeling_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        prepared = pd.DataFrame(index=data.index)
+        for column in self.nodes:
+            if column not in data.columns:
+                continue
+            series = data[column]
+            if pd.api.types.is_bool_dtype(series):
+                prepared[column] = series.astype(int)
+            elif pd.api.types.is_numeric_dtype(series):
+                prepared[column] = pd.to_numeric(series, errors="coerce")
+            else:
+                codes, _ = pd.factorize(series.astype(str), sort=True)
+                prepared[column] = codes.astype(float)
+        prepared = prepared.replace([np.inf, -np.inf], np.nan)
+        return prepared
+
+    def _get_structural_equations(self) -> Dict[str, StructuralEquation]:
+        if self.structural_equations is not None:
+            return self.structural_equations
+
+        equations: Dict[str, StructuralEquation] = {}
+        if self.graph.number_of_nodes() == 0 or self.data.empty:
+            self.structural_equations = equations
+            return equations
+
+        modeling_data = self._prepare_modeling_data(self.data)
+        for node in nx.topological_sort(self.graph):
+            parents = list(self.graph.predecessors(node))
+            node_series = modeling_data[node].dropna()
+
+            if not parents:
+                equations[node] = StructuralEquation(
+                    node=node,
+                    parents=[],
+                    equation_type="exogenous",
+                    mean=float(node_series.mean()) if not node_series.empty else 0.0,
+                    variance=float(node_series.var(ddof=0)) if len(node_series) > 1 else 0.0,
+                )
+                continue
+
+            X = modeling_data[parents]
+            y = modeling_data[node]
+            valid_idx = X.dropna().index.intersection(y.dropna().index)
+            if len(valid_idx) < max(len(parents) + 2, 5):
+                equations[node] = StructuralEquation(
+                    node=node,
+                    parents=parents,
+                    equation_type="fallback_mean",
+                    mean=float(node_series.mean()) if not node_series.empty else 0.0,
+                    variance=float(node_series.var(ddof=0)) if len(node_series) > 1 else 0.0,
+                )
+                continue
+
+            X_valid = X.loc[valid_idx]
+            y_valid = y.loc[valid_idx]
+            unique_values = sorted(set(y_valid.unique().tolist()))
+            is_binary = len(unique_values) <= 2 and set(unique_values).issubset({0, 1})
+
+            if is_binary:
+                model = LogisticRegression(max_iter=2000, random_state=self.random_seed)
+                model.fit(X_valid, y_valid)
+                equations[node] = StructuralEquation(
+                    node=node,
+                    parents=parents,
+                    equation_type="logistic",
+                    model=model,
+                    predictors=parents,
+                )
+            else:
+                X_ols = add_constant(X_valid, has_constant="add")
+                model = OLS(y_valid, X_ols).fit()
+                # X_ols is a DataFrame at runtime; ignore type for .columns access
+                predictors = list(X_ols.columns)  # type: ignore[attr-defined]
+                equations[node] = StructuralEquation(
+                    node=node,
+                    parents=parents,
+                    equation_type="ols",
+                    model=model,
+                    predictors=predictors,
+                )
+
+        self.structural_equations = equations
+        return equations
+
+    # ------------------------------------------------------------------
+    # Effect estimation
+    # ------------------------------------------------------------------
+    def estimate_effect(
+        self,
+        treatment: str,
+        outcome: str,
+        method: Optional[str] = None,
+        data: Optional[pd.DataFrame] = None,
+        instrument: Optional[str] = None,
+        mediators: Optional[Sequence[str]] = None,
+    ) -> pd.Series:
         """
-        # 1. Check graphical conditions (optional but recommended)
+        Estimate a causal effect using backdoor, frontdoor, or IV methods.
+        """
+        try:
+            resolved_method = (method or self.default_effect_method).strip().lower()
+            treatment_name = ensure_non_empty_string(treatment, "treatment", error_cls=DataValidationError)
+            outcome_name = ensure_non_empty_string(outcome, "outcome", error_cls=DataValidationError)
+
+            source_data = self.data if data is None else data.copy()
+            if not isinstance(source_data, pd.DataFrame):
+                raise TypeMismatchError(
+                    "estimate_effect requires a pandas DataFrame as data input.",
+                    context={"actual_type": type(source_data).__name__},
+                )
+            ensure_columns_present(
+                source_data,
+                [treatment_name, outcome_name],
+                field_name="data",
+                error_cls=DataValidationError,
+            )
+
+            if resolved_method.startswith("backdoor"):
+                result = self._backdoor_adjustment(source_data, treatment_name, outcome_name, resolved_method)
+            elif resolved_method.startswith("frontdoor"):
+                result = self._frontdoor_adjustment(
+                    source_data,
+                    treatment_name,
+                    outcome_name,
+                    mediators=list(mediators or []),
+                    method=resolved_method,
+                )
+            elif resolved_method.startswith("iv"):
+                instrument_name = ensure_non_empty_string(
+                    instrument,
+                    "instrument",
+                    error_cls=MissingFieldError,
+                )
+                result = self._instrumental_variables(
+                    source_data,
+                    treatment_name,
+                    outcome_name,
+                    instrument_name,
+                    estimator=resolved_method.split(".")[-1] if "." in resolved_method else "2sls",
+                )
+            else:
+                raise ConfigurationError(
+                    "Unsupported causal effect estimation method.",
+                    context={"method": resolved_method},
+                )
+
+            self._log_effect_estimate(result)
+            return result.to_series() if isinstance(result, CausalEffectEstimate) else result
+        except Exception as exc:
+            raise wrap_alignment_exception(
+                exc,
+                target_cls=CausalModelError,
+                message="Failed to estimate causal effect.",
+                context={"treatment": treatment, "outcome": outcome, "method": method},
+            ) from exc
+
+    def _linear_adjustment(
+        self,
+        data: pd.DataFrame,
+        treatment: str,
+        outcome: str,
+        adjustment_set: Set[str],
+    ) -> CausalEffectEstimate:
+        modeling_data = self._prepare_modeling_data(data)
+        columns = [treatment, outcome, *sorted(adjustment_set)]
+        ensure_columns_present(modeling_data, columns, field_name="modeling_data", error_cls=DataValidationError)
+
+        valid_data = modeling_data[columns].dropna()
+        if valid_data.empty:
+            raise DataValidationError(
+                "No valid observations remained after dropping NaNs for linear adjustment.",
+                context={"columns": columns},
+            )
+
+        X = valid_data[[treatment, *sorted(adjustment_set)]]
+        X = add_constant(X, has_constant="add")
+        y = valid_data[outcome]
+        model = OLS(y, X).fit()
+
+        ci = model.conf_int().loc[treatment]
+        # X is a DataFrame; ignore type for .columns access
+        formula_terms = list(X.columns)  # type: ignore[attr-defined]
+        return CausalEffectEstimate(
+            treatment=treatment,
+            outcome=outcome,
+            method="backdoor.linear_regression",
+            effect=float(model.params[treatment]),
+            std_error=float(model.bse[treatment]),
+            p_value=float(model.pvalues[treatment]),
+            ci_lower=float(ci[0]),
+            ci_upper=float(ci[1]),
+            n_obs=int(model.nobs),
+            adjustment_set=sorted(adjustment_set),
+            metadata={"formula_terms": formula_terms},
+        )
+
+    def _doubly_robust_estimation(
+        self,
+        data: pd.DataFrame,
+        treatment: str,
+        outcome: str,
+        adjustment_set: Set[str],
+    ) -> CausalEffectEstimate:
+        modeling_data = self._prepare_modeling_data(data)
+        columns = [treatment, outcome, *sorted(adjustment_set)]
+        valid_data = modeling_data[columns].dropna()
+        if valid_data.empty:
+            raise DataValidationError(
+                "No valid observations remained after dropping NaNs for doubly robust estimation.",
+                context={"columns": columns},
+            )
+
+        T = valid_data[treatment]
+        Y = valid_data[outcome]
+        if not T.isin([0, 1]).all():
+            raise DataValidationError(
+                "Doubly robust estimation currently requires a binary treatment encoded as 0/1.",
+                context={"treatment": treatment},
+            )
+
+        Z = valid_data[list(sorted(adjustment_set))] if adjustment_set else pd.DataFrame(index=valid_data.index)
+        ps_model = LogisticRegression(solver="liblinear", C=1e6, random_state=self.random_seed)
+        ps_model.fit(Z if not Z.empty else np.ones((len(valid_data), 1)), T)
+        propensity_scores = ps_model.predict_proba(Z if not Z.empty else np.ones((len(valid_data), 1)))[:, 1]
+        propensity_scores = np.clip(propensity_scores, self.propensity_clip, 1.0 - self.propensity_clip)
+
+        XZ = Z.copy()
+        XZ[treatment] = T
+        XZ1 = Z.copy()
+        XZ1[treatment] = 1
+        XZ0 = Z.copy()
+        XZ0[treatment] = 0
+
+        outcome_model = GradientBoostingRegressor(random_state=self.random_seed)
+        outcome_model.fit(XZ, Y)
+
+        mu1_hat = outcome_model.predict(XZ1)
+        mu0_hat = outcome_model.predict(XZ0)
+
+        dr_y1 = (T * Y / propensity_scores) + (1.0 - T / propensity_scores) * mu1_hat
+        dr_y0 = ((1.0 - T) * Y / (1.0 - propensity_scores)) + (1.0 - (1.0 - T) / (1.0 - propensity_scores)) * mu0_hat
+
+        ate = float(np.mean(dr_y1 - dr_y0))
+        influence = (dr_y1 - dr_y0) - ate
+        variance = float(np.mean(influence ** 2) / max(len(valid_data), 1))
+        std_error = math.sqrt(max(variance, 0.0))
+        z_score = ate / std_error if std_error > 0 else np.inf
+        p_value = 2 * (1 - norm.cdf(abs(z_score))) if np.isfinite(z_score) else 0.0
+        ci_lower = ate - 1.96 * std_error
+        ci_upper = ate + 1.96 * std_error
+
+        return CausalEffectEstimate(
+            treatment=treatment,
+            outcome=outcome,
+            method="backdoor.doubly_robust",
+            effect=ate,
+            std_error=std_error,
+            p_value=float(p_value),
+            ci_lower=float(ci_lower),
+            ci_upper=float(ci_upper),
+            n_obs=int(len(valid_data)),
+            adjustment_set=sorted(adjustment_set),
+            metadata={"propensity_clip": self.propensity_clip},
+        )
+
+    def _backdoor_adjustment(
+        self,
+        data: pd.DataFrame,
+        treatment: str,
+        outcome: str,
+        method: str,
+    ) -> CausalEffectEstimate:
+        adjustment_set = self._find_minimal_adjustment_set(treatment, outcome)
+        if "linear_regression" in method:
+            return self._linear_adjustment(data, treatment, outcome, adjustment_set)
+        if "doubly_robust" in method:
+            return self._doubly_robust_estimation(data, treatment, outcome, adjustment_set)
+        raise ConfigurationError(
+            "Unsupported backdoor adjustment estimator configured.",
+            context={"method": method},
+        )
+
+    def _frontdoor_adjustment(
+        self,
+        data: pd.DataFrame,
+        treatment: str,
+        outcome: str,
+        mediators: List[str],
+        method: str,
+    ) -> CausalEffectEstimate:
+        mediator_set = mediators or self._find_frontdoor_mediators(treatment, outcome)
+        if not mediator_set:
+            raise CausalModelError(
+                "Frontdoor adjustment requires at least one mediator.",
+                context={"treatment": treatment, "outcome": outcome},
+            )
+
+        modeling_data = self._prepare_modeling_data(data)
+        ensure_columns_present(
+            modeling_data,
+            [treatment, outcome, *mediator_set],
+            field_name="modeling_data",
+            error_cls=DataValidationError,
+        )
+        valid_data = modeling_data[[treatment, outcome, *mediator_set]].dropna()
+        if valid_data.empty:
+            raise DataValidationError(
+                "No valid observations remained after dropping NaNs for frontdoor adjustment.",
+                context={"mediators": mediator_set},
+            )
+
+        mediator_effects: List[float] = []
+        for mediator in mediator_set:
+            mediator_model = OLS(valid_data[mediator], add_constant(valid_data[[treatment]], has_constant="add")).fit()
+            outcome_model = OLS(
+                valid_data[outcome],
+                add_constant(valid_data[[mediator, treatment]], has_constant="add"),
+            ).fit()
+            mediator_effects.append(float(mediator_model.params[treatment] * outcome_model.params[mediator]))
+
+        total_effect = float(np.sum(mediator_effects))
+        return CausalEffectEstimate(
+            treatment=treatment,
+            outcome=outcome,
+            method=method,
+            effect=total_effect,
+            std_error=None,
+            p_value=None,
+            ci_lower=None,
+            ci_upper=None,
+            n_obs=int(len(valid_data)),
+            mediator_set=mediator_set,
+            metadata={"frontdoor_mode": "product_of_coefficients"},
+        )
+
+    def _check_iv_conditions(self, instrument: str, treatment: str, outcome: str) -> Dict[str, bool]:
+        conditions = {
+            "relevance_path": False,
+            "exclusion": False,
+            "independence": False,
+        }
+        if instrument not in self.graph or treatment not in self.graph or outcome not in self.graph:
+            return conditions
+
+        if nx.has_path(self.graph.to_undirected(), instrument, treatment):
+            conditions["relevance_path"] = True
+
+        modified_graph = self.graph.copy()
+        for child in list(modified_graph.successors(treatment)):
+            modified_graph.remove_edge(treatment, child)
+
+        conditions["exclusion"] = not nx.has_path(modified_graph, instrument, outcome)
+        conditions["independence"] = self._are_d_separated(modified_graph, instrument, outcome, set())
+        return conditions
+
+    def _instrumental_variables(
+        self,
+        data: pd.DataFrame,
+        treatment: str,
+        outcome: str,
+        instrument: str,
+        estimator: str = "2sls",
+    ) -> CausalEffectEstimate:
+        if estimator != "2sls":
+            raise ConfigurationError(
+                "Unsupported IV estimator configured for causal model.",
+                context={"estimator": estimator},
+            )
+
+        modeling_data = self._prepare_modeling_data(data)
+        ensure_columns_present(
+            modeling_data,
+            [treatment, outcome, instrument],
+            field_name="modeling_data",
+            error_cls=DataValidationError,
+        )
+        valid_data = modeling_data[[treatment, outcome, instrument]].dropna()
+        if valid_data.empty:
+            raise DataValidationError(
+                "No valid observations remained after dropping NaNs for IV estimation.",
+                context={"instrument": instrument},
+            )
+
         iv_conditions = self._check_iv_conditions(instrument, treatment, outcome)
-        if not all(iv_conditions.values()):
-            logger.warning(f"Instrument '{instrument}' may not satisfy all graphical conditions for IV estimation of {treatment} -> {outcome}. Proceeding with caution.")
-            # Depending on severity, could return None or raise error.
+        weak_iv_warning = not all(iv_conditions.values())
 
-        # 2. Identify exogenous covariates (W) to include in both stages.
-        #    These are typically variables that affect Y but are not affected by T.
-        #    In simplest case, W is empty. Often includes confounders Z-Y or X-Y if instrument is conditional.
-        #    For simplicity, let's assume no *additional* covariates W for now. Advanced implementations would identify these from the graph.
-        exog_covariates = [] # Placeholder: Identify based on graph if needed.
+        endog = valid_data[outcome]
+        exog = add_constant(valid_data[[treatment]], has_constant="add")
+        instruments = add_constant(valid_data[[instrument]], has_constant="add")
+        iv_model = IV2SLS(endog=endog, exog=exog, instrument=instruments).fit()
 
-        # 3. Perform 2SLS estimation
-        if estimator == '2sls':
-            try:
-                logger.info(f"Performing 2SLS: Stage 1 ({treatment} ~ {instrument}), Stage 2 ({outcome} ~ predicted {treatment})")
-                # Prepare data for statsmodels IV2SLS
-                # We need to specify the endogenous regressor (Treatment X) separately.
+        ci = iv_model.conf_int().loc[treatment]
+        estimate = CausalEffectEstimate(
+            treatment=treatment,
+            outcome=outcome,
+            method="iv.2sls",
+            effect=float(iv_model.params[treatment]),
+            std_error=float(iv_model.bse[treatment]),
+            p_value=float(iv_model.pvalues[treatment]),
+            ci_lower=float(ci[0]),
+            ci_upper=float(ci[1]),
+            n_obs=int(iv_model.nobs),
+            instrument=instrument,
+            metadata={
+                "iv_conditions": iv_conditions,
+                "weak_iv_warning": weak_iv_warning,
+            },
+        )
+        return estimate
 
-                endog = data[outcome]
-                # Exogenous variables in the *structural* equation (Stage 2) - typically just intercept if no W
-                exog_structural = pd.DataFrame({'Intercept': np.ones(len(data))})
-                if exog_covariates:
-                    exog_structural[exog_covariates] = data[exog_covariates]
+    def _log_effect_estimate(self, estimate: Union[CausalEffectEstimate, pd.Series, None]) -> None:
+        if not self.enable_memory_logging or estimate is None:
+            return
+        try:
+            payload = estimate.to_dict() if isinstance(estimate, CausalEffectEstimate) else dict(estimate)
+            effect_value = float(payload.get("effect", 0.0))
+            self.alignment_memory.log_evaluation(
+                metric="causal_effect_estimate",
+                value=abs(effect_value),
+                threshold=1.0,
+                context={
+                    "treatment": payload.get("treatment"),
+                    "outcome": payload.get("outcome"),
+                    "method": payload.get("method"),
+                    "instrument": payload.get("instrument"),
+                },
+                source="causal_model",
+                metadata={"estimate": payload},
+            )
+        except Exception as exc:
+            logger.warning("Failed to log causal effect estimate to AlignmentMemory: %s", exc)
 
-                 # Endogenous variable(s) in the structural equation - the treatment X
-                endog_regressor = data[[treatment]] # Needs to be DataFrame
-
-                # Instruments = Instrument Z + any exogenous vars W included above
-                instruments = data[[instrument]]
-                if exog_covariates:
-                    instruments[exog_covariates] = data[exog_covariates]
-                # Add constant to instruments as well if including intercept in structural
-                instruments_with_const = add_constant(instruments, has_constant='add')
-
-
-                # Use statsmodels IV2SLS
-                iv_model = IV2SLS(
-                    endog=endog, 
-                    exog=exog_structural.join(endog_regressor),  # Combine exogenous variables and treatment
-                    instrument=instruments_with_const
-                ).fit()
-
-                logger.info(iv_model.summary())
-
-                # Extract the coefficient for the treatment variable
-                iv_effect = iv_model.params[treatment]
-                iv_stderr = iv_model.bse[treatment]
-                iv_pvalue = iv_model.pvalues[treatment]
-                iv_conf_int = iv_model.conf_int().loc[treatment]
-
-                return pd.Series({
-                    'effect': iv_effect,
-                    'std_error': iv_stderr,
-                    'p_value': iv_pvalue,
-                    'ci_lower': iv_conf_int[0],
-                    'ci_upper': iv_conf_int[1],
-                    'n_obs': iv_model.nobs,
-                    'method': 'IV-2SLS',
-                    'instrument': instrument
-                })
-
-            except Exception as e:
-                logger.error(f"IV 2SLS estimation failed: {e}")
-                # Check for common issues: weak instrument (low F-stat in stage 1), collinearity
-                # Could try running stage 1 manually to check instrument strength.
-                return None # Indicate failure
-        else:
-            raise NotImplementedError(f"IV estimator '{estimator}' not implemented.")
-
-
-    # --- Counterfactual Methods ---
-
-    def compute_counterfactual(self,
-                             intervention: Dict[str, Union[float, int]],
-                             observed_data_point: Optional[pd.Series] = None,
-                             method: str = 'adjust') -> Union[pd.Series, pd.DataFrame]:
-        r"""
-        Compute counterfactual outcome(s) under a specific intervention using Pearl's 3-step process (Abduction, Action, Prediction)
-        or simpler adjustment if structural equations are known.
-
-        Args:
-            intervention (Dict[str, Union[float, int]]): Dictionary specifying variables to intervene on and their fixed values. E.g., {'treatment': 1}.
-            observed_data_point (pd.Series, optional): A single row of observed data representing the unit for which the counterfactual is computed. If None, computes expected counterfactual over the population.
-            method (str): 'adjust' (uses SEM) or 'pearl3step' (requires modeling noise). Default 'adjust'.
-
-        Returns:
-            pd.Series or pd.DataFrame: Counterfactual outcomes. If observed_data_point is given, returns a Series with counterfactual values for that unit.
-                                      Otherwise, returns a DataFrame representing the expected population distribution under intervention.
+    # ------------------------------------------------------------------
+    # Counterfactual inference
+    # ------------------------------------------------------------------
+    def compute_counterfactual(
+        self,
+        intervention: Dict[str, Union[float, int, str, bool]],
+        observed_data_point: Optional[pd.Series] = None,
+        method: str = "adjust",
+    ) -> Union[pd.Series, pd.DataFrame]:
         """
-        if method == 'adjust':
-            # Simplified method: Modify graph (remove incoming to intervened), re-estimate/predict.
-            # Assumes SEMs capture the essential structure.
-            logger.info(f"Computing counterfactual using structural equation adjustment for intervention: {intervention}")
+        Compute counterfactual outcome(s) under a specific intervention using
+        structural equation adjustment or, for specific future extension,
+        Pearl's three-step method.
+        """
+        try:
+            method_name = ensure_non_empty_string(method, "method", error_cls=DataValidationError).lower()
+            intervention_mapping = ensure_mapping(
+                intervention,
+                "intervention",
+                allow_empty=False,
+                error_cls=DataValidationError,
+            )
+            ensure_columns_present(
+                self.data if observed_data_point is None else pd.DataFrame([observed_data_point]),
+                list(intervention_mapping.keys()),
+                field_name="intervention_scope",
+                error_cls=DataValidationError,
+            )
 
-            # Ensure SEMs are estimated
-            sems = self._get_structural_equations()
-            if sems is None:
-                raise RuntimeError("Structural equations must be estimated before computing counterfactuals with 'adjust' method.")
+            if method_name == "pearl3step":
+                raise CounterfactualAuditError(
+                    "Pearl's three-step counterfactual routine is not yet implemented in this module.",
+                    context={"method": method_name},
+                )
+            if method_name != "adjust":
+                raise ConfigurationError(
+                    "Unsupported counterfactual method configured for causal model.",
+                    context={"method": method_name},
+                )
 
-
+            equations = self._get_structural_equations()
             if observed_data_point is not None:
-                # Compute for a specific individual (requires abduction step for noise terms in full Pearl method)
-                # Adjustment method is simpler: just substitute and predict down the chain.
-                cf_data = observed_data_point.copy().to_frame().T # Make it DataFrame-like
-                cf_data.index = ['counterfactual']
+                base_frame = observed_data_point.to_frame().T.copy()
+                base_frame.index = ["counterfactual"]
             else:
-                # Compute expected counterfactual for the population
-                cf_data = self.data.copy()
+                base_frame = self.data.copy()
+
+            numeric_frame = self._prepare_modeling_data(base_frame)
+            if numeric_frame.empty and base_frame.empty:
+                return base_frame.iloc[0] if observed_data_point is not None else base_frame
+
+            for variable in nx.topological_sort(self.graph):
+                if variable in intervention_mapping:
+                    base_frame[variable] = intervention_mapping[variable]
+                    if variable in numeric_frame.columns:
+                        numeric_frame[variable] = pd.to_numeric(base_frame[variable], errors="coerce")
+                    continue
+
+                equation = equations.get(variable)
+                if equation is None:
+                    continue
+                if equation.equation_type in {"exogenous", "fallback_mean"}:
+                    if self.counterfactual_predict_exogenous_strategy == "mean_fill" and variable in numeric_frame.columns:
+                        fill_value = equation.mean if equation.mean is not None else 0.0
+                        numeric_frame[variable] = numeric_frame[variable].fillna(fill_value)
+                        if pd.api.types.is_numeric_dtype(base_frame[variable]):
+                            base_frame[variable] = numeric_frame[variable]
+                    continue
+
+                parents = equation.parents
+                parent_frame = numeric_frame[parents].copy()
+                if equation.equation_type == "ols" and isinstance(equation.model, RegressionResultsWrapper):
+                    X_pred = add_constant(parent_frame, has_constant="add")
+                    X_pred = X_pred.reindex(columns=equation.predictors, fill_value=1.0)
+                    predicted = equation.model.predict(X_pred)
+                    numeric_frame[variable] = predicted
+                    if variable in base_frame.columns and pd.api.types.is_numeric_dtype(base_frame[variable]):
+                        base_frame[variable] = predicted
+                elif equation.equation_type == "logistic" and equation.model is not None:
+                    probabilities = equation.model.predict_proba(parent_frame)[:, 1]
+                    binary_prediction = (probabilities >= 0.5).astype(int)
+                    numeric_frame[variable] = binary_prediction
+                    if variable in base_frame.columns and pd.api.types.is_numeric_dtype(base_frame[variable]):
+                        base_frame[variable] = binary_prediction
+
+            cf_result = base_frame.iloc[0] if observed_data_point is not None else base_frame
+            self.intervention_history.append(
+                build_alignment_event(
+                    "counterfactual_computed",
+                    source="causal_model",
+                    metadata={"method": method_name},
+                    context={
+                        "intervention": normalize_context(intervention_mapping),
+                        "observed_data_point": observed_data_point.to_dict() if observed_data_point is not None else None,
+                    },
+                    payload={"shape": getattr(base_frame, "shape", None)},
+                )
+            )
+            return cf_result
+        except Exception as exc:
+            raise wrap_alignment_exception(
+                exc,
+                target_cls=CounterfactualAuditError,
+                message="Failed to compute counterfactual outcome.",
+                context={"method": method, "intervention": sanitize_for_logging(intervention)},
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Diagnostic helpers
+    # ------------------------------------------------------------------
+    def get_graph_summary(self) -> Dict[str, Any]:
+        # Retrieve latent confounders from graph metadata (or fallback to empty set)
+        latent_confounders = self.graph.graph.get("potential_latent_confounders", set())
+        return {
+            "nodes": list(self.graph.nodes()),
+            "edges": list(self.graph.edges()),
+            "n_nodes": self.graph.number_of_nodes(),
+            "n_edges": self.graph.number_of_edges(),
+            "is_dag": nx.is_directed_acyclic_graph(self.graph) if self.graph.number_of_nodes() > 0 else True,
+            "potential_latent_confounders": list(latent_confounders),
+            "graph_hash": self.graph_hash,
+        }
+
+    def get_structural_equation_summary(self) -> Dict[str, Any]:
+        return {
+            node: equation.to_dict()
+            for node, equation in self._get_structural_equations().items()
+        }
 
 
-            # Process variables in topological order for prediction
-            try:
-                sorted_nodes = list(nx.topological_sort(self.graph))
-            except nx.NetworkXUnfeasible:
-                raise ValueError("Graph contains cycles, cannot topologically sort for counterfactual prediction.")
-
-
-            for var in sorted_nodes:
-                if var in intervention:
-                    # Action: Set variable to intervened value
-                    cf_data[var] = intervention[var]
-                else:
-                    # Prediction: Use SEM for non-intervened variables based on their parents' current/counterfactual values
-                    parents = list(self.graph.predecessors(var))
-                    model_info = sems.get(var)
-                    # Handle exogenous/unmodeled vars first
-                    is_exogenous_or_unmodeled = (
-                        not parents or model_info is None or (isinstance(model_info, dict) and model_info.get('type') == 'exogenous'))
-                    if is_exogenous_or_unmodeled: # Exogenous variable not intervened on keeps its original value(s)
-                        if observed_data_point is not None:
-                            if var in observed_data_point:
-                                cf_data[var] = observed_data_point[var]
-                        continue
-
-                    if isinstance(model_info, RegressionResultsWrapper):
-                        # Endogenous variable: Predict using its SEM
-                        try:
-                            # Prepare predictor data (current values of parents in cf_data)
-                            X_pred_input = cf_data[parents].copy()
-                            has_intercept = 'const' in model_info.model.exog_names
-                            if has_intercept:
-                                X_pred_input['const'] = 1.0
-                            X_pred_aligned = X_pred_input.reindex(columns=model_info.model.exog_names, fill_value=0)
-                            predictions = model_info.predict(X_pred_aligned)
-                            cf_data[var] = predictions
-                        except Exception as e:
-                            logger.error(f"Prediction failed for variable '{var}' during counterfactual computation: {e}")
-                            cf_data[var] = np.nan # Mark as failed
-                    else:
-                        logger.warning(f"No valid SEM found for endogenous variable '{var}'. Cannot predict counterfactual value.")
-                        cf_data[var] = np.nan
-
-            # Return the result
-            if observed_data_point is not None:
-                return cf_data.iloc[0] # Return Series for the individual
-            else:
-                return cf_data # Return DataFrame for the population
-
-
-        elif method == 'pearl3step':
-            # Requires modeling exogenous noise variables U, more complex.
-            # Step 1: Abduction - Estimate U for the observed_data_point.
-            # Step 2: Action - Modify structural equations based on intervention.
-            # Step 3: Prediction - Compute counterfactual outcome using modified model and estimated U.
-            raise NotImplementedError("Pearl's 3-step counterfactual method is not yet implemented.")
-        else:
-            raise ValueError(f"Unknown counterfactual method: {method}")
-
-
-# Example Usage (Optional - Keep commented out or remove for final script)
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("\n=== Running Causal Model ===\n")
-    printer.status("Init", "Causal Model initialized", "success")
-    # Create sample data
+    printer.status("TEST", "Causal Model initialized", "info")
+
     np.random.seed(42)
-    n_samples = 1000
-    Z = np.random.normal(0, 1, n_samples)  # Instrument / Common Cause
-    X = 0.6 * Z + np.random.normal(0, 0.8, n_samples) # Treatment influenced by Z
-    Y = 1.5 * X + 0.8 * Z + np.random.normal(0, 1, n_samples) # Outcome influenced by X and Z (confounding)
-    Y = 1.5 * X + np.random.normal(0, 1, n_samples) # Outcome influenced only by X (for simpler IV case)
-    W = 0.4 * Z + np.random.normal(0, 1, n_samples) # Another variable correlated with Z
+    n_samples = 1200
 
-    data = pd.DataFrame({'Z': Z, 'X': X, 'Y': Y, 'W': W})
+    Z = np.random.normal(0, 1, n_samples)
+    U = np.random.normal(0, 1, n_samples)
+    X = 0.8 * Z + 0.4 * U + np.random.normal(0, 0.5, n_samples)
+    M = 0.9 * X + np.random.normal(0, 0.5, n_samples)
+    Y = 1.4 * X + 0.6 * M + 0.5 * U + np.random.normal(0, 0.8, n_samples)
+    S = np.where(Z > 0, "group_a", "group_b")
 
-    # --- Graph Learning ---
+    data = pd.DataFrame(
+        {
+            "Z": Z,
+            "U_proxy": U,
+            "X": X,
+            "M": M,
+            "Y": Y,
+            "sensitive_group": S,
+        }
+    )
+
     builder = CausalGraphBuilder()
-    # This will run PC, orient, BIC optimize etc.
-    # In a real scenario, might need constraints.
-    builder.forbidden_edges = [('Y', 'X')] # Example constraint
-    learned_model = builder.construct_graph(data, sensitive_attrs=[]) # No sensitive attrs here
+    builder.required_edges = [("Z", "X"), ("X", "M"), ("M", "Y")]
+    builder.forbidden_edges = [("Y", "X"), ("Y", "M")]
 
-    print("\nLearned Graph Edges:")
-    print(learned_model.graph.edges())
+    learned_model = builder.construct_graph(data, sensitive_attrs=["sensitive_group"])
 
-    # --- Effect Estimation ---
-    print("\nEstimating Effect X -> Y using Backdoor Linear Regression:")
+    printer.pretty("graph_summary", learned_model.get_graph_summary(), "success")
+    printer.pretty("structural_equations", learned_model.get_structural_equation_summary(), "success")
+
+    print("\nEstimating effect X -> Y using backdoor linear regression:")
+    backdoor_linear = learned_model.estimate_effect(
+        treatment="X",
+        outcome="Y",
+        method="backdoor.linear_regression",
+    )
+    printer.pretty("backdoor_linear", backdoor_linear.to_dict(), "success")
+
+    binary_treatment = (data["Z"] > 0).astype(int)
+    binary_outcome = (data["Y"] > data["Y"].median()).astype(int)
+    binary_data = data.copy()
+    binary_data["T_bin"] = binary_treatment
+    binary_data["Y_bin"] = binary_outcome
+
+    print("\nEstimating effect T_bin -> Y_bin using doubly robust estimation:")
     try:
-        backdoor_est = learned_model.estimate_effect(treatment='X', outcome='Y', method='backdoor.linear_regression')
-        print(backdoor_est)
-    except Exception as e:
-        print(f"Backdoor estimation failed: {e}")
+        dr_estimate = learned_model.estimate_effect(
+            treatment="T_bin",
+            outcome="Y_bin",
+            method="backdoor.doubly_robust",
+            data=binary_data,
+        )
+        printer.pretty("doubly_robust", dr_estimate.to_dict(), "success")
+    except Exception as exc:
+        printer.pretty("doubly_robust_error", str(exc), "warning")
 
+    print("\nEstimating effect X -> Y using IV (Z as instrument):")
+    iv_estimate = learned_model.estimate_effect(
+        treatment="X",
+        outcome="Y",
+        method="iv.2sls",
+        instrument="Z",
+    )
+    printer.pretty("iv_estimate", iv_estimate.to_dict(), "success")
 
-    print("\nEstimating Effect X -> Y using IV (Z as instrument):")
-    try:
-        iv_est = learned_model.estimate_effect(treatment='X', outcome='Y', method='iv.2sls', instrument='Z')
-        if iv_est is not None:
-            print(iv_est)
-        else:
-            print("IV estimation failed.")
-    except Exception as e:
-        print(f"IV estimation failed: {e}")
+    print("\nEstimating effect X -> Y using frontdoor mediation:")
+    frontdoor_estimate = learned_model.estimate_effect(
+        treatment="X",
+        outcome="Y",
+        method="frontdoor.linear_regression",
+        mediators=["M"],
+    )
+    printer.pretty("frontdoor_estimate", frontdoor_estimate.to_dict(), "success")
 
+    print("\nComputing counterfactual do(X = 2.0) over the population:")
+    cf_population = learned_model.compute_counterfactual(intervention={"X": 2.0}, method="adjust")
+    printer.pretty(
+        "counterfactual_population_summary",
+        {
+            "mean_Y": float(pd.to_numeric(cf_population["Y"], errors="coerce").mean()),
+            "mean_M": float(pd.to_numeric(cf_population["M"], errors="coerce").mean()),
+            "rows": int(len(cf_population)),
+        },
+        "success",
+    )
 
-    # --- Counterfactual ---
-    print("\nComputing Counterfactual E[Y | do(X=2)]:")
-    try:
-        intervention = {'X': 2.0}
-        # Population counterfactual
-        cf_population_df = learned_model.compute_counterfactual(intervention=intervention, method='adjust')
-        mean_cf_outcome = cf_population_df['Y'].mean()
-        print(f"Expected outcome Y under do(X=2): {mean_cf_outcome:.4f}")
+    print("\nComputing counterfactual do(X = 2.0) for one observed unit:")
+    observed_point = data.iloc[0]
+    cf_individual = learned_model.compute_counterfactual(
+        intervention={"X": 2.0},
+        observed_data_point=observed_point,
+        method="adjust",
+    )
+    printer.pretty("counterfactual_individual", cf_individual.to_dict(), "success")
 
-        # Individual counterfactual (for the first data point)
-        observed_point = data.iloc[0]
-        cf_individual = learned_model.compute_counterfactual(intervention=intervention, observed_data_point=observed_point, method='adjust')
-        print(f"\nCounterfactual for individual 0 (Observed Y={observed_point['Y']:.4f}):")
-        print(cf_individual)
+    graph_path = Path("/tmp/causal_graph_test.gml")
+    saved_path = builder.save_graph(graph_path)
+    printer.pretty("saved_graph_path", str(saved_path), "success")
 
-    except Exception as e:
-        print(f"Counterfactual computation failed: {e}")
-    print("\n=== Causal Model Test Completed ===\n")
+    print("\n=== Test ran successfully ===\n")

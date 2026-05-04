@@ -1,0 +1,97 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+
+:root {
+  --bg-dark: #020617;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-dark);
+}
+
+.academy-panel {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.4);
+}
+
+.academy-section-card {
+  background: rgba(2, 6, 23, 0.5);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 0.75rem;
+  padding: 1.2rem;
+  transition: border-color 0.2s ease;
+}
+.academy-section-card:hover {
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.academy-btn {
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.15);
+  color: #e2e8f0;
+  border-radius: 0.6rem;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  transition: all 0.2s ease;
+}
+.academy-btn:hover {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.8);
+}
+
+.academy-btn-secondary {
+  border-color: rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.4);
+}
+.academy-btn-secondary:hover {
+  background: rgba(148, 163, 184, 0.2);
+  border-color: rgba(148, 163, 184, 0.8);
+}
+
+.scanlines {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0) 50%, rgba(0, 0, 0, 0.1) 50%, rgba(0, 0, 0, 0.1));
+  background-size: 100% 4px;
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+/* Fix canvas so it stays behind content while scrolling */
+#academy-canvas {
+  position: fixed;
+}
+
+/* Enlarged state for section cards */
+.academy-section-card.enlarged {
+  transform: scale(1.15);
+  transition: transform 0.2s ease;
+  z-index: 10;
+  position: relative;
+}
+
+.academy-section-card {
+  position: relative; /* for absolute positioning of timer */
+  /* existing styles */
+}
+
+.section-timer {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: #22d3ee;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  display: none; /* hidden by default */
+  z-index: 5;
+}

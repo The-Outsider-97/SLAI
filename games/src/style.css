@@ -1,0 +1,44 @@
+:root {
+  --signal-white: #efefef;
+  --black-brown: #181818;
+  --traffic-red: #cb0605;
+  --sky-blue: #0071a4;
+}
+
+body {
+  background-color: #0a0a0a;
+  color: var(--signal-white);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.neon-text {
+  text-shadow: 0 0 15px rgba(0, 113, 164, 0.4);
+}
+
+.glass-panel {
+  background: rgba(24, 24, 24, 0.72);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(239, 239, 239, 0.08);
+}
+
+.page-bg-grid {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.12;
+  background-image:
+    linear-gradient(rgba(239, 239, 239, 0.2) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(239, 239, 239, 0.2) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.9), transparent 88%);
+}
+
+.card-glow:hover {
+  box-shadow: 0 0 30px rgba(0, 113, 164, 0.28);
+}
+
+.game-card[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}

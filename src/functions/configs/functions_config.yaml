@@ -29,6 +29,13 @@ credential_policy:
     require_digit: true
     require_symbol: true
 
+portable_store:
+  lock_timeout: 5.0
+  ensure_ascii: false
+  indent: 2
+  sort_keys: true
+  create_if_missing: true
+
 language_aware:
     stopwords: "src/agents/language/templates/stopwords.json"
 
@@ -41,3 +48,26 @@ search_engine:
 bm25:
     k1: 1.2
     b: 0.75
+
+transport:
+    adapters:
+      - name: "field-lora"
+        type: "lora"
+        reliability: 0.92
+        base_latency_ms: 420
+      - name: "local-serial"
+        type: "serial"
+        reliability: 0.995
+        base_latency_ms: 20
+      - name: "mesh-net"
+        type: "mesh"
+        reliability: 0.90
+        base_latency_ms: 260
+      - name: "ops-lte"
+        type: "lte"
+        reliability: 0.97
+        base_latency_ms: 120
+      - name: "backup-sat"
+        type: "satcom"
+        reliability: 0.88
+        base_latency_ms: 780

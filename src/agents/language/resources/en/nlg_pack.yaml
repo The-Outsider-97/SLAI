@@ -1,0 +1,5793 @@
+# NLG Resource Pack (English)
+# -----------------------------------------------------------------------------
+# Consolidates discourse_markers.json, verbose_phrases.json, and
+# politeness_strategies.yaml into a single NLG-facing style/resource pack.
+# Keep response templates separate under templates/en/nlg_templates.yaml.
+# -----------------------------------------------------------------------------
+
+metadata:
+  name: nlg_pack
+  language: en
+  locale_default: en-US
+  version: 1.0.0
+  status: production_ready_resource_pack
+  created_at: '2026-04-28T09:40:00Z'
+  description: Consolidated NLG resource pack for discourse markers, verbosity phrase pools, politeness strategies, style
+    adaptation, and speech-act realization. Templates remain separate under templates/en/nlg_templates.yaml.
+  source_files:
+  - discourse_markers.json
+  - verbose_phrases.json
+  - politeness_strategies.yaml
+  replaces_standalone_files:
+  - discourse_markers.json
+  - verbose_phrases.json
+  - politeness_strategies.yaml
+  intended_consumers:
+  - NLGEngine
+  - DialogueContext
+  - LanguageResourceManager
+schema:
+  format: language_resource_pack
+  pack_type: nlg
+  schema_version: '1.0'
+  templates_are_external: true
+  requires:
+    discourse_marker_fields:
+    - id
+    - marker
+    - enabled
+    - functions
+    - preferred_position
+    - formality
+    - risk_level
+    verbose_entry_fields:
+    - id
+    - text
+    - enabled
+    - style
+    - position
+    - risk_level
+    politeness_entry_fields:
+    - id
+    - text
+    - enabled
+    - risk_level
+    - max_uses_per_response
+runtime_policy:
+  preserve_template_text: true
+  do_not_randomly_insert_markers: true
+  allow_discourse_markers: true
+  allow_verbose_prefixes: true
+  allow_politeness_strategies: true
+  max_discourse_markers_per_response: 2
+  max_verbose_prefixes_per_response: 1
+  max_politeness_markers_per_response: 1
+  min_words_for_discourse_marker: 8
+  min_words_for_verbose_prefix: 35
+  suppress_markers_for_exact_answers: true
+  suppress_markers_for_safety_refusals: true
+  suppress_boosters_below_confidence: 0.82
+  allow_hedges_below_confidence: 0.72
+  selection_order:
+  - template_rendering
+  - speech_act_realization
+  - politeness_strategy
+  - discourse_marker
+  - verbosity_prefix
+  - style_adaptation
+  - quality_validation
+  dedupe_case_insensitive: true
+  avoid_repeating_marker_within_turns: 3
+  avoid_repeating_prefix_within_turns: 5
+style_policy:
+  default_style: neutral
+  supported_styles:
+    neutral:
+      formality: 0.5
+      verbosity: 1.0
+      allow_slang: false
+      default_phrase_pool: default
+    friendly:
+      formality: 0.35
+      verbosity: 1.05
+      allow_slang: true
+      default_phrase_pool: friendly
+    professional:
+      formality: 0.78
+      verbosity: 1.0
+      allow_slang: false
+      default_phrase_pool: professional
+    technical:
+      formality: 0.72
+      verbosity: 1.15
+      allow_slang: false
+      default_phrase_pool: technical
+    concise:
+      formality: 0.55
+      verbosity: 0.65
+      allow_slang: false
+      default_phrase_pool: null
+  contraction_policy:
+    formal_expand: true
+    casual_contract: true
+    never_contract:
+    - cannot
+    do_not_change_inside_code: true
+  verbosity_policy:
+    concise_max_words: 30
+    normal_max_words: 120
+    verbose_min_words: 35
+    verbose_prefix_probability: 0.25
+    never_prefix_if_response_starts_with:
+    - 'Yes'
+    - 'No'
+    - OK
+    - Okay
+    - Sure
+    - Sorry
+discourse:
+  selection_policy:
+    marker_selection: function_then_style_then_recency
+    prefer_explicit_relation_from_context: true
+    fallback_function: general_transition
+    punctuate_initial_marker: true
+    do_not_insert_before_user_visible_code: true
+    do_not_insert_inside_quoted_text: true
+    avoid_low_information_markers:
+    - actually
+    - basically
+    - you know
+    - you see
+    avoid_overconfident_markers_when_uncertain:
+    - clearly
+    - obviously
+    - without a doubt
+    - certainly
+    - definitely
+  functions:
+    additive_elaboration:
+      description: Adds related information or extends a point.
+      preferred_position: sentence_initial_or_mid_sentence
+      inventory_count: 17
+    contrast_concession:
+      description: Introduces contrast, exception, or concession.
+      preferred_position: sentence_initial_or_clause_initial
+      inventory_count: 28
+    cause_result:
+      description: Signals reason, consequence, or causal relation.
+      preferred_position: sentence_initial_or_clause_initial
+      inventory_count: 18
+    temporal_sequence:
+      description: Orders events or shifts temporal reference.
+      preferred_position: sentence_initial_or_clause_initial
+      inventory_count: 48
+    condition:
+      description: Introduces condition, contingency, or assumption.
+      preferred_position: clause_initial
+      inventory_count: 23
+    comparison_analogy:
+      description: Compares, analogizes, or aligns two ideas.
+      preferred_position: sentence_initial
+      inventory_count: 13
+    example_evidence:
+      description: Introduces an example, illustration, or specific evidence.
+      preferred_position: sentence_initial
+      inventory_count: 10
+    summary_conclusion:
+      description: Summarizes, closes, or compresses prior content.
+      preferred_position: sentence_initial
+      inventory_count: 20
+    emphasis_certainty:
+      description: Emphasizes certainty, clarity, or importance.
+      preferred_position: sentence_initial_or_inline
+      inventory_count: 20
+    stance_evaluation:
+      description: Signals speaker stance, evaluation, or attitude.
+      preferred_position: sentence_initial_or_inline
+      inventory_count: 20
+    topic_management:
+      description: Changes, resumes, narrows, or references a topic.
+      preferred_position: sentence_initial
+      inventory_count: 24
+    ordering_structure:
+      description: Structures multi-part responses.
+      preferred_position: sentence_initial
+      inventory_count: 14
+    discourse_response:
+      description: Short conversational response marker.
+      preferred_position: standalone_or_sentence_initial
+      inventory_count: 4
+    question_relative:
+      description: Relative/interrogative connective used in clauses.
+      preferred_position: clause_initial
+      inventory_count: 19
+    general_transition:
+      description: General-purpose connective with weak functional specificity.
+      preferred_position: flexible
+      inventory_count: 136
+  inventory:
+  - id: disc.en.001
+    marker: actually
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.002
+    marker: accordingly
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.003
+    marker: additionally
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.004
+    marker: admittedly
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.005
+    marker: after
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.006
+    marker: after all
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.007
+    marker: afterward
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.008
+    marker: afterwards
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.009
+    marker: again
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.010
+    marker: alas
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.011
+    marker: all in all
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.012
+    marker: all of a sudden
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.013
+    marker: all things considered
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.014
+    marker: also
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.015
+    marker: alternatively
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.016
+    marker: although
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.017
+    marker: altogether
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.018
+    marker: always
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.019
+    marker: amazing
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.020
+    marker: analogously
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.021
+    marker: and
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.022
+    marker: and so
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.023
+    marker: and then
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.024
+    marker: another key point
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.025
+    marker: anyhow
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: casual
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.026
+    marker: anyway
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: casual
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.027
+    marker: apparently
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.028
+    marker: as
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.029
+    marker: as a result
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.030
+    marker: as an illustration
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.031
+    marker: as for
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.032
+    marker: as if
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.033
+    marker: as I have said
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.034
+    marker: as it were
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.035
+    marker: as long as
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.036
+    marker: as mentioned earlier
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.037
+    marker: as noted
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.038
+    marker: as shown above
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.039
+    marker: as soon as
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.040
+    marker: as though
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.041
+    marker: as well
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.042
+    marker: as well as
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.043
+    marker: aside from
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.044
+    marker: at any rate
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.045
+    marker: at first
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.046
+    marker: at last
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.047
+    marker: at least
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.048
+    marker: at length
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.049
+    marker: at present
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.050
+    marker: at the same time
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.051
+    marker: at this point
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.052
+    marker: basically
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: casual
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.053
+    marker: because
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.054
+    marker: because of
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.055
+    marker: before
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.056
+    marker: besides
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.057
+    marker: beyond
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.058
+    marker: briefly
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.059
+    marker: but
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.060
+    marker: by all means
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.061
+    marker: by and large
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.062
+    marker: by comparison
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.063
+    marker: by contrast
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.064
+    marker: by far
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.065
+    marker: by the same token
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.066
+    marker: by the way
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.067
+    marker: certainly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.068
+    marker: chiefly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.069
+    marker: clearly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.070
+    marker: comparatively
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.071
+    marker: concurrently
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.072
+    marker: consequently
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.073
+    marker: considering
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.074
+    marker: conversely
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.075
+    marker: correspondingly
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.076
+    marker: curiously
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.077
+    marker: currently
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.078
+    marker: definitely
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.079
+    marker: despite
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.080
+    marker: despite this
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.081
+    marker: different from
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.082
+    marker: doubtless
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.083
+    marker: due to
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.084
+    marker: during
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.085
+    marker: earlier
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.086
+    marker: either
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.087
+    marker: else
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.088
+    marker: elsewhere
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.089
+    marker: equally
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.090
+    marker: equally important
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.091
+    marker: especially
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.092
+    marker: essentially
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.093
+    marker: even
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.094
+    marker: even if
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.095
+    marker: even so
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.096
+    marker: even though
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.097
+    marker: eventually
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.098
+    marker: evidently
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.099
+    marker: exactly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.100
+    marker: except
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.101
+    marker: except for
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.102
+    marker: exceptionally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.103
+    marker: exclusively
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.104
+    marker: explicitly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.105
+    marker: expressly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.106
+    marker: finally
+    enabled: true
+    functions:
+    - temporal_sequence
+    - summary_conclusion
+    - ordering_structure
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.107
+    marker: first
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.108
+    marker: first and foremost
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.109
+    marker: first of all
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.110
+    marker: firstly
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.111
+    marker: following
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.112
+    marker: for example
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.113
+    marker: for instance
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.114
+    marker: for one thing
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.115
+    marker: for that reason
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.116
+    marker: for this purpose
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.117
+    marker: for this reason
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.118
+    marker: fortunately
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.119
+    marker: frankly
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.120
+    marker: frequently
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.121
+    marker: from now on
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.122
+    marker: from this point
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.123
+    marker: further
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.124
+    marker: furthermore
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.125
+    marker: generally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.126
+    marker: generally speaking
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.127
+    marker: genuinely
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.128
+    marker: given these points
+    enabled: true
+    functions:
+    - cause_result
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.129
+    marker: gradually
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.130
+    marker: granted
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.131
+    marker: granted that
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.132
+    marker: hence
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.133
+    marker: henceforth
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.134
+    marker: here
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.135
+    marker: hereafter
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.136
+    marker: herein
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.137
+    marker: hopefully
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.138
+    marker: however
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.139
+    marker: ideally
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.140
+    marker: if
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.141
+    marker: if not
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.142
+    marker: if so
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.143
+    marker: if then
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.144
+    marker: if when
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.145
+    marker: immediately
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.146
+    marker: importantly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.147
+    marker: in a moment
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.148
+    marker: in a nutshell
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.149
+    marker: in a similar fashion
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.150
+    marker: in a word
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.151
+    marker: in addition
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.152
+    marker: in any case
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.153
+    marker: in any event
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.154
+    marker: in brief
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.155
+    marker: in case
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.156
+    marker: in comparison
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.157
+    marker: in conclusion
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.158
+    marker: in consequence
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.159
+    marker: in contrast
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.160
+    marker: in due time
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.161
+    marker: in essence
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.162
+    marker: in fact
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.163
+    marker: in general
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.164
+    marker: in like manner
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.165
+    marker: in particular
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.166
+    marker: in reality
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.167
+    marker: in retrospect
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.168
+    marker: in short
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.169
+    marker: in similar fashion
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.170
+    marker: in summary
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.171
+    marker: in sum
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.172
+    marker: in that case
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.173
+    marker: in the beginning
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.174
+    marker: in the end
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.175
+    marker: in the event that
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.176
+    marker: in the first place
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.177
+    marker: in the meantime
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.178
+    marker: in the meanwhile
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.179
+    marker: in the same way
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.180
+    marker: in theory
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.181
+    marker: in this case
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.182
+    marker: in time
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.183
+    marker: in truth
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.184
+    marker: in turn
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.185
+    marker: in other words
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.186
+    marker: incidentally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.187
+    marker: including
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.188
+    marker: incomparably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.189
+    marker: indeed
+    enabled: true
+    functions:
+    - discourse_response
+    preferred_position: standalone_or_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.190
+    marker: initially
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.191
+    marker: instantly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.192
+    marker: instead
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.193
+    marker: interestingly
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.194
+    marker: ironically
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.195
+    marker: it follows that
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.196
+    marker: it is true that
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.197
+    marker: just as
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.198
+    marker: last
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.199
+    marker: last but not least
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.200
+    marker: lastly
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.201
+    marker: later
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.202
+    marker: least of all
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.203
+    marker: less
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.204
+    marker: let's say
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.205
+    marker: like
+    enabled: true
+    functions:
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.206
+    marker: likewise
+    enabled: true
+    functions:
+    - additive_elaboration
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.207
+    marker: literally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.208
+    marker: luckily
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.209
+    marker: mainly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.210
+    marker: markedly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.211
+    marker: maybe
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.212
+    marker: meaning
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.213
+    marker: meantime
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.214
+    marker: meanwhile
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.215
+    marker: merely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.216
+    marker: miraculously
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.217
+    marker: more
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.218
+    marker: more accurately
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.219
+    marker: more importantly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.220
+    marker: more or less
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.221
+    marker: more precisely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.222
+    marker: more significantly
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.223
+    marker: more to the point
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.224
+    marker: moreover
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.225
+    marker: most importantly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.226
+    marker: most of all
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.227
+    marker: much as
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.228
+    marker: namely
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.229
+    marker: naturally
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.230
+    marker: nearly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.231
+    marker: needless to say
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.232
+    marker: neither
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.233
+    marker: never
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.234
+    marker: nevertheless
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.235
+    marker: next
+    enabled: true
+    functions:
+    - additive_elaboration
+    - temporal_sequence
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.236
+    marker: no doubt
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.237
+    marker: nonetheless
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.238
+    marker: nor
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.239
+    marker: normally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.240
+    marker: not to mention
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.241
+    marker: notably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.242
+    marker: notwithstanding
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.243
+    marker: now
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.244
+    marker: now that
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.245
+    marker: nowadays
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.246
+    marker: obviously
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.247
+    marker: occasionally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.248
+    marker: of course
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.249
+    marker: often
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.250
+    marker: ok
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.251
+    marker: on balance
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.252
+    marker: on condition that
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.253
+    marker: on one hand
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.254
+    marker: on the contrary
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.255
+    marker: on the other hand
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.256
+    marker: on the whole
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.257
+    marker: on top of that
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.258
+    marker: once
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.259
+    marker: once more
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.260
+    marker: only
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.261
+    marker: only if
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.262
+    marker: opposite to
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.263
+    marker: or
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.264
+    marker: ordinarily
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.265
+    marker: originally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.266
+    marker: otherwise
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.267
+    marker: overall
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.268
+    marker: owing to
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.269
+    marker: paradoxically
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.270
+    marker: particularly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.271
+    marker: perhaps
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.272
+    marker: plus
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.273
+    marker: point in fact
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.274
+    marker: precisely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.275
+    marker: presently
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.276
+    marker: presumably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.277
+    marker: previously
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.278
+    marker: primarily
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.279
+    marker: prior to
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.280
+    marker: probably
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.281
+    marker: provided that
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.282
+    marker: put another way
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.283
+    marker: quickly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.284
+    marker: quite
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.285
+    marker: rather
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.286
+    marker: rarely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.287
+    marker: really
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.288
+    marker: regardless
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.289
+    marker: remarkably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.290
+    marker: right
+    enabled: true
+    functions:
+    - discourse_response
+    preferred_position: standalone_or_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.291
+    marker: sadly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.292
+    marker: scarcely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.293
+    marker: second
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.294
+    marker: secondly
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.295
+    marker: seldom
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.296
+    marker: seriously
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.297
+    marker: shortly
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.298
+    marker: significantly
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.299
+    marker: similarly
+    enabled: true
+    functions:
+    - additive_elaboration
+    - comparison_analogy
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.300
+    marker: simultaneously
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.301
+    marker: since
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.302
+    marker: so
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: casual
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.303
+    marker: so that
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.304
+    marker: so then
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.305
+    marker: sometimes
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.306
+    marker: soon
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.307
+    marker: speaking of
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.308
+    marker: specifically
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: flexible
+    formality: neutral_to_formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.309
+    marker: still
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.310
+    marker: strangely
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.311
+    marker: strictly speaking
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.312
+    marker: subsequently
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.313
+    marker: such as
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.314
+    marker: suddenly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.315
+    marker: summing up
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.316
+    marker: summarizing
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.317
+    marker: suppose
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.318
+    marker: supposedly
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.319
+    marker: surely
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.320
+    marker: surprisingly
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.321
+    marker: thankfully
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.322
+    marker: then
+    enabled: true
+    functions:
+    - temporal_sequence
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.323
+    marker: then again
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.324
+    marker: theoretically
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.325
+    marker: there
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.326
+    marker: thereafter
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.327
+    marker: thereby
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.328
+    marker: therefore
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.329
+    marker: therein
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.330
+    marker: third
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.331
+    marker: thirdly
+    enabled: true
+    functions:
+    - ordering_structure
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.332
+    marker: though
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.333
+    marker: thus
+    enabled: true
+    functions:
+    - cause_result
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.334
+    marker: till
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.335
+    marker: to be precise
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.336
+    marker: to be specific
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.337
+    marker: to begin with
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.338
+    marker: to clarify
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.339
+    marker: to conclude
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.340
+    marker: to demonstrate
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.341
+    marker: to emphasize
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.342
+    marker: to end
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.343
+    marker: to explain
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.344
+    marker: to illustrate
+    enabled: true
+    functions:
+    - example_evidence
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.345
+    marker: to put it another way
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low_medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.346
+    marker: to put it differently
+    enabled: true
+    functions:
+    - condition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.347
+    marker: to start with
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.348
+    marker: to sum up
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.349
+    marker: to summarize
+    enabled: true
+    functions:
+    - summary_conclusion
+    preferred_position: sentence_initial
+    formality: neutral_to_formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.350
+    marker: together with
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.351
+    marker: too
+    enabled: true
+    functions:
+    - additive_elaboration
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.352
+    marker: topically
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.353
+    marker: totally
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.354
+    marker: truly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.355
+    marker: typically
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.356
+    marker: ultimately
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.357
+    marker: unbelievably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.358
+    marker: unconditionally
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.359
+    marker: undeniably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.360
+    marker: undoubtedly
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.361
+    marker: unexpectedly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.362
+    marker: unfortunately
+    enabled: true
+    functions:
+    - stance_evaluation
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.363
+    marker: unless
+    enabled: true
+    functions:
+    - condition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.364
+    marker: unlike
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.365
+    marker: unquestionably
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.366
+    marker: until
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.367
+    marker: until now
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.368
+    marker: up to now
+    enabled: true
+    functions:
+    - temporal_sequence
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.369
+    marker: usually
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.370
+    marker: utterly
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.371
+    marker: vis-a-vis
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.372
+    marker: well
+    enabled: true
+    functions:
+    - discourse_response
+    preferred_position: standalone_or_initial
+    formality: casual
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.373
+    marker: what is more
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.374
+    marker: whatever
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.375
+    marker: when
+    enabled: true
+    functions:
+    - temporal_sequence
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.376
+    marker: whenever
+    enabled: true
+    functions:
+    - condition
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.377
+    marker: where
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.378
+    marker: whereas
+    enabled: true
+    functions:
+    - contrast_concession
+    - question_relative
+    preferred_position: clause_initial
+    formality: formal
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.379
+    marker: whereby
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.380
+    marker: wherever
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.381
+    marker: whether
+    enabled: true
+    functions:
+    - condition
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.382
+    marker: which
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.383
+    marker: while
+    enabled: true
+    functions:
+    - contrast_concession
+    - temporal_sequence
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: contextual
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.384
+    marker: whilst
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.385
+    marker: who
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.386
+    marker: whoever
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.387
+    marker: whole
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.388
+    marker: whom
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.389
+    marker: whose
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.390
+    marker: why
+    enabled: true
+    functions:
+    - question_relative
+    preferred_position: clause_initial
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.391
+    marker: with regard to
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.392
+    marker: with respect to
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: formal
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.393
+    marker: with this in mind
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.394
+    marker: without a doubt
+    enabled: true
+    functions:
+    - emphasis_certainty
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.395
+    marker: worse
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.396
+    marker: worst of all
+    enabled: true
+    functions:
+    - general_transition
+    preferred_position: sentence_initial
+    formality: neutral
+    comma_after_initial: usually
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.397
+    marker: yet
+    enabled: true
+    functions:
+    - contrast_concession
+    preferred_position: flexible
+    formality: neutral
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.398
+    marker: 'yes'
+    enabled: true
+    functions:
+    - discourse_response
+    preferred_position: standalone_or_initial
+    formality: casual
+    comma_after_initial: optional
+    risk_level: low
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.399
+    marker: you know
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: casual
+    comma_after_initial: usually
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+  - id: disc.en.400
+    marker: you see
+    enabled: true
+    functions:
+    - topic_management
+    preferred_position: sentence_initial
+    formality: casual
+    comma_after_initial: usually
+    risk_level: medium
+    max_uses_per_response: 1
+    avoid_random_insertion: true
+verbosity:
+  selection_policy:
+    prefix_selection: style_then_intent_then_recency
+    apply_only_when_expanding: true
+    max_prefixes_per_response: 1
+    strip_duplicate_terminal_punctuation: true
+    avoid_prefix_for_short_confirmations: true
+  phrase_pools:
+    default:
+      enabled: true
+      description: Default verbosity prefix pool.
+      entries:
+      - id: verbose.default.001
+        text: Let me elaborate on that a bit.
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.002
+        text: 'Here''s some additional context:'
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.003
+        text: To provide more complete information,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.004
+        text: Expanding on that thought,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.005
+        text: For better understanding,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.006
+        text: To clarify further,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.007
+        text: In more concrete terms,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.008
+        text: 'Adding some background:'
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.009
+        text: To flesh this out completely,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.010
+        text: For comprehensive clarity,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.011
+        text: Delving a little deeper into this,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.012
+        text: If I may expand on that point,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.013
+        text: To give you a fuller picture,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.014
+        text: Let's unpack that statement.
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.015
+        text: To offer more perspective,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.016
+        text: Just to be perfectly clear on this,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.017
+        text: To illustrate this with more detail,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.018
+        text: Building upon what was just said,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.019
+        text: To add another layer of detail,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.020
+        text: For a more thorough explanation,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.021
+        text: Let me provide some specifics.
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.022
+        text: To ensure no misunderstanding,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.023
+        text: 'Here''s a bit more on that topic:'
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.024
+        text: To put this into a broader context,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.default.025
+        text: Considering this in more detail,
+        enabled: true
+        style: default
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+    algorithmic_qa:
+      enabled: true
+      description: Algorithmic Qa verbosity prefix pool.
+      entries:
+      - id: verbose.algorithmic_qa.001
+        text: Regarding algorithmic complexity,
+        enabled: true
+        style: algorithmic_qa
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.algorithmic_qa.002
+        text: Delving into the algorithmics of it,
+        enabled: true
+        style: algorithmic_qa
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+    technical:
+      enabled: true
+      description: Technical verbosity prefix pool.
+      entries:
+      - id: verbose.technical.001
+        text: From an architectural perspective,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.002
+        text: In implementation terms,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.003
+        text: Considering system constraints,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.004
+        text: Analyzing through computational lenses,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.005
+        text: From an optimization standpoint,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.006
+        text: Regarding algorithmic complexity,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.007
+        text: In terms of resource allocation,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.008
+        text: Examining the underlying mechanics,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.009
+        text: From a protocol-level view,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.010
+        text: 'Addressing computational tradeoffs:'
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.011
+        text: From a data flow perspective,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.012
+        text: Considering the hardware abstraction layer,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.013
+        text: In terms of software engineering principles,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.014
+        text: Looking at system scalability factors,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.015
+        text: Analyzing the security implications,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.016
+        text: Regarding the deployment environment specifics,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.017
+        text: From a performance tuning perspective,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.018
+        text: Considering network topology and latency,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.019
+        text: From a design pattern viewpoint,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.020
+        text: In terms of maintainability and extensibility,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.021
+        text: Evaluating the system's fault tolerance,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.022
+        text: From a database schema perspective,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.023
+        text: Considering the API contract,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.024
+        text: From a microservices architecture standpoint,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.technical.025
+        text: Analyzing the concurrency model,
+        enabled: true
+        style: technical
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+    friendly:
+      enabled: true
+      description: Friendly verbosity prefix pool.
+      entries:
+      - id: verbose.friendly.001
+        text: 'Here''s the inside scoop:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.002
+        text: 'Let me break it down simply:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.003
+        text: Between you and me,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.004
+        text: 'The quick and dirty version:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.005
+        text: 'Here''s the TL;DR:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.006
+        text: 'Spoiler alert:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.007
+        text: 'The key thing to know:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.008
+        text: 'In plain English:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.009
+        text: 'The bottom line is:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.010
+        text: 'Cutting through the jargon:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.011
+        text: 'So, here''s the deal:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.012
+        text: Let me give you the lowdown.
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.013
+        text: 'If you want the nutshell version:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.014
+        text: Basically, what this means is...
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.015
+        text: To put it in layman's terms,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.016
+        text: 'Here''s what''s really going on:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.017
+        text: 'The gist of it is:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.018
+        text: Let me spell it out for you.
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.019
+        text: 'No frills, just the facts:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.020
+        text: 'Here''s the real skinny:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.021
+        text: Long story short,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.022
+        text: Essentially,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.023
+        text: What it all boils down to is,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.024
+        text: If I had to sum it up quickly,
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+      - id: verbose.friendly.025
+        text: 'The main takeaway here is:'
+        enabled: true
+        style: friendly
+        position: prefix
+        requires_min_words: 25
+        risk_level: low_medium
+        max_uses_per_response: 1
+    professional:
+      enabled: true
+      description: Professional verbosity prefix pool.
+      entries:
+      - id: verbose.professional.001
+        text: Per industry best practices,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.002
+        text: Aligning with organizational goals,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.003
+        text: From a strategic perspective,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.004
+        text: Considering market trends,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.005
+        text: In terms of ROI analysis,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.006
+        text: From a risk management viewpoint,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.007
+        text: Regarding stakeholder priorities,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.008
+        text: Balancing competing demands,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.009
+        text: Within operational parameters,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.010
+        text: 'Following compliance guidelines:'
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.011
+        text: To ensure strategic alignment across departments,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.012
+        text: From a resource optimization standpoint,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.013
+        text: Considering our key performance indicators (KPIs),
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.014
+        text: In line with our quarterly/annual objectives,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.015
+        text: To address potential compliance and regulatory issues,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.016
+        text: From a competitive advantage perspective,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.017
+        text: To maximize shareholder value and stakeholder satisfaction,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.018
+        text: Considering the project lifecycle and deliverables,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.019
+        text: In the context of our long-term vision and mission,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.020
+        text: To ensure operational excellence and efficiency,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.021
+        text: From a change management perspective,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.022
+        text: Considering the financial implications and budget constraints,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.023
+        text: In accordance with established governance frameworks,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.024
+        text: To foster innovation and continuous improvement,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+      - id: verbose.professional.025
+        text: Considering the broader economic climate,
+        enabled: true
+        style: professional
+        position: prefix
+        requires_min_words: 35
+        risk_level: low
+        max_uses_per_response: 1
+politeness:
+  selection_policy:
+    strategy_selection: speech_act_confidence_context
+    use_hedging_for_low_confidence: true
+    use_indirect_requests_for_clarification: true
+    use_apology_for_errors_or_repairs: true
+    require_preference_for_honorifics: true
+    do_not_stack_hedge_and_booster: true
+    do_not_use_booster_for_uncertain_claims: true
+  strategies:
+    hedging:
+      enabled: true
+      purpose: soften_uncertainty
+      description: Use when confidence is moderate/low or a claim should be softened.
+      default_position: prefix_or_inline
+      entries:
+      - id: polite.hedging.001
+        text: perhaps
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.002
+        text: maybe
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.003
+        text: I think
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.004
+        text: possibly
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.005
+        text: it seems
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.006
+        text: might be
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.hedging.007
+        text: could be
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+    boosters:
+      enabled: true
+      purpose: increase_confidence
+      description: Use only when confidence is high and certainty is justified.
+      default_position: prefix_or_inline
+      entries:
+      - id: polite.boosters.001
+        text: clearly
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.002
+        text: obviously
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.003
+        text: undoubtedly
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.004
+        text: certainly
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.005
+        text: definitely
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.006
+        text: absolutely
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.boosters.007
+        text: without doubt
+        enabled: true
+        risk_level: medium
+        requires_context: false
+        max_uses_per_response: 1
+    indirect_requests:
+      enabled: true
+      purpose: soften_directive
+      description: Use for directives, clarification requests, or user-facing prompts.
+      default_position: prefix
+      entries:
+      - id: polite.indirect_requests.001
+        text: Would you mind
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.indirect_requests.002
+        text: Could you possibly
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.indirect_requests.003
+        text: I was wondering if
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.indirect_requests.004
+        text: If it's not too much trouble
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+    apologies:
+      enabled: true
+      purpose: repair_or_error
+      description: Use for failures, correction, rejection, or negative sentiment.
+      default_position: prefix
+      entries:
+      - id: polite.apologies.001
+        text: I'm sorry
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.apologies.002
+        text: My apologies
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.apologies.003
+        text: Pardon me
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+      - id: polite.apologies.004
+        text: Excuse me
+        enabled: true
+        risk_level: low
+        requires_context: false
+        max_uses_per_response: 1
+    honorifics:
+      enabled: true
+      purpose: address_form
+      description: Use only with known user preference or explicit named addressee.
+      default_position: inline
+      entries:
+      - id: polite.honorifics.001
+        text: Mr.
+        enabled: true
+        risk_level: medium
+        requires_context: true
+        max_uses_per_response: 1
+      - id: polite.honorifics.002
+        text: Ms.
+        enabled: true
+        risk_level: medium
+        requires_context: true
+        max_uses_per_response: 1
+      - id: polite.honorifics.003
+        text: Dr.
+        enabled: true
+        risk_level: medium
+        requires_context: true
+        max_uses_per_response: 1
+      - id: polite.honorifics.004
+        text: Professor
+        enabled: true
+        risk_level: medium
+        requires_context: true
+        max_uses_per_response: 1
+speech_act_realization:
+  assertive:
+    enabled: true
+    default_strategy: plain_statement
+    allowed_politeness:
+    - hedging
+    - boosters
+    avoid_prefixes:
+    - Please
+    - I will
+  directive:
+    enabled: true
+    default_strategy: clear_request
+    allowed_politeness:
+    - indirect_requests
+    - apologies
+    - hedging
+    preferred_templates:
+    - Could you
+    - Please
+    - Would you mind
+    avoid_imperative_when_sentiment_negative: true
+  commissive:
+    enabled: true
+    default_strategy: commitment_statement
+    allowed_politeness:
+    - hedging
+    preferred_templates:
+    - I can
+    - I will
+    - I can help with that
+  expressive:
+    enabled: true
+    default_strategy: social_acknowledgement
+    allowed_politeness:
+    - apologies
+    preferred_templates:
+    - Thank you
+    - You're welcome
+    - I'm sorry
+  declaration:
+    enabled: true
+    default_strategy: explicit_declaration
+    allowed_politeness: []
+    requires_high_confidence: true
+response_quality:
+  blocked_patterns:
+  - id: nlg.block.001
+    pattern: \bas an ai language model\b
+    severity: warning
+  - id: nlg.block.002
+    pattern: \bI cannot answer\b
+    severity: warning
+  - id: nlg.block.003
+    pattern: \bI do not have access\b
+    severity: info
+  overuse_controls:
+    max_same_discourse_marker_per_session: 3
+    max_same_verbose_prefix_per_session: 2
+    reset_window_turns: 20
+  postprocess:
+    trim_whitespace: true
+    collapse_repeated_spaces: true
+    fix_space_before_punctuation: true
+    ensure_terminal_punctuation: true
+    preserve_markdown: true
+integration:
+  language_config_keys:
+    nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
+    templates_path: src/agents/language/templates/en/nlg_templates.yaml
+  nlg_templates_external:
+    recommended_path: src/agents/language/templates/en/nlg_templates.yaml
+    reason: Templates change more often than style resources and should remain separately editable.
+  expected_nlg_engine_usage:
+    load_pack_once: true
+    cache_resource_pack: true
+    select_by_style: true
+    record_marker_usage: true
+    surface_diagnostics_on_missing_pack: true
+test_vectors:
+- id: nlg.pack.test.001
+  description: Low-confidence assertion should allow hedge and suppress booster.
+  input:
+    speech_act: assertive
+    confidence: 0.55
+    style: professional
+  expected:
+    allowed_strategies:
+    - hedging
+    blocked_strategies:
+    - boosters
+- id: nlg.pack.test.002
+  description: Clarification request should prefer indirect request or polite directive.
+  input:
+    speech_act: directive
+    intent: clarification_request
+    confidence: 0.9
+  expected:
+    allowed_strategies:
+    - indirect_requests
+    - hedging
+    max_politeness_markers: 1
+- id: nlg.pack.test.003
+  description: Technical verbose response can use technical prefix but only once.
+  input:
+    style: technical
+    verbosity: 1.4
+    word_count: 80
+  expected:
+    phrase_pool: technical
+    max_verbose_prefixes: 1
+- id: nlg.pack.test.004
+  description: Short confirmation should suppress discourse markers and verbose prefixes.
+  input:
+    response: Got it.
+    word_count: 2
+  expected:
+    allow_discourse_marker: false
+    allow_verbose_prefix: false
+migration_hints:
+  move_to: src/agents/language/resources/en/nlg_pack.yaml
+  retire_standalone_files:
+  - discourse_markers.json
+  - verbose_phrases.json
+  - politeness_strategies.yaml
+  keep_separate:
+  - templates/en/nlg_templates.yaml
+  language_config_update:
+    nlg:
+      nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
+      templates_path: src/agents/language/templates/en/nlg_templates.yaml

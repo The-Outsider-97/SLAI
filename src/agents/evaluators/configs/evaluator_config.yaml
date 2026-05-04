@@ -2,7 +2,7 @@
 enable_historical: true
 store_results: true
 avg_token_baseline: 50
-template_path: 'src/agents/evaluators/templates/certification_templates.json'
+template_path: '../templates/certification_templates.json'
 
 initial_hazard_rates:
   system_failure: 0.000001
@@ -103,7 +103,7 @@ documentation:
     formats: ["json", "yaml"]
     default_format: "json"
   validation:
-    schema_path: "src/agents/evaluators/templates/audit_schema.json"
+    schema_path: "../templates/audit_schema.json"
   versioning:
     max_versions: 7
 
@@ -303,3 +303,5 @@ static_analysis:
     complexity:
       cyclomatic: 15
       cognitive: 20
+
+eval_transformer: {}

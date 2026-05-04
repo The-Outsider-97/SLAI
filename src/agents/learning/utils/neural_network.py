@@ -1,709 +1,613 @@
+"""Production-ready manual neural network with explicit backpropagation."""
 
+from __future__ import annotations
+
+import time
 import torch
 import torch.nn as nn
-import time
 
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from src.agents.base.utils.activation_engine import Activation, ReLU, Sigmoid, Tanh, Linear
-from logs.logger import get_logger
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+from .config_loader import load_global_config, get_config_section
+from ...base.modules.activation_engine import (Activation, Linear,
+                                             ReLU, Sigmoid, Softmax, Tanh)
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Neural Network")
+printer = PrettyPrinter
 
-class Softmax(Activation):
-    """Softmax activation, typically for multi-class classification output.
-    Note: Derivative is complex (Jacobian). Usually combined with CrossEntropyLoss
-    for a simpler and more stable gradient (dL/dz = prediction_probs - true_labels).
-    """
-    def forward(self, z):
-        # Subtract max for numerical stability (log-sum-exp trick part 1)
-        exp_z = torch.exp(z - torch.max(z, dim=-1, keepdim=True)[0])
-        return exp_z / torch.sum(exp_z, dim=-1, keepdim=True)
-    
-    def backward(self, z):
-        # The derivative of Softmax (da/dz) is a Jacobian matrix.
-        # dL/dz = dL/da * da/dz.
-        # This is complex and rarely computed directly in backprop.
-        # Instead, dL/dz for (Softmax + CrossEntropy) is much simpler.
-        # If this layer is used and its derivative is needed directly (e.g. MSE after Softmax),
-        # this method would need to compute dL/da_output @ Jacobian_softmax.
-        # For now, we assume it's either the final output not needing derivative or handled by CrossEntropyLoss.
-        raise NotImplementedError("Softmax derivative is usually handled within SoftmaxCrossEntropyLoss. Set output_activation to 'linear' if using CrossEntropyLoss.")
+DEBUG_LEVEL = 10   # numeric value for DEBUG
 
-# --- Loss Functions ---
+TensorLike = Union[torch.Tensor, Sequence[float]]
+
+
 class Loss:
     """Base class for loss functions."""
-    def forward(self, y_pred, y_true):
-        """Computes the loss."""
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
-    def backward(self, y_pred, y_true, batch_size):
-        """Computes the gradient of the loss w.r.t. y_pred."""
+
+    def backward(self, y_pred: torch.Tensor, y_true: torch.Tensor, batch_size: int) -> torch.Tensor:
         raise NotImplementedError
+
 
 class MSELoss(Loss):
-    """Mean Squared Error Loss.
-    L = (1/N) * sum((y_pred - y_true)^2)
-    dL/dy_pred = (2/N) * (y_pred - y_true)
-    """
-    def forward(self, y_pred, y_true):
-        return torch.mean((y_pred - y_true)**2)
-    def backward(self, y_pred, y_true, batch_size):
-        if batch_size == 0: batch_size = 1 # Avoid division by zero
-        return (2 / batch_size) * (y_pred - y_true)
+    """Mean squared error loss."""
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        return torch.mean((y_pred - y_true) ** 2)
+
+    def backward(self, y_pred: torch.Tensor, y_true: torch.Tensor, batch_size: int) -> torch.Tensor:
+        batch_size = max(int(batch_size), 1)
+        return (2.0 / batch_size) * (y_pred - y_true)
+
 
 class CrossEntropyLoss(Loss):
-    """Cross-Entropy Loss with integrated Softmax.
-    Expects raw logits as y_pred and class indices as y_true.
-    L = - (1/N) * sum(log(softmax(logits)_correct_class))
-    dL/dlogits = (1/N) * (softmax(logits) - y_true_one_hot)
-    """
-    def __init__(self):
-        self.softmax = Softmax()
-        self._cache = {} # To store probabilities from forward pass
+    """Cross-entropy loss over raw logits and class-index targets."""
 
-    def forward(self, logits, y_true_indices):
-        # logits: (batch_size, num_classes)
-        # y_true_indices: (batch_size,) tensor of class indices
-        batch_size = logits.shape[0]
-        
-        # Compute softmax probabilities
-        probs = self.softmax.forward(logits)
-        self._cache['probs'] = probs
-        
-        # Select the probabilities of the true classes
-        # Add epsilon for numerical stability to prevent log(0)
-        y_true_indices = y_true_indices.long()
-        log_probs = torch.log(probs[torch.arange(batch_size), y_true_indices] + 1e-9)
-        
-        # Compute mean negative log likelihood
-        loss = -torch.mean(log_probs)
+    def __init__(self):
+        self.softmax = Softmax(dim=-1)
+        self._cache: Dict[str, torch.Tensor] = {}
+
+    def forward(self, logits: torch.Tensor, y_true_indices: torch.Tensor) -> torch.Tensor:
+        if logits.ndim != 2:
+            raise ValueError(f"CrossEntropyLoss expects 2D logits, got shape {tuple(logits.shape)}")
+        if y_true_indices.ndim != 1:
+            raise ValueError(
+                f"CrossEntropyLoss expects 1D class indices, got shape {tuple(y_true_indices.shape)}"
+            )
+        if logits.shape[0] != y_true_indices.shape[0]:
+            raise ValueError("Batch size mismatch between logits and labels.")
+
+        y_true_indices = y_true_indices.to(device=logits.device, dtype=torch.long)
+        logsumexp = torch.logsumexp(logits, dim=-1)
+        correct_class_logits = logits.gather(1, y_true_indices.unsqueeze(1)).squeeze(1)
+        loss = torch.mean(logsumexp - correct_class_logits)
+        self._cache["probs"] = self.softmax.forward(logits)
         return loss
 
-    def backward(self, logits, y_true_indices, batch_size):
-        # Gradient of CrossEntropyLoss w.r.t. logits (inputs to Softmax)
-        # is (probs - y_true_one_hot) / batch_size
-        if batch_size == 0: batch_size = 1 # Avoid division by zero
-        
-        probs = self._cache.get('probs')
-        # If backward is called without forward (e.g. direct testing), recompute probs
-        if probs is None or probs.shape[0] != logits.shape[0]: 
+    def backward(self, logits: torch.Tensor, y_true_indices: torch.Tensor, batch_size: int) -> torch.Tensor:
+        batch_size = max(int(batch_size), 1)
+        probs = self._cache.get("probs")
+        if probs is None or probs.shape != logits.shape or probs.device != logits.device:
             probs = self.softmax.forward(logits)
 
-        num_classes = logits.shape[1]
-        
-        # Create one-hot encoded y_true
+        y_true_indices = y_true_indices.to(device=logits.device, dtype=torch.long)
         y_true_one_hot = torch.zeros_like(probs)
-        y_true_one_hot[torch.arange(batch_size), y_true_indices] = 1.0
-        
-        # Gradient dL/dlogits
-        grad = (probs - y_true_one_hot) / batch_size
-        return grad
+        y_true_one_hot.scatter_(1, y_true_indices.unsqueeze(1), 1.0)
+        return (probs - y_true_one_hot) / batch_size
 
-# --- Optimizers ---
-# Based on common optimization algorithms in deep learning.
+
 class Optimizer:
     """Base class for optimizers."""
-    def __init__(self, learning_rate):
-        self.learning_rate = learning_rate
-    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs):
-        """Updates parameters based on gradients."""
+
+    def __init__(self, learning_rate: float):
+        self.learning_rate = float(learning_rate)
+
+    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs) -> None:
         raise NotImplementedError
 
+    def state_dict(self) -> Dict[str, Any]:
+        return {"learning_rate": self.learning_rate}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self.learning_rate = float(state_dict.get("learning_rate", self.learning_rate))
+
+
 class SGD(Optimizer):
-    """Stochastic Gradient Descent optimizer."""
-    def __init__(self, learning_rate):
-        super().__init__(learning_rate)
-    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs):
+    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs) -> None:
         for i in range(len(params_Ws)):
-            params_Ws[i] -= self.learning_rate * grads_dWs[i]
-            params_bs[i] -= self.learning_rate * grads_dBs[i]
+            params_Ws[i].sub_(self.learning_rate * grads_dWs[i])
+            params_bs[i].sub_(self.learning_rate * grads_dBs[i])
+
 
 class SGDMomentum(Optimizer):
-    """SGD with Momentum.
-    Reference: Sutskever, I., Martens, J., Dahl, G., & Hinton, G. (2013).
-               On the importance of initialization and momentum in deep learning.
-    v_new = beta * v_old + grad
-    param_new = param_old - lr * v_new
-    """
-    def __init__(self, learning_rate, beta=0.9):
+    def __init__(self, learning_rate: float, beta: float = 0.9):
         super().__init__(learning_rate)
-        self.beta = beta
+        self.beta = float(beta)
         self.v_Ws = None
         self.v_bs = None
 
-    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs):
-        if self.v_Ws is None: # Initialize velocities on first step
+    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs) -> None:
+        if self.v_Ws is None:
             self.v_Ws = [torch.zeros_like(W) for W in params_Ws]
             self.v_bs = [torch.zeros_like(b) for b in params_bs]
 
         for i in range(len(params_Ws)):
-            # Update velocities
-            self.v_Ws[i] = self.beta * self.v_Ws[i] + grads_dWs[i]
-            self.v_bs[i] = self.beta * self.v_bs[i] + grads_dBs[i]
-            
-            # Update parameters
-            params_Ws[i] -= self.learning_rate * self.v_Ws[i]
-            params_bs[i] -= self.learning_rate * self.v_bs[i]
+            self.v_Ws[i].mul_(self.beta).add_(grads_dWs[i])
+            self.v_bs[i].mul_(self.beta).add_(grads_dBs[i])
+            params_Ws[i].sub_(self.learning_rate * self.v_Ws[i])
+            params_bs[i].sub_(self.learning_rate * self.v_bs[i])
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            **super().state_dict(),
+            "beta": self.beta,
+            "v_Ws": [v.clone() for v in self.v_Ws] if self.v_Ws is not None else None,
+            "v_bs": [v.clone() for v in self.v_bs] if self.v_bs is not None else None,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        self.beta = float(state_dict.get("beta", self.beta))
+        self.v_Ws = state_dict.get("v_Ws")
+        self.v_bs = state_dict.get("v_bs")
+
 
 class Adam(Optimizer):
-    """Adam Optimizer.
-    Reference: Kingma, D. P., & Ba, J. (2014). Adam: A method for stochastic optimization.
-    """
-    def __init__(self, learning_rate, beta1=0.9, beta2=0.999, epsilon=1e-8):
+    def __init__(self, learning_rate: float, beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-8):
         super().__init__(learning_rate)
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.epsilon = epsilon
-        self.m_Ws, self.v_Ws = None, None # First and second moment estimates for Ws
-        self.m_bs, self.v_bs = None, None # First and second moment estimates for bs
-        self.t = 0 # Timestep counter
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        self.epsilon = float(epsilon)
+        self.m_Ws = None
+        self.v_Ws = None
+        self.m_bs = None
+        self.v_bs = None
+        self.t = 0
 
-    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs):
+    def step(self, params_Ws, params_bs, grads_dWs, grads_dBs) -> None:
         self.t += 1
-        if self.m_Ws is None: # Initialize moment estimates on first step
+        if self.m_Ws is None:
             self.m_Ws = [torch.zeros_like(W) for W in params_Ws]
             self.v_Ws = [torch.zeros_like(W) for W in params_Ws]
             self.m_bs = [torch.zeros_like(b) for b in params_bs]
             self.v_bs = [torch.zeros_like(b) for b in params_bs]
 
         for i in range(len(params_Ws)):
-            # Update biased first moment estimate for Ws
-            self.m_Ws[i] = self.beta1 * self.m_Ws[i] + (1 - self.beta1) * grads_dWs[i]
-            # Update biased second raw moment estimate for Ws
-            self.v_Ws[i] = self.beta2 * self.v_Ws[i] + (1 - self.beta2) * (grads_dWs[i]**2)
-            
-            # Compute bias-corrected first moment estimate for Ws
-            m_hat_W = self.m_Ws[i] / (1 - self.beta1**self.t)
-            # Compute bias-corrected second raw moment estimate for Ws
-            v_hat_W = self.v_Ws[i] / (1 - self.beta2**self.t)
-            
-            # Update Ws
-            params_Ws[i] -= self.learning_rate * m_hat_W / (torch.sqrt(v_hat_W) + self.epsilon)
+            self.m_Ws[i].mul_(self.beta1).add_(grads_dWs[i], alpha=1 - self.beta1)
+            self.v_Ws[i].mul_(self.beta2).addcmul_(grads_dWs[i], grads_dWs[i], value=1 - self.beta2)
+            m_hat_W = self.m_Ws[i] / (1 - self.beta1 ** self.t)
+            v_hat_W = self.v_Ws[i] / (1 - self.beta2 ** self.t)
+            params_Ws[i].sub_(self.learning_rate * m_hat_W / (torch.sqrt(v_hat_W) + self.epsilon))
 
-            # Update biased first moment estimate for bs
-            self.m_bs[i] = self.beta1 * self.m_bs[i] + (1 - self.beta1) * grads_dBs[i]
-            # Update biased second raw moment estimate for bs
-            self.v_bs[i] = self.beta2 * self.v_bs[i] + (1 - self.beta2) * (grads_dBs[i]**2)
+            self.m_bs[i].mul_(self.beta1).add_(grads_dBs[i], alpha=1 - self.beta1)
+            self.v_bs[i].mul_(self.beta2).addcmul_(grads_dBs[i], grads_dBs[i], value=1 - self.beta2)
+            m_hat_b = self.m_bs[i] / (1 - self.beta1 ** self.t)
+            v_hat_b = self.v_bs[i] / (1 - self.beta2 ** self.t)
+            params_bs[i].sub_(self.learning_rate * m_hat_b / (torch.sqrt(v_hat_b) + self.epsilon))
 
-            # Compute bias-corrected first moment estimate for bs
-            m_hat_b = self.m_bs[i] / (1 - self.beta1**self.t)
-            # Compute bias-corrected second raw moment estimate for bs
-            v_hat_b = self.v_bs[i] / (1 - self.beta2**self.t)
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            **super().state_dict(),
+            "beta1": self.beta1,
+            "beta2": self.beta2,
+            "epsilon": self.epsilon,
+            "m_Ws": [m.clone() for m in self.m_Ws] if self.m_Ws is not None else None,
+            "v_Ws": [v.clone() for v in self.v_Ws] if self.v_Ws is not None else None,
+            "m_bs": [m.clone() for m in self.m_bs] if self.m_bs is not None else None,
+            "v_bs": [v.clone() for v in self.v_bs] if self.v_bs is not None else None,
+            "t": self.t,
+        }
 
-            # Update bs
-            params_bs[i] -= self.learning_rate * m_hat_b / (torch.sqrt(v_hat_b) + self.epsilon)
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        self.beta1 = float(state_dict.get("beta1", self.beta1))
+        self.beta2 = float(state_dict.get("beta2", self.beta2))
+        self.epsilon = float(state_dict.get("epsilon", self.epsilon))
+        self.m_Ws = state_dict.get("m_Ws")
+        self.v_Ws = state_dict.get("v_Ws")
+        self.m_bs = state_dict.get("m_bs")
+        self.v_bs = state_dict.get("v_bs")
+        self.t = int(state_dict.get("t", self.t))
 
-class NeuralNetwork(torch.nn.Module):
-    """Simple 3-layer neural network with manual backpropagation"""
-    
-    def __init__(self, input_dim, output_dim):
+
+class NeuralNetwork(nn.Module):
+    """Configurable feed-forward neural network with explicit manual backpropagation."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        config: Optional[Dict[str, Any]] = None,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: torch.dtype = torch.float32,
+    ):
         super().__init__()
-        # He initialization with ReLU
-        # self.W1 = torch.randn(input_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / input_dim))
-        # self.b1 = torch.zeros(hidden_dim)
-        # self.W2 = torch.randn(hidden_dim, hidden_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
-        # self.b2 = torch.zeros(hidden_dim)
-        # self.W3 = torch.randn(hidden_dim, output_dim) * torch.sqrt(torch.tensor(2. / hidden_dim))
-        # self.b3 = torch.zeros(output_dim)
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("input_dim and output_dim must be positive integers.")
+
         self.config = load_global_config()
-        self.nn_config = get_config_section('neural_network')
-        self.layer_dims = self.nn_config.get('layer_dims', [input_dim, 128, 64, output_dim])
+        self.nn_config = get_config_section("neural_network")
+        if config:
+            self.nn_config.update(config)
 
-        # Override input/output dims explicitly to ensure compatibility
-        self.layer_dims[0] = input_dim
-        self.layer_dims[-1] = output_dim
+        default_dims = [input_dim, 128, 64, output_dim]
+        raw_dims = list(self.nn_config.get("layer_dims", default_dims))
+        if len(raw_dims) < 2:
+            raise ValueError("layer_dims must define at least an input and output dimension.")
 
-        self.hidden_activation = self.nn_config.get('hidden_activation', 'relu')
-        self.output_activation = self.nn_config.get('output_activation', 'linear')
-        self.loss_function = self.nn_config.get('loss_function', 'mse')
-        self.optimizer = self.nn_config.get('optimizer', 'adam')
-        self.learning_rate = self.nn_config.get('learning_rate', 0.001)
-        self.num_layers = len(self.layer_dims) - 1 # Number of layers with weights/biases
-        self.l1_lambda = self.nn_config.get('l1_lambda', 0.0)
-        self.l2_lambda = self.nn_config.get('l2_lambda', 0.0)
+        raw_dims[0] = input_dim
+        raw_dims[-1] = output_dim
+        if any(int(dim) <= 0 for dim in raw_dims):
+            raise ValueError("All layer dimensions must be positive integers.")
+
+        self.layer_dims = [int(dim) for dim in raw_dims]
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.device_override = torch.device(device) if device is not None else None
+        self.dtype = dtype
+
+        self.hidden_activation_name = str(self.nn_config.get("hidden_activation", "relu")).lower()
+        self.output_activation_name = str(self.nn_config.get("output_activation", "linear")).lower()
+        self.loss_function_name = str(self.nn_config.get("loss_function", "mse")).lower()
+        self.optimizer_name = str(self.nn_config.get("optimizer", "adam")).lower()
+        self.learning_rate = float(self.nn_config.get("learning_rate", 0.001))
+        self.num_layers = len(self.layer_dims) - 1
+        self.l1_lambda = float(self.nn_config.get("l1_lambda", 0.0))
+        self.l2_lambda = float(self.nn_config.get("l2_lambda", 0.0))
+        self.max_grad_norm = self.nn_config.get("gradient_clip_norm", 5.0)
+        self.max_grad_norm = None if self.max_grad_norm is None else float(self.max_grad_norm)
 
         self._init_activation_functions()
+        self._initialize_weights()
         self._init_loss_function()
-        self._initialize_weights() # Depends on activation types for He/Xavier
         self._init_optimizer()
 
-        # Intermediate values for backprop
-        self._cache = {}
+        self._cache: Dict[str, Any] = {}
+        self.dWs: List[torch.Tensor] = []
+        self.dBs: List[torch.Tensor] = []
 
-        logger.info(f"Learning Neural Network succesfully initialized")
+        logger.info(
+            "NeuralNetwork initialised: dims=%s hidden_act=%s output_act=%s loss=%s optimizer=%s lr=%s",
+            self.layer_dims,
+            self.hidden_activation_name,
+            self.output_activation_name,
+            self.loss_function_name,
+            self.optimizer_name,
+            self.learning_rate,
+        )
 
-    def _str_to_activation(self, name_str):
+    def _str_to_activation(self, name_str: str) -> Activation:
         name_lower = name_str.lower()
-        if name_lower == 'relu': return ReLU()
-        if name_lower == 'sigmoid': return Sigmoid()
-        if name_lower == 'tanh': return Tanh()
-        if name_lower == 'linear': return Linear()
-        if name_lower == 'softmax': return Softmax()
-        raise ValueError(f"Unknown activation function: {name_str}")
+        mapping = {
+            "relu": ReLU,
+            "sigmoid": Sigmoid,
+            "tanh": Tanh,
+            "linear": Linear,
+            "identity": Linear,
+            "softmax": Softmax,
+        }
+        if name_lower not in mapping:
+            raise ValueError(f"Unknown activation function: {name_str}")
+        return mapping[name_lower]() if name_lower != "softmax" else mapping[name_lower](dim=-1)
 
-    def _init_activation_functions(self):
-        hidden_act_str = self.nn_config.get('hidden_activation', 'relu')
-        output_act_str = self.nn_config.get('output_activation', 'linear')
-
+    def _init_activation_functions(self) -> None:
         self.hidden_activations = []
-        if self.num_layers > 1: # If there are hidden layers
-            self.hidden_activations = [self._str_to_activation(hidden_act_str) for _ in range(self.num_layers - 1)]
-        self.output_activation = self._str_to_activation(output_act_str)
+        if self.num_layers > 1:
+            self.hidden_activations = [
+                self._str_to_activation(self.hidden_activation_name) for _ in range(self.num_layers - 1)
+            ]
+        self.output_activation = self._str_to_activation(self.output_activation_name)
 
-    def _init_loss_function(self):
-        loss_str = self.nn_config.get('loss_function', 'mse').lower()
-    
-        if loss_str == 'mse':
+    def _init_loss_function(self) -> None:
+        if self.loss_function_name == "mse":
             self.loss_fn = MSELoss()
-        elif loss_str == 'cross_entropy':
+        elif self.loss_function_name == "cross_entropy":
             if not isinstance(self.output_activation, Linear):
-                print("Warning: CrossEntropyLoss expects logits (linear output activation).")
+                logger.warning(
+                    "CrossEntropyLoss expects logits. Overriding non-linear output activation '%s' for loss computation.",
+                    self.output_activation_name,
+                )
             self.loss_fn = CrossEntropyLoss()
         else:
-            raise ValueError(f"Unknown loss function: {loss_str}")
+            raise ValueError(f"Unknown loss function: {self.loss_function_name}")
 
-    def _initialize_weights(self):
-        """
-        Initializes weights and biases.
-        Uses He initialization for ReLU, Xavier/Glorot for Sigmoid/Tanh/Softmax.
-        Refs:
-        - He et al. (2015). "Delving Deep into Rectifiers..." (He initialization)
-        - Glorot & Bengio (2010). "Understanding the difficulty of training deep feedforward neural networks" (Xavier/Glorot initialization)
-        """
-        self.Ws = []
-        self.bs = []
+    def _initialize_weights(self) -> None:
+        target_device = self.device_override or torch.device("cpu")
+        self.Ws = nn.ParameterList()
+        self.bs = nn.ParameterList()
+
         for i in range(self.num_layers):
             fan_in = self.layer_dims[i]
-            fan_out = self.layer_dims[i+1]
+            fan_out = self.layer_dims[i + 1]
+            activation = self.hidden_activations[i] if i < self.num_layers - 1 else self.output_activation
 
-            # Determine activation for current layer to choose init strategy
-            if i < self.num_layers - 1: # Hidden layer
-                current_activation_type = self.hidden_activations[i]
-            else: # Output layer
-                current_activation_type = self.output_activation
-            
-            if isinstance(current_activation_type, ReLU):
-                # He initialization: std = sqrt(2 / fan_in)
-                std_dev = torch.sqrt(torch.tensor(2.0 / fan_in))
-            elif isinstance(current_activation_type, (Sigmoid, Tanh, Softmax, Linear)): # Linear also often uses Xavier
-                # Xavier/Glorot initialization: std = sqrt(1 / fan_in) or sqrt(2 / (fan_in + fan_out))
-                # Using sqrt(1 / fan_in) variant here.
-                std_dev = torch.sqrt(torch.tensor(1.0 / fan_in))
-            else: # Fallback for unknown activation types (should not happen with current setup)
-                std_dev = torch.sqrt(torch.tensor(1.0 / fan_in)) 
+            weight = torch.empty((fan_in, fan_out), device=target_device, dtype=self.dtype)
+            if isinstance(activation, ReLU):
+                nn.init.kaiming_uniform_(weight, nonlinearity="relu")
+            else:
+                nn.init.xavier_uniform_(weight)
+            bias = torch.zeros(fan_out, device=target_device, dtype=self.dtype)
 
-            self.Ws.append(torch.randn(fan_in, fan_out) * std_dev)
-            self.bs.append(torch.zeros(fan_out))
-            
-    def _init_optimizer(self):
-        optimizer_name = self.nn_config.get('optimizer', 'sgd').lower()
-        lr = self.nn_config.get('learning_rate', 0.01)
+            self.Ws.append(nn.Parameter(weight, requires_grad=False))
+            self.bs.append(nn.Parameter(bias, requires_grad=False))
 
-        if optimizer_name == 'sgd':
-            self.optimizer = SGD(learning_rate=lr)
-        elif optimizer_name == 'momentum':
-            beta = self.nn_config.get('momentum_beta', 0.9)
-            self.optimizer = SGDMomentum(learning_rate=lr, beta=beta)
-        elif optimizer_name == 'adam':
-            beta1 = self.nn_config.get('adam_beta1', 0.9)
-            beta2 = self.nn_config.get('adam_beta2', 0.999)
-            epsilon = self.nn_config.get('adam_epsilon', 1e-8)
-            self.optimizer = Adam(learning_rate=lr, beta1=beta1, beta2=beta2, epsilon=epsilon)
+    def _init_optimizer(self) -> None:
+        if self.optimizer_name == "sgd":
+            self.optimizer = SGD(learning_rate=self.learning_rate)
+        elif self.optimizer_name == "momentum":
+            self.optimizer = SGDMomentum(
+                learning_rate=self.learning_rate,
+                beta=float(self.nn_config.get("momentum_beta", 0.9)),
+            )
+        elif self.optimizer_name == "adam":
+            self.optimizer = Adam(
+                learning_rate=self.learning_rate,
+                beta1=float(self.nn_config.get("adam_beta1", 0.9)),
+                beta2=float(self.nn_config.get("adam_beta2", 0.999)),
+                epsilon=float(self.nn_config.get("adam_epsilon", 1e-8)),
+            )
         else:
-            raise ValueError(f"Unknown optimizer: {optimizer_name}")
+            raise ValueError(f"Unknown optimizer: {self.optimizer_name}")
 
-    def forward(self, X):
-        """Performs a forward pass through the network."""
-        self._cache['inputs'] = X
-        self._cache['layer_outputs'] = []
-        
+    @property
+    def device(self) -> torch.device:
+        return self.Ws[0].device
+
+    def _prepare_input(self, X: TensorLike) -> Tuple[torch.Tensor, bool]:
+        if not torch.is_tensor(X):
+            X = torch.as_tensor(X, dtype=self.dtype, device=self.device)
+        else:
+            X = X.to(device=self.device, dtype=self.dtype)
+
+        squeezed = False
+        if X.ndim == 1:
+            X = X.unsqueeze(0)
+            squeezed = True
+        if X.ndim != 2:
+            raise ValueError(f"Input must be a 2D tensor or a 1D feature vector, got shape {tuple(X.shape)}")
+        if X.shape[1] != self.input_dim:
+            raise ValueError(f"Input feature dimension mismatch. Expected {self.input_dim}, got {X.shape[1]}")
+        return X, squeezed
+
+    def _prepare_target(self, y_true: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if self.loss_function_name == "cross_entropy":
+            if y_true.ndim != 1:
+                raise ValueError(
+                    f"Cross-entropy targets must be a 1D tensor of class indices, got shape {tuple(y_true.shape)}"
+                )
+            if y_true.shape[0] != batch_size:
+                raise ValueError("Target batch size does not match input batch size.")
+            return y_true.to(device=self.device, dtype=torch.long)
+
+        if y_true.ndim == 1 and self.output_dim == 1:
+            y_true = y_true.unsqueeze(1)
+        if y_true.ndim != 2:
+            raise ValueError(f"MSE targets must be 2D (or 1D when output_dim == 1), got shape {tuple(y_true.shape)}")
+        if y_true.shape != (batch_size, self.output_dim):
+            raise ValueError(
+                f"Target shape mismatch. Expected {(batch_size, self.output_dim)}, got {tuple(y_true.shape)}"
+            )
+        return y_true.to(device=self.device, dtype=self.dtype)
+
+    def forward(self, X: TensorLike) -> torch.Tensor:
+        X, squeezed = self._prepare_input(X)
+        self._cache = {"inputs": X, "layer_outputs": []}
+
         current_a = X
         for i in range(self.num_layers):
             W, b = self.Ws[i], self.bs[i]
             z = current_a @ W + b
-            
-            # Remove this line: current_a = activation(z)
-            
-            if i < self.num_layers - 1:
-                current_a = self.hidden_activations[i].forward(z)
+            current_a = self.hidden_activations[i].forward(z) if i < self.num_layers - 1 else self.output_activation.forward(z)
+            self._cache["layer_outputs"].append({"z": z, "a": current_a})
+
+        return current_a.squeeze(0) if squeezed else current_a
+
+    def predict_logits(self, X: TensorLike) -> torch.Tensor:
+        X, squeezed = self._prepare_input(X)
+        current_a = X
+        logits = None
+        for i in range(self.num_layers):
+            z = current_a @ self.Ws[i] + self.bs[i]
+            logits = z
+            current_a = self.hidden_activations[i].forward(z) if i < self.num_layers - 1 else self.output_activation.forward(z)
+        return logits.squeeze(0) if squeezed else logits
+
+    def regularization_penalty(self) -> torch.Tensor:
+        penalty = torch.zeros((), device=self.device, dtype=self.dtype)
+        if self.l1_lambda > 0.0:
+            penalty = penalty + self.l1_lambda * sum(W.abs().sum() for W in self.Ws)
+        if self.l2_lambda > 0.0:
+            penalty = penalty + 0.5 * self.l2_lambda * sum(W.pow(2).sum() for W in self.Ws)
+        return penalty
+
+    def compute_loss(self, y_pred_output: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.loss_fn, CrossEntropyLoss):
+            final_layer_z = self._cache["layer_outputs"][-1]["z"]
+            data_loss = self.loss_fn.forward(final_layer_z, y_true)
+        else:
+            data_loss = self.loss_fn.forward(y_pred_output, y_true)
+        return data_loss + self.regularization_penalty()
+
+    def backward(self, y_true: torch.Tensor) -> None:
+        m = y_true.shape[0] if y_true.ndim > 0 else 1
+        m = max(int(m), 1)
+
+        self.dWs = [torch.zeros_like(W) for W in self.Ws]
+        self.dBs = [torch.zeros_like(b) for b in self.bs]
+
+        final_layer_cache = self._cache["layer_outputs"][-1]
+        if isinstance(self.loss_fn, CrossEntropyLoss):
+            delta = self.loss_fn.backward(final_layer_cache["z"], y_true, m)
+        else:
+            dL_daL = self.loss_fn.backward(final_layer_cache["a"], y_true, m)
+            if isinstance(self.output_activation, Softmax):
+                delta = self.output_activation.backward(final_layer_cache["z"], dL_daL)
             else:
-                current_a = self.output_activation.forward(z)
-            
-            self._cache['layer_outputs'].append({'z': z, 'a': current_a})
-        
-        return current_a
+                delta = dL_daL * self.output_activation.backward(final_layer_cache["z"])
 
-    def compute_loss(self, y_pred_output, y_true):
-        """
-        Computes the loss.
-        Args:
-            y_pred_output: The final activated output from the network's forward pass.
-            y_true: True labels. Format depends on the loss function
-                    (e.g., class indices for CrossEntropyLoss, continuous values for MSELoss).
-        Returns:
-            Scalar tensor representing the loss.
-        """
-        if isinstance(self.loss_fn, CrossEntropyLoss):
-            # CrossEntropyLoss expects logits (pre-softmax).
-            # The 'z' of the final layer is these logits.
-            final_layer_z = self._cache['layer_outputs'][-1]['z']
-            return self.loss_fn.forward(final_layer_z, y_true)
-        else:
-            # Other losses (like MSE) expect the activated output.
-            return self.loss_fn.forward(y_pred_output, y_true)
-
-    def backward(self, y_true):
-        """
-        Performs backpropagation to compute gradients for weights and biases.
-        Relies on values stored in self._cache from the forward pass.
-        Args:
-            y_true: True labels.
-        """
-        # Determine batch size (m)
-        # y_true shape can be (batch_size,) for CE or (batch_size, output_dim) for MSE
-        m = y_true.shape[0] if y_true.dim() > 0 else 1
-        if m == 0: m = 1 # Avoid division by zero, though batch size shouldn't be 0
-
-        # Initialize gradients for Ws and bs as lists of zero tensors
-        self.dWs = [torch.zeros_like(W, device=W.device) for W in self.Ws]
-        self.dBs = [torch.zeros_like(b, device=b.device) for b in self.bs]
-
-        # --- Initial delta (gradient w.r.t. z of the output layer, dL/dz_L) ---
-        final_layer_cache = self._cache['layer_outputs'][-1] # Contains z_L and a_L
-        
-        if isinstance(self.loss_fn, CrossEntropyLoss):
-            # For CrossEntropyLoss, backward method returns dL/d(logits) where logits = z_L
-            # y_true are class indices for CrossEntropyLoss
-            delta = self.loss_fn.backward(final_layer_cache['z'], y_true, m)
-        else:
-            # For other losses (e.g., MSE), loss_fn.backward returns dL/da_L
-            # We need dL/dz_L = dL/da_L * da_L/dz_L
-            # y_true matches shape of a_L for MSELoss
-            dL_daL = self.loss_fn.backward(final_layer_cache['a'], y_true, m)
-            g_prime_zL = self.output_activation.backward(final_layer_cache['z'])
-            delta = dL_daL * g_prime_zL
-
-        # --- Backpropagate delta through layers (from L to 1) ---
         for i in reversed(range(self.num_layers)):
-            # a_prev is the input to the current layer i (i.e., activation from layer i-1)
-            # If i=0 (first layer), a_prev is the network input X
-            a_prev = self._cache['inputs'] if i == 0 else self._cache['layer_outputs'][i-1]['a']
-
-            # Gradient w.r.t. weights W_i: dL/dW_i = a_{i-1}.T @ delta_i
+            a_prev = self._cache["inputs"] if i == 0 else self._cache["layer_outputs"][i - 1]["a"]
             self.dWs[i] = a_prev.T @ delta
-            # Gradient w.r.t. biases b_i: dL/db_i = sum(delta_i, axis=0)
-            self.dBs[i] = torch.sum(delta, axis=0)
+            self.dBs[i] = torch.sum(delta, dim=0)
 
-            # Add regularization gradients (if applicable)
-            # L2 regularization: d(0.5 * lambda * W^2)/dW = lambda * W
-            # Here, loss is often (1/m) * sum(...) + (lambda / (2*m)) * sum(W^2)
-            # So dW_reg = (lambda / m) * W
-            if self.l2_lambda > 0:
-                self.dWs[i] += (self.l2_lambda / m) * self.Ws[i] # L2 penalty applied to weights
-            # L1 regularization: d(lambda * |W|)/dW = lambda * sign(W)
-            # So dW_reg = (lambda / m) * sign(W)
-            if self.l1_lambda > 0:
-                self.dWs[i] += (self.l1_lambda / m) * torch.sign(self.Ws[i]) # L1 penalty
-            
-            if i > 0: # If not the first layer, propagate delta to the previous layer
-                # Calculate dL/da_{i-1} = delta_i @ W_i.T
+            if self.l2_lambda > 0.0:
+                self.dWs[i] += self.l2_lambda * self.Ws[i]
+            if self.l1_lambda > 0.0:
+                self.dWs[i] += self.l1_lambda * torch.sign(self.Ws[i])
+
+            if i > 0:
                 da_prev = delta @ self.Ws[i].T
-                # Get g'(z_{i-1}) for the previous layer's activation
-                g_prime_z_prev = self.hidden_activations[i-1].backward(self._cache['layer_outputs'][i-1]['z'])
-                # Update delta for the previous layer: delta_{i-1} = dL/da_{i-1} * g'(z_{i-1})
-                delta = da_prev * g_prime_z_prev
-                
-    def update_parameters(self):
-        """Updates network parameters using the configured optimizer and computed gradients."""
-        self.optimizer.step(self.Ws, self.bs, self.dWs, self.dBs)
+                hidden_activation = self.hidden_activations[i - 1]
+                prev_z = self._cache["layer_outputs"][i - 1]["z"]
+                if isinstance(hidden_activation, Softmax):
+                    delta = hidden_activation.backward(prev_z, da_prev)
+                else:
+                    delta = da_prev * hidden_activation.backward(prev_z)
 
-    def train_step(self, X_batch, y_batch):
-        """
-        Performs a single training step: forward pass, loss computation,
-        backward pass (gradient computation), and parameter update.
-        
-        Expanded to include:
-        - Input validation
-        - Gradient clipping
-        - NaN value checks
-        - Detailed logging
-        - Performance timing
-        
-        Args:
-            X_batch: Input data for the batch (Tensor of shape [batch_size, input_dim])
-            y_batch: True labels for the batch (Tensor shape depends on loss function)
-            
-        Returns:
-            The loss value for the batch (scalar float)
-            
-        Raises:
-            ValueError: If input dimensions are invalid
-            RuntimeError: If NaNs are detected in gradients or outputs
-        """
-        # 1. Validate inputs
-        if X_batch.dim() != 2:
-            raise ValueError(f"X_batch must be 2D tensor, got {X_batch.dim()}D")
+    def _global_grad_norm(self) -> torch.Tensor:
+        if not self.dWs and not self.dBs:
+            return torch.zeros((), device=self.device, dtype=self.dtype)
+        total = torch.zeros((), device=self.device, dtype=self.dtype)
+        for grad in [*self.dWs, *self.dBs]:
+            total = total + grad.pow(2).sum()
+        return torch.sqrt(total)
+
+    def _clip_gradients(self) -> None:
+        if self.max_grad_norm is None:
+            return
+        grad_norm = self._global_grad_norm()
+        if torch.isfinite(grad_norm) and grad_norm > self.max_grad_norm:
+            scale = self.max_grad_norm / (grad_norm + 1e-12)
+            for i in range(len(self.dWs)):
+                self.dWs[i].mul_(scale)
+                self.dBs[i].mul_(scale)
+
+    def update_parameters(self) -> None:
+        with torch.no_grad():
+            self.optimizer.step(self.Ws, self.bs, self.dWs, self.dBs)
+
+    def train_step(self, X_batch: TensorLike, y_batch: torch.Tensor) -> float:
+        step_start = time.perf_counter()
+        X_batch, _ = self._prepare_input(X_batch)
         if X_batch.shape[0] == 0:
             raise ValueError("Batch size cannot be zero")
-        if X_batch.shape[1] != self.layer_dims[0]:
-            raise ValueError(f"Input feature dimension mismatch. Expected {self.layer_dims[0]}, got {X_batch.shape[1]}")
-        
-        # Start timing for performance monitoring
-        forward_time = time.time()
-        
-        try:
-            # 2. Forward pass to get predictions
-            y_pred_output = self.forward(X_batch)
-            
-            # Check for NaN in outputs
-            if torch.isnan(y_pred_output).any():
-                raise RuntimeError("NaN detected in network output during forward pass")
-                
-        except Exception as e:
-            logger.error(f"Forward pass failed: {str(e)}")
-            logger.debug(f"Input shape: {X_batch.shape}, Input range: [{X_batch.min()}, {X_batch.max()}]")
-            raise
-            
-        forward_time = time.time() - forward_time
-        
-        loss_time = time.time()
-        
-        try:
-            # 3. Compute loss
-            loss = self.compute_loss(y_pred_output, y_batch)
-            
-            # Check for invalid loss
-            if torch.isnan(loss):
-                raise RuntimeError("Loss is NaN")
-            if torch.isinf(loss):
-                raise RuntimeError("Loss is infinite")
-                
-        except Exception as e:
-            logger.error(f"Loss computation failed: {str(e)}")
-            logger.debug(f"y_true range: [{y_batch.min()}, {y_batch.max()}]")
-            logger.debug(f"y_pred range: [{y_pred_output.min()}, {y_pred_output.max()}]")
-            raise
-            
-        loss_time = time.time() - loss_time
-        
-        backward_time = time.time()
-        
-        try:
-            # 4. Backward pass to compute gradients
-            self.backward(y_batch)
-            
-            # 5. Gradient clipping to prevent explosion
-            max_grad_norm = 5.0  # Configurable value
-            for i in range(len(self.dWs)):
-                # Weight gradients
-                grad_norm = torch.norm(self.dWs[i])
-                if grad_norm > max_grad_norm:
-                    self.dWs[i] = self.dWs[i] * (max_grad_norm / (grad_norm + 1e-6))
-                    
-                # Bias gradients
-                grad_norm = torch.norm(self.dBs[i])
-                if grad_norm > max_grad_norm:
-                    self.dBs[i] = self.dBs[i] * (max_grad_norm / (grad_norm + 1e-6))
-                    
-                # Check for NaN in gradients
-                if torch.isnan(self.dWs[i]).any() or torch.isnan(self.dBs[i]).any():
-                    raise RuntimeError(f"NaN detected in gradients at layer {i}")
-                    
-        except Exception as e:
-            logger.error(f"Backward pass failed: {str(e)}")
-            logger.debug(f"Loss value: {loss.item()}")
-            raise
-            
-        backward_time = time.time() - backward_time
-        
-        update_time = time.time()
-        
-        try:
-            # 6. Update parameters using optimizer
-            self.update_parameters()
-        except Exception as e:
-            logger.error(f"Parameter update failed: {str(e)}")
-            raise
-            
-        update_time = time.time() - update_time
-        
-        # Log performance metrics
-        import logging
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                f"Train step timings: "
-                f"Forward: {forward_time:.4f}s, "
-                f"Loss: {loss_time:.4f}s, "
-                f"Backward: {backward_time:.4f}s, "
-                f"Update: {update_time:.4f}s, "
-                f"Total: {forward_time+loss_time+backward_time+update_time:.4f}s"
-            )
-            
-            # Log gradient norms
-            for i, (dw, db) in enumerate(zip(self.dWs, self.dBs)):
-                logger.debug(
-                    f"Layer {i} gradient norms: "
-                    f"Weights: {torch.norm(dw):.6f}, "
-                    f"Biases: {torch.norm(db):.6f}"
-                )
-        
-        return loss.item()
+        y_batch = self._prepare_target(y_batch, X_batch.shape[0])
 
-    def predict(self, X):
-        """
-        Makes predictions for input X. Essentially a forward pass.
-        For classification with CrossEntropyLoss, this returns raw logits if output_activation is linear.
-        If probabilities are needed, apply Softmax explicitly or set output_activation to 'softmax'.
-        """
+        forward_start = time.perf_counter()
+        y_pred_output = self.forward(X_batch)
+        if not torch.isfinite(y_pred_output).all():
+            raise RuntimeError("Non-finite values detected in network output during forward pass.")
+        forward_time = time.perf_counter() - forward_start
+
+        loss_start = time.perf_counter()
+        loss = self.compute_loss(y_pred_output, y_batch)
+        if not torch.isfinite(loss):
+            raise RuntimeError("Loss became non-finite.")
+        loss_time = time.perf_counter() - loss_start
+
+        backward_start = time.perf_counter()
+        self.backward(y_batch)
+        self._clip_gradients()
+        for i, (dw, db) in enumerate(zip(self.dWs, self.dBs)):
+            if not torch.isfinite(dw).all() or not torch.isfinite(db).all():
+                raise RuntimeError(f"Non-finite gradients detected at layer {i}.")
+        backward_time = time.perf_counter() - backward_start
+
+        update_start = time.perf_counter()
+        self.update_parameters()
+        update_time = time.perf_counter() - update_start
+
+        if logger.isEnabledFor(DEBUG_LEVEL):
+            logger.debug(
+                "Train step timings | forward=%.6fs loss=%.6fs backward=%.6fs update=%.6fs total=%.6fs grad_norm=%.6f",
+                forward_time,
+                loss_time,
+                backward_time,
+                update_time,
+                time.perf_counter() - step_start,
+                float(self._global_grad_norm().item()),
+            )
+
+        return float(loss.item())
+
+    def predict(self, X: TensorLike, return_probabilities: bool = False) -> torch.Tensor:
+        if return_probabilities and isinstance(self.loss_fn, CrossEntropyLoss) and isinstance(self.output_activation, Linear):
+            logits = self.predict_logits(X)
+            return Softmax(dim=-1).forward(logits)
         return self.forward(X)
 
-    def get_weights(self):
-        """Returns the network's weights and biases."""
-        return {'Ws': [W.clone().detach() for W in self.Ws], 
-                'bs': [b.clone().detach() for b in self.bs]}
+    def predict_proba(self, X: TensorLike) -> torch.Tensor:
+        return self.predict(X, return_probabilities=True)
 
-    def set_weights(self, weights_dict):
-        """
-        Sets the network's weights and biases.
-        Args:
-            weights_dict (dict): A dictionary with keys 'Ws' and 'bs',
-                                 containing lists of tensors for weights and biases.
-        """
-        if 'Ws' not in weights_dict or 'bs' not in weights_dict:
+    def get_weights(self) -> Dict[str, List[torch.Tensor]]:
+        return {"Ws": [W.detach().clone() for W in self.Ws], "bs": [b.detach().clone() for b in self.bs]}
+
+    def set_weights(self, weights_dict: Dict[str, List[torch.Tensor]]) -> None:
+        if "Ws" not in weights_dict or "bs" not in weights_dict:
             raise ValueError("weights_dict must contain 'Ws' and 'bs' keys.")
-        if len(weights_dict['Ws']) != self.num_layers or len(weights_dict['bs']) != self.num_layers:
+        if len(weights_dict["Ws"]) != self.num_layers or len(weights_dict["bs"]) != self.num_layers:
             raise ValueError("Mismatch in the number of layers for weights/biases.")
 
-        self.Ws = [W.clone().detach() for W in weights_dict['Ws']]
-        self.bs = [b.clone().detach() for b in weights_dict['bs']]
-
-
-# ====================== Usage Example ======================
-if __name__ == "__main__":
-    print("\n=== Running Neural Network ===\n")
-    import argparse
-    config = load_global_config()
-    input_dim = 64
-    output_dim = 10
-
-    network = NeuralNetwork(
-        input_dim=input_dim,
-        output_dim=output_dim)
-    
-    print(f"\n{network}\n")
-    print("\n=== Successfully Neural Network ===\n")
-
-# ====================== Usage Example 2 ======================
-    print("\n * * * * Phase 2 * * * *\n=== Neural Network Demonstration ===\n")
-
-    parser = argparse.ArgumentParser(description='Neural Network Examples')
-    parser.add_argument('--example', type=int, default=1, choices=[1, 2],
-                        help='Example to run (1: simple init, 2: training demo)')
-    args = parser.parse_args()
-
-    if args.example == 1:
-        print("\n=== Running Neural Network Example 1 ===\n")
-        input_dim = 64
-        output_dim = 10
-
-        network = NeuralNetwork(input_dim, output_dim)
-        
-        # Print configuration details
-        print("Network Configuration:")
-        print(f"  Layer dimensions: {network.layer_dims}")
-        # Handle case where there might be no hidden activations
-        hidden_act = 'None'
-        if network.hidden_activations:
-            hidden_act = type(network.hidden_activations[0]).__name__
-        print(f"  Hidden activation: {hidden_act}")
-        print(f"  Output activation: {type(network.output_activation).__name__}")
-        print(f"  Loss function: {type(network.loss_fn).__name__}")
-        print(f"  Optimizer: {type(network.optimizer).__name__}")
-        print(f"  Learning rate: {network.learning_rate}")
-        print(f"  L1 Lambda: {network.l1_lambda}")
-        print(f"  L2 Lambda: {network.l2_lambda}")
-        
-        print("\n=== Example 1 Complete ===\n")
-
-    else:
-        print("\n=== Running Neural Network Example 2 ===\n")
-        
-        # Create synthetic dataset
-        input_dim = 784  # MNIST-like input dimension
-        output_dim = 10  # 10-class classification
-        num_samples = 1000
-        X = torch.randn(num_samples, input_dim)  # Random "images"
-        y = torch.randint(0, output_dim, (num_samples,))  # Random class labels
-
-        # Initialize network
-        network = NeuralNetwork(input_dim, output_dim)
-        
-        # Print configuration details
-        print("Network Configuration:")
-        # Handle case where there might be no hidden activations
-        hidden_act = 'None'
-        if network.hidden_activations:
-            hidden_act = type(network.hidden_activations[0]).__name__
-        print(f"  Layer dimensions: {network.layer_dims}")
-        print(f"  Hidden activation: {hidden_act}")
-        print(f"  Output activation: {type(network.output_activation).__name__}")
-        print(f"  Loss function: {type(network.loss_fn).__name__}")
-        print(f"  Optimizer: {type(network.optimizer).__name__}")
-        print(f"  Learning rate: {network.learning_rate}")
-        print(f"  L1 Lambda: {network.l1_lambda}")
-        print(f"  L2 Lambda: {network.l2_lambda}")
-        print()
-
-        # Training loop
-        num_epochs = 5  # Reduced for demonstration
-        batch_size = 32
-        losses = []
-
-        print(f"Training network for {num_epochs} epochs...")
-        for epoch in range(num_epochs):
-            epoch_loss = 0
-            num_batches = 0
-            for i in range(0, num_samples, batch_size):
-                X_batch = X[i:i+batch_size]
-                y_batch = y[i:i+batch_size]
-                
-                loss = network.train_step(X_batch, y_batch)
-                epoch_loss += loss
-                num_batches += 1
-            
-            # Calculate average loss per batch
-            avg_loss = epoch_loss / num_batches
-            losses.append(avg_loss)
-            
-            print(f"Epoch {epoch+1}/{num_epochs} | Avg Loss: {avg_loss:.4f}")
-
-        # Evaluation
         with torch.no_grad():
-            test_X = torch.randn(100, input_dim)  # Test batch
-            test_y = torch.randint(0, output_dim, (100,))
-            
-            preds = network.predict(test_X)
-            predicted_classes = torch.argmax(preds, dim=1)
-            accuracy = (predicted_classes == test_y).float().mean()
-            
-            print(f"\nTest Accuracy: {accuracy.item()*100:.1f}%")
+            for i, (W_new, b_new) in enumerate(zip(weights_dict["Ws"], weights_dict["bs"])):
+                W_new = W_new.to(device=self.device, dtype=self.dtype)
+                b_new = b_new.to(device=self.device, dtype=self.dtype)
+                if W_new.shape != self.Ws[i].shape:
+                    raise ValueError(
+                        f"Weight shape mismatch at layer {i}. Expected {tuple(self.Ws[i].shape)}, got {tuple(W_new.shape)}"
+                    )
+                if b_new.shape != self.bs[i].shape:
+                    raise ValueError(
+                        f"Bias shape mismatch at layer {i}. Expected {tuple(self.bs[i].shape)}, got {tuple(b_new.shape)}"
+                    )
+                self.Ws[i].copy_(W_new)
+                self.bs[i].copy_(b_new)
 
-        # Checkpoint demonstration
-        checkpoint_path = "network_checkpoint.pt"
-        print(f"\nSaving model to {checkpoint_path}")
-        torch.save(network.get_weights(), checkpoint_path)
+    def get_checkpoint(self) -> Dict[str, Any]:
+        return {
+            "model_weights": self.get_weights(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "config": {
+                "layer_dims": self.layer_dims,
+                "hidden_activation": self.hidden_activation_name,
+                "output_activation": self.output_activation_name,
+                "loss_function": self.loss_function_name,
+                "optimizer": self.optimizer_name,
+                "learning_rate": self.learning_rate,
+                "l1_lambda": self.l1_lambda,
+                "l2_lambda": self.l2_lambda,
+                "gradient_clip_norm": self.max_grad_norm,
+            },
+        }
 
-        # Load checkpoint into a NEW network for verification
-        new_network = NeuralNetwork(input_dim, output_dim)
-        loaded_weights = torch.load(checkpoint_path)
-        new_network.set_weights(loaded_weights)
-        
-        # Verify matching predictions
-        test_sample = test_X[0:1]
-        original_pred = network.predict(test_sample)
-        reloaded_pred = new_network.predict(test_sample)
-        torch.allclose(original_pred, reloaded_pred)
-        
-        print("\nCheckpoint verification:", 
-              "Match" if torch.allclose(original_pred, reloaded_pred, atol=1e-6) else "Mismatch")
+    def load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        self.set_weights(checkpoint["model_weights"])
+        optimizer_state = checkpoint.get("optimizer_state")
+        if optimizer_state:
+            self.optimizer.load_state_dict(optimizer_state)
 
-        print("\n=== Example 2 Complete ===\n")
+    def save_weights(self, path: Union[str, Path]) -> None:
+        torch.save(self.get_checkpoint(), Path(path))
+
+    def load_weights(self, path: Union[str, Path], map_location: Optional[Union[str, torch.device]] = None) -> None:
+        checkpoint = torch.load(Path(path), map_location=map_location)
+        self.load_checkpoint(checkpoint)
+
+
+if __name__ == "__main__":
+    print("\n=== Running Neural Network Smoke Test ===\n")
+
+    network = NeuralNetwork(input_dim=64, output_dim=10)
+    print(network)
+
+    X = torch.randn(128, 64)
+    y_reg = torch.randn(128, 10)
+    loss_reg = network.train_step(X, y_reg)
+    print(f"Regression train-step loss: {loss_reg:.4f}")
+
+    clf = NeuralNetwork(
+        input_dim=64,
+        output_dim=5,
+        config={"loss_function": "cross_entropy", "output_activation": "linear"},
+    )
+    X_cls = torch.randn(128, 64)
+    y_cls = torch.randint(0, 5, (128,))
+    loss_cls = clf.train_step(X_cls, y_cls)
+    print(f"Classification train-step loss: {loss_cls:.4f}")
+
+    checkpoint_path = Path("network_checkpoint.pt")
+    clf.save_weights(checkpoint_path)
+    restored = NeuralNetwork(
+        input_dim=64,
+        output_dim=5,
+        config={"loss_function": "cross_entropy", "output_activation": "linear"},
+    )
+    restored.load_weights(checkpoint_path)
+    print(
+        "Checkpoint restore verified:",
+        torch.allclose(clf.predict_logits(X_cls[:4]), restored.predict_logits(X_cls[:4]), atol=1e-6),
+    )
+    print("\n=== Neural Network Smoke Test Complete ===\n")

@@ -18,168 +18,93 @@ logger = get_logger("Reasoning Types")
 printer = PrettyPrinter
 
 class ReasoningTypes:
-    """
-    Selects the best reasoning type for the task or combines up to 3 types for more copmplex ones
-    """
+    """Factory/policy layer for single and combined reasoning strategies."""
+
     _task_types: Dict[str, Type[BaseReasoning]] = {
-        'abduction': ReasoningAbduction,
-        'deduction': ReasoningDeductive,
-        'induction': ReasoningInductive,
-        'analitical': ReasoningAnalogical,
-        'decompositional': ReasoningDecompositional,
-        'cause_effect': ReasoningCauseAndEffect,
+        "abduction": ReasoningAbduction,
+        "deduction": ReasoningDeductive,
+        "induction": ReasoningInductive,
+        "analogical": ReasoningAnalogical,
+        "analitical": ReasoningAnalogical,  # backward-compat typo
+        "decompositional": ReasoningDecompositional,
+        "cause_effect": ReasoningCauseAndEffect,
     }
 
-    def __init__(self):
-        self.config = load_global_config()
-        self.types_config = get_config_section("reasoning_types")
-        self.memory = ReasoningMemory()
+    def discover_task_types(self) -> None:
+        import src.agents.reasoning.types as reasoning_types_module
 
-    def discover_task_types(self):
-        import src.agents.reasoning.types  # root module
-        for name, obj in inspect.getmembers(src.agents.reasoning.types):
-            if inspect.isclass(obj) and issubclass(obj, BaseReasoning):
-                self._task_types[obj.__name__.lower()] = obj
+        for _, obj in inspect.getmembers(reasoning_types_module):
+            if inspect.isclass(obj) and issubclass(obj, BaseReasoning) and obj is not BaseReasoning:
+                normalized = obj.__name__.replace("Reasoning", "").lower()
+                self._task_types.setdefault(normalized, obj)
 
     def create(self, task_type: str) -> BaseReasoning:
-        """Creates an instance of a specified reasoning type"""
-        printer.status("CREATE", f"Request to create type of reasoning: '{task_type}'")
-        
-        # Normalize task type name
-        normalized_type = task_type.lower().strip()
-        
-        # Check if it's a combined type (e.g., "abduction+induction")
-        if '+' in normalized_type:
-            return self._create_combined_reasoning(normalized_type)
-        
-        # Get the reasoning class
-        reasoning_class = self._get_reasoning_class(normalized_type)
-        if not reasoning_class:
-            raise ValueError(f"Unknown reasoning type: {task_type}")
-            
-        # Instantiate the reasoning class
-        instance = reasoning_class()
-        printer.status("CREATED", f"Instance of {reasoning_class.__name__} created", "success")
-        return instance
+        normalized = (task_type or "").strip().lower()
+        if not normalized:
+            raise ValueError("reasoning type is required")
 
-    def _get_reasoning_class(self, task_type: str) -> Optional[Type[BaseReasoning]]:
-        """Get reasoning class by type name"""
-        # Check predefined types
-        if task_type in self._task_types:
-            return self._task_types[task_type]
-            
-        # Check discovered types
-        self.discover_task_types()
-        return self._task_types.get(task_type)
+        if "+" in normalized:
+            return self._create_combined_reasoning(normalized)
+
+        reasoning_cls = self._task_types.get(normalized)
+        if reasoning_cls is None:
+            self.discover_task_types()
+            reasoning_cls = self._task_types.get(normalized)
+
+        if reasoning_cls is None:
+            raise ValueError(f"Unknown reasoning type: {task_type}")
+        return reasoning_cls()
 
     def _create_combined_reasoning(self, combined_type: str) -> BaseReasoning:
-        """Create a combined reasoning instance with up to 3 types"""
-        type_names = combined_type.split('+')
-        if len(type_names) > 3:
-            raise ValueError("Cannot combine more than 3 reasoning types")
-            
-        # Get individual reasoning classes
-        reasoning_classes = []
-        for t in type_names:
-            cls = self._get_reasoning_class(t.strip())
-            if not cls:
-                raise ValueError(f"Unknown reasoning type in combination: {t}")
-            reasoning_classes.append(cls)
-            
-        # Create combined reasoning class
-        combined_class = self._create_combined_class(reasoning_classes)
-        instance = combined_class()
-        printer.status("CREATED", 
-                      f"Combined reasoning instance: {combined_type}", 
-                      "success")
-        return instance
+        names = [n.strip() for n in combined_type.split("+") if n.strip()]
+        if not 1 <= len(names) <= 3:
+            raise ValueError("Combined reasoning must include between 1 and 3 strategies")
+        classes = [self._task_types.get(name) for name in names]
+        if any(cls is None for cls in classes):
+            self.discover_task_types()
+            classes = [self._task_types.get(name) for name in names]
+        if any(cls is None for cls in classes):
+            missing = [name for name, cls in zip(names, classes) if cls is None]
+            raise ValueError(f"Unknown reasoning type(s): {', '.join(missing)}")
 
-    def _create_combined_class(self, 
-                              reasoning_classes: List[Type[BaseReasoning]]
-                              ) -> Type[BaseReasoning]:
-        """Dynamically create a combined reasoning class"""
         class CombinedReasoning(BaseReasoning):
             def __init__(self):
                 super().__init__()
-                self.components = [cls() for cls in reasoning_classes]
-                self.name = "+".join([cls.__name__ for cls in reasoning_classes])
-                
-            def perform_reasoning(self, *args, **kwargs) -> Dict[str, Any]:
-                """Execute reasoning components in sequence"""
-                results = {}
-                context = kwargs.get("context", {})
-                
-                for i, component in enumerate(self.components):
-                    # Execute component with accumulated context
-                    result = component.perform_reasoning(*args, **kwargs, context=context)
-                    results[f"step_{i+1}_{type(component).__name__}"] = result
-                    
-                    # Update context for next component
-                    context.update({
-                        f"prev_{type(component).__name__}_result": result,
-                        f"prev_step_result": result
-                    })
-                    
-                # Create final combined result
-                return {
-                    "combined_result": results,
-                    "reasoning_types": self.name,
-                    "final_output": self._synthesize_result(results)
-                }
-                
-            def _synthesize_result(self, results: Dict) -> Dict:
-                """Synthesize final result from component outputs"""
-                # Default implementation - override for custom synthesis
-                last_key = list(results.keys())[-1]
-                return results[last_key]
-                
-        # Set a meaningful name for the class
-        class_names = [cls.__name__ for cls in reasoning_classes]
-        CombinedReasoning.__name__ = "Combined_" + "_".join(class_names)
-        return CombinedReasoning
+                self.components = [cls() for cls in classes]
+                self.name = "+".join(type(c).__name__ for c in self.components)
 
-    def _determine_reasoning_strategy(self, problem: str) -> str:
-        """
-        Dynamically select reasoning strategy based on problem analysis
-        Returns either a single type or combined types (e.g., "abduction+deduction")
-        """
-        problem_lower = problem.lower()
-    
-        if any(word in problem_lower for word in [
-            "explain", "why", "hypothesis", "plausible", "assumption", "guess", "possible cause", 
-            "most likely", "reason for", "root cause"
-        ]):
+            def perform_reasoning(self, *args, **kwargs) -> Dict[str, Any]:
+                context = dict(kwargs.pop("context", {}) or {})
+                output: Dict[str, Any] = {}
+                for idx, component in enumerate(self.components, start=1):
+                    result = component.perform_reasoning(*args, context=context, **kwargs)
+                    output[f"step_{idx}_{type(component).__name__}"] = result
+                    context[f"step_{idx}"] = result
+                last = next(reversed(output.values())) if output else {}
+                return {
+                    "combined_result": output,
+                    "reasoning_types": self.name,
+                    "final_output": last,
+                }
+
+        return CombinedReasoning()
+
+    def determine_reasoning_strategy(self, problem: str) -> str:
+        text = (problem or "").lower()
+        if any(w in text for w in ["explain", "why", "hypothesis", "plausible", "most likely"]):
             return "abduction"
-    
-        if any(word in problem_lower for word in [
-            "prove", "derive", "therefore", "implies", "logical consequence", "from this", 
-            "deduce", "conclude", "premise", "certainty", "must be"
-        ]):
+        if any(w in text for w in ["prove", "derive", "therefore", "premise", "must be"]):
             return "deduction"
-    
-        if any(word in problem_lower for word in [
-            "generalize", "pattern", "trend", "predict", "examples suggest", "correlation", 
-            "extrapolate", "inductive", "likely outcome", "probable result"
-        ]):
+        if any(w in text for w in ["pattern", "trend", "generalize", "predict", "extrapolate"]):
             return "induction"
-    
-        if any(word in problem_lower for word in [
-            "similar to", "analogy", "is like", "map between", "analogous", "compare with", 
-            "corresponds to", "metaphor", "analogy-based", "resembles"
-        ]):
-            return "analitical"
-    
-        if any(word in problem_lower for word in [
-            "break down", "decompose", "component", "subsystem", "analyze parts", 
-            "structure", "function", "hierarchy", "system analysis", "modular"
-        ]):
+        if any(w in text for w in ["analogy", "similar", "compare", "resembles"]):
+            return "analogical"
+        if any(w in text for w in ["break down", "component", "decompose", "subsystem"]):
             return "decompositional"
-    
-        if any(word in problem_lower for word in [
-            "cause", "effect", "leads to", "results in", "trigger", "because of", 
-            "impact", "influence", "chain reaction", "causal", "outcome"
-        ]):
+        if any(w in text for w in ["effect", "impact", "results in", "causal", "cause"]):
             return "cause_effect"
-        
-        # Default combination for complex problems
         return "abduction+deduction"
+
+    # backward-compatible private name used by existing code
+    def _determine_reasoning_strategy(self, problem: str) -> str:
+        return self.determine_reasoning_strategy(problem)

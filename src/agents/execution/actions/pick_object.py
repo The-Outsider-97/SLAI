@@ -1,298 +1,257 @@
-
 import math
 import time
 import random
 
 from typing import Dict, Any, Optional, Tuple
 
-from src.agents.execution.utils.config_loader import load_global_config, get_config_section
-from src.agents.execution.actions.base_action import BaseAction, ActionStatus
+from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.execution_error import ActionFailureError, InvalidContextError, UnreachableTargetError
+from ..actions.base_action import BaseAction, ActionStatus, SoftInterrupt
+from ..actions.robot_actions import RobotAction
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Pick Object Action")
 printer = PrettyPrinter
 
-class PickObjectAction(BaseAction):
+class PickObjectAction(RobotAction):
+    """
+    Pick an object using a robotic gripper and optional arm movement.
+    Requires robot interface with set_gripper(), set_joint_position(), get_pose().
+    """
     name = "pick_object"
     priority = 5
-    preconditions = ["object_detected", "hand_empty"]
-    postconditions = ["holding_object"]
-    _required_context_keys = ["object_position", "object_properties"]
-    
+    preconditions = ["robot_ready", "hand_empty"]
+    postconditions = ["holding_object", "hand_empty"]  # hand_empty becomes False
+    _required_context_keys = ["object_position", "object_properties", "target_object"]
+
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config = load_global_config()
-        self.pick_config = get_config_section("pick_object_action")
-        
-        # Configuration parameters
-        self.grasp_time = self.pick_config.get("grasp_time")
-        self.min_distance = self.pick_config.get("min_distance")
-        self.base_success_rate = self.pick_config.get("base_success_rate")
-        self.energy_cost = self.pick_config.get("energy_cost")
-        self.max_weight = self.pick_config.get("max_weight")
-        self.max_size = self.pick_config.get("max_size")
-        
-        # Action state
-        self.object_id = ""
+        self.pick_object = get_config_section("pick_object_action") or {}
+
+        # Configuration with defaults
+        self.grasp_time = self.pick_object.get("grasp_time", 1.0)
+        self.min_distance = self.pick_object.get("min_distance", 0.5)
+        self.base_success_rate = self.pick_object.get("base_success_rate", 0.95)
+        self.energy_cost = self.pick_object.get("energy_cost", 0.2)
+        self.max_weight = self.pick_object.get("max_weight", 5.0)
+        self.max_size = self.pick_object.get("max_size", 1.0)
+        self.arm_prepick_joint = self.pick_object.get("arm_prepick_joint", None)  # e.g., {"joint_id": 2, "angle": 0.5}
+        self.arm_pick_joint = self.pick_object.get("arm_pick_joint", None)
+
+        # Internal state
+        self.object_id: str = ""
         self.object_properties: Dict[str, Any] = {}
-        self.grasp_progress = 0.0
-        self.attempt_failed = False
-        
-        logger.info(f"Pick Object Action initialized")
+        self.grasp_progress: float = 0.0
+        self._pick_start_time: float = 0.0
 
     def _execute(self) -> bool:
-        """Execute object picking with grasp mechanics and failure handling"""
-        printer.status("PICK", "Executing...", "info")
+        """Execute the pick sequence with validation, arm positioning, and gripper closure."""
+        logger.info(f"Starting pick action for '{self.context.get('target_object')}'")
 
-        # Validate object properties
-        if not self._validate_object():
-            return False
-            
-        # Verify proximity to object
-        if not self._check_proximity():
-            logger.error("Too far from object to pick up")
-            return False
-            
-        # Initialize picking process
-        self._pre_execute_pick()
-        
-        # Execute grasp sequence
+        # Validate object and proximity
+        self._validate_object()
+        self._check_proximity()
+
+        # Pre‑pick arm positioning (if configured)
+        if self.arm_prepick_joint:
+            self._move_arm(self.arm_prepick_joint, "pre‑pick")
+
+        # Perform grasp
         success = self._perform_grasp_sequence()
-        
-        # Handle results
-        return self._post_execute_pick(success)
 
-    def _validate_object(self) -> bool:
-        """Verify object can be picked up based on properties"""
-        printer.status("PICK", "Validating object...", "info")
+        # Post‑pick arm retraction (optional)
+        if success and self.arm_pick_joint:
+            self._move_arm(self.arm_pick_joint, "pick")
 
-        # Get object properties from context
+        return self._finalize_pick(success)
+
+    def _validate_object(self) -> None:
+        """Validate object properties and raise appropriate errors."""
         self.object_id = self.context.get("target_object", "unknown")
         self.object_properties = self.context.get("object_properties", {})
-        
-        # Check required properties
-        required_props = ["weight", "size", "grasp_difficulty"]
-        missing = [prop for prop in required_props if prop not in self.object_properties]
+
+        required = ["weight", "size", "grasp_difficulty"]
+        missing = [p for p in required if p not in self.object_properties]
         if missing:
-            logger.error(f"Object missing properties: {', '.join(missing)}")
-            return False
-            
-        # Check weight capacity
+            raise InvalidContextError(self.name, missing)
+
         weight = self.object_properties["weight"]
         if weight > self.max_weight:
-            logger.error(f"Object too heavy ({weight} > {self.max_weight})")
-            return False
-            
-        # Check size constraints
+            raise ActionFailureError(self.name, f"Object too heavy ({weight} > {self.max_weight})")
+
         size = self.object_properties["size"]
         if size > self.max_size:
-            logger.error(f"Object too large ({size} > {self.max_size})")
-            return False
-            
-        return True
+            raise ActionFailureError(self.name, f"Object too large ({size} > {self.max_size})")
 
-    def _check_proximity(self) -> bool:
-        """Verify agent is close enough to the object"""
-        printer.status("PICK", "Checking proximity...", "info")
+    def _check_proximity(self) -> None:
+        """Ensure robot is close enough to object using robot.get_pose()."""
+        try:
+            robot_pose = self.robot.get_pose()  # (x, y, theta)
+        except AttributeError:
+            # Fallback: use context position if robot lacks get_pose
+            robot_pose = self.context.get("current_position", (0.0, 0.0))
+            if len(robot_pose) == 2:
+                robot_pose = (robot_pose[0], robot_pose[1], 0.0)
 
-        agent_pos = self.context.get("current_position", (0, 0))
-        obj_pos = self.context.get("object_position", (0, 0))
-        
-        distance = math.sqrt(
-            (agent_pos[0]-obj_pos[0])**2 + 
-            (agent_pos[1]-obj_pos[1])**2
-        )
-        
-        return distance <= self.min_distance
+        obj_pos = self.context.get("object_position")
+        if not obj_pos:
+            raise InvalidContextError(self.name, ["object_position"])
 
-    def _pre_execute_pick(self):
-        """Specialized setup for picking"""
-        printer.status("PICK", "Pre execute", "info")
+        dx = robot_pose[0] - obj_pos[0]
+        dy = robot_pose[1] - obj_pos[1]
+        distance = math.hypot(dx, dy)
+        if distance > self.min_distance:
+            raise UnreachableTargetError(self.name, obj_pos, robot_pose[:2])
 
-        self.status = ActionStatus.RUNNING
-        self.grasp_progress = 0.0
-        self.attempt_failed = False
-        
-        logger.info(f"Preparing to pick up {self.object_id}")
-        self.context["current_activity"] = f"picking_{self.object_id}"
+    def _move_arm(self, joint_config: Dict[str, Any], stage: str) -> None:
+        """Move a joint to a specified angle."""
+        joint_id = joint_config.get("joint_id")
+        angle = joint_config.get("angle")
+        speed = joint_config.get("speed", 0.5)
+        if joint_id is None or angle is None:
+            logger.warning(f"Invalid arm config for {stage}: {joint_config}")
+            return
+        if not self.robot.set_joint_position(joint_id, angle, speed):
+            raise ActionFailureError(self.name, f"Arm movement failed during {stage}")
 
     def _perform_grasp_sequence(self) -> bool:
-        """Execute the grasping process with progress tracking"""
-        printer.status("PICK", "Executing grasping process", "info")
+        """Simulate or actually close gripper with timing and failure chance."""
+        difficulty = self.object_properties.get("grasp_difficulty", 0.0)
+        grasp_duration = self.grasp_time * (1.0 + difficulty)
+        self._pick_start_time = time.time()
+        self.grasp_progress = 0.0
 
-        start_time = time.time()
-        grasp_duration = self.grasp_time * (1 + self.object_properties.get("grasp_difficulty", 0))
-        
+        # Random failure check before starting
+        if self._should_fail():
+            logger.warning("Grasp attempt failed (pre‑failure)")
+            return False
+
+        # Close gripper (actual hardware command)
+        if not self.robot.set_gripper(open=False, force=self.object_properties.get("weight", 1.0)):
+            raise ActionFailureError(self.name, "Failed to close gripper")
+
+        # Wait for grasp duration with progress updates
         while self.grasp_progress < 1.0:
-            # Check for interruptions
             if self._should_interrupt():
-                return False
-                
-            # Update progress
-            elapsed = time.time() - start_time
+                self.robot.set_gripper(open=True)  # release
+                raise SoftInterrupt("Pick interrupted")
+
+            elapsed = time.time() - self._pick_start_time
             self.grasp_progress = min(1.0, elapsed / grasp_duration)
-            
-            # Update status visualization
             self._update_grasp_status()
-            
-            # Handle random failures
-            if self._check_failure_condition():
-                self.attempt_failed = True
+            time.sleep(0.05)
+
+            # Mid‑grasp failure check
+            if self._should_fail():
+                self.robot.set_gripper(open=True)
                 return False
-                
-            time.sleep(0.1)
-            
+
         return True
 
-    def _update_grasp_status(self):
-        """Visualize grasp progress through status updates"""
-        printer.status("PICK", "Updating grasping status", "info")
+    def _should_fail(self) -> bool:
+        """Determine if grasp should fail based on difficulty and random chance."""
+        difficulty = self.object_properties.get("grasp_difficulty", 0.0)
+        failure_chance = (1.0 - self.base_success_rate) * (1.0 + difficulty)
+        # Critical failure (e.g., object slips)
+        if random.random() < 0.01 * (1.0 + difficulty):
+            logger.error("Critical grasp failure: object dropped")
+            return True
+        return random.random() < failure_chance
 
+    def _update_grasp_status(self) -> None:
+        """Update action status based on grasp progress."""
         if self.grasp_progress < 0.3:
-            self.status = ActionStatus.ACCELERATE
+            self.status = ActionStatus.ACCELERATING
         elif self.grasp_progress < 0.7:
             self.status = ActionStatus.RUNNING
         else:
-            self.status = ActionStatus.DECELERATE
+            self.status = ActionStatus.DECELERATING
 
-    def _check_failure_condition(self) -> bool:
-        """Determine if grasp attempt fails"""
-        printer.status("PICK", "Checking failure condition", "info")
-
-        if self.attempt_failed:
-            return True
-            
-        # Calculate failure probability
-        difficulty = self.object_properties.get("grasp_difficulty", 0)
-        failure_chance = (1 - self.base_success_rate) * (1 + difficulty)
-        
-        # Critical failure check (1% base + difficulty modifier)
-        critical_chance = 0.01 * (1 + difficulty)
-        if random.random() < critical_chance:
-            logger.error("Critical failure during grasp attempt!")
-            return True
-            
-        # Normal failure check
-        if random.random() < failure_chance:
-            logger.warning("Grasp attempt failed, retrying...")
-            return True
-            
-        return False
-
-    def _should_interrupt(self) -> bool:
-        """Check if picking should be interrupted"""
-        printer.status("PICK", "Interrupting...", "info")
-
-        # External interruption signal
-        if self.context.get("interrupt_action", False):
-            return True
-            
-        # Critical event requires attention
-        if self.context.get("urgent_event", False):
-            return True
-            
-        # Agent cancellation
-        if self.status == ActionStatus.CANCELLED:
-            return True
-            
-        # Energy depletion
-        if self.context.get("energy", 10.0) <= 0:
-            return True
-            
-        return False
-
-    def _post_execute_pick(self, success: bool) -> bool:
-        """Finalize picking process and update context"""
-        printer.status("PICK", "Post execute", "info")
-
-        # Consume energy regardless of success
+    def _finalize_pick(self, success: bool) -> bool:
+        """Update context and inventory after pick attempt."""
         self._consume_energy()
-        
-        if success:
-            # Update inventory
-            self._update_inventory()
-            
-            # Update object state
-            self.context["object_state"][self.object_id] = "held"
-            self.context["holding_object"] = True
-            self.context["held_object"] = self.object_id
-            
-            logger.info(f"Successfully picked up {self.object_id}")
-            return True
-        else:
-            if self.attempt_failed:
-                logger.error(f"Failed to pick up {self.object_id}")
+
+        if not success:
+            logger.error(f"Failed to pick {self.object_id}")
             return False
 
-    def _consume_energy(self):
-        """Deduct energy based on object properties"""
-        printer.status("PICK", "Consuming Energy", "info")
-
-        if "energy" in self.context:
-            weight_factor = self.object_properties["weight"] / self.max_weight
-            difficulty_factor = self.object_properties["grasp_difficulty"]
-            
-            consumption = self.energy_cost * (1 + weight_factor + difficulty_factor)
-            self.context["energy"] = max(0, self.context["energy"] - consumption)
-
-    def _update_inventory(self):
-        """Add object to agent's inventory"""
-        printer.status("PICK", "Updating inventory...", "info")
-
-        if "inventory" not in self.context:
-            self.context["inventory"] = {}
-            
-        self.context["inventory"][self.object_id] = {
+        # Update inventory
+        inventory = self.context.setdefault("inventory", {})
+        inventory[self.object_id] = {
             "type": self.object_properties.get("type", "unknown"),
             "weight": self.object_properties["weight"],
             "size": self.object_properties["size"]
         }
-        
-        # Update carrying capacity
-        carrying_items = len(self.context["inventory"])
-        self.context["carrying_items"] = carrying_items
-        self.set_carry_capacity(carrying_items)
+        self.context["carrying_items"] = len(inventory)
+        self.set_carry_capacity(self.context["carrying_items"])
 
-    def _pre_execute(self):
-        """Setup before main execution"""
-        super()._pre_execute()
-        # Initialize object state tracking
-        self.context.setdefault("object_state", {})
-        logger.info(f"Beginning object pickup sequence")
+        # Update state flags
+        self.context["holding_object"] = True
+        self.context["held_object"] = self.object_id
+        self.context["hand_empty"] = False
+        self.context.setdefault("object_state", {})[self.object_id] = "held"
 
-    def _post_execute(self, success: bool):
-        """Cleanup after action completes"""
-        super()._post_execute(success)
-        
-        # Reset activity tracking
-        if "current_activity" in self.context:
-            del self.context["current_activity"]
-            
-        # Reset interruption flags
-        if "interrupt_action" in self.context:
-            self.context["interrupt_action"] = False
+        logger.info(f"Successfully picked up {self.object_id}")
+        return True
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Enhanced serialization with picking info"""
-        base = super().to_dict()
-        base.update({
-            "object_id": self.object_id,
-            "grasp_progress": self.grasp_progress,
-            "weight": self.object_properties.get("weight", 0),
-            "size": self.object_properties.get("size", 0),
-            "grasp_difficulty": self.object_properties.get("grasp_difficulty", 0)
-        })
-        return base
+    def _consume_energy(self) -> None:
+        """Deduct energy based on object weight and difficulty."""
+        if "energy" in self.context:
+            weight_factor = self.object_properties["weight"] / self.max_weight
+            difficulty = self.object_properties.get("grasp_difficulty", 0.0)
+            consumption = self.energy_cost * (1.0 + weight_factor + difficulty)
+            self.context["energy"] = max(0.0, self.context["energy"] - consumption)
+
+    def _should_interrupt(self) -> bool:
+        """Extended interrupt checks including energy depletion."""
+        if super()._should_interrupt():
+            return True
+        if self.context.get("energy", 10.0) <= 0:
+            logger.warning("Pick interrupted: energy depleted")
+            return True
+        return False
 
 if __name__ == "__main__":
     print("\n=== Running Execution PICK_OBJECT Action ===\n")
     printer.status("TEST", "Starting Execution PICK_OBJECT Action tests", "info")
+    from ..utils.robot_interface import RobotInterface
 
-    # Test context
+    # Mock robot interface
+    class MockRobot(RobotInterface):
+        def set_motor_speed(self, left: float, right: float) -> bool:
+            print(f"MockMotor: left={left}, right={right}")
+            return True
+        def set_steering(self, angle: float) -> bool:
+            print(f"MockSteering: angle={angle}")
+            return True
+        def set_throttle(self, speed: float) -> bool:
+            print(f"MockThrottle: speed={speed}")
+            return True
+        def stop(self) -> bool:
+            print("MockStop")
+            return True
+        def set_gripper(self, open: bool, force: float = 1.0) -> bool:
+            print(f"MockGripper: open={open}, force={force}")
+            return True
+        def set_joint_position(self, joint_id: int, position: float, speed: float) -> bool:
+            print(f"MockJoint: id={joint_id}, pos={position}, speed={speed}")
+            return True
+        def get_pose(self) -> Tuple[float, float, float]:
+            return (1.1, 1.1, 0.0)  # close to object at (1.0, 1.0)
+        def get_sensor_value(self, sensor_name: str) -> Any:
+            return 42.0
+        def set_led(self, led_id: int, state: bool) -> bool:
+            print(f"MockLED: id={led_id}, state={state}")
+            return True
+
+    # Test context with robot
     context = {
+        "robot": MockRobot(),
+        "robot_ready": True,
+        "hand_empty": True,
         "target_object": "apple",
         "object_position": (1.0, 1.0),
-        "current_position": (1.1, 1.1),
         "object_properties": {
             "weight": 0.3,
             "size": 0.1,
@@ -301,25 +260,16 @@ if __name__ == "__main__":
         },
         "energy": 10.0
     }
-    
+
     pick_action = PickObjectAction(context)
     print(f"{pick_action}")
-    
-    print("\n* * * * * Phase 2 - Validation * * * * *\n")
-    
-    printer.pretty("VALIDATE", pick_action._validate_object(), "success")
-    printer.pretty("PROXIMITY", pick_action._check_proximity(), "success")
-    
-    print("\n* * * * * Phase 3 - Grasp Simulation * * * * *\n")
-    
-    # Test grasp sequence
-    pick_action._pre_execute_pick()
-    success = pick_action._perform_grasp_sequence()
-    printer.pretty("GRASP", success, "success" if success else "error")
-    
-    print("\n* * * * * Phase 4 - Finalization * * * * *\n")
-    
-    final_success = pick_action._post_execute_pick(success)
-    printer.pretty("FINAL", final_success, "success" if final_success else "error")
-    
+
+    print("\n* * * * * Phase 2 - Execute * * * * *\n")
+    try:
+        success = pick_action.execute()
+        printer.pretty("EXECUTION", "SUCCESS" if success else "FAILURE",
+                       "success" if success else "error")
+    except Exception as e:
+        printer.pretty("EXECUTION", f"Exception: {e}", "error")
+
     print("\n=== All tests completed successfully! ===\n")

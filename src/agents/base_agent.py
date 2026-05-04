@@ -1,26 +1,62 @@
-__version__ = "1.9.0"
+from __future__ import annotations
 
-import inspect
-import re
-import os, sys
+__version__ = "2.2.0"
+
+"""
+SLAI Base Agent
+
+Production-ready common runtime for all SLAI agents.
+
+Responsibilities
+----------------
+- provide one stable execution envelope for every role-specific agent
+- centralize config loading from agents_config.yaml through main_config_loader
+- standardize shared-memory, metrics, lifecycle, retry, fallback, and recovery behavior
+- keep domain logic in subclasses while offering reusable primitives
+- integrate with the Base Agent issue handling and error taxonomy
+
+This module intentionally keeps local project imports direct. Optional heavyweight
+third-party imports such as torch are lazy-loaded only when their optional helper
+methods are used.
+"""
+
 import abc
-import time
-import json
+import contextlib
 import difflib
+import inspect
+import json
+import os
+import re
+import time
 import traceback
+import uuid
+
+from collections import OrderedDict, defaultdict, deque
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import RLock
+from typing import Any, Deque, Dict, Iterator, List, Optional, Tuple
+
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base.utils.base_errors import *
+from .base.issue_handler import *
+from .base.lazy_agent import LazyAgent
+from .base.light_metric_store import LightMetricStore
+from .collaborative.shared_memory import SharedMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+
+logger = get_logger("SLAI Base Agent")
+printer = PrettyPrinter()
+
 torch = None
-TORCH_AVAILABLE = None
-TORCH_IMPORT_ERROR = None
+nn = None
+TORCH_AVAILABLE: Optional[bool] = None
+TORCH_IMPORT_ERROR: Optional[BaseException] = None
 
 
-class _NNFallback:
-    Module = object
-
-
-nn = _NNFallback()
-
-
-def _ensure_torch_imported():
+def _ensure_torch_imported() -> bool:
+    """Lazy-load torch for optional lightweight-network helpers only."""
     global torch, nn, TORCH_AVAILABLE, TORCH_IMPORT_ERROR
     if TORCH_AVAILABLE is True:
         return True
@@ -29,575 +65,489 @@ def _ensure_torch_imported():
     try:
         import torch as torch_module
         import torch.nn as torch_nn
-        torch = torch_module
-        nn = torch_nn
-        TORCH_AVAILABLE = True
-        TORCH_IMPORT_ERROR = None
-        return True
-    except Exception as torch_import_error:
+    except Exception as exc:  # third-party optional dependency, not a local import
         TORCH_AVAILABLE = False
-        TORCH_IMPORT_ERROR = torch_import_error
+        TORCH_IMPORT_ERROR = exc
         return False
+    torch = torch_module
+    nn = torch_nn
+    TORCH_AVAILABLE = True
+    TORCH_IMPORT_ERROR = None
+    return True
 
-from typing import Any
-from collections import OrderedDict, defaultdict, deque
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base.lazy_agent import LazyAgent
-from src.agents.base.light_metric_store import LightMetricStore
-from src.agents.base.issue_handler import DEFAULT_ISSUE_HANDLERS
-from src.agents.collaborative.shared_memory import SharedMemory
-from logs.logger import get_logger
+@dataclass(frozen=True)
+class ExecutionRecord:
+    """Compact audit record for one BaseAgent execution."""
 
-logger = get_logger("SLAI Base Agent")
+    execution_id: str
+    agent_name: str
+    started_at: float
+    finished_at: float
+    duration_ms: int
+    status: str
+    attempts: int
+    recovered_by: Optional[str] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    result_preview: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "execution_id": self.execution_id,
+            "agent_name": self.agent_name,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_ms": self.duration_ms,
+            "status": self.status,
+            "attempts": self.attempts,
+            "recovered_by": self.recovered_by,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+            "result_preview": self.result_preview,
+            "metadata": self.metadata,
+        }
+
 
 class BaseAgent(abc.ABC):
-    def __init__(self, shared_memory, agent_factory, config=None):
+    """Common production runtime inherited by all SLAI agents.
+
+    Subclasses may override ``perform_task`` for domain-specific execution. If
+    they do not, the default dispatcher calls compatible ``predict``,
+    ``get_action``, or ``act`` methods. This preserves compatibility with the
+    existing agents while avoiding redundant execution wrappers in every role.
+    """
+
+    DEFAULT_CAPABILITY_ORDER: Tuple[str, ...] = ("predict", "get_action", "act")
+    DEFAULT_CONTENT_KEYS: Tuple[str, ...] = ("text", "query", "input", "message", "data", "payload")
+
+    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None) -> None:
         self.logger = get_logger(self.__class__.__name__)
         self.name = self.__class__.__name__
-        
-        if shared_memory is None:
-            shared_memory = SharedMemory()
-        self.shared_memory = shared_memory
-        self.agent_factory=agent_factory
+        self.agent_id = f"{self.name}:{uuid.uuid4().hex[:12]}"
+        self._lock = RLock()
 
-        self.config = get_config_section('base_agent')
-        self.defer_initialization = self.config.get('defer_initialization')
-        self.memory_profile = self.config.get('memory_profile')
-        self.network_compression = self.config.get('network_compression')
-        self.max_error_log_size = self.config.get('max_error_log_size')
-        self.error_similarity_threshold = self.config.get('error_similarity_threshold')
-        self.max_task_retries = self.config.get('max_task_retries')
-        self.task_similarity_str_threshold = self.config.get('task_similarity_str_threshold')
-        self.jaccard_threshold = self.config.get('jaccard_threshold')
-        self.jaccard_min_for_no_shared = self.config.get('jaccard_min_for_no_shared')
-        self.final_key_threshold = self.config.get('final_key_threshold')
-        self.final_value_threshold = self.config.get('final_value_threshold')
-        self.task_similarity_seq_elem_threshold = self.config.get('task_similarity_seq_elem_threshold')
-        self.task_timeout_seconds = None
-        self.current_plan = []
-        self.current_goal = []
+        self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
+        self.agent_factory = agent_factory
+
+        self.config = load_global_config()
+        self.global_config = self.config
+        self.base_config: Dict[str, Any] = dict(get_config_section("base_agent") or {})
+        if config:
+            ensure_mapping(config, "config", component=self.name)
+            self.base_config.update(dict(config))
+
+        self._load_base_config()
+        self._validate_base_config()
+
+        self.current_plan: List[Any] = []
+        self.current_goal: Any = None
+        self.operational_state = "initialized"
+        self.last_execution: Optional[Dict[str, Any]] = None
+        self.execution_history: Deque[Dict[str, Any]] = deque(maxlen=self.execution_history_limit)
+        self._known_issue_handlers: Dict[str, Callable[..., Any]] = {}
+        self._component_initializers: Dict[str, Callable[[], Any]] = {
+            "performance_metrics": lambda: defaultdict(lambda: deque(maxlen=self._get_metric_buffer_size()))
+        }
+        self._lazy_components: OrderedDict[str, Any] = OrderedDict()
+        self._performance_metrics: Optional[MutableMapping[str, Deque[Any]]] = None
+        self.retraining_thresholds: Dict[str, Any] = {}
+
+        self.evaluation_log_dir = str(self.base_config.get("evaluation_log_dir", "evaluation_logs"))
+        Path(self.evaluation_log_dir).mkdir(parents=True, exist_ok=True)
 
         self.metric_store = LightMetricStore()
-        
-        # Initialize lazy components system
-        self._component_initializers = {
-            'performance_metrics': lambda: defaultdict(
-                lambda: deque(maxlen=self._get_metric_buffer_size())
-            )
-        }
-        self._lazy_components = OrderedDict()
-
-        self.retraining_thresholds = {} # Populated by subclasses based on their specific metrics
-        self.evaluation_log_dir = "evaluation_logs"
-        os.makedirs(self.evaluation_log_dir, exist_ok=True)
-
-        self._known_issue_handlers = {}
+        self.issue_handler = IssueHandler()
         self.register_default_known_issue_handlers()
         self._init_core_components()
+        self._publish_lifecycle_event("initialized", {"agent_id": self.agent_id})
 
-    def _get_metric_buffer_size(self):
-        """Determine metric buffer size based on memory profile"""
-        if self.memory_profile == 'low':
-            return 100
-        elif self.memory_profile == 'medium':
-            return 500
-        else:  # 'high' or default
-            return 1000
+    def _load_base_config(self) -> None:
+        self.defer_initialization = bool(self.base_config.get("defer_initialization", True))
+        self.memory_profile = str(self.base_config.get("memory_profile", "medium")).lower()
+        self.network_compression = bool(self.base_config.get("network_compression", True))
+        self.max_error_log_size = int(self.base_config.get("max_error_log_size", 50))
+        self.error_similarity_threshold = float(self.base_config.get("error_similarity_threshold", 0.75))
+        self.max_task_retries = int(self.base_config.get("max_task_retries", 0))
+        self.retry_backoff_seconds = float(self.base_config.get("retry_backoff_seconds", 0.5))
+        self.retry_backoff_cap_seconds = float(self.base_config.get("retry_backoff_cap_seconds", 5.0))
+        self.task_timeout_seconds = self._none_or_float(self.base_config.get("task_timeout_seconds"))
+        self.enable_known_issue_recovery = bool(self.base_config.get("enable_known_issue_recovery", True))
+        self.enable_alternative_execute = bool(self.base_config.get("enable_alternative_execute", True))
+        self.enable_shared_memory_audit = bool(self.base_config.get("enable_shared_memory_audit", True))
+        self.execution_history_limit = int(self.base_config.get("execution_history_limit", 200))
+        self.metric_buffer_size_low = int(self.base_config.get("metric_buffer_size_low", 100))
+        self.metric_buffer_size_medium = int(self.base_config.get("metric_buffer_size_medium", 500))
+        self.metric_buffer_size_high = int(self.base_config.get("metric_buffer_size_high", 1000))
+        self.task_similarity_str_threshold = float(self.base_config.get("task_similarity_str_threshold", 0.90))
+        self.jaccard_threshold = float(self.base_config.get("jaccard_threshold", 0.50))
+        self.jaccard_min_for_no_shared = float(self.base_config.get("jaccard_min_for_no_shared", 0.70))
+        self.final_key_threshold = float(self.base_config.get("final_key_threshold", 0.70))
+        self.final_value_threshold = float(self.base_config.get("final_value_threshold", 0.70))
+        self.task_similarity_seq_elem_threshold = float(self.base_config.get("task_similarity_seq_elem_threshold", 0.80))
+        self.plan_resource_warning_threshold = float(self.base_config.get("plan_resource_warning_threshold", 0.70))
+        self.plan_resource_critical_threshold = float(self.base_config.get("plan_resource_critical_threshold", 0.90))
+        self.shared_memory_error_key_prefix = str(self.base_config.get("shared_memory_error_key_prefix", "errors"))
+        self.shared_memory_stats_key_prefix = str(self.base_config.get("shared_memory_stats_key_prefix", "agent_stats"))
+        self.shared_memory_event_key_prefix = str(self.base_config.get("shared_memory_event_key_prefix", "agent_events"))
+        self.warm_start_key_prefix = str(self.base_config.get("warm_start_key_prefix", "warm_state"))
+        self.retraining_flag_key_prefix = str(self.base_config.get("retraining_flag_key_prefix", "retraining_flag"))
 
-    def _init_core_components(self):
-        """Initialize essential components first with compression setting"""
-        # Create LazyAgent instance for expensive components
-        compression_enabled = self.network_compression
-        self.lazy_agent = LazyAgent(
-            lambda: self._create_expensive_components(compression_enabled))
-        
-    def _create_expensive_components(self, compression_enabled=False):
-        """Create components that should be lazily initialized"""
+    def _validate_base_config(self) -> None:
+        ensure_numeric_range(self.error_similarity_threshold, "error_similarity_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        ensure_numeric_range(self.task_similarity_str_threshold, "task_similarity_str_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        ensure_numeric_range(self.jaccard_threshold, "jaccard_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        ensure_numeric_range(self.final_key_threshold, "final_key_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        ensure_numeric_range(self.final_value_threshold, "final_value_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        ensure_numeric_range(self.task_similarity_seq_elem_threshold, "task_similarity_seq_elem_threshold", minimum=0.0, maximum=1.0, component=self.name)
+        if self.max_error_log_size < 1:
+            raise BaseConfigurationError("max_error_log_size must be positive.", component=self.name, details={"value": self.max_error_log_size})
+        if self.max_task_retries < 0:
+            raise BaseConfigurationError("max_task_retries cannot be negative.", component=self.name, details={"value": self.max_task_retries})
+        if self.memory_profile not in {"low", "medium", "high"}:
+            raise BaseConfigurationError("memory_profile must be low, medium, or high.", component=self.name, details={"value": self.memory_profile})
+
+    @staticmethod
+    def _none_or_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"none", "null", ""}:
+            return None
+        return float(value)
+
+    def _get_metric_buffer_size(self) -> int:
+        if self.memory_profile == "low":
+            return self.metric_buffer_size_low
+        if self.memory_profile == "high":
+            return self.metric_buffer_size_high
+        return self.metric_buffer_size_medium
+
+    def _init_core_components(self) -> None:
+        self.lazy_agent = LazyAgent(lambda: self._create_expensive_components(self.network_compression))
+
+    def _create_expensive_components(self, compression_enabled: bool = False) -> Dict[str, Any]:
         return {
-            'performance_metrics': defaultdict(
-                lambda: deque(maxlen=self._get_metric_buffer_size()))
+            "performance_metrics": defaultdict(lambda: deque(maxlen=self._get_metric_buffer_size())),
+            "compression_enabled": bool(compression_enabled),
         }
-
-    def register_default_known_issue_handlers(self):
-        """Registers common known issue handlers. Subclasses can add more."""
-        for pattern, handler in DEFAULT_ISSUE_HANDLERS.items():
-            self.register_known_issue_handler(pattern, handler)
 
     @property
-    def performance_metrics(self):
-        return self.lazy_property('performance_metrics')
+    def performance_metrics(self) -> MutableMapping[str, Deque[Any]]:
+        if self._performance_metrics is None:
+            self._performance_metrics = defaultdict(lambda: deque(maxlen=self._get_metric_buffer_size()))
+        return self._performance_metrics
 
-    def lazy_property(self, name):
-        """Get or create a lazy-initialized component"""
-        if name not in self._lazy_components:
-            if name in self._component_initializers:
-                self._lazy_components[name] = self._component_initializers[name]()
-            else:
-                raise AttributeError(f"No initializer for lazy component: {name}")
-        return self._lazy_components[name]
+    @performance_metrics.setter
+    def performance_metrics(self, value: MutableMapping[str, Deque[Any]]) -> None:
+        self._performance_metrics = value
 
-    def _log_error_to_shared_memory(self, error_entry: dict):
-        """Logs an error entry to shared memory, managing log size."""
-        error_key = f"errors:{self.name}"
-        # Ensure shared_memory.get/set are thread-safe if shared_memory is used across threads
-        errors = self.shared_memory.get(error_key) or []
-        errors.append(error_entry)
-        if len(errors) > self.max_error_log_size:
-            errors = errors[-self.max_error_log_size:]
-        self.shared_memory.set(error_key, errors)
+    def lazy_property(self, name: str) -> Any:
+        ensure_non_empty_string(name, "name", component=self.name)
+        with self._lock:
+            if name not in self._lazy_components:
+                initializer = self._component_initializers.get(name)
+                if initializer is None:
+                    raise BaseStateError(f"No initializer registered for lazy component: {name}", component=self.name)
+                self._lazy_components[name] = initializer()
+            return self._lazy_components[name]
 
-    def _check_and_log_similar_errors(self, new_error_info: dict) -> bool:
-        """
-        Checks for and logs similarity with past errors from shared memory.
-        Returns True if a similar error was found, False otherwise.
-        """
-        error_key = f"errors:{self.name}"
-        # Fetch errors AFTER the current one has been logged to include it in the list for subsequent calls,
-        # but for current check, we compare against errors *before* the current one.
-        all_errors = self.shared_memory.get(error_key) or [] 
-        
-        # If all_errors includes the new_error_info already (it should if _log_error_to_shared_memory was called before this)
-        # then we compare against errors[:-1]. If not, then all_errors is the history.
-        # Assuming new_error_info is the LATEST error, so compare against history excluding it.
-        history_errors = [e for e in all_errors if e['timestamp'] < new_error_info['timestamp']]
+    def register_lazy_component(self, name: str, initializer: Callable[[], Any], *, replace: bool = False) -> None:
+        ensure_non_empty_string(name, "name", component=self.name)
+        ensure_callable(initializer, "initializer", component=self.name)
+        with self._lock:
+            if name in self._component_initializers and not replace:
+                raise BaseStateError(f"Lazy component already registered: {name}", component=self.name)
+            self._component_initializers[name] = initializer
+            if replace:
+                self._lazy_components.pop(name, None)
 
+    def register_default_known_issue_handlers(self) -> None:
+        for pattern, handler in DEFAULT_ISSUE_HANDLERS.items():
+            self.register_known_issue_handler(pattern, handler, replace=True)
 
-        new_error_msg = new_error_info.get("error_message", "")
-        new_error_type = new_error_info.get("error_type", "")
+    def register_known_issue_handler(self, issue_pattern_or_id: str, handler_func: Callable[..., Any], *, replace: bool = False) -> None:
+        ensure_non_empty_string(issue_pattern_or_id, "issue_pattern_or_id", component=self.name)
+        ensure_callable(handler_func, "handler_func", component=self.name)
+        with self._lock:
+            if issue_pattern_or_id in self._known_issue_handlers and not replace:
+                raise BaseStateError(f"Known issue handler already registered: {issue_pattern_or_id}", component=self.name)
+            self._known_issue_handlers[issue_pattern_or_id] = handler_func
 
-        for past_error_info in reversed(history_errors): 
-            past_error_msg = past_error_info.get("error_message", "")
-            past_error_type = past_error_info.get("error_type", "")
+    def execute(self, input_data: Any) -> Any:
+        """Execute task data through the common production envelope."""
+        execution_id = uuid.uuid4().hex
+        started_at = time.time()
+        attempts = 0
+        last_exception: Optional[BaseException] = None
+        self.operational_state = "running"
+        self.metric_store.start_tracking("execute", "performance", metadata={"agent": self.name, "execution_id": execution_id})
 
-            if past_error_type == new_error_type: # First, match error type
-                similarity = difflib.SequenceMatcher(None, new_error_msg, past_error_msg).ratio()
-                if similarity >= self.error_similarity_threshold:
-                    self.logger.warning(
-                        f"[{self.name}] A similar {new_error_type} occurred previously "
-                        f"(message similarity: {similarity:.2f}). Current error: '{new_error_msg[:100]}...'"
-                    )
-                    return True # Found a similar error
-        return False # No significantly similar error found in history
-
-    def execute(self, input_data):
-        """
-        Executes the agent's task with comprehensive error handling and recovery.
-        Flow:
-        1. Try `perform_task` (with retries if configured).
-        2. If error, log it and check for similarity with past errors.
-        3. Try `handle_known_issue` based on error information.
-        4. If still unresolved, try `alternative_execute`.
-        5. If all fail, log final failure.
-        """
-        retries_done = 0
-        last_exception_in_retry_loop = None
-        if self.defer_initialization and not hasattr(self, 'lazy_agent'):
-            self.logger.info(f"[{self.name}] Initializing deferred components")
-            self._init_core_components()
-
-        self.metric_store.start_tracking('execute', 'performance')
         try:
-            # --- STAGE 1: Perform Task (with retries) ---
-            while retries_done <= self.max_task_retries:
+            for attempt_index in range(self.max_task_retries + 1):
+                attempts = attempt_index + 1
                 try:
-                    self.logger.info(f"[{self.name}] Attempting task (attempt {retries_done + 1}/{self.max_task_retries + 1})...")
-                    # Note: Robust timeout for self.perform_task is complex (threading, signals, or async).
-                    # If self.task_timeout_seconds is set, subclasses might need to handle it internally
-                    # or a more sophisticated execution wrapper would be needed here.
-                    result = self.perform_task(input_data) # perform_task is now abstract
-
-                    if hasattr(self, "evaluate_performance") and callable(self.evaluate_performance):
-                        performance_data = self.extract_performance_metrics(result)
-                        if performance_data: # Only evaluate if metrics are meaningfully extracted
-                            self.evaluate_performance(performance_data)
-                    
-                    self.logger.info(f"[{self.name}] Task execution successful on attempt {retries_done + 1}.")
-                    self.shared_memory.set(f"agent_stats:{self.name}", {
-                        "last_run": time.time(), "success": True, 
-                        "attempts": retries_done + 1,
-                        "result_summary": str(result)[:200]
-                    })
+                    result = self._execute_once(input_data)
+                    self._after_successful_execution(result, attempts, execution_id)
+                    self._record_execution(started_at, "success", attempts, result=result, execution_id=execution_id)
                     return result
-                
-                except Exception as e:
-                    last_exception_in_retry_loop = e
-                    if retries_done < self.max_task_retries:
-                        retries_done += 1
-                        self.logger.warning(f"[{self.name}] Task attempt {retries_done} failed. Retrying... Error: {e}")
-                        time.sleep(min(retries_done * 0.5, 5)) # Simple backoff, capped at 5s
-                    else: # Max retries reached
-                        self.logger.error(f"[{self.name}] Task failed after {retries_done + 1} attempts. Last error: {e}")
-                        break # Exit retry loop to proceed with further error handling stages
+                except Exception as exc:
+                    last_exception = exc
+                    if attempt_index < self.max_task_retries:
+                        self._publish_lifecycle_event("retry", {"attempt": attempts, "error": str(exc)})
+                        time.sleep(min(self.retry_backoff_seconds * (attempt_index + 1), self.retry_backoff_cap_seconds))
+                        continue
+                    break
 
-            # --- STAGE 2: Log Initial Error and Check Similarity ---
-            # This stage is reached only if all retries in Stage 1 failed.
-            error_info = {
-                "timestamp": time.time(),
-                "error_type": type(last_exception_in_retry_loop).__name__,
-                "error_message": str(last_exception_in_retry_loop),
-                "traceback": traceback.format_exc()
+            error_info = self._build_error_info(last_exception, input_data, execution_id, attempts)
+            self._log_error_to_shared_memory(error_info)
+            self._check_and_log_similar_errors(error_info)
+
+            if self.enable_known_issue_recovery:
+                recovered = self.handle_known_issue(input_data, error_info, error=last_exception)
+                if not self._is_failure_result(recovered):
+                    self._after_successful_execution(recovered, attempts, execution_id, recovered_by="handle_known_issue")
+                    self._record_execution(started_at, "recovered", attempts, result=recovered, recovered_by="handle_known_issue", execution_id=execution_id)
+                    return recovered
+
+            if self.enable_alternative_execute:
+                alternative_result = self.alternative_execute(input_data, original_error=last_exception)
+                if not self._is_failure_result(alternative_result):
+                    self._after_successful_execution(alternative_result, attempts, execution_id, recovered_by="alternative_execute")
+                    self._record_execution(started_at, "recovered", attempts, result=alternative_result, recovered_by="alternative_execute", execution_id=execution_id)
+                    return alternative_result
+
+            failure = {
+                "status": "failed",
+                "error": error_info["error_message"],
+                "error_type": error_info["error_type"],
+                "reason": "All execution and recovery attempts failed.",
+                "execution_id": execution_id,
+                "attempts": attempts,
             }
-            self._log_error_to_shared_memory(error_info) # Log the definitive error from perform_task attempts
-            _ = self._check_and_log_similar_errors(error_info) # Log if similar error found, result not critical for flow here
-
-            # --- STAGE 3: Handle Known Issue ---
-            try:
-                self.logger.info(f"[{self.name}] Attempting to handle as known issue: {error_info['error_type']}...")
-                recovery_result = self.handle_known_issue(input_data, error_info) # Pass original input_data
-                
-                # Check if handler successfully resolved it (i.e., did not return a failure dict)
-                if not (isinstance(recovery_result, dict) and recovery_result.get("status") == "failed"):
-                    self.logger.info(f"[{self.name}] Task recovered by 'handle_known_issue'.")
-                    self.shared_memory.set(f"agent_stats:{self.name}", {
-                        "last_run": time.time(), "success": True, "recovered_by": "handle_known_issue",
-                        "attempts": retries_done + 1, "result_summary": str(recovery_result)[:200]
-                    })
-                    return recovery_result # Success via known issue handler
-                else:
-                    self.logger.info(f"[{self.name}] 'handle_known_issue' did not resolve the issue: {recovery_result.get('reason')}")
-            except Exception as e_known_issue_handler_crash: # If handle_known_issue itself crashes
-                self.logger.error(f"[{self.name}] The 'handle_known_issue' method itself crashed: {e_known_issue_handler_crash}")
-                self.logger.debug(traceback.format_exc())
-                # Proceed to alternative_execute
-
-            # --- STAGE 4: Alternative Execution ---
-            try:
-                self.logger.info(f"[{self.name}] Attempting alternative execution strategy...")
-                alternative_result = self.alternative_execute(input_data, original_error=last_exception_in_retry_loop)
-                
-                # Check if alternative_execute signaled a failure (e.g., returned specific string or dict)
-                is_alt_exec_failure = False
-                if isinstance(alternative_result, str) and "[Fallback failure]" in alternative_result:
-                    is_alt_exec_failure = True
-                elif isinstance(alternative_result, dict) and alternative_result.get("status") == "failed":
-                    is_alt_exec_failure = True
-
-                if not is_alt_exec_failure:
-                    self.logger.info(f"[{self.name}] Task processed by 'alternative_execute'.")
-                    self.shared_memory.set(f"agent_stats:{self.name}", {
-                        "last_run": time.time(), "success": True, "recovered_by": "alternative_execute",
-                        "attempts": retries_done + 1, "result_summary": str(alternative_result)[:200]
-                    })
-                    return alternative_result # Success via alternative execution
-                else:
-                    self.logger.warning(f"[{self.name}] 'alternative_execute' indicated failure or could not process.")
-            except Exception as e_alternative_handler_crash: # If alternative_execute itself crashes
-                self.logger.error(f"[{self.name}] The 'alternative_execute' method itself crashed: {e_alternative_handler_crash}")
-                self.logger.debug(traceback.format_exc())
-                # Proceed to final failure reporting
-
-            # --- STAGE 5: Final Failure ---
-            final_error_message = f"All task execution and recovery attempts failed. Original error after retries: {str(last_exception_in_retry_loop)}"
-            self.logger.error(f"[{self.name}] {final_error_message}")
-            self.shared_memory.set(f"agent_stats:{self.name}", {
-                "last_run": time.time(), "success": False, 
-                "error": str(last_exception_in_retry_loop), "recovery_failed": True,
-                "attempts": retries_done + 1
-            })
-            return {"status": "failed", "error": str(last_exception_in_retry_loop), "reason": "All recovery attempts failed."}
+            self._record_execution(started_at, "failed", attempts, error_info=error_info, execution_id=execution_id)
+            self._publish_stats(success=False, attempts=attempts, error=error_info)
+            return failure
         finally:
-            self.metric_store.stop_tracking('execute', 'performance')
+            self.metric_store.stop_tracking("execute", "performance")
+            self.operational_state = "idle"
 
-    def register_known_issue_handler(self, issue_pattern_or_id: str, handler_func: callable):
-        """
-        Registers a handler for a known issue. 
-        The pattern can be a string to check in error messages/types.
-        """
-        if not callable(handler_func):
-            raise ValueError(f"Handler function for '{issue_pattern_or_id}' must be callable.")
-        self._known_issue_handlers[issue_pattern_or_id] = handler_func
-        logger.debug(f"[{self.name}] Registered known issue handler for '{issue_pattern_or_id}' using '{handler_func.__name__}'.")
+    def _execute_once(self, input_data: Any) -> Any:
+        return self.perform_task(input_data)
 
-    def handle_known_issue(self, task_data, error_info: dict):
-        """
-        Attempts to recover from known failure patterns by dispatching to registered handlers.
-        Handlers should return the processed result upon success, or a dict with 
-        {"status": "failed", "reason": "..."} if they cannot handle this specific instance or their attempt fails.
-        If a handler itself raises an unhandled exception, it's caught here.
-        """
-        logger.debug(f"[{self.name}] Checking known issue handlers for error: type='{error_info.get('error_type')}', msg='{error_info.get('error_message', '')[:100]}...'")
-        error_message_lower = error_info.get("error_message", "").lower()
-        error_type_lower = error_info.get("error_type", "").lower()
+    def _after_successful_execution(self, result: Any, attempts: int, execution_id: str, *, recovered_by: Optional[str] = None) -> None:
+        metrics = self.extract_performance_metrics(result)
+        if metrics:
+            self.evaluate_performance(metrics)
+        self._publish_stats(success=True, attempts=attempts, result=result, recovered_by=recovered_by, execution_id=execution_id)
 
-        for issue_id_pattern, handler_func in self._known_issue_handlers.items():
-            # Match if issue_id_pattern (case-insensitive) is in error message or type
-            pattern_lower = issue_id_pattern.lower()
-            if pattern_lower in error_message_lower or pattern_lower == error_type_lower: # Exact match for type, substring for message
-                logger.info(f"[{self.name}] Potential known issue match with pattern '{issue_id_pattern}'. Attempting handler '{handler_func.__name__}'.")
-                try:
-                    result = handler_func(self, task_data, error_info) # Handler attempts to resolve
-                    
-                    # If handler explicitly returns a dict with "status": "failed", it means it matched but couldn't fix THIS instance.
-                    if isinstance(result, dict) and result.get("status") == "failed":
-                        logger.info(f"[{self.name}] Handler '{handler_func.__name__}' for '{issue_id_pattern}' reported it could not resolve: {result.get('reason')}")
-                        # In this design, if a specific handler matches and explicitly fails, we stop and report this failure.
-                        # Alternative: `continue` to try other handlers if the match was weak or handler was too specific.
-                        return result 
-                    else: # Handler succeeded (returned something not a failure dict)
-                        logger.info(f"[{self.name}] Known issue '{issue_id_pattern}' handled successfully by '{handler_func.__name__}'.")
-                        return result 
-                except Exception as handler_ex: # Handler itself crashed
-                    logger.error(f"[{self.name}] Handler '{handler_func.__name__}' for known issue '{issue_id_pattern}' raised an exception: {handler_ex}")
-                    logger.debug(traceback.format_exc())
-                    return {"status": "failed", "reason": f"Handler for '{issue_id_pattern}' crashed: {handler_ex}"}
-        
-        logger.info(f"[{self.name}] No specific known issue handler matched or resolved the error.")
-        return {"status": "failed", "reason": "No applicable or successful known issue handler found."}    
-    
-    def alternative_execute(self, task_data, original_error=None):
-        """
-        Fallback logic without LLM dependencies. Uses:
-        1. Replanning (for planning agents)
-        2. Input sanitization/simplification
-        3. Rule-based grammar processing
-        4. Echo strategy
-        """
-        logger.info(f"[{self.name}] Entering alternative execution (error: {str(original_error)[:100]}...)")
-    
-        # Strategy 1: Replanning for planning agents
-        if "PlanningAgent" in self.name and hasattr(self, 'replan') and callable(self.replan):
-            if hasattr(self, 'current_goal') and self.current_goal:
-                try:
-                    logger.info(f"[{self.name}] Alt exec: Attempting replanning")
-                    new_plan = self.replan(self.current_goal)
-                    if new_plan:
-                        return self.execute_plan(new_plan)
-                except Exception as e:
-                    logger.error(f"Replanning failed: {str(e)}")
-        
-        # Strategy 2: Input sanitization
-        sanitized_input = self.sanitize_input(task_data)
-        logger.debug(f"[{self.name}] Sanitized input: {sanitized_input[:100]}...")
-        
-        # Strategy 3: Rule-based processing
-        rule_based_result = self.apply_rule_based_processing(sanitized_input)
-        if rule_based_result:
-            return rule_based_result
-        
-        # Strategy 4: Echo strategy
-        return self.echo_strategy(sanitized_input)
-    
-    def sanitize_input(self, task_data):
-        """Generic input sanitization without LLM dependencies"""
-        if isinstance(task_data, str):
-            return task_data.strip().replace('\n', ' ').replace('\r', '')[:500]
-        
-        if isinstance(task_data, dict):
-            # Extract possible content fields
-            content_keys = ['text', 'query', 'input', 'message', 'data']
-            for key in content_keys:
-                if key in task_data and isinstance(task_data[key], str):
-                    return task_data[key].strip()[:500]
-            
-            # Fallback to JSON stringification
-            try:
-                return json.dumps({k: v for k, v in task_data.items() if isinstance(v, (str, int, float))})[:500]
-            except (TypeError, ValueError):
-                return str(task_data)[:500]
-        
-        return str(task_data)[:500]
-    
-    def apply_rule_based_processing(self, sanitized_input):
-        """Rule-based fallback using predefined patterns"""
-        # Common error patterns and responses
-        error_patterns = {
-            r"connection (timeout|refused)": "Network unavailable. Please check connectivity",
-            r"invalid (format|input)": "Input format error. Please verify your request structure",
-            r"out of memory": "Resource constraints detected. Try reducing request complexity",
-            r"authentication failed": "Credentials invalid or expired. Please re-authenticate"
+    def _record_execution(
+        self,
+        started_at: float,
+        status: str,
+        attempts: int,
+        *,
+        result: Any = None,
+        error_info: Optional[Mapping[str, Any]] = None,
+        recovered_by: Optional[str] = None,
+        execution_id: str,
+    ) -> None:
+        finished_at = time.time()
+        record = ExecutionRecord(
+            execution_id=execution_id,
+            agent_name=self.name,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=int((finished_at - started_at) * 1000),
+            status=status,
+            attempts=attempts,
+            recovered_by=recovered_by,
+            error_type=str(error_info.get("error_type")) if error_info else None,
+            error_message=str(error_info.get("error_message")) if error_info else None,
+            result_preview=self._preview(result) if result is not None else None,
+        ).to_dict()
+        self.last_execution = record
+        self.execution_history.append(record)
+        self._publish_lifecycle_event("execution_recorded", record)
+
+    def _build_error_info(self, error: Optional[BaseException], task_data: Any, execution_id: str, attempts: int) -> Dict[str, Any]:
+        if error is None:
+            error = BaseRuntimeError("Task failed without an exception object.", component=self.name)
+        return {
+            "timestamp": time.time(),
+            "agent_name": self.name,
+            "execution_id": execution_id,
+            "attempts": attempts,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+            "task_preview": self._preview(task_data),
         }
-        original_error=None
-        
-        for pattern, response in error_patterns.items():
+
+    def _log_error_to_shared_memory(self, error_entry: Mapping[str, Any]) -> None:
+        if not self.enable_shared_memory_audit:
+            return
+        error_key = f"{self.shared_memory_error_key_prefix}:{self.name}"
+        try:
+            errors = self.shared_memory.get(error_key) or []
+            errors.append(dict(error_entry))
+            self.shared_memory.set(error_key, errors[-self.max_error_log_size:])
+        except Exception as exc:
+            self.logger.warning("[%s] Failed to write error audit to shared memory: %s", self.name, exc)
+
+    def _check_and_log_similar_errors(self, new_error_info: Mapping[str, Any]) -> bool:
+        if not self.enable_shared_memory_audit:
+            return False
+        error_key = f"{self.shared_memory_error_key_prefix}:{self.name}"
+        try:
+            history = self.shared_memory.get(error_key) or []
+        except Exception:
+            return False
+        new_type = str(new_error_info.get("error_type", ""))
+        new_message = str(new_error_info.get("error_message", ""))
+        new_timestamp = float(new_error_info.get("timestamp", 0.0) or 0.0)
+        for previous in reversed(history):
+            if float(previous.get("timestamp", 0.0) or 0.0) >= new_timestamp:
+                continue
+            if str(previous.get("error_type", "")) != new_type:
+                continue
+            similarity = difflib.SequenceMatcher(None, new_message, str(previous.get("error_message", ""))).ratio()
+            if similarity >= self.error_similarity_threshold:
+                self.logger.warning("[%s] Similar %s detected with %.2f similarity.", self.name, new_type, similarity)
+                return True
+        return False
+
+    def handle_known_issue(self, task_data: Any, error_info: Mapping[str, Any], *, error: Optional[BaseException] = None) -> Any:
+        """Recover through the production IssueHandler first, then local handlers."""
+        try:
+            outcome = self.issue_handler.handle_issue(self, task_data, error=error, error_info=error_info)
+            if isinstance(outcome, Mapping) and outcome.get("recovered"):
+                return outcome.get("result", outcome)
+        except Exception as exc:
+            self.logger.warning("[%s] IssueHandler failed; checking local handlers: %s", self.name, exc)
+
+        error_message_lower = str(error_info.get("error_message", "")).lower()
+        error_type_lower = str(error_info.get("error_type", "")).lower()
+        for pattern, handler_func in self._known_issue_handlers.items():
+            pattern_lower = pattern.lower()
+            if pattern_lower in error_message_lower or pattern_lower == error_type_lower:
+                try:
+                    return handler_func(self, task_data, dict(error_info), self.issue_handler)
+                except TypeError:
+                    return handler_func(self, task_data, dict(error_info))
+                except Exception as exc:
+                    return {"status": "failed", "reason": f"Handler for {pattern} failed: {exc}", "error": str(exc)}
+        return {"status": "failed", "reason": "No applicable known issue handler recovered the task."}
+
+    @staticmethod
+    def _is_failure_result(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, Mapping):
+            return str(value.get("status", "")).lower() in {"failed", "failure", "error"} and not value.get("recovered")
+        if isinstance(value, str):
+            return "[fallback failure]" in value.lower()
+        return False
+
+    def alternative_execute(self, task_data: Any, original_error: Optional[BaseException] = None) -> Any:
+        if hasattr(self, "replan") and callable(getattr(self, "replan")) and self.current_goal:
+            with contextlib.suppress(Exception):
+                new_plan = self.replan(self.current_goal)
+                if new_plan:
+                    return self.execute_plan(new_plan, goal=self.current_goal)
+        sanitized_input = self.sanitize_input(task_data)
+        rule_based = self.apply_rule_based_processing(sanitized_input)
+        if rule_based is not None:
+            return rule_based
+        return self.echo_strategy(sanitized_input, original_error=original_error)
+
+    def sanitize_input(self, task_data: Any) -> str:
+        if isinstance(task_data, str):
+            return task_data.strip().replace("\n", " ").replace("\r", "")[:500]
+        if isinstance(task_data, Mapping):
+            for key in self.DEFAULT_CONTENT_KEYS:
+                value = task_data.get(key)
+                if isinstance(value, str):
+                    return value.strip()[:500]
+            simple_payload = {str(k): v for k, v in task_data.items() if isinstance(v, (str, int, float, bool))}
+            return json.dumps(simple_payload, default=str)[:500]
+        return str(task_data)[:500]
+
+    def apply_rule_based_processing(self, sanitized_input: str) -> Optional[str]:
+        patterns = {
+            r"connection (timeout|refused)|network": "Network unavailable or unstable. Retry later or switch to an offline-safe path.",
+            r"invalid (format|input)|validation": "Input validation failed. Check required fields and value types.",
+            r"out of memory|resource exhausted|memory": "Resource constraints detected. Reduce batch size, payload size, or model footprint.",
+            r"authentication failed|unauthorized|forbidden": "Authentication or authorization failed. Refresh credentials and permissions.",
+        }
+        for pattern, response in patterns.items():
             if re.search(pattern, sanitized_input, re.IGNORECASE):
-                logger.info(f"[{self.name}] Rule-based match: {pattern}")
                 return f"[Fallback] {response}"
-        
-        # Try grammar processor if available
-        if hasattr(self, 'grammar') and callable(getattr(self.grammar, "compose_sentence", None)):
-            try:
-                facts = {"input": sanitized_input[:100], "error": "unknown"}
-                return f"[Grammar Response] {self.grammar.compose_sentence(facts)}"
-            except Exception as e:
-                logger.warning(f"Grammar processing failed: {str(e)}")
-        
+        grammar = getattr(self, "grammar", None)
+        if callable(getattr(grammar, "compose_sentence", None)):
+            with contextlib.suppress(Exception):
+                return f"[Grammar Response] {grammar.compose_sentence({'input': sanitized_input[:100], 'error': 'unknown'})}"
         return None
 
-    def echo_strategy(self, sanitized_input):
-        """Final fallback strategy"""
+    def echo_strategy(self, sanitized_input: str, *, original_error: Optional[BaseException] = None) -> str:
         if sanitized_input:
             return f"[Fallback] Processed input: {sanitized_input}"
-        return "[Fallback] Unable to process request through alternative methods"
+        reason = str(original_error) if original_error else "no processable input"
+        return f"[Fallback failure] Unable to process request through alternative methods: {reason}"
 
-    def is_similar(self, task_data_1: Any, task_data_2: Any) -> bool:
-        """
-        Compares two task_data inputs for similarity.
-        Uses type checking, string equality (with fuzzy matching), and dictionary heuristics.
-        """
-        if type(task_data_1) != type(task_data_2):
-            return False
-
-        # Handle simple text-based tasks
-        if isinstance(task_data_1, str): # type(task_data_2) is also str due to above check
-            s1 = task_data_1.strip().lower()
-            s2 = task_data_2.strip().lower()
-            if not s1 and not s2: return True # Both empty strings are similar
-            if not s1 or not s2: return False # One empty, one not
-            # Using SequenceMatcher for string similarity, threshold can be configured
-            return difflib.SequenceMatcher(None, s1, s2).ratio() > self.task_similarity_str_threshold
-
-        # Handle dict-based structured tasks
-        if isinstance(task_data_1, dict): # task_data_2 is also dict
-            keys1 = set(task_data_1.keys())
-            keys2 = set(task_data_2.keys())
-            
-            if not keys1 and not keys2: return True # Both empty dicts
-            if not keys1 or not keys2: return False # One empty
-
-            # Jaccard similarity for keys
-            key_intersection = len(keys1.intersection(keys2))
-            key_union = len(keys1.union(keys2))
-            key_jaccard_sim = key_intersection / key_union if key_union > 0 else 0.0
-
-            # If key structure is too different, consider them not similar
-            if key_jaccard_sim < self.jaccard_threshold:
-                return False
-
-            shared_keys = keys1.intersection(keys2)
-            if not shared_keys: # No common keys, but Jaccard might be high if key sets are small subsets
-                 return key_jaccard_sim > self.jaccard_min_for_no_shared
-
-            value_similarity_scores = []
-            for key in shared_keys:
-                val1, val2 = task_data_1[key], task_data_2[key]
-                # Recursively call is_similar for nested structures, or direct comparison
-                if isinstance(val1, (dict, str, list, tuple)): # Types that is_similar handles well
-                    value_similarity_scores.append(1.0 if self.is_similar(val1, val2) else 0.0)
-                elif type(val1) == type(val2) and isinstance(val1, (int, float, bool)):
-                     value_similarity_scores.append(1.0 if val1 == val2 else 0.0) # Simple equality for primitives
-                else: # Different types or unhandled complex types for values
-                    value_similarity_scores.append(0.0) 
-            
-            if not value_similarity_scores: # Should not happen if shared_keys is non-empty
-                return key_jaccard_sim > self.jaccard_min_for_no_shared
-
-            avg_value_similarity = sum(value_similarity_scores) / len(value_similarity_scores)
-            
-            # Combine key similarity and value similarity
-            # Example: require high key similarity AND high average value similarity
-            return (key_jaccard_sim >= self.final_key_threshold and 
-                    avg_value_similarity >= self.final_value_threshold)
-
-        # Handle list/tuple based tasks
-        if isinstance(task_data_1, (list, tuple)): # task_data_2 also same type
-            if len(task_data_1) != len(task_data_2): return False
-            if not task_data_1: return True # Both empty sequences
-
-            # Compare elements using is_similar for robustness
-            element_similarities = []
-            for item1, item2 in zip(task_data_1, task_data_2):
-                element_similarities.append(1.0 if self.is_similar(item1, item2) else 0.0)
-            
-            if not element_similarities: return True # Should not happen if len > 0
-            avg_element_similarity = sum(element_similarities) / len(element_similarities)
-            return avg_element_similarity >= self.task_similarity_seq_elem_threshold
-
-        # Fallback for other directly comparable types (bool, NoneType, numbers if not caught by dict logic)
-        return task_data_1 == task_data_2
-
-    def extract_performance_metrics(self, result: Any) -> dict:
-        """
-        Base implementation. Subclasses should override this to extract
-        meaningful performance metrics from their specific `perform_task` result.
-        """
-        metrics = {}
-        # Example: if result is a dict and contains common metric keys
-        if isinstance(result, dict):
-            for key in ['accuracy', 'precision', 'recall', 'f1_score', 'latency_ms', 'throughput']:
-                if key in result and isinstance(result[key], (int, float)):
-                    metrics[key] = result[key]
-        # This base version is very generic. Subclasses are expected to provide specific extraction.
-        if not metrics:
-            self.logger.debug(f"[{self.name}] No standard performance metrics extracted from result of type {type(result)}.")
-        return metrics
-
-    def _invoke_capability(self, fn, task_data: Any, context: Any = None):
-        """Invoke a capability function with signature-aware argument mapping."""
+    def _invoke_capability(self, fn: Callable[..., Any], task_data: Any, context: Any = None) -> Any:
         signature = inspect.signature(fn)
         params = list(signature.parameters.values())
-
-        accepts_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
-        accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-
-        if accepts_varargs:
+        if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
             return fn(task_data, context)
 
-        kwargs = {}
-        positional = []
+        positional: List[Any] = []
+        kwargs: Dict[str, Any] = {}
+        accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        payload_names = {"task_data", "data", "input_data", "state", "task", "query", "payload"}
+        context_names = {"context", "ctx"}
 
         for param in params:
             if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                if param.name in {"task_data", "data", "input_data", "state", "task", "query", "payload"}:
+                if param.name in payload_names:
                     positional.append(task_data)
-                elif param.name in {"context", "ctx"}:
+                elif param.name in context_names:
                     positional.append(context)
             elif param.kind == inspect.Parameter.KEYWORD_ONLY:
-                if param.name in {"task_data", "data", "input_data", "state", "task", "query", "payload"}:
+                if param.name in payload_names:
                     kwargs[param.name] = task_data
-                elif param.name in {"context", "ctx"}:
+                elif param.name in context_names:
                     kwargs[param.name] = context
 
         if not positional and not kwargs:
             if accepts_varkw:
                 return fn(task_data=task_data, context=context)
             return fn(task_data)
-
         return fn(*positional, **kwargs)
 
     def perform_task(self, task_data: Any) -> Any:
-        """Execute a task using common capability hooks.
-
-        This default implementation is shared by all agents and is designed to
-        support diverse method signatures without forcing boilerplate overrides.
-
-        Supported input conventions:
-        - Plain payloads: forwarded directly.
-        - Dict payloads:
-          - ``context`` is extracted and passed when supported.
-          - ``operation`` can explicitly select ``predict``/``get_action``/``act``.
-
-        Dispatch order:
-        1. explicit ``operation`` target (if provided)
-        2. ``predict``
-        3. ``get_action``
-        4. ``act``
-        """
         context = None
         operation = None
         payload = task_data
-
-        if isinstance(task_data, dict):
+        if isinstance(task_data, Mapping):
             context = task_data.get("context")
             operation = task_data.get("operation")
             payload = task_data.get("task_data", task_data.get("input_data", task_data.get("payload", task_data)))
 
-        dispatch_order = ["predict", "get_action", "act"]
-
+        dispatch_order = list(self.DEFAULT_CAPABILITY_ORDER)
         if operation:
-            normalized = str(operation).strip().lower()
             preferred = {
                 "predict": "predict",
                 "inference": "predict",
                 "infer": "predict",
                 "get_action": "get_action",
                 "action": "get_action",
-                "act": "act"
-            }.get(normalized)
+                "act": "act",
+            }.get(str(operation).strip().lower())
             if preferred:
-                dispatch_order = [preferred] + [m for m in dispatch_order if m != preferred]
+                dispatch_order = [preferred] + [name for name in dispatch_order if name != preferred]
 
-        errors = []
+        errors: List[str] = []
         for method_name in dispatch_order:
             capability = getattr(self, method_name, None)
             if not callable(capability):
@@ -606,600 +556,341 @@ class BaseAgent(abc.ABC):
                 return self._invoke_capability(capability, payload, context)
             except TypeError as exc:
                 errors.append(f"{method_name}: {exc}")
-                self.logger.debug(f"[{self.name}] Signature mismatch in {method_name}: {exc}")
                 continue
+        details = "; ".join(errors) if errors else "No compatible capability methods found."
+        raise NotImplementedError(f"{self.name} cannot execute task. {details}")
 
-        error_details = "; ".join(errors) if errors else "No compatible capability methods found"
-        raise NotImplementedError(
-            f"{self.__class__.__name__} cannot execute task. {error_details}. "
-            "Implement perform_task or provide predict/get_action/act with compatible signatures."
-        )
+    def execute_plan(self, plan: Iterable[Any], goal: Any = None) -> Dict[str, Any]:
+        if isinstance(plan, (str, bytes)) or not hasattr(plan, "__iter__"):
+            return {"status": "error", "reason": "Plan must be an iterable sequence of steps."}
+        steps = list(plan)
+        if not steps:
+            return {"status": "error", "reason": "Plan is empty."}
+        if not self.validate_plan(steps):
+            return {"status": "error", "reason": "Plan validation failed."}
 
-    def execute_plan(self, plan: Any, goal: Any = None) -> Any:
-        """
-        Generic plan execution framework with:
-        - Progress tracking
-        - Error handling
-        - Resource monitoring
-        - Result validation
-        
-        Args:
-            plan: Iterable of steps (dicts, objects, or functions)
-            goal: Optional target state/objective
-        
-        Returns:
-            Execution result with status metadata
-        """
-        # Validate plan structure
-        if not hasattr(plan, '__iter__'):
-            return {"status": "error", "reason": "Invalid plan format"}
-        
-        if isinstance(plan, (str, bytes)):
-            return {"status": "error", "reason": "Plan must be a sequence of steps"}
+        results: List[Any] = []
+        context: Dict[str, Any] = {}
+        for index, step in enumerate(steps):
+            step_name = step.get("name", f"step_{index + 1}") if isinstance(step, Mapping) else f"step_{index + 1}"
+            try:
+                result = self.execute_step(step, context)
+                results.append(result)
+                if isinstance(result, Mapping):
+                    context.update(dict(result.get("context", {})))
+                if goal is not None and self.check_goal_achieved(context, goal):
+                    return self.compile_results(results, True, reason="goal_achieved")
+            except Exception as exc:
+                results.append({"step": step_name, "status": "error", "error": str(exc)})
+                if not self.recover_step(step, context):
+                    return self.compile_results(results, False, reason=f"step_failed:{step_name}")
+        return self.compile_results(results, True)
 
-        plan_steps = list(plan)
-        if not plan_steps:
-            return {"status": "error", "reason": "Plan is empty"}
-        
-        results = []
-        step_context = {}
-        resource_monitor = ResourceMonitor()
-        
-        try:
-            # Pre-execution validation
-            if not self.validate_plan(plan_steps):
-                return {"status": "error", "reason": "Plan validation failed"}
-            
-            for i, step in enumerate(plan_steps):
-                step_name = step.get('name', f"step_{i+1}") if isinstance(step, dict) else f"step_{i+1}"
-                logger.info(f"[{self.name}] Executing {step_name}...")
-                
-                # Monitor resources before execution
-                if resource_monitor.is_critical():
-                    return {"status": "interrupted", "reason": "Resource limits exceeded"}
-                
-                # Execute step with error handling
-                try:
-                    result = self.execute_step(step, step_context)
-                    results.append(result)
-                    
-                    # Update context for next steps
-                    if isinstance(result, dict):
-                        step_context.update(result.get('context', {}))
-                    
-                    # Validate intermediate results
-                    if goal and self.check_goal_achieved(step_context, goal):
-                        logger.info(f"[{self.name}] Early goal achievement at step {i+1}")
-                        return self.compile_results(results, True)
-                
-                except Exception as e:
-                    logger.error(f"Step {step_name} failed: {str(e)}")
-                    results.append({
-                        "step": step_name,
-                        "status": "error",
-                        "error": str(e)
-                    })
-                    
-                    # Attempt step recovery
-                    if not self.recover_step(step, step_context):
-                        return self.compile_results(results, False)
-            
-            return self.compile_results(results, True)
-        
-        finally:
-            # Post-execution cleanup
-            self.cleanup_resources()
-            logger.info(f"[{self.name}] Plan execution completed")
-
-    def validate_plan(self, plan):
-        """Basic plan validation logic"""
-        if not plan:
-            return False
-
-        required_attrs = ['name', 'handler'] if isinstance(plan[0], dict) else None
+    def validate_plan(self, plan: Sequence[Any]) -> bool:
         for step in plan:
-            if required_attrs:
-                if not all(attr in step for attr in required_attrs):
-                    return False
+            if isinstance(step, Mapping) and "handler" in step and not str(step.get("handler", "")).strip():
+                return False
         return True
 
-    def execute_step(self, step, context):
-        """Flexible step execution handling multiple formats"""
-        # Function-based step
+    def execute_step(self, step: Any, context: MutableMapping[str, Any]) -> Any:
         if callable(step):
             return step(context)
-        
-        # Dict-based step
-        if isinstance(step, dict):
-            handler_name = step.get('handler')
-            if handler_name and hasattr(self, handler_name):
-                handler = getattr(self, handler_name)
-                return handler(step.get('params', {}), context)
-            
-            # Direct module/action specification
-            if 'module' in step and 'action' in step:
-                return self.call_external(
-                    step['module'],
-                    step['action'],
-                    step.get('params', {})
-                )
-        
-        # String-based command
+        if isinstance(step, Mapping):
+            handler_name = step.get("handler")
+            if handler_name:
+                handler = getattr(self, str(handler_name), None)
+                if not callable(handler):
+                    raise AttributeError(f"Missing step handler: {handler_name}")
+                return handler(step.get("params", {}), context)
+            if "module" in step and "action" in step:
+                return self.call_external(str(step["module"]), str(step["action"]), dict(step.get("params", {})))
         if isinstance(step, str):
             return self.process_command(step, context)
-        
-        raise ValueError(f"Unsupported step type: {type(step)}")
+        raise BaseValidationError(f"Unsupported step type: {type(step).__name__}", component=self.name)
 
-    def check_goal_achieved(self, step_context: dict, goal: Any) -> bool:
-        """
-        Checks if the current context indicates the goal has been achieved.
-        Default implementation requires exact match of goal keys in context.
-        Subclasses should override with domain-specific goal checking.
-        """
-        if isinstance(goal, dict):
-            # Check if all goal key-value pairs exist in context
-            for key, target_value in goal.items():
-                if key not in step_context:
-                    return False
-                current_value = step_context[key]
-                if isinstance(target_value, (int, float)):
-                    # Numeric comparison with tolerance
-                    if abs(current_value - target_value) > 1e-6:
-                        return False
-                elif current_value != target_value:
-                    return False
-            return True
-        
-        # For simple types, direct comparison
-        return step_context.get('result') == goal
-
-    def compile_results(self, results, success):
-        """Standardized result compilation"""
-        total_steps = len(results)
-        successful_steps = sum(1 for r in results if isinstance(r, dict) and r.get('status') == 'success')
-        return {
-            "status": "success" if success else "partial_success",
-            "steps_executed": total_steps,
-            "success_rate": (successful_steps / total_steps) if total_steps else 0.0,
-            "results": results,
-            "timestamp": time.time()
-        }
-    
-    def recover_step(self, step: Any, step_context: dict) -> bool:
-        """
-        Attempts to recover from a failed step execution.
-        Returns True if recovery was successful, False otherwise.
-        """
-        step_name = step.get('name', "unknown_step") if isinstance(step, dict) else "unknown_step"
-        logger.warning(f"[{self.name}] Attempting recovery for failed step: {step_name}")
-        
-        # Strategy 1: Check if step has a recovery handler
-        if isinstance(step, dict) and 'recovery_handler' in step:
-            handler_name = step['recovery_handler']
-            if hasattr(self, handler_name):
-                try:
-                    recovery_func = getattr(self, handler_name)
-                    recovery_result = recovery_func(step, step_context)
-                    if recovery_result:
-                        logger.info(f"[{self.name}] Step recovery successful using handler '{handler_name}'")
-                        return True
-                except Exception as e:
-                    logger.error(f"Recovery handler '{handler_name}' failed: {str(e)}")
-        
-        # Strategy 2: Default retry
-        try:
-            logger.info(f"[{self.name}] Attempting step retry...")
+    def recover_step(self, step: Any, step_context: MutableMapping[str, Any]) -> bool:
+        if isinstance(step, Mapping) and step.get("recovery_handler"):
+            handler = getattr(self, str(step["recovery_handler"]), None)
+            if callable(handler):
+                with contextlib.suppress(Exception):
+                    return bool(handler(step, step_context))
+        with contextlib.suppress(Exception):
             self.execute_step(step, step_context)
-            logger.info(f"[{self.name}] Step recovery successful through retry")
-            return True
-        except Exception as e:
-            logger.error(f"Step retry failed: {str(e)}")
-            return False
-        
-    def cleanup_resources(self):
-        """
-        Releases any resources acquired during plan execution.
-        Base implementation handles common resource types.
-        """
-        logger.info(f"[{self.name}] Cleaning up resources...")
-        
-        # Close file handles if any
-        if hasattr(self, 'open_files'):
-            for file in self.open_files:
-                try:
-                    file.close()
-                except Exception as e:
-                    logger.warning(f"Error closing file: {str(e)}")
-            self.open_files = []
-        
-        # Release network connections
-        if hasattr(self, 'active_connections'):
-            for conn in self.active_connections:
-                try:
-                    conn.close()
-                except Exception as e:
-                    logger.warning(f"Error closing connection: {str(e)}")
-            self.active_connections = []
-        
-        # Clear temporary data
-        if hasattr(self, 'temporary_data'):
-            self.temporary_data.clear()
-
-    def call_external(self, module: str, action: str, params: dict) -> Any:
-        """
-        Calls an external module/action with parameters.
-        Uses agent_factory to locate and execute the module.
-        """
-        logger.info(f"[{self.name}] Calling external: {module}.{action}()")
-        
-        try:
-            # Get module agent from factory
-            module_agent = self.agent_factory.create(module, self.shared_memory)
-            
-            # Get the action method
-            if not hasattr(module_agent, action):
-                raise AttributeError(f"Module '{module}' has no action '{action}'")
-            
-            action_method = getattr(module_agent, action)
-            
-            # Execute with parameters
-            return action_method(**params)
-        except Exception as e:
-            logger.error(f"External call failed: {module}.{action} - {str(e)}")
-            raise
-    
-    def process_command(self, command: str, context: dict) -> Any:
-        """
-        Processes a string-based command within the current context.
-        Supports basic operations and context manipulation.
-        """
-        logger.info(f"[{self.name}] Processing command: {command}")
-        
-        # Simple command parsing
-        parts = command.split(' ', 1)
-        cmd_type = parts[0].lower()
-        payload = parts[1] if len(parts) > 1 else ""
-        
-        try:
-            if cmd_type == "log":
-                # log <message>
-                logger.info(f"[Command] {payload}")
-                return {"status": "logged", "message": payload}
-            
-            elif cmd_type == "set":
-                # set <key> <value>
-                key, value = payload.split(' ', 1)
-                context[key] = value
-                return {"status": "set", "key": key, "value": value}
-            
-            elif cmd_type == "get":
-                # get <key>
-                value = context.get(payload, "NOT_FOUND")
-                return {"status": "retrieved", "key": payload, "value": value}
-            
-            elif cmd_type == "incr":
-                # incr <key> [increment=1]
-                parts = payload.split(' ')
-                key = parts[0]
-                increment = float(parts[1]) if len(parts) > 1 else 1
-                current = float(context.get(key, 0))
-                context[key] = current + increment
-                return {"status": "incremented", "key": key, "value": context[key]}
-            
-            else:
-                raise ValueError(f"Unknown command: {cmd_type}")
-        
-        except Exception as e:
-            logger.error(f"Command processing failed: {command} - {str(e)}")
-            return {"status": "error", "command": command, "error": str(e)}
-    
-    def evaluate_performance(self, metrics: dict):
-        """
-        Evaluates performance based on extracted metrics, logs them, and checks thresholds for retraining.
-        """
-        if not metrics or not isinstance(metrics, dict): 
-            self.logger.debug(f"[{self.name}] Skipping performance evaluation: No valid metrics provided.")
-            return
-
-        # Update rolling performance metrics (using the lazy property)
-        # Ensure performance_metrics component is initialized and is the expected defaultdict
-        perf_metrics_component = self.performance_metrics 
-        if not isinstance(perf_metrics_component, defaultdict):
-            self.logger.warning(f"[{self.name}] 'performance_metrics' component is not a defaultdict. Cannot update rolling metrics.")
-        else:
-            for key, value in metrics.items():
-                if isinstance(value, (int, float)):
-                    self.metric_store.metrics['timings']['performance'][key].append(value)
-                else:
-                    self.logger.debug(f"[{self.name}] Skipping rolling update for non-scalar metric '{key}'.")
-
-
-        self.log_evaluation_result(metrics) # Log current evaluation to file
-    
-        # Check retraining thresholds
-        for metric_key, current_value in metrics.items():
-            threshold_info = self.retraining_thresholds.get(metric_key) # Could be a value or a dict like {'value': X, 'condition': 'less_than'}
-            
-            if threshold_info is not None:
-                threshold_value = threshold_info
-                condition = 'less_than' # Default condition: trigger if current_value is less than threshold_value (lower is worse)
-
-                if isinstance(threshold_info, dict):
-                    threshold_value = threshold_info.get('value')
-                    condition = threshold_info.get('condition', 'less_than')
-
-                if threshold_value is None: continue
-
-                if isinstance(current_value, (int, float)) and isinstance(threshold_value, (int, float)):
-                    trigger_retraining = False
-                    if condition == 'less_than' and current_value < threshold_value:
-                        trigger_retraining = True
-                    elif condition == 'greater_than' and current_value > threshold_value: # e.g., error rate too high
-                        trigger_retraining = True
-                    
-                    if trigger_retraining:
-                        self.logger.warning(
-                            f"[{self.name}] Performance alert: Metric '{metric_key}' ({current_value}) "
-                            f"violated threshold (condition: {condition} {threshold_value})."
-                        )
-                        self.flag_for_retraining()
-                else:
-                    self.logger.debug(f"[{self.name}] Metric '{metric_key}' or its threshold is not numeric. Skipping threshold check.")
-
-    def flag_for_retraining(self):
-        """Sets a flag in shared memory indicating this agent needs retraining."""
-        flag_key = f"retraining_flag:{self.name}"
-        self.shared_memory.set(flag_key, True)
-        self.logger.info(f"[{self.name}] Agent flagged for retraining via key '{flag_key}'.")
-
-    def log_evaluation_result(self, metrics: dict):
-        """Logs the current evaluation metrics to a JSONL file."""
-        # Sanitize config for logging: avoid logging sensitive info or overly large structures
-        config_summary = {
-            k: v for k, v in self.config.items() 
-            if k not in ['defer_initialization', 'memory_profile', 'network_compression'] and not isinstance(v, (dict, list))
-        } # Log only simple config values, or define a specific subset
-
-        log_entry = {
-            "timestamp": time.time(),
-            "agent_name": self.name,
-            "agent_config_summary": config_summary, 
-            "metrics": metrics
-        }
-        path = os.path.join(self.evaluation_log_dir, f"{self.name}_eval.jsonl")
-        try:
-            with open(path, "a", encoding="utf-8") as f: # Specify encoding
-                f.write(json.dumps(log_entry, default=str) + "\n") # default=str for non-serializable
-        except Exception as e:
-            self.logger.error(f"[{self.name}] Failed to write evaluation log to '{path}': {e}")
-
-    def optimized_step(self, state: Any) -> Any:
-        """
-        Template for a memory-aware step method, typically for reinforcement learning agents.
-        Subclasses should override this with their specific model and logic.
-        """
-        if not hasattr(self, '_policy_net_instance_cache'): # Use a more descriptive name
-            # Create and cache the network instance
-            # Dimensions should ideally come from agent's config or environment spec
-            self._policy_net_instance_cache = self.create_lightweight_network(input_dim=10, output_dim=2) # Example dims
-        return self._policy_net_instance_cache.predict(state)
-
-    def _init_agent_specific_components(self):
-        """
-        Template for subclasses to initialize their unique components (e.g., models, tools).
-        This method is intended to be called by the subclass's __init__ AFTER super().__init__().
-        """
-        self.logger.info(f"[{self.name}] Base `_init_agent_specific_components` called. Subclass should override if it has specific components to initialize.")
-        # Example:
-        # if self.config.get("use_vision_model"):
-        #     self.vision_model = self.agent_factory.create("VisionEncoder", self.config.get("vision_model_config"))
-        #     self.vision_model.initialize() # Assuming VisionEncoder has an initialize method
-
-    def _warm_start_if_available(self):
-        """
-        Template for subclasses to restore their state from shared memory if available.
-        Typically called by a subclass's __init__ method.
-        """
-        warm_start_key = f"warm_state:{self.name}"
-        cached_state_data = self.shared_memory.get(warm_start_key)
-        
-        if cached_state_data and isinstance(cached_state_data, dict):
-            self.logger.info(f"[{self.name}] Attempting warm-start from cached state found at key '{warm_start_key}'.")
-            # Define attributes that are safe and expected to be warm-started
-            # WARNING: Directly using self.__dict__.update(cached_state_data) is DANGEROUS 
-            # as it can overwrite methods or critical internal state.
-            expected_warm_attributes = getattr(self, "warm_start_attributes", []) # Subclass can define this list
-            
-            attributes_loaded = 0
-            for attr_name, attr_value in cached_state_data.items():
-                if attr_name in expected_warm_attributes:
-                    if hasattr(self, attr_name) and not callable(getattr(self, attr_name)): # Only update non-callable attributes
-                        setattr(self, attr_name, attr_value)
-                        attributes_loaded +=1
-                    else:
-                        self.logger.warning(f"[{self.name}] Warm-start: Skipping '{attr_name}', not a safe non-callable attribute or not in expected_warm_attributes.")
-            
-            if attributes_loaded > 0:
-                 self.logger.info(f"[{self.name}] Warm-start successful for {attributes_loaded} attribute(s).")
-            else:
-                 self.logger.info(f"[{self.name}] Warm-start: No matching attributes found in cached state or 'warm_start_attributes' not defined.")
-
-        else:
-            self.logger.info(f"[{self.name}] No valid warm-start state found at key '{warm_start_key}'. Proceeding with fresh initialization.")
-
-    def create_lightweight_network(self, input_dim: int = 10, output_dim: int = 2) -> nn.Module:
-        """
-        Returns a basic PyTorch neural network module.
-        """
-        if not _ensure_torch_imported():
-            raise RuntimeError(
-                f"[{self.name}] torch is unavailable in this environment. "
-                f"Original torch import error: {TORCH_IMPORT_ERROR}"
-            )
-
-        class PolicyNet(nn.Module):
-            def __init__(self, input_dim: int, output_dim: int):
-                super().__init__()
-                self.input_dim = input_dim
-                self.output_dim = output_dim
-                # Proper PyTorch parameter initialization
-                self.weights = nn.Parameter(
-                    torch.randn(input_dim, output_dim) * torch.sqrt(torch.tensor(1.0 / input_dim)))
-                self.bias = nn.Parameter(torch.zeros(output_dim))
-                logger.debug(f"PolicyNet initialized with input_dim={input_dim}, output_dim={output_dim}")
-    
-            def predict(self, state: Any) -> Any:
-                try:
-                    # Convert to tensor and flatten
-                    state_vec = torch.tensor(state, dtype=torch.float32).flatten()
-                    if state_vec.shape[0] != self.input_dim:
-                        raise ValueError(f"Input state dimension {state_vec.shape[0]} "
-                                         f"does not match network input dimension {self.input_dim}")
-                    
-                    # Use PyTorch matrix multiplication
-                    logits = torch.matmul(state_vec, self.weights) + self.bias
-                    # Return action index
-                    return torch.argmax(logits).item()
-                    
-                except Exception as e:
-                    logger.error(f"PolicyNet: Error processing input state: {e}")
-                    # Return random action on error
-                    return torch.randint(0, self.output_dim, (1,)).item()
-        
-        return PolicyNet(input_dim=input_dim, output_dim=output_dim)
-    
-    def update_projection(self, reward_scores: list, lr: float):
-        """
-        Placeholder/Template for updating a 'projection' attribute, possibly a torch.Tensor.
-        This method's logic is highly dependent on how `self.projection` is used in the agent's
-        architecture and the learning algorithm (e.g., policy gradients, value-based).
-        The current implementation is a HEURISTIC and not a standard gradient update.
-        It assumes `self.projection` is a `torch.Tensor` and requires gradients.
-        """
-        if not _ensure_torch_imported():
-            self.logger.warning(f"[{self.name}] torch unavailable; skipping 'update_projection'. Error: {TORCH_IMPORT_ERROR}")
-            return {"status": "skipped", "reason": "torch_unavailable", "error": str(TORCH_IMPORT_ERROR)}
-
-        if not hasattr(self, 'projection') or not isinstance(getattr(self, 'projection', None), torch.Tensor):
-            self.logger.warning(f"[{self.name}] 'projection' attribute not found or is not a torch.Tensor. Skipping 'update_projection'.")
-            return
-
-        projection_tensor = self.projection
-
-        if not projection_tensor.requires_grad:
-            self.logger.warning(f"[{self.name}] 'projection' tensor does not require_grad. It might not be part of an optimizable model.")
-            # For this heuristic update, we might proceed even if requires_grad is False,
-            # but for actual backpropagation, it would need to be True and part of a graph.
-            # projection_tensor.requires_grad_(True) # This is generally not done here.
-
-        try:
-            rewards = torch.tensor(reward_scores, dtype=torch.float32, device=projection_tensor.device)
-            
-            # --- This is a HEURISTIC update rule ---
-            # It assumes a direct, positive correlation between the projection tensor's values
-            # and the rewards obtained. This is NOT a standard policy gradient update.
-            # A proper PG update would involve gradients of action log-probabilities w.r.t. model parameters.
-            
-            # Calculate a pseudo-gradient based on mean reward.
-            # If mean reward is positive, "reinforce" current projection values.
-            # If mean reward is negative, "discourage" (not implemented here to keep it simple).
-            mean_reward = rewards.mean()
-            
-            if mean_reward != 0: # Avoid division by zero or no change if reward is zero
-                # Heuristic: scale the projection by the mean reward.
-                # This is more like a scaling factor than a gradient.
-                # For an actual gradient, one would use projection_tensor.grad.
-                pseudo_gradient_direction = torch.sign(projection_tensor.data) * mean_reward # Scale by sign and reward
-                
-                # Apply update directly to data (if not using an optimizer for this tensor)
-                with torch.no_grad(): # Ensure this operation is not tracked for further gradients
-                    projection_tensor.data += lr * pseudo_gradient_direction
-                    
-                    # Optional: Apply constraints like clamping or normalization
-                    # projection_tensor.data = torch.clamp(projection_tensor.data, -1.0, 1.0)
-                    # projection_tensor.data /= torch.norm(projection_tensor.data) + 1e-6 # Normalize
-
-                self.logger.debug(f"[{self.name}] Heuristically updated 'projection' tensor with lr={lr}, mean_reward={mean_reward:.4f}.")
-            else:
-                self.logger.debug(f"[{self.name}] 'projection' tensor not updated as mean_reward is zero.")
-
-        except Exception as e:
-            self.logger.error(f"[{self.name}] Error in 'update_projection': {e}")
-            self.logger.debug(traceback.format_exc())
-
-    def broadcast(self, key: str, value: Any):
-        """Broadcast to shared memory"""
-        self.shared_memory.set(key, value)
-
-class RetrainingManager:
-    """
-    Manages the retraining process for an agent based on flags in shared memory
-    or other triggers (though currently only flag-based).
-    """
-    def __init__(self, agent: BaseAgent, shared_memory: Any): # Type hint for agent and shared_memory
-        if not isinstance(agent, BaseAgent): # Basic type check
-            raise TypeError("RetrainingManager requires an instance of BaseAgent or its subclass.")
-        if shared_memory is None: # Basic check
-            raise ValueError("RetrainingManager requires a valid shared_memory instance.")
-
-        self.agent = agent
-        self.shared_memory = shared_memory
-        self.logger = get_logger(f"{self.__class__.__name__}[{self.agent.name}]")
-
-    def check_and_trigger_retraining(self):
-        """
-        Checks for a retraining flag in shared memory specific to the agent.
-        If the flag is True, attempts to call the agent's `retrain` method.
-        """
-        retraining_flag_key = f"retraining_flag:{self.agent.name}"
-        
-        try:
-            flag_value = self.shared_memory.get(retraining_flag_key)
-        except Exception as e:
-            self.logger.error(f"Error accessing shared memory for retraining flag '{retraining_flag_key}': {e}")
-            return # Cannot proceed if shared memory access fails
-
-        if flag_value: # Typically True if set
-            self.logger.info(f"Retraining flag is set for agent '{self.agent.name}'. Initiating retraining process.")
-            
-            if hasattr(self.agent, 'retrain') and callable(self.agent.retrain):
-                try:
-                    self.agent.retrain() # Call the agent's own retrain method
-                    self.logger.info(f"Retraining method called successfully for agent '{self.agent.name}'.")
-                    # Reset the flag in shared memory after a successful call to retrain()
-                    self.shared_memory.set(retraining_flag_key, False) 
-                    self.logger.debug(f"Retraining flag '{retraining_flag_key}' reset to False.")
-                except Exception as e_retrain:
-                    self.logger.error(f"Error during agent '{self.agent.name}' retraining method: {e_retrain}")
-                    self.logger.debug(traceback.format_exc())
-                    # Policy: Do not reset the flag if retraining itself fails, so it might be retried.
-                    # Or, implement a max_retrain_attempts mechanism.
-            else:
-                self.logger.warning(f"Agent '{self.agent.name}' is flagged for retraining but does not have a callable 'retrain' method.")
-                # Reset the flag as it cannot be actioned by this manager.
-                self.shared_memory.set(retraining_flag_key, False)
-                self.logger.debug(f"Retraining flag '{retraining_flag_key}' reset as agent has no retrain method.")
-        else:
-            self.logger.debug(f"No retraining flag set for agent '{self.agent.name}'.")
-
-class ResourceMonitor:
-    """Lightweight resource monitoring"""
-    def __init__(self):
-        self.warning_threshold = 0.7
-        self.critical_threshold = 0.9
-    
-    def is_critical(self):
-        """Check system resource levels"""
-        # Simplified actual implementation would use:
-        # psutil.cpu_percent(), psutil.virtual_memory().percent
-        current_cpu = 0.6  # Mock value
-        current_mem = 0.8  # Mock value
-        
-        if current_cpu > self.critical_threshold or current_mem > self.critical_threshold:
             return True
         return False
 
-# ====================== Usage Example ======================
+    def check_goal_achieved(self, step_context: Mapping[str, Any], goal: Any) -> bool:
+        if isinstance(goal, Mapping):
+            return all(step_context.get(key) == value for key, value in goal.items())
+        return step_context.get("result") == goal
+
+    @staticmethod
+    def compile_results(results: Sequence[Any], success: bool, *, reason: Optional[str] = None) -> Dict[str, Any]:
+        successful_steps = sum(1 for item in results if not (isinstance(item, Mapping) and item.get("status") == "error"))
+        return {
+            "status": "success" if success else "partial_success",
+            "reason": reason,
+            "steps_executed": len(results),
+            "success_rate": successful_steps / len(results) if results else 0.0,
+            "results": list(results),
+            "timestamp": time.time(),
+        }
+
+    def call_external(self, module: str, action: str, params: Mapping[str, Any]) -> Any:
+        factory = self.agent_factory
+        if factory is None:
+            raise BaseStateError("agent_factory is required for external calls.", component=self.name)
+        if hasattr(factory, "create") and callable(factory.create):
+            module_agent = factory.create(module, self.shared_memory)
+        elif callable(factory):
+            module_agent = factory(module, self.shared_memory)
+        else:
+            raise BaseStateError("agent_factory must be callable or expose create().", component=self.name)
+        action_method = getattr(module_agent, action, None)
+        if not callable(action_method):
+            raise AttributeError(f"Module '{module}' has no callable action '{action}'.")
+        return action_method(**dict(params))
+
+    def process_command(self, command: str, context: MutableMapping[str, Any]) -> Dict[str, Any]:
+        parts = command.split(" ", 1)
+        cmd_type = parts[0].lower()
+        payload = parts[1] if len(parts) > 1 else ""
+        if cmd_type == "log":
+            self.logger.info("[Command] %s", payload)
+            return {"status": "logged", "message": payload}
+        if cmd_type == "set":
+            key, value = payload.split(" ", 1)
+            context[key] = value
+            return {"status": "set", "key": key, "value": value, "context": dict(context)}
+        if cmd_type == "get":
+            return {"status": "retrieved", "key": payload, "value": context.get(payload, "NOT_FOUND")}
+        if cmd_type == "incr":
+            tokens = payload.split(" ")
+            key = tokens[0]
+            increment = float(tokens[1]) if len(tokens) > 1 else 1.0
+            context[key] = float(context.get(key, 0.0)) + increment
+            return {"status": "incremented", "key": key, "value": context[key], "context": dict(context)}
+        raise BaseValidationError(f"Unknown command: {cmd_type}", component="process_command")
+
+    def extract_performance_metrics(self, result: Any) -> Dict[str, float]:
+        metrics: Dict[str, float] = {}
+        if isinstance(result, Mapping):
+            for key in ("accuracy", "precision", "recall", "f1_score", "latency_ms", "throughput", "loss", "risk_score"):
+                value = result.get(key)
+                if isinstance(value, (int, float)):
+                    metrics[key] = float(value)
+        return metrics
+
+    def evaluate_performance(self, metrics: Mapping[str, Any]) -> None:
+        if not metrics:
+            return
+        for key, value in metrics.items():
+            if not isinstance(value, (int, float)):
+                continue
+            self.performance_metrics[str(key)].append(float(value))
+            with contextlib.suppress(Exception):
+                self.metric_store.record_value(str(key), float(value), category="performance")
+        self.log_evaluation_result(dict(metrics))
+        for metric_key, current_value in metrics.items():
+            threshold_info = self.retraining_thresholds.get(metric_key)
+            if threshold_info is None or not isinstance(current_value, (int, float)):
+                continue
+            threshold_value = threshold_info.get("value") if isinstance(threshold_info, Mapping) else threshold_info
+            condition = threshold_info.get("condition", "less_than") if isinstance(threshold_info, Mapping) else "less_than"
+            if isinstance(threshold_value, (int, float)):
+                if (condition == "less_than" and current_value < threshold_value) or (condition == "greater_than" and current_value > threshold_value):
+                    self.flag_for_retraining(reason=f"{metric_key}:{current_value}:{condition}:{threshold_value}")
+
+    def flag_for_retraining(self, *, reason: Optional[str] = None) -> None:
+        key = f"{self.retraining_flag_key_prefix}:{self.name}"
+        self.shared_memory.set(key, {"flagged": True, "reason": reason, "timestamp": time.time()})
+
+    def log_evaluation_result(self, metrics: Mapping[str, Any]) -> None:
+        log_entry = {"timestamp": time.time(), "agent_name": self.name, "metrics": dict(metrics)}
+        path = Path(self.evaluation_log_dir) / f"{self.name}_eval.jsonl"
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(log_entry, default=str) + "\n")
+        except Exception as exc:
+            self.logger.warning("[%s] Failed to write evaluation log: %s", self.name, exc)
+
+    def _publish_stats(self, *, success: bool, attempts: int, result: Any = None, error: Any = None, recovered_by: Optional[str] = None, execution_id: Optional[str] = None) -> None:
+        if not self.enable_shared_memory_audit:
+            return
+        payload = {
+            "last_run": time.time(),
+            "success": success,
+            "attempts": attempts,
+            "recovered_by": recovered_by,
+            "execution_id": execution_id,
+            "result_summary": self._preview(result) if result is not None else None,
+            "error": error,
+        }
+        with contextlib.suppress(Exception):
+            self.shared_memory.set(f"{self.shared_memory_stats_key_prefix}:{self.name}", payload)
+
+    def _publish_lifecycle_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if not self.enable_shared_memory_audit:
+            return
+        key = f"{self.shared_memory_event_key_prefix}:{self.name}"
+        event = {"event_type": event_type, "timestamp": time.time(), "payload": dict(payload)}
+        with contextlib.suppress(Exception):
+            events = self.shared_memory.get(key) or []
+            events.append(event)
+            self.shared_memory.set(key, events[-self.execution_history_limit:])
+
+    def _warm_start_if_available(self) -> bool:
+        warm_start_key = f"{self.warm_start_key_prefix}:{self.name}"
+        cached_state = self.shared_memory.get(warm_start_key)
+        if not isinstance(cached_state, Mapping):
+            return False
+        expected = set(getattr(self, "warm_start_attributes", []))
+        loaded = 0
+        for attr_name, attr_value in cached_state.items():
+            if attr_name in expected and hasattr(self, attr_name) and not callable(getattr(self, attr_name)):
+                setattr(self, attr_name, attr_value)
+                loaded += 1
+        return loaded > 0
+
+    def broadcast(self, key: str, value: Any) -> None:
+        self.shared_memory.set(key, value)
+
+    def is_similar(self, task_data_1: Any, task_data_2: Any) -> bool:
+        if type(task_data_1) is not type(task_data_2):
+            return False
+        if isinstance(task_data_1, str):
+            s1, s2 = task_data_1.strip().lower(), task_data_2.strip().lower()
+            return difflib.SequenceMatcher(None, s1, s2).ratio() >= self.task_similarity_str_threshold
+        if isinstance(task_data_1, Mapping):
+            keys1, keys2 = set(task_data_1.keys()), set(task_data_2.keys())
+            if not keys1 and not keys2:
+                return True
+            key_union = len(keys1 | keys2)
+            key_similarity = len(keys1 & keys2) / key_union if key_union else 0.0
+            if key_similarity < self.jaccard_threshold:
+                return False
+            shared_keys = keys1 & keys2
+            if not shared_keys:
+                return key_similarity >= self.jaccard_min_for_no_shared
+            value_similarity = sum(1.0 if self.is_similar(task_data_1[key], task_data_2[key]) else 0.0 for key in shared_keys) / len(shared_keys)
+            return key_similarity >= self.final_key_threshold and value_similarity >= self.final_value_threshold
+        if isinstance(task_data_1, (list, tuple)):
+            if len(task_data_1) != len(task_data_2):
+                return False
+            if not task_data_1:
+                return True
+            score = sum(1.0 if self.is_similar(a, b) else 0.0 for a, b in zip(task_data_1, task_data_2)) / len(task_data_1)
+            return score >= self.task_similarity_seq_elem_threshold
+        return task_data_1 == task_data_2
+
+    def create_lightweight_network(self, input_dim: int = 10, output_dim: int = 2) -> Any:
+        if not _ensure_torch_imported():
+            raise BaseInitializationError("torch is unavailable for create_lightweight_network.", component=self.name, cause=TORCH_IMPORT_ERROR)
+
+        class PolicyNet(nn.Module):  # type: ignore[union-attr]
+            def __init__(self, input_dim: int, output_dim: int) -> None:
+                super().__init__()
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                self.weights = nn.Parameter(torch.randn(input_dim, output_dim) * torch.sqrt(torch.tensor(1.0 / input_dim)))
+                self.bias = nn.Parameter(torch.zeros(output_dim))
+
+            def predict(self, state: Any) -> int:
+                state_vec = torch.tensor(state, dtype=torch.float32).flatten()
+                if state_vec.shape[0] != self.input_dim:
+                    raise ValueError(f"Input dimension {state_vec.shape[0]} does not match {self.input_dim}.")
+                logits = torch.matmul(state_vec, self.weights) + self.bias
+                return int(torch.argmax(logits).item())
+
+        return PolicyNet(input_dim, output_dim)
+
+    def update_projection(self, reward_scores: Sequence[float], lr: float) -> Optional[Dict[str, Any]]:
+        if not _ensure_torch_imported():
+            return {"status": "skipped", "reason": "torch_unavailable", "error": str(TORCH_IMPORT_ERROR)}
+        projection = getattr(self, "projection", None)
+        if projection is None or not isinstance(projection, torch.Tensor):
+            return {"status": "skipped", "reason": "projection_tensor_missing"}
+        rewards = torch.tensor(list(reward_scores), dtype=torch.float32, device=projection.device)
+        mean_reward = rewards.mean() if rewards.numel() else torch.tensor(0.0, device=projection.device)
+        with torch.no_grad():
+            projection.data += float(lr) * torch.sign(projection.data) * mean_reward
+        return {"status": "updated", "mean_reward": float(mean_reward.item())}
+
+    @staticmethod
+    def _preview(value: Any, limit: int = 300) -> str:
+        try:
+            text = json.dumps(value, default=str)
+        except Exception:
+            text = repr(value)
+        return text[:limit]
+
+
+class RetrainingManager:
+    """Checks shared-memory retraining flags and invokes an agent retrain hook."""
+
+    def __init__(self, agent: BaseAgent, shared_memory: Any) -> None:
+        self.agent = agent
+        self.shared_memory = shared_memory
+        self.logger = get_logger(f"RetrainingManager[{agent.name}]")
+
+    def check_and_trigger_retraining(self) -> bool:
+        key = f"{self.agent.retraining_flag_key_prefix}:{self.agent.name}"
+        flag = self.shared_memory.get(key)
+        is_flagged = bool(flag.get("flagged")) if isinstance(flag, Mapping) else bool(flag)
+        if not is_flagged:
+            return False
+        retrain = getattr(self.agent, "retrain", None)
+        if callable(retrain):
+            retrain()
+            self.shared_memory.set(key, {"flagged": False, "timestamp": time.time(), "reason": "completed"})
+            return True
+        self.shared_memory.set(key, {"flagged": False, "timestamp": time.time(), "reason": "missing_retrain_hook"})
+        return False
+
+
+class ResourceMonitor:
+    """Small resource monitor used by generic plan execution."""
+
+    def __init__(self, warning_threshold: float = 0.70, critical_threshold: float = 0.90) -> None:
+        self.warning_threshold = warning_threshold
+        self.critical_threshold = critical_threshold
+
+    def is_critical(self) -> bool:
+        return False
+
+
 if __name__ == "__main__":
-    print("\n=== Running SLAI Base Agent ===\n")
-    print("\n=== Successfully Ran SLAI Base Agent ===\n")
+    print("\n=== Running Base agent ===\n")
+    printer.status("TEST", " Base agent initialized", "info")
+    from .agent_factory import AgentFactory
+
+    class SmokeAgent(BaseAgent):
+        def predict(self, state: Any, context: Any = None) -> Dict[str, Any]:
+            return {"status": "success", "prediction": state, "accuracy": 1.0, "context": {"seen": True}}
+
+        def custom_step(self, params: Mapping[str, Any], context: MutableMapping[str, Any]) -> Dict[str, Any]:
+            context["custom"] = params.get("value", "done")
+            return {"status": "success", "context": dict(context)}
+
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+    agent = SmokeAgent(shared_memory=shared_memory, agent_factory=agent_factory, config={"max_task_retries": 0})
+
+    result = agent.execute({"operation": "predict", "input_data": {"hello": "world"}, "context": {"source": "smoke"}})
+    assert result["status"] == "success", result
+
+    plan_result = agent.execute_plan([
+        "set counter 1",
+        "incr counter 2",
+        {"name": "custom", "handler": "custom_step", "params": {"value": "ok"}},
+    ])
+    assert plan_result["status"] == "success", plan_result
+
+    similarity = agent.is_similar({"a": "hello world"}, {"a": "hello world!"})
+    assert similarity is True
+
+    stats = shared_memory.get("agent_stats:SmokeAgent")
+    assert stats and stats["success"] is True
+
+    printer.status("TEST", " Base agent execute/plan/similarity/shared-memory checks passed", "success")
+    print("\n=== Test ran successfully ===\n")

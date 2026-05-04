@@ -1,106 +1,195 @@
-![Startup](../../../frontend/assets/aba.png)
+# Browser Agent Subsystem (`src/agents/browser`)
 
-# Agentic Browsing System Overview
+This package contains the browser-domain runtime used by `src/agents/browser_agent.py`.
 
-This system integrates a multi-agent architecture designed to autonomously plan, execute, and refine web-based research tasks. It combines a research-oriented language model (SLAI LM) with a Planning Agent and a Browser Agent, all coordinated to serve complex user queries efficiently.
+As of the latest Base Agent update, the architecture is intentionally split into:
 
----
-
-## System Components
-
-### 1. User Interface
-
-* The user provides **queries or tasks**.
-* Optionally, the user may provide **feedback** (skipped in the first iteration).
-
-### 2. Research Model + SLAI LM
-
-* Processes the incoming query.
-* Interfaces with:
-
-  * **Language Agent**: Handles linguistic analysis.
-  * **Text Encoder**: Converts text into embeddings.
-  * **Tokenizer**: Breaks text into subword units.
-* Passes the structured goal to the Planning Agent.
+- **`BrowserAgent` (facade/orchestrator)**: lifecycle, policy, retries, task routing, security gates, workflow compile/execute decisions, and shared-memory publication.
+- **`BrowserFunctions` (function dispatcher)**: canonical function registry, alias normalization, execution contracts, and delegation to concrete function modules.
+- **Concrete function modules (`functions/`)**: Selenium interaction logic only (navigate/click/type/scroll/clipboard/drag-drop).
 
 ---
 
-## Planning Agent Flow
+## What changed conceptually
 
-1. **Receive Goal Task**
-2. **Check Task Type**
+Historically, docs often described `BrowserAgent` as directly coordinating all `Do*` modules. That is now **one layer too low**.
 
-   * If primitive → check preconditions, execute, apply effects, determine success/fail.
-   * If abstract → retrieve matching methods.
-3. **Score Methods**
+The current flow is:
 
-   * Uses decision tree (DT) and gradient boosting (GB) heuristics.
-4. **Select Best Method**
-
-   * Chooses the method with the highest heuristic score.
-5. **Decompose into Subtasks**
-6. **Recursively Decompose** (if needed)
-7. **Simulate Effects** on the world state.
-8. **Build Full Executable Plan**
-9. **Schedule Tasks** using the DeadlineAwareScheduler.
-10. **Execute Plan** → Monitor for success or failure.
-11. **Failure Handling**
-
-    * If failure: apply Bayesian + grid search to find alternative methods → replan.
-12. **Periodic Retraining**
-
-    * Every N plans, retrains on accumulated data.
+1. `BrowserAgent` receives a task or workflow.
+2. `BrowserAgent` applies agent policy (guards/retries/workflow compile/search behavior/etc.).
+3. `BrowserAgent` calls into `BrowserFunctions`.
+4. `BrowserFunctions` resolves aliases + dispatches to a concrete `Do*` module.
+5. Results are normalized and returned to `BrowserAgent` for optional security/reporting/shared-memory publication.
 
 ---
 
-## Browser Agent Flow
+## High-level architecture
 
-1. **Receive User Query or Plan**
-2. **Initialize Browser** (typically headless Chrome)
-3. **NLP Parse on Query**
-4. **Google Search Navigation**
-5. **CAPTCHA Handling** (if detected)
-6. **Select Best-Matching Link** (based on relevance)
-7. **Click and Load Content**
-8. **Capture Page Snapshot** (HTML, text, screenshot)
-9. **Run Content Handlers**
+```mermaid
+flowchart TD
+    A[Caller / task payload] --> B[BrowserAgent facade]
 
-   * For PDFs, arXiv papers, or other special formats.
-10. **Apply Reasoning Agent**
+    B --> C[BrowserDriver lifecycle]
+    B --> D[SecurityFeatures]
+    B --> E[WorkFlow compiler/normalizer]
+    B --> F[ContentHandling]
+    B --> G[BrowserFunctions dispatcher]
 
-    * Extracts structured facts.
-11. **Send Data to Learning Agent**
+    G --> H[DoNavigate]
+    G --> I[DoClick]
+    G --> J[DoType]
+    G --> K[DoScroll]
+    G --> L[DoCopyCutPaste]
+    G --> M[DoDragAndDrop]
 
-    * Records relevance, updates model weights.
-12. **Return Analyzed Results** to the user.
-13. **Failure Handling**
+    H --> N[(WebDriver)]
+    I --> N
+    J --> N
+    K --> N
+    L --> N
+    M --> N
 
-    * If CAPTCHA blocks or hard failures occur: fallback or retry with exponential backoff (up to 5 recursive retries).
-
----
-
-## Skills (Tools) Available to Browser Agent
-
-* `scroll()`
-* `click()`
-* `navigate()`
-* `entertext()`
-* `get_dom()`
-* `get_url()`
-* `google_search()`
-* `open_url()`
-* `pdf_extractor()`
-* `press_key()`
-
-These tools let the Browser Agent dynamically interact with web pages, extract needed content, and adapt to complex tasks.
+    B --> O[Shared Memory telemetry/history]
+```
 
 ---
 
-## System Highlights
+## Directory structure
 
-* Modular, multi-agent design.
-* Combines heuristic planning with execution and real-time feedback.
-* Can recover from failures, handle dynamic web environments (e.g., CAPTCHAs).
-* Integrates learning agents for continuous improvement.
-* Can be expanded with more tools, models, or domains.
+```text
+browser/
+├── __init__.py
+├── README.md
+├── browser_functions.py        # function registry + aliasing + dispatch
+├── browser_memory.py           # optional memory store for function/content/security traces
+├── content.py                  # content extraction / post-processing
+├── security.py                 # URL/action/page safety assessments
+├── utilities.py                # helper utilities used by browser subsystem
+├── workflow.py                 # workflow normalize/compile/dry-run interfaces
+├── configs/
+│   └── browser_config.yaml
+├── templates/
+│   └── indicators.json
+├── functions/
+│   ├── __init__.py
+│   ├── do_click.py
+│   ├── do_copy_cut_paste.py
+│   ├── do_drag_and_drop.py
+│   ├── do_navigate.py
+│   ├── do_scroll.py
+│   └── do_type.py
+└── utils/
+    ├── __init__.py
+    ├── Browser_helpers.py
+    ├── browser_driver.py
+    ├── browser_errors.py
+    └── config_loader.py
+```
 
+---
+
+## Module responsibilities (current)
+
+### `browser_functions.py` (`BrowserFunctions`)
+
+Primary responsibilities:
+
+- Build and maintain a **canonical function registry** (`navigate`, `click`, `type`, `scroll`, etc.).
+- Normalize external names via alias map (e.g. `open_url` -> `navigate`, `click_element` -> `click`).
+- Own component composition for function modules around the active driver.
+- Execute single function calls, generic task payloads, and workflows with unified result envelopes.
+- Optionally record action/workflow outcomes to `BrowserMemory`.
+- Provide convenience browser functions like `screenshot`, `extract_page`, and `page_state` at orchestration level.
+
+### `functions/*` (concrete interaction primitives)
+
+Each module contains low-level Selenium interaction behavior + typed options/request/context dataclasses. They do **not** own orchestration policy.
+
+- `do_navigate.py`: URL normalization, navigation controls, load verification, navigation history.
+- `do_click.py`: robust clicking with wait/strategy fallbacks.
+- `do_type.py`: typing/clearing/key submission strategies and verification.
+- `do_scroll.py`: by/to/direction/element/percentage/page/end scrolling modes.
+- `do_copy_cut_paste.py`: clipboard-aware copy/cut/paste strategies with verification.
+- `do_drag_and_drop.py`: drag-target or drag-by-offset execution.
+
+### `security.py` (`SecurityFeatures`)
+
+Protective scanning and policy decisions:
+
+- assess navigation URLs
+- assess action payload risk
+- scan current page (captcha/bot/rate-limit/login-wall/sensitive markers)
+- emit structured decisions (`allow` / `warn` / `block`)
+
+### `content.py` (`ContentHandling`)
+
+Extraction/post-processing for page content and special result types, bounded by config (timeouts, limits, retries, metadata inclusion, etc.).
+
+### `workflow.py` (`WorkFlow`)
+
+Normalizes and compiles workflow definitions into executable browser steps. `BrowserAgent` chooses compile/dry-run behavior; `BrowserFunctions` executes steps.
+
+### `utils/browser_driver.py` (`BrowserDriver`)
+
+Single owner of browser driver lifecycle:
+
+- startup / attach / detach / restart / close
+- health/state reporting
+- ownership semantics
+
+---
+
+## BrowserAgent integration contract
+
+`BrowserAgent` uses this package with strict boundaries:
+
+- **Lifecycle:** via `BrowserDriver` only.
+- **Execution:** via `BrowserFunctions.execute(...)` / `execute_workflow(...)`.
+- **Security:** pre-action/post-action gates through `SecurityFeatures`.
+- **Content:** optional post-extraction enrichment through `ContentHandling`.
+- **Observability:** compact execution history + shared-memory publication.
+
+It should not directly re-implement module internals that already exist in `functions/*` or `BrowserFunctions`.
+
+---
+
+## Execution sequence (single action)
+
+```mermaid
+sequenceDiagram
+    participant U as Upstream caller
+    participant A as BrowserAgent
+    participant S as SecurityFeatures
+    participant BF as BrowserFunctions
+    participant F as Do* function module
+    participant D as WebDriver
+
+    U->>A: perform_task / action method
+    A->>S: assess_action(...) (if enabled)
+    S-->>A: allow/warn/block
+    A->>BF: execute(function_name, params)
+    BF->>F: dispatch canonical function
+    F->>D: Selenium operations
+    D-->>F: state/result
+    F-->>BF: function result
+    BF-->>A: normalized result
+    A->>S: scan_current_page(...) (optional)
+    A-->>U: final result + metadata
+```
+
+---
+
+## Maintaining consistency when adding features
+
+When introducing a new browser action or alias, update all relevant layers:
+
+1. Concrete implementation in `functions/` (or orchestration-only helper in `BrowserFunctions`).
+2. Registration/alias mapping in `BrowserFunctions`.
+3. `BrowserAgent` task routing aliases if user-facing task names should map to it.
+4. Workflow supported actions where applicable.
+5. Documentation:
+   - this file (`src/agents/browser/README.md`)
+   - function-level docs (`src/agents/browser/functions/README.md`)
+
+This keeps agent-level docs aligned with the actual runtime boundaries.

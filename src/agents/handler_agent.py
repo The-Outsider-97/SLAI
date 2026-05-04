@@ -56,11 +56,13 @@ class HandlerAgent(BaseAgent):
             "resource": handle_resource_constraint,
             "unicode": handle_unicode_emoji_error,
         }
+        self.calls = 0
 
         logger.info("HandlerAgent initialized")
 
     def perform_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Entry-point that executes normalization, recovery, telemetry, and postmortem emission."""
+        self.calls += 1
         error = task_data.get("error")
         error_info = task_data.get("error_info")
         target_agent = task_data.get("target_agent")
@@ -89,6 +91,9 @@ class HandlerAgent(BaseAgent):
             "telemetry": telemetry,
             "postmortem": postmortem,
         }
+    
+    def reset_calls(self):      # optional, for test isolation
+        self.calls = 0
 
     def failure_normalization(
         self,

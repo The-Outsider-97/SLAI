@@ -1,0 +1,37 @@
+{
+  "completed_episodes": 26,
+  "meta": {
+    "episodes": 100,
+    "depth": 3,
+    "playouts": 8,
+    "seed": 7
+  },
+  "summary": {
+    "episodes": 100,
+    "depth": 3,
+    "counter_playouts": 8,
+    "board_sizes": [
+      9,
+      11,
+      13
+    ],
+    "wins": {
+      "9": 9,
+      "11": 9,
+      "13": 8
+    },
+    "losses": {
+      "9": 0,
+      "11": 0,
+      "13": 0
+    },
+    "draw_like": {
+      "9": 0,
+      "11": 0,
+      "13": 0
+    },
+    "explored_states": 9502,
+    "counter_evals": 1992,
+    "completed_episodes": 26
+  }
+}

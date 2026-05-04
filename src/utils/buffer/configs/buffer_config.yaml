@@ -11,3 +11,56 @@ distributed:
   seed: null
   staleness_threshold_days: 1
   prioritization_alpha: 0.6
+
+validation:
+  required_length: 6
+  enforce_numeric_reward: true
+  enforce_boolean_done: true
+  allow_none_state: false
+  allow_none_next_state: false
+  max_abs_reward: null
+
+segment_tree:
+  capacity: 100000
+  dtype: float32
+
+sequence_replay:
+  capacity: 100000
+  sequence_length: 16
+  burn_in: 4
+  min_episode_length: 2
+  pad_value: 0.0
+  seed: null
+
+eviction:
+  policy: fifo
+  age_weight: 0.7
+  reward_weight: 0.3
+
+telemetry:
+  enabled: true
+  log_interval: 200
+
+nstep:
+  n_step: 3
+  gamma: 0.99
+  clear_on_terminal: true
+
+reservoir:
+  capacity: 100000
+  seed: null
+
+network_buffer:
+  capacity: 2048
+  fairness_strategy: weighted_round_robin
+  default_fairness_key: global
+  drop_strategy: drop_oldest
+  eviction_policy: fifo
+  random_early_drop_min_fill: 0.8
+  random_early_drop_max_probability: 0.4
+  high_watermark_ratio: 0.9
+  low_watermark_ratio: 0.6
+  default_ttl_seconds: null
+  max_per_key_inflight: 0
+  max_dequeue_batch: 64
+  fairness_weights: {}

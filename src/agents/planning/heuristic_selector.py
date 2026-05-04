@@ -1,17 +1,20 @@
 import os
 import time
 import joblib
+import threading
 import numpy as np
 
 from typing import Dict, Any, Tuple, Optional
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.decision_tree_heuristic import DecisionTreeHeuristic
-from src.agents.planning.gradient_boosting_heuristic import GradientBoostingHeuristic
-from src.agents.planning.uncertainty_aware_heuristic import UncertaintyAwareHeuristic
-from src.agents.planning.case_based_reasoning_heuristic import CaseBasedReasoningHeuristic
-from src.agents.planning.reinforcement_learning_heuristic import ReinforcementLearningHeuristic
-from src.agents.planning.planning_memory import PlanningMemory
+from .utils.config_loader import load_global_config, get_config_section
+from .heuristics import (
+    DecisionTreeHeuristic,
+    GradientBoostingHeuristic,
+    ReinforcementLearningHeuristic,
+    UncertaintyAwareHeuristic,
+    CaseBasedReasoningHeuristic,
+)
+from .planning_memory import PlanningMemory
 from logs.logger import get_logger, PrettyPrinter
 
 logger = get_logger("Heuristic Selector")
@@ -50,7 +53,8 @@ class HeuristicSelector:
 
     def load_state(self):
         """Load state from memory or initialize defaults"""
-        state = self.memory.base_state.get('heuristic_selector', {})
+        # Use _base_state (the internal state when no agent is attached)
+        state = self.memory._base_state.get('heuristic_selector', {}) if self.memory._base_state else {}
         
         # Initialize with default values
         self.heuristic_performance = {key: {"speed": 0.0, "accuracy": 0.5} for key in self.heuristics}
@@ -66,16 +70,17 @@ class HeuristicSelector:
             for key, val in state['last_used'].items():
                 if key in self.last_used:
                     self.last_used[key] = val
-
+    
     def save_state(self):
         """Persist current state to memory"""
-        self.memory.base_state['heuristic_selector'] = {
-            'performance': self.heuristic_performance,
-            'last_used': self.last_used
-        }
-        # Create checkpoint if agent is attached
-        if hasattr(self.memory, 'agent') and self.memory.agent:
-            self.memory.save_checkpoint(label="heuristic_update")
+        if self.memory._base_state is not None:
+            self.memory._base_state['heuristic_selector'] = {
+                'performance': self.heuristic_performance,
+                'last_used': self.last_used
+            }
+            # Create checkpoint if agent is attached
+            if hasattr(self.memory, 'agent') and self.memory.agent:
+                self.memory.save_checkpoint(label="heuristic_update")
 
     def load_performance_stats(self):
         """Load historical performance metrics if available"""

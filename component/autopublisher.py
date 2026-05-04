@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 import sys
 import traceback
-from dataclasses import dataclass, field
+
+from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt
@@ -29,6 +32,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
+from component.utils.loading_overlay import LoadingOverlay
 from component.styles.autopublisher_style import AUTOPUBLISHER_STYLE, sanitize_qss
 from logs.logger import get_logger
 
@@ -128,6 +133,10 @@ class AutopublisherWindow(QMainWindow):
         self._build_ui()
         self._refresh_board()
         self._refresh_agent_fleet()
+        self.loading_overlay = LoadingOverlay(self.centralWidget())
+        self.loading_overlay.sync_geometry()
+        self.loading_controller = create_loading_controller()
+        self.loading_controller.on_update = self.loading_overlay.on_loader_update
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -141,6 +150,12 @@ class AutopublisherWindow(QMainWindow):
         sidebar.setFixedWidth(220)
         side_layout = QVBoxLayout(sidebar)
         side_layout.addWidget(QLabel("ContentOps", objectName="AppTitle"))
+        self.btn_home = QPushButton("Home")
+        self.btn_home.clicked.connect(self._return_home)
+        self.btn_back = QPushButton("Back")
+        self.btn_back.clicked.connect(self._return_home)
+        side_layout.addWidget(self.btn_home)
+        side_layout.addWidget(self.btn_back)
         self.btn_runtime = QPushButton("Initialize Agent Runtime", objectName="Primary")
         self.btn_runtime.clicked.connect(self.initialize_runtime)
         side_layout.addWidget(self.btn_runtime)
@@ -271,7 +286,10 @@ class AutopublisherWindow(QMainWindow):
             logger.warning("Torch subsystem probe failed: %s", self.torch_probe_details)
 
     def initialize_runtime(self) -> bool:
+        start_loading(self.loading_controller, "Initializing agent runtime…")
+        update_loading(self.loading_controller, progress=0.2, message="Loading runtime modules…")
         if self.runtime_initialized:
+            complete_loading(self.loading_controller, "Runtime already initialized")
             return True
 
         self.status_label.setText("Initializing lightweight agent runtime...")
@@ -378,6 +396,7 @@ class AutopublisherWindow(QMainWindow):
             else:
                 self.status_label.setText("UI ready; agent runtime blocked")
             self._refresh_agent_fleet()
+            complete_loading(self.loading_controller, "Runtime ready")
             return True
         except Exception as exc:
             self.runtime_initialized = False
@@ -393,6 +412,7 @@ class AutopublisherWindow(QMainWindow):
             QMessageBox.critical(self, "Autopublisher Runtime Initialization Failed", detail)
             self.status_label.setText("UI ready; lightweight runtime unavailable")
             self._refresh_agent_fleet()
+            complete_loading(self.loading_controller, "Runtime initialization failed")
             return False
 
     def _ensure_runtime(self) -> bool:
@@ -450,6 +470,8 @@ class AutopublisherWindow(QMainWindow):
         return list(dedup.values())
 
     def generate_weekly_plan(self) -> None:
+        start_loading(self.loading_controller, "Generating weekly plan…")
+        update_loading(self.loading_controller, progress=0.45, message="Calling planning agent…")
         self.status_label.setText("Generating plan...")
         planning = self._agent_call("planning", {"objective": "weekly editorial slate", "workspace": "autopublisher"})
 
@@ -469,6 +491,7 @@ class AutopublisherWindow(QMainWindow):
         self._refresh_board()
         self._refresh_agent_fleet()
         self._update_detail_panels()
+        complete_loading(self.loading_controller, "Plan completed")
 
     def _require_selected_topic(self) -> Optional[TopicCandidate]:
         if not self.selected_topic:
@@ -714,6 +737,16 @@ class AutopublisherWindow(QMainWindow):
                 lines.append("\nCollaborative metrics:")
                 lines.append(json.dumps(self.collab.get_metrics(), indent=2, default=str))
         self.fleet_text.setPlainText("\n".join(lines))
+
+    def _return_home(self) -> None:
+        main_path = Path(__file__).resolve().parents[1] / "main.py"
+        subprocess.Popen([sys.executable, str(main_path)])
+        self.close()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.sync_geometry()
 
 
 def launch_autopublisher() -> None:
