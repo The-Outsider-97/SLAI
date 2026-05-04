@@ -1,121 +1,105 @@
 # Core numerics / ML
-numpy>=1.23.0
-scipy>=1.10.0
-pandas>=1.5.0
-scikit-learn>=1.2.0
-statsmodels>=0.14.0
-mlxtend>=0.22.0
-joblib>=1.2.0
+numpy>=1.23
+scipy>=1.10
+pandas>=1.5
+scikit-learn>=1.2
+statsmodels>=0.14
+joblib>=1.2
 
-# Deep learning / LLM
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
-tensorflow>=2.12.0
-transformers>=4.31.0
-accelerate>=0.21.0
+# Deep learning / model stacks (some modules are optional/experimental)
+torch>=2.0
+torchvision>=0.15
+torchaudio>=2.0
+transformers>=4.31
 sentence-transformers>=2.2.2
 sentencepiece>=0.1.99
-einops>=0.7.0
+einops>=0.7
 rotary-embedding-torch>=0.3.5
+tensorflow>=2.12  # optional: used by experimental/legacy modules
 
 # Optimization / RL / experimentation
-gymnasium>=0.28.1
+gymnasium>=0.28
 deap>=1.3.3
-optuna>=3.1.0
-ray[tune]>=2.2.0
-scikit-optimize>=0.10.0
+optuna>=3.1
+scikit-optimize>=0.10
 ruptures>=1.1.9
 
-# Retrieval / vector / NLP
-faiss-cpu>=1.7.4
+# Retrieval / NLP / symbolic reasoning
+faiss-cpu>=1.7.4  # optional: vector retrieval
 nltk>=3.8.1
 regex>=2023.0.0
-textstat>=0.7.3
-evaluate>=0.4.0
-bert-score>=0.3.13
-rouge-score>=0.1.2
 pyspellchecker>=0.8.1
 Metaphone>=0.6
-ply>=3.11
+pgmpy>=0.1.25
+rdflib>=7.0
+textblob>=0.18.0.post0
+vaderSentiment>=3.3.2
 
-# Audio / vision
-opencv-python>=4.8.0
-pillow>=9.5.0
+# Audio / vision / document
+opencv-python>=4.8
+pillow>=9.5
 pytesseract>=0.3.10
-librosa>=0.10.0
+librosa>=0.10
 sounddevice>=0.4.6
 soundfile>=0.12.1
-mido>=1.3.0
-music21>=9.1.0
+mido>=1.3
+music21>=9.1
+pydub>=0.25.1
+pypdf>=3.15
 
-# Web / API / app framework
-fastapi>=0.95.0
-uvicorn>=0.22.0
-flask>=2.3.0
+# Web / API / networking
+flask>=2.3
 flask-socketio>=5.3.6
-Flask-Talisman>=1.1.0
-Flask-Limiter==3.5.0
-bleach==6.0.0
-Werkzeug==2.3.7
-django>=4.0.0
+fastapi>=0.95
+uvicorn>=0.22
 websockets>=11.0.3
 aiohttp>=3.8.5
-
-# Data / integrations / utilities
-pyyaml>=6.0
-python-dotenv>=1.0.0
-requests>=2.31.0,<2.33.0
-urllib3>=1.26.0,<2.1.0
-charset-normalizer>=2.0.0,<4.0.0
-jsonschema>=4.19.0
-packaging>=23.1
+requests>=2.31,<2.33
 beautifulsoup4>=4.12.2
-selenium>=4.10.0
+selenium>=4.10
 python-whois==0.9.0
 robotexclusionrulesparser>=1.7.1
-openai>=1.0.0
-langchain>=0.1.0
-elasticsearch>=8.10.0
-kafka-python>=2.0.2
-prometheus-client>=0.17.1
+
+# Data / storage / infra utilities
+pyyaml>=6.0
+python-dotenv>=1.0
+jsonschema>=4.19
+packaging>=23.1
 psutil>=5.9.5
 GPUtil>=1.4.0
 pynvml>=11.5.0
 pyarrow>=12.0.1
 psycopg2-binary>=2.9.7
-pydantic>=2.0.0
+pydantic>=2.0
 pyperclip>=1.8.2
-pypdf>=3.15.1
-pydub>=0.25.1
-rdflib>=7.0.0
-cryptography>=41.0.0
+cryptography>=41.0
 deepmerge>=1.1.0
 tenacity>=8.2.2
-rollback>=0.4.0
 watchdog>=3.0.0
 loguru>=0.7.0
 lz4>=4.3.2
-astor>=0.8.1
-tqdm>=4.66.0
-concurrent-log-handler>=0.9.24
 pympler>=1.0.1
-faker>=19.0.0
-fuzzywuzzy>=0.18.0
-python-Levenshtein>=0.21.0
-pgmpy>=0.1.25
+portalocker>=2.8.2
+boto3>=1.34
+botocore>=1.34
+yfinance>=0.2.40
+blpapi>=3.19; platform_system != "Darwin"  # optional/proprietary Bloomberg SDK bridge
 
-# Visualization / reporting
-matplotlib>=3.7.0
+# Messaging / observability
+elasticsearch>=8.10
+kafka-python>=2.0.2
+prometheus-client>=0.17.1
+
+# Visualization / reporting / UI
+matplotlib>=3.7
 seaborn>=0.12.2
-plotly>=5.15.0
+plotly>=5.15
 graphviz>=0.20.1
 reportlab>=4.0.4
-shap>=0.43.0
-gradio>=3.50.0
 PyQt5>=5.15.9
+prettytable>=3.10
+pytz>=2024.1
 
-# Testing / notebooks
-pytest>=7.3.0
-pytest-cov>=4.1.0
-jupyterlab>=4.0.5
+# Testing
+pytest>=7.3
+pytest-cov>=4.1
