@@ -204,7 +204,7 @@ handler_agent:
 knowledge_agent:
     source: "local_files"
     is_query: True
-    stopwords: "src/agents/language/templates/stopwords.json"
+    stopwords: "src/agents/language/resources/en/syntax_pack.yaml"
     knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
     use_graph_ontology: True  # False for in-memory
     ontology_threshold: 500   # Switch to graph DB at this size
