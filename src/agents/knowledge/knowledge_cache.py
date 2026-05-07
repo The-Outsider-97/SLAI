@@ -11,12 +11,12 @@ from typing import Optional, Any, List, Set
 from collections import OrderedDict, defaultdict
 from cryptography.fernet import Fernet, InvalidToken
 
-from src.agents.knowledge.utils.knowledge_errors import CacheError
-from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from .utils.knowledge_errors import CacheError
+from .utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Cache")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 ACTION_PATTERN = re.compile(r"action:(\w+):(.+)", re.IGNORECASE)
 
@@ -81,7 +81,7 @@ class KnowledgeCache:
 
         if self.enable_encryption:
             try:
-                return json.loads(self.cipher.decrypt(value).decode("utf-8"))
+                return json.loads(self.cipher.decrypt(value).decode("utf-8")) # type: ignore
             except (InvalidToken, json.JSONDecodeError, TypeError) as exc:
                 logger.error("Failed to decrypt cached value for key='%s': %s", key, exc)
                 raise CacheError("get", key, f"Decryption failed: {exc}") from exc
@@ -98,7 +98,7 @@ class KnowledgeCache:
 
         if self.enable_encryption:
             serialized = json.dumps(value).encode("utf-8")
-            value = self.cipher.encrypt(serialized)
+            value = self.cipher.encrypt(serialized) # type: ignore
 
         if key in self.cache:
             self.cache.move_to_end(key)
@@ -264,13 +264,31 @@ class KnowledgeCache:
         raise TypeError("stopwords must be a collection of tokens or a path string")
 
     def _normalize_stopwords(self, stopwords: Any) -> Set[str]:
+        if stopwords is None:
+            return set()
+    
         if isinstance(stopwords, dict):
-            iterable = stopwords.keys()
+            if "stopwords" in stopwords and isinstance(stopwords["stopwords"], dict):
+                stopword_section = stopwords["stopwords"]
+                iterable = stopword_section.get("items", [])
+            elif "items" in stopwords:
+                iterable = stopwords.get("items", [])
+            elif "Stopword" in stopwords:
+                iterable = stopwords.get("Stopword", [])
+            elif "stopwords" in stopwords and isinstance(stopwords["stopwords"], list):
+                iterable = stopwords.get("stopwords", [])
+            else:
+                iterable = stopwords.keys()
         elif isinstance(stopwords, str):
             iterable = [stopwords]
         else:
             iterable = stopwords
-        return {str(token).strip().lower() for token in iterable if str(token).strip()}
+    
+        return {
+            str(token).strip().lower()
+            for token in iterable
+            if str(token).strip()
+        }
 
     def _resolve_path(self, path_value: str) -> Path:
         path = Path(path_value)
