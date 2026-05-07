@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import yaml
+
 __version__ = "2.1.0"
 
 """
@@ -20,16 +22,16 @@ import os
 import re
 import threading
 import time
+import numpy as np
+
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Callable
 
-import numpy as np
-
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
-from src.agents.knowledge.utils.knowledge_errors import (
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base_agent import BaseAgent
+from .knowledge.utils.knowledge_errors import (
     BiasDetectionError,
     EmbeddingError,
     GovernanceViolation,
@@ -38,7 +40,7 @@ from src.agents.knowledge.utils.knowledge_errors import (
     OntologyError,
     RetrievalError,
 )
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Agent")
 printer = PrettyPrinter
@@ -325,9 +327,21 @@ class KnowledgeAgent(BaseAgent):
             resolved_path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
         try:
             with open(resolved_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+                if resolved_path.suffix.lower() in {".yaml", ".yml"}:
+                    data = yaml.safe_load(handle) or {}
+                else:
+                    data = json.load(handle)
             if isinstance(data, dict):
-                iterable = data.get("Stopword") or data.get("stopwords") or data.keys()
+                if "stopwords" in data and isinstance(data["stopwords"], dict):
+                    iterable = data["stopwords"].get("items", [])
+                elif "items" in data:
+                    iterable = data.get("items", [])
+                elif "Stopword" in data:
+                    iterable = data.get("Stopword", [])
+                elif "stopwords" in data and isinstance(data["stopwords"], list):
+                    iterable = data.get("stopwords", [])
+                else:
+                    iterable = data.keys()
             elif isinstance(data, list):
                 iterable = data
             else:
