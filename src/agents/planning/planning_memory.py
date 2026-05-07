@@ -10,7 +10,7 @@ from typing import Any, Deque, Dict, List, Optional, Union
 from collections import deque, defaultdict
 
 from .utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Memory")
 printer = PrettyPrinter
@@ -503,13 +503,23 @@ class PlanningMemory:
         """Get task hierarchy chain (root to leaf)."""
         chain = []
         current = task
-        while current:
-            name = current.get("name")
-            if not name:
-                logger.error(f"Missing 'name' in task: {current}")
+        visited = set()
+
+        while isinstance(current, dict):
+            current_id = id(current)
+            if current_id in visited:
+                logger.warning("Detected cycle in task ancestry; stopping traversal.")
                 break
-            chain.append(name)
+            visited.add(current_id)
+
+            name = current.get("name")
+            if isinstance(name, str) and name.strip():
+                chain.append(name)
+            else:
+                logger.debug("Skipping unnamed task node in ancestry traversal: %s", current)
+
             current = current.get("parent")
+
         return chain[::-1]  # root-first
 
     # -------------------------------------------------------------------------
