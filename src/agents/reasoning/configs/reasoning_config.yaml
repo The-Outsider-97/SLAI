@@ -25,8 +25,8 @@ rules:
   auto_weight_adjustment: true    # Allow reinforcement learning on rule weights
   max_circular_depth: 3           # Limit for detecting rule circularity
   max_utterance_length: 50
-  discourse_markers_path: "src/agents/language/resources/discourse_markers.json"
-  politeness_strategies_path: "src/agents/language/resources/politeness_strategies.yaml"
+  discourse_markers_path: "src/agents/language/resources/en/nlg_pack.yaml"
+  politeness_strategies_path: "src/agents/language/resources/en/nlg_pack.yaml"
 
 validation:
   enable: true
@@ -48,8 +48,8 @@ storage:
   bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"
   knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
   rule_backup: "src/agents/knowledge/discovered_rules.json"
-  lexicon_path: "src/agents/language/templates/sentiment_lexicon.json"
-  dependency_rules_path: "src/agents/language/templates/pos_patterns.json"
+  lexicon_path: "src/agents/language/resources/en/sentiment_pack.yaml"
+  dependency_rules_path: "src/agents/language/resources/en/syntax_pack.yaml"
 
 model_compute:
   schema_version: 1.2
