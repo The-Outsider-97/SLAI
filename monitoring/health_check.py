@@ -233,25 +233,22 @@ class HealthChecker:
 
     def _with_retry(self, fn: Any, svc: dict[str, Any]) -> ServiceHealthResult:
         attempt = 0
-        last_exc: Exception | None = None
+        last_result: ServiceHealthResult | None = None
 
         for attempt in range(1, self.retry_policy.max_retries + 2):
-            try:
-                result = fn(svc)
-                if result.status == "unhealthy":
-                    raise OSError(result.message)
+            result = fn(svc)
+            last_result = result
+            if result.status != "unhealthy":
                 result.attempt_count = attempt
                 return result
-            except Exception as exc:
-                last_exc = exc
-                if attempt <= self.retry_policy.max_retries:
-                    delay = self.retry_policy._sleep_duration(attempt - 1)
-                    time.sleep(delay)    
 
-        # All attempts exhausted – perform one final non‑retried check to get a result
-        fallback = fn(svc)
-        fallback.attempt_count = attempt
-        return fallback
+            if attempt <= self.retry_policy.max_retries:
+                delay = self.retry_policy._sleep_duration(attempt - 1)
+                time.sleep(delay)
+
+        assert last_result is not None
+        last_result.attempt_count = attempt
+        return last_result
 
     # ── TCP check ────────────────────────────────
 
