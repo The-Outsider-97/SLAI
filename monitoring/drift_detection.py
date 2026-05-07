@@ -85,22 +85,35 @@ def _to_categories(values: Iterable[Any]) -> list[str]:
 # KS test
 # ──────────────────────────────────────────────
 def _ks_statistic(a: list[float], b: list[float]) -> float:
-    """Two-sample KS statistic."""
+    """Two-sample KS statistic with correct handling of ties and tails."""
     sa, sb = sorted(a), sorted(b)
     n, m = len(sa), len(sb)
     i = j = 0
     cdf_a = cdf_b = 0.0
     max_diff = 0.0
+
     while i < n and j < m:
-        if sa[i] <= sb[j]:
-            i += 1
-            cdf_a = i / n
+        if sa[i] < sb[j]:
+            v = sa[i]
+        elif sb[j] < sa[i]:
+            v = sb[j]
         else:
+            v = sa[i]
+
+        while i < n and sa[i] <= v:
+            i += 1
+        while j < m and sb[j] <= v:
             j += 1
-            cdf_b = j / m
-        diff = abs(cdf_a - cdf_b)
-        if diff > max_diff:
-            max_diff = diff
+
+        cdf_a = i / n
+        cdf_b = j / m
+        max_diff = max(max_diff, abs(cdf_a - cdf_b))
+
+    if i < n:
+        max_diff = max(max_diff, abs(1.0 - cdf_b))
+    if j < m:
+        max_diff = max(max_diff, abs(cdf_a - 1.0))
+
     return max_diff
 
 
