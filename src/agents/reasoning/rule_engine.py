@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple, Callable
 from collections import defaultdict
 
-from src.agents.reasoning.utils.config_loader import load_global_config, get_config_section
-from src.agents.reasoning.reasoning_memory import ReasoningMemory
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .reasoning_memory import ReasoningMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Rule Engine")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class RuleEngine:
     def __init__(self):
@@ -181,38 +181,113 @@ class RuleEngine:
             return {}
 
         return parsed_kb
+    
+    def _load_structured_resource(self, path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            raise FileNotFoundError(f"Resource file not found: {path}")
+    
+        suffix = path.suffix.lower()
+        with open(path, "r", encoding="utf-8") as handle:
+            if suffix in {".yaml", ".yml"}:
+                data = yaml.safe_load(handle) or {}
+            elif suffix == ".json":
+                data = json.load(handle)
+            else:
+                raise ValueError(f"Unsupported resource format for {path}. Expected JSON or YAML.")
+    
+        if not isinstance(data, dict):
+            raise ValueError(f"Resource file must contain a mapping/object: {path}")
+    
+        return data
 
-    def _load_sentiment_lexicon(self, lexicon_path: Path) -> Dict[Tuple, Any]:
-        """Load sentiment analysis resources"""
+    def _load_sentiment_lexicon(self, lexicon_path: Path) -> Dict[str, Any]:
+        """Load sentiment analysis resources from legacy JSON or sentiment_pack YAML."""
         if not lexicon_path.exists():
             raise FileNotFoundError(f"Sentiment lexicon file not found: {lexicon_path}")
-        
-        logger.info(f"Loading sentiment lexicon from {lexicon_path}")
-        with open(lexicon_path, 'r') as f:
-            lexicon = json.load(f)
-
-        # Log summary instead of entire lexicon
-        num_positive = len(lexicon.get('positive', {}))
-        num_negative = len(lexicon.get('negative', {}))
-        num_intensifiers = len(lexicon.get('intensifiers', {}))
-        num_negators = len(lexicon.get('negators', []))
-        
-        logger.info(f"Loaded lexicon with {num_positive} positive, {num_negative} negative, "
-                    f"{num_intensifiers} intensifiers, and {num_negators} negators")
-                    
+    
+        logger.info("Loading sentiment lexicon from %s", lexicon_path)
+        data = self._load_structured_resource(lexicon_path)
+    
+        # Legacy shape:
+        # {
+        #   "positive": {...},
+        #   "negative": {...},
+        #   "intensifiers": {...},
+        #   "negators": [...]
+        # }
+        #
+        # New pack shape may wrap these under sentiment_lexicon / lexicon / sentiment.
+        candidates = [
+            data,
+            data.get("sentiment_lexicon", {}),
+            data.get("lexicon", {}),
+            data.get("sentiment", {}),
+            data.get("resources", {}).get("sentiment_lexicon", {}) if isinstance(data.get("resources"), dict) else {},
+        ]
+    
+        source = next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and any(key in candidate for key in ("positive", "negative", "intensifiers", "negators"))
+            ),
+            {},
+        )
+    
+        lexicon = {
+            "positive": source.get("positive", {}) if isinstance(source.get("positive", {}), dict) else {},
+            "negative": source.get("negative", {}) if isinstance(source.get("negative", {}), dict) else {},
+            "intensifiers": source.get("intensifiers", {}) if isinstance(source.get("intensifiers", {}), dict) else {},
+            "negators": source.get("negators", []) if isinstance(source.get("negators", []), (list, set, tuple)) else [],
+            "antonyms": source.get("antonyms", {}) if isinstance(source.get("antonyms", {}), dict) else {},
+        }
+    
+        logger.info(
+            "Loaded lexicon with %s positive, %s negative, %s intensifiers, and %s negators",
+            len(lexicon["positive"]),
+            len(lexicon["negative"]),
+            len(lexicon["intensifiers"]),
+            len(lexicon["negators"]),
+        )
+    
         return lexicon
 
     def _load_pos_patterns(self, patterns_path: Path) -> Dict[str, list]:
-        """Load POS patterns from JSON file"""
+        """Load POS/chunk patterns from legacy JSON or syntax_pack YAML."""
         if not patterns_path.exists():
             raise FileNotFoundError(f"POS patterns file not found: {patterns_path}")
-        
-        logger.info(f"Loading POS patterns from {patterns_path}")
-        with open(patterns_path, 'r') as f:
-            patterns_data = json.load(f)
-        
-        # Convert to pattern_name -> pattern mapping
-        return {pattern["name"]: pattern["pattern"] for pattern in patterns_data}
+    
+        logger.info("Loading POS patterns from %s", patterns_path)
+        data = self._load_structured_resource(patterns_path)
+    
+        # Legacy shape: [{"name": "...", "pattern": [...]}, ...]
+        # New syntax_pack shape: {"phrase_patterns": [{...}], ...}
+        if isinstance(data, list):
+            patterns_data = data
+        else:
+            patterns_data = data.get("phrase_patterns", [])
+    
+        patterns: Dict[str, list] = {}
+    
+        for index, item in enumerate(patterns_data):
+            if not isinstance(item, dict):
+                continue
+    
+            name = (
+                item.get("name")
+                or item.get("id")
+                or item.get("category")
+                or f"pattern_{index}"
+            )
+    
+            # Prefer Universal POS if available because your updated NLP engine emits UPOS-style tags.
+            pattern = item.get("universal_pattern") or item.get("pattern")
+    
+            if isinstance(pattern, list):
+                patterns[str(name)] = [str(tag) for tag in pattern]
+    
+        return patterns
 
     def _create_dependency_rules(self) -> Dict[str, list]:
         """Create dependency rules from loaded POS patterns"""
@@ -259,28 +334,96 @@ class RuleEngine:
         }
 
     def _load_discourse_markers(self) -> List[str]:
-        """Load discourse markers from configured JSON file"""
+        """Load discourse markers from legacy JSON or nlg_pack YAML."""
         markers_path = Path(self.discourse_markers_path)
         if not markers_path.exists():
             raise FileNotFoundError(f"Discourse markers file not found: {markers_path}")
-
-        logger.info(f"Loading discourse markers from {markers_path}")
-        with open(markers_path, 'r') as f:
-            data = json.load(f)
-
-        return data.get('discourse_markers', [])
+    
+        logger.info("Loading discourse markers from %s", markers_path)
+        data = self._load_structured_resource(markers_path)
+    
+        raw_markers = (
+            data.get("discourse_markers")
+            or data.get("discourse")
+            or data.get("markers")
+            or []
+        )
+    
+        markers: List[str] = []
+    
+        if isinstance(raw_markers, list):
+            for item in raw_markers:
+                if isinstance(item, str):
+                    markers.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text") or item.get("marker") or item.get("value")
+                    if value:
+                        markers.append(str(value))
+    
+        elif isinstance(raw_markers, dict):
+            for value in raw_markers.values():
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            markers.append(item)
+                        elif isinstance(item, dict):
+                            marker = item.get("text") or item.get("marker") or item.get("value")
+                            if marker:
+                                markers.append(str(marker))
+                elif isinstance(value, dict):
+                    nested = value.get("items") or value.get("markers") or value.get("values") or []
+                    for item in nested:
+                        if isinstance(item, str):
+                            markers.append(item)
+                        elif isinstance(item, dict):
+                            marker = item.get("text") or item.get("marker") or item.get("value")
+                            if marker:
+                                markers.append(str(marker))
+    
+        return sorted({marker.strip().lower() for marker in markers if marker.strip()})
 
     def _load_politeness_strategies(self) -> Dict[str, List[str]]:
-        """Load politeness strategies from configured YAML file"""
+        """Load politeness strategies from legacy YAML or nlg_pack YAML."""
         strategies_path = Path(self.politeness_strategies_path)
         if not strategies_path.exists():
             raise FileNotFoundError(f"Politeness strategies file not found: {strategies_path}")
-
-        logger.info(f"Loading politeness strategies from {strategies_path}")
-        with open(strategies_path, 'r') as f:
-            data = yaml.safe_load(f)
-
-        return data.get('strategies', {})
+    
+        logger.info("Loading politeness strategies from %s", strategies_path)
+        data = self._load_structured_resource(strategies_path)
+    
+        raw_strategies = (
+            data.get("strategies")
+            or data.get("politeness_strategies")
+            or data.get("politeness")
+            or {}
+        )
+    
+        if isinstance(raw_strategies, dict):
+            normalized: Dict[str, List[str]] = {}
+    
+            for strategy, value in raw_strategies.items():
+                if isinstance(value, list):
+                    phrases = value
+                elif isinstance(value, dict):
+                    phrases = (
+                        value.get("phrases")
+                        or value.get("items")
+                        or value.get("examples")
+                        or value.get("markers")
+                        or []
+                    )
+                else:
+                    phrases = []
+    
+                normalized[str(strategy)] = [
+                    str(phrase).strip()
+                    for phrase in phrases
+                    if str(phrase).strip()
+                ]
+    
+            return normalized
+    
+        return {}
     
     def get_rules_by_category(self, category: str) -> Dict[str, Callable]:
         """
