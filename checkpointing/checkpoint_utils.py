@@ -815,6 +815,7 @@ __all__ = [
     "CheckpointSaveError",
     "CheckpointTokenizerError",
     "CheckpointVersionError",
+    "CheckpointManifestError",
     "LEGACY_TORCH_CHECKPOINT_NAME",
     "MANIFEST_NAME",
     "METADATA_NAME",
