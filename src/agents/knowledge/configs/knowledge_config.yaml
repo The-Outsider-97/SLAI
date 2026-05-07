@@ -76,7 +76,7 @@ perform_action:                # Global toggle for action execution
   confirmation_required: false    # Require human approval for high-risk actions
 
 knowledge_cache:
-  stopwords: "src/agents/language/templates/stopwords.json"
+  stopwords: "src/agents/language/resources/en/syntax_pack.yaml"
   max_size: 1000                  # Max items in cache (LRU enforced)
   enable_encryption: True         # Encrypt cached data
   hashing_method: "simhash"       # Options: md5, simhash
