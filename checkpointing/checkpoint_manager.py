@@ -27,7 +27,6 @@ Public API examples
 from __future__ import annotations
 
 import concurrent.futures
-import threading
 import os
 import shutil
 import tempfile
@@ -464,6 +463,8 @@ class CheckpointManager:
             else:
                 allowed -= disallowed
     
+        incompatible: Any = None
+
         # Load model state with optional prefix filtering
         if allowed is None or "model_state" in allowed:
             model_state = payload.get("model_state")
@@ -487,7 +488,6 @@ class CheckpointManager:
         loaded_tokenizer = None
         if allowed is None or "tokenizer" in allowed:
             loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
-            incompatible = {"missing_keys": [], "unexpected_keys": []}
     
         # Build result dictionary (same as before)
         record = self.read_manifest(resolved_version, missing_ok=True)
@@ -502,8 +502,8 @@ class CheckpointManager:
             "metadata": payload.get("metadata") or {},
             "metrics": payload.get("metrics") or {},
             "extra_state": payload.get("extra_state") or {},
-            "missing_keys": list(getattr(incompatible, "missing_keys", [])), # pyright: ignore[reportPossiblyUnboundVariable]
-            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])), # pyright: ignore[reportPossiblyUnboundVariable]
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])) if incompatible is not None else [],
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])) if incompatible is not None else [],
             "tokenizer": loaded_tokenizer,
         }
 
@@ -633,7 +633,7 @@ class CheckpointManager:
             if looks_like_legacy_checkpoint(checkpoint_dir):
                 logger.warning("Checkpoint '%s' has no manifest; skipping integrity verification", safe_version)
                 return True
-            raise FileNotFoundError(f"Checkpoint '{safe_version}' has no manifest and is not a legacy checkpoint")
+            raise CheckpointManifestError(f"Checkpoint '{safe_version}' has no manifest and is not a legacy checkpoint", path=checkpoint_dir, version=safe_version)
 
         return verify_files_against_record(checkpoint_dir, record)
 
@@ -705,20 +705,35 @@ class CheckpointManager:
         checkpoint_dir.parent.mkdir(parents=True, exist_ok=True)
     
         import tarfile
-        with tarfile.open(archive_path, "r:gz") as tar:
-            # Extract into a temporary directory first to avoid partial writes
-            tmp_extract = tempfile.mkdtemp(dir=self.base_dir, prefix=f".restore-{safe_version}-")
-            try:
-                tar.extractall(path=tmp_extract)
-                # The archive contains a single top-level directory (the checkpoint version)
-                extracted_items = list(Path(tmp_extract).iterdir())
-                if len(extracted_items) == 1 and extracted_items[0].is_dir():
-                    extracted_items[0].rename(checkpoint_dir)
-                else:
-                    # If archive was not created with a parent directory, move all contents
-                    Path(tmp_extract).rename(checkpoint_dir)
-            finally:
-                safe_rmtree(Path(tmp_extract))
+
+        def _validate_member(member: tarfile.TarInfo) -> None:
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise CheckpointIntegrityError(
+                    f"Unsafe archive member path '{member.name}' for checkpoint '{safe_version}'"
+                )
+            if member.issym() or member.islnk():
+                raise CheckpointIntegrityError(
+                    f"Refusing to extract link member '{member.name}' for checkpoint '{safe_version}'"
+                )
+
+        tmp_extract = Path(tempfile.mkdtemp(dir=self.base_dir, prefix=f".restore-{safe_version}-"))
+        restore_dir = tmp_extract / safe_version
+        restore_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                members = tar.getmembers()
+                for member in members:
+                    _validate_member(member)
+                tar.extractall(path=restore_dir, members=members)
+
+            extracted_items = list(restore_dir.iterdir())
+            if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                extracted_items[0].rename(checkpoint_dir)
+            else:
+                restore_dir.rename(checkpoint_dir)
+        finally:
+            safe_rmtree(tmp_extract)
     
         logger.info("Restored checkpoint '%s' from archive %s", safe_version, archive_path)
         return checkpoint_dir
@@ -748,12 +763,6 @@ class CheckpointManager:
     def _checkpoint_dir(self, version: str) -> Path:
         safe_version = self._sanitize_or_resolve(version)
         return resolve_checkpoint_path(self.base_dir, safe_version)
-
-
-# ``typing.MutableMapping`` cannot be used directly with ``isinstance`` on all
-# Python/PyTorch environments through postponed annotations. Keep the runtime
-# check explicit and local to avoid importing the name throughout the manager.
-MutableMappingCompat = dict
 
 
 __all__ = [
