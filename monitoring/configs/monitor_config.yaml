@@ -1,0 +1,142 @@
+# ── Metrics collection ────────────────────────────────────────────────────────
+# Used by: MetricsCollector(disk_path, history_max_snapshots)
+#          collector.start(interval_seconds)
+metrics_collector:
+  disk_path: "/"                  # mount point to measure disk usage for
+  history_max_snapshots: 240      # ring-buffer depth (240 × 15 s ≈ 1 hour)
+  collect_interval_seconds: 15.0  # background-loop polling interval
+
+
+# ── Alert thresholds ──────────────────────────────────────────────────────────
+# Used by: AlertManager.process_metrics(snapshot, thresholds)
+# Keys:    cpu_percent | memory_percent | disk_percent
+thresholds:
+  cpu_percent: 85.0       # trigger warning; +10 pp → critical
+  memory_percent: 85.0
+  disk_percent: 90.0
+
+
+# ── Drift detection ───────────────────────────────────────────────────────────
+# Used by: DriftDetector(default_test, psi_bins)
+#          detector.detect(..., threshold)
+#          WindowedDriftDetector(max_window_size, test, threshold)
+drift_detection:
+  default_test: "ks"          # "ks" | "chi2" | "psi"
+  psi_bins: 10
+  threshold: 0.05             # p-value threshold for KS/Chi2; PSI value for PSI
+  windowed_max_window_size: 1000
+
+
+# ── Health checks ─────────────────────────────────────────────────────────────
+# Used by: HealthChecker(max_workers, default_timeout)
+#          checker.run_checks(services)
+# The `services` list drives what gets checked; add/remove entries freely.
+# Each entry keys: name, type (tcp|http|tls), then type-specific keys below.
+health_check:
+  max_workers: 8
+  default_timeout: 5.0        # seconds, used when a service omits "timeout"
+
+  services:
+    # ── TCP examples ──────────────────────────────────────────────────────
+    - name: "Redis"
+      type: tcp
+      host: "localhost"
+      port: 6379
+      timeout: 1.0
+      latency_warn_ms: 200    # optional: degrade if RTT exceeds this
+
+    - name: "PostgreSQL"
+      type: tcp
+      host: "localhost"
+      port: 5432
+      timeout: 1.0
+
+    # ── HTTP examples ─────────────────────────────────────────────────────
+    - name: "SLAI API"
+      type: http
+      url: "http://localhost:8000/health"
+      timeout: 2.0
+      expected_status: [200]  # list of acceptable HTTP status codes
+      latency_warn_ms: 500
+
+    - name: "Hub UI"
+      type: http
+      url: "http://localhost:3000"
+      timeout: 3.0
+      expected_status: [200, 304]
+
+    # ── TLS certificate expiry examples ───────────────────────────────────
+    - name: "API TLS"
+      type: tls
+      host: "api.example.com"
+      port: 443
+      timeout: 3.0
+      tls_warn_days: 30       # degrade when cert expires within this many days
+
+
+# ── Alert manager ─────────────────────────────────────────────────────────────
+# Used by: AlertManager.from_config(get_config_section("alert_manager"))
+#
+# Top-level keys map directly to AlertManager.__init__ parameters.
+# Transport sub-sections are only activated when enabled: true.
+alert_manager:
+  cooldown_seconds: 300             # minimum gap between repeat alerts (per dedup_key)
+  dedup_state_path: "/tmp/slai_dedup_state.json"   # persists dedup across restarts
+  rate_limit_tokens: 10             # token-bucket burst capacity
+  rate_limit_refill_per_second: 1.0
+  cb_failure_threshold: 5           # failures before a transport circuit opens
+  cb_recovery_timeout: 60.0         # seconds before circuit moves to half-open
+  retry_max: 3
+  retry_base_delay: 0.5
+
+  # ── Email transport ───────────────────────────────────────────────────────
+  email:
+    enabled: false
+    smtp_host: "smtp.example.com"
+    smtp_port: 587
+    username: "alerts@example.com"
+    password: ""                    # set via env: SLAI_SMTP_PASSWORD
+    from_email: "alerts@example.com"
+    recipient_email: "ops@example.com"
+    use_tls: true
+
+  # ── Slack transport ───────────────────────────────────────────────────────
+  slack:
+    enabled: false
+    webhook_url: ""                 # set via env: SLAI_SLACK_WEBHOOK_URL
+    channel: "#alerts"
+    username: "SLAI Monitor"
+
+  # ── Generic HTTP webhook transport ────────────────────────────────────────
+  webhook:
+    enabled: false
+    url: ""                         # set via env: SLAI_WEBHOOK_URL
+    secret_header: "X-SLAI-Signature"
+    secret_value: ""                # set via env: SLAI_WEBHOOK_SECRET_VALUE
+    timeout_seconds: 5.0
+
+
+# ── Resilience primitives ─────────────────────────────────────────────────────
+# Informational defaults — modules construct RetryPolicy / CircuitBreakerRegistry
+# directly, but this section is available for any module that reads it explicitly.
+resilience:
+  max_retries: 3
+  retry_base_delay: 0.5       # seconds
+  retry_max_delay: 30.0
+  retry_backoff_factor: 2.0
+  retry_jitter: true
+  cb_failure_threshold: 5
+  cb_recovery_timeout: 60.0
+  cb_half_open_max_calls: 1
+  rate_limit_tokens: 10
+  rate_limit_refill_per_second: 1.0
+  health_check_workers: 8
+  health_check_timeout: 5.0
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+# Used by: run_dashboard(host, port) / run_dashboard_thread(host, port)
+dashboard:
+  host: "0.0.0.0"
+  port: 5000
+  max_history: 50       # maximum update entries kept in memory for late-joining clients
