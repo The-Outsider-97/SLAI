@@ -29,7 +29,6 @@ import urllib.request
 import urllib.error
 import threading
 
-from numpy.__config__ import CONFIG
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
@@ -40,7 +39,13 @@ from .config_loader import get_config_section, load_global_config
 from .drift_detection import DriftResult
 from .health_check import HealthReport
 from .metrics_collector import MetricSnapshot
-from .resilience import *
+from .resilience import (
+    CircuitBreakerOpen,
+    CircuitBreakerRegistry,
+    RateLimitExceeded,
+    RetryPolicy,
+    TokenBucketLimiter,
+)
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Alert Manager")
@@ -243,13 +248,13 @@ class _DedupStore:
                 if isinstance(data, dict):
                     self._store = data
         except Exception as exc:
-            logger.warning("Could not load dedup state.", path=str(self._path), error=str(exc))
+            logger.warning(f"Could not load dedup state. path={self._path} error={exc}")
 
     def _save(self) -> None:
         try:
             self._path.write_text(json.dumps(self._store, indent=2))
         except Exception as exc:
-            logger.warning("Could not persist dedup state.", path=str(self._path), error=str(exc))
+            logger.warning(f"Could not persist dedup state. path={self._path} error={exc}")
 
 
 # ──────────────────────────────────────────────
@@ -387,9 +392,7 @@ class AlertManager:
         if not self._transports:
             for alert in alerts:
                 logger.warning(
-                    "No transports configured; alert logged only.",
-                    severity=alert.severity,
-                    subject=alert.subject,
+                    f"No transports configured; alert logged only. severity={alert.severity} subject={alert.subject}"
                 )
                 outcomes.append({
                     "alert_subject": alert.subject,
@@ -403,7 +406,7 @@ class AlertManager:
             try:
                 self._rate_limiter.acquire(tokens=1, block=False)
             except RateLimitExceeded as exc:
-                logger.warning("Rate limit exceeded; alert dropped.", subject=alert.subject)
+                logger.warning(f"Rate limit exceeded; alert dropped. subject={alert.subject}")
                 outcomes.append({
                     "alert_subject": alert.subject,
                     "transport": "all",
@@ -433,10 +436,7 @@ class AlertManager:
         try:
             self._retry.execute(_do_send)
             logger.info(
-                "Alert dispatched.",
-                transport=key,
-                severity=alert.severity,
-                subject=alert.subject,
+                f"Alert dispatched. transport={key} severity={alert.severity} subject={alert.subject}"
             )
             return {
                 "alert_subject": alert.subject,
@@ -445,7 +445,7 @@ class AlertManager:
                 "detail": "",
             }
         except CircuitBreakerOpen as exc:
-            logger.warning("Circuit breaker open; skipping transport.", transport=key)
+            logger.warning(f"Circuit breaker open; skipping transport. transport={key}")
             return {
                 "alert_subject": alert.subject,
                 "transport": key,
@@ -454,10 +454,7 @@ class AlertManager:
             }
         except Exception as exc:
             logger.error(
-                "Failed to dispatch alert after retries.",
-                transport=key,
-                subject=alert.subject,
-                error=str(exc),
+                f"Failed to dispatch alert after retries. transport={key} subject={alert.subject} error={exc}"
             )
             return {
                 "alert_subject": alert.subject,
@@ -529,7 +526,7 @@ class AlertManager:
                 recipient_email=email_cfg.get("recipient_email", ""),
                 use_tls=bool(email_cfg.get("use_tls", True)),
             ))
-            logger.info(f"{CONFIG} Email transport enabled. recipient={email_cfg.get('recipient_email')}")
+            logger.info(f"Email transport enabled. recipient={email_cfg.get('recipient_email')}")
 
         slack_cfg = cfg.get("slack", {})
         if slack_cfg.get("enabled", False):
@@ -538,7 +535,7 @@ class AlertManager:
                 channel=slack_cfg.get("channel", "#alerts"),
                 username=slack_cfg.get("username", "SLAI Monitor"),
             ))
-            logger.info(f"{CONFIG} Slack transport enabled. channel={slack_cfg.get('channel')}")
+            logger.info(f"Slack transport enabled. channel={slack_cfg.get('channel')}")
 
         webhook_cfg = cfg.get("webhook", {})
         if webhook_cfg.get("enabled", False):
@@ -548,7 +545,7 @@ class AlertManager:
                 secret_value=webhook_cfg.get("secret_value", ""),
                 timeout=float(webhook_cfg.get("timeout_seconds", 5.0)),
             ))
-            logger.info(f"{CONFIG} Webhook transport enabled. url={webhook_cfg.get('url')}")
+            logger.info(f"Webhook transport enabled. url={webhook_cfg.get('url')}")
 
         return cls(
             transports=transports,
