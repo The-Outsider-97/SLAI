@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.2.0"
 
 import hashlib
 import json
@@ -8,8 +8,8 @@ import time
 
 from typing import Any, Dict, Optional
 
-from src.agents.base_agent import BaseAgent
-from src.agents.base.issue_handler import (
+from .base_agent import BaseAgent
+from .base.issue_handler import (
     handle_common_dependency_error,
     handle_memory_error,
     handle_network_error,
@@ -18,20 +18,24 @@ from src.agents.base.issue_handler import (
     handle_timeout_error,
     handle_unicode_emoji_error,
 )
-from src.agents.handler.adaptive_retry_policy import AdaptiveRetryPolicy
-from src.agents.handler.escalation_manager import EscalationManager
-from src.agents.handler.handler_memory import HandlerMemory
-from src.agents.handler.handler_policy import HandlerPolicy
-from src.agents.handler.sla_policy import SLARecoveryPolicy
-from src.agents.handler.strategy_selector import ProbabilisticStrategySelector
-from src.agents.handler.utils.config_loader import get_config_section, load_global_config
-from logs.logger import PrettyPrinter, get_logger
+from .handler.adaptive_retry_policy import AdaptiveRetryPolicy
+from .handler.escalation_manager import EscalationManager
+from .handler.handler_memory import HandlerMemory
+from .handler.handler_policy import HandlerPolicy
+from .handler.sla_policy import SLARecoveryPolicy
+from .handler.strategy_selector import ProbabilisticStrategySelector
+from .handler.utils.config_loader import get_config_section, load_global_config
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Handler Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class HandlerAgent(BaseAgent):
     """Cross-agent reliability layer for failure normalization and recovery orchestration."""
+    _SEVERITY_CRITICAL_TAGS = ("critical", "fatal", "security", "data loss")
+    _SEVERITY_HIGH_TAGS = ("oom", "outofmemory", "memory", "runtime", "dependency")
+    _SEVERITY_MEDIUM_TAGS = ("timeout", "network", "connection")
+    _RETRYABLE_TAGS = ("timeout", "network", "connection", "resource busy", "temporary")
 
     def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
@@ -117,17 +121,17 @@ class HandlerAgent(BaseAgent):
 
         lowered = f"{error_type} {error_message}".lower()
 
-        if any(tag in lowered for tag in ["critical", "fatal", "security", "data loss"]):
+        if any(tag in lowered for tag in self._SEVERITY_CRITICAL_TAGS):
             severity = "critical"
-        elif any(tag in lowered for tag in ["oom", "outofmemory", "memory", "runtime", "dependency"]):
+        elif any(tag in lowered for tag in self._SEVERITY_HIGH_TAGS):
             severity = "high"
-        elif any(tag in lowered for tag in ["timeout", "network", "connection"]):
+        elif any(tag in lowered for tag in self._SEVERITY_MEDIUM_TAGS):
             severity = "medium"
         else:
             severity = "low"
 
         retryable = (
-            any(tag in lowered for tag in ["timeout", "network", "connection", "resource busy", "temporary"])
+            any(tag in lowered for tag in self._RETRYABLE_TAGS)
             and "invalid" not in lowered
         )
 
@@ -178,7 +182,9 @@ class HandlerAgent(BaseAgent):
             current = self.shared_memory.get(key) or []
             current.append(telemetry_event)
             max_items = self.handler_config.get("telemetry_buffer_size", 1000)
-            self.shared_memory.set(key, current[-max_items:])
+            if len(current) > max_items:
+                del current[:-max_items]
+            self.shared_memory.set(key, current)
 
         logger.info(
             "[HandlerAgent][Observability] failure_type=%s severity=%s recovered=%s",
