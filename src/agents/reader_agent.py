@@ -5,9 +5,9 @@ import asyncio
 
 from typing import Any, Awaitable, Callable, Dict, List, TypeVar
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
-from src.agents.reader.utils.reader_error import ReaderError
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base_agent import BaseAgent
+from .reader.utils.reader_error import ReaderError
 from src.agents.reader import (
     ConversionEngine,
     ParserEngine,
@@ -15,12 +15,13 @@ from src.agents.reader import (
     ReaderMemory,
     RecoveryEngine,
 )
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reader Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 T = TypeVar("T")
+_FORMAT_TOKEN_PATTERN = re.compile(r"\.?[a-zA-Z0-9]+")
 
 class ReaderAgent(BaseAgent):
     """Thin facade for reader-domain orchestration (parse -> recover -> convert|merge)."""
@@ -44,6 +45,7 @@ class ReaderAgent(BaseAgent):
         self.output_dir = str(self.reader_agent_config.get("output_dir", "output/reader"))
         self.max_concurrency = max(1, int(self.reader_agent_config.get("max_concurrency", 4)))
         self.enable_cache = bool(self.reader_agent_config.get("enable_cache", True))
+        self._supported_output_formats_sorted = tuple(sorted(self.conversion_engine.supported_output_formats))
 
         logger.info("Reader Agent initialized")
 
@@ -65,9 +67,8 @@ class ReaderAgent(BaseAgent):
         if not instruction:
             return None
 
-        supported = sorted(self.conversion_engine.supported_output_formats)
-        tokens = set(re.findall(r"\.?[a-zA-Z0-9]+", instruction.lower()))
-        for fmt in supported:
+        tokens = set(_FORMAT_TOKEN_PATTERN.findall(instruction.lower()))
+        for fmt in self._supported_output_formats_sorted:
             if fmt in tokens or f".{fmt}" in tokens:
                 return fmt
         return None
