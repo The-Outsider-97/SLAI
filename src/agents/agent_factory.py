@@ -74,6 +74,8 @@ class AgentFactory:
         "reasoning",
         "safety",
     }
+    _import_cache: Dict[str, Any] = {}
+    _constructor_signature_cache: Dict[type, Dict[str, Any]] = {}
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
