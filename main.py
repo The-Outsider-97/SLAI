@@ -20,34 +20,9 @@ import math
 from pathlib import Path
 from datetime import datetime
 from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent
-from PyQt5.QtGui import (
-    QColor,
-    QFont,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QPolygonF,
-    QBrush,
-    QRadialGradient,
-    QRegion,
-    QTransform
-)
-from PyQt5.QtWidgets import (
-    QApplication,
-    QLabel,
-    QPushButton,
-    QWidget,
-    QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
-    QFrame,
-    QVBoxLayout,
-    QDialog,
-    QLineEdit,
-    QMessageBox,
-    QHBoxLayout,
-    QTextEdit,
-)
+from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QBrush, QRadialGradient, QRegion, QTransform
+from PyQt5.QtWidgets import (QApplication, QLabel, QPushButton, QWidget, QGraphicsDropShadowEffect,
+                             QGraphicsOpacityEffect, QFrame, QVBoxLayout, QDialog, QLineEdit, QMessageBox, QHBoxLayout, QTextEdit)
 
 from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
 from src.functions.auth import AuthService
