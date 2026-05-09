@@ -1,0 +1,152 @@
+agent_meta:
+  default_version: 1.0.0
+  required_fields:
+  - name
+  - class_name
+  - module_path
+  validation_rules:
+    max_name_length: 50
+    allowed_modules:
+    - src.agents
+    strict_semver: false
+    allow_dotted_names: true
+  default_author: Unknown
+  default_status: active
+
+agent_registry:
+  allow_overwrite: false
+  allow_missing_dependencies: true
+  validate_graph_on_register: true
+  snapshot_include_config: false
+
+factory_cache:
+  name: "factory_cache"
+  max_size: 256
+  default_ttl_seconds: 300
+  cleanup_interval_seconds: 0
+  record_stats: true
+
+factory_obs:
+  name: "factory_observability"
+  enabled: true
+  event_buffer_size: 500
+  record_events: true
+  record_timings: true
+  record_counters: true
+  record_gauges: true
+  include_events_in_snapshot: false
+  snapshot_event_limit: 50
+  auto_counter_events: false
+  auto_gauge_events: false
+  auto_timing_events: false
+
+metrics:
+  demographic_parity_diff: 0.0
+  max_adaptation_rate: 0.2
+  calibration_error: 0.0
+  history_size: 100
+  accuracy: 1.0
+  adaptation_factors:
+    risk_threshold: 1.0
+    exploration_rate: 1.0
+    learning_rate: 1.0
+    bias_threshold: 1.0
+  pid_params:
+    Kp: 0.15
+    Ki: 0.05
+    Kd: 0.02
+  error_config:
+    fairness_target: 1.0
+    performance_target: 0.0
+    bias_target: 0.0
+  safety_bounds:
+    medical: 0.5
+    default: 0.4
+  enabled: true
+  adaptation_history_size: 100
+  metric_types:
+  - fairness
+  - performance
+  - bias
+  integral_limit: 10.0
+  return_tensors: false
+  strict_metric_validation: false
+  record_adaptation_history: true
+  target_parameters:
+    exploration_rate:
+      min: 0.0
+      max: 1.0
+    learning_rate:
+      min: 0.0
+      max: 1.0
+    risk_threshold:
+      min: 0.0
+      max: 1.0
+    bias_threshold:
+      min: 0.0
+      max: 1.0
+
+oopa:
+  name: out_of_process_agent_proxy
+  enabled: true
+  worker_module: src.agents.factory.remote_worker
+  python_executable: ''
+  timeout_seconds: 60.0
+  max_retries: 0
+  retry_backoff_seconds: 0.0
+  max_stdout_chars: 20000
+  max_stderr_chars: 10000
+  max_history_size: 50
+  return_envelope: false
+  include_worker_stderr: true
+  strict_worker_response: false
+  allow_private_methods: false
+  pass_through_env: true
+  allowed_methods:
+  - execute
+  - perform_task
+  - act
+  - predict
+  - get_action
+  - failure_normalization
+  allowed_module_prefixes:
+  - src.agents
+  environment:
+    PYTHONIOENCODING: utf-8
+    PYTHONUTF8: '1'
+
+remote_worker:
+  name: remote_worker
+  enabled: true
+  allowed_module_prefixes:
+    - src.agents
+  allowed_methods:
+    - execute
+    - perform_task
+    - act
+    - predict
+    - get_action
+    - failure_normalization
+  allow_private_methods: false
+  inject_constructor_dependencies: true
+  strict_dependency_injection: false
+  fallback_without_dependencies: true
+  max_stdin_chars: 1000000
+  max_result_chars: 2000000
+  include_diagnostics: true
+  include_error_payload: true
+  redact_payload: true
+  json_sort_keys: false
+  constructor_dependencies:
+    shared_memory:
+      enabled: true
+      module_path: src.agents.collaborative.shared_memory
+      class_name: SharedMemory
+      args: []
+      kwargs: {}
+    agent_factory:
+      enabled: true
+      module_path: src.agents.agent_factory
+      class_name: AgentFactory
+      args: []
+      kwargs: {}
