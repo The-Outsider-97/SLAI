@@ -1,12 +1,24 @@
+import ctypes
+import platform
+import sys, os
+from importlib.util import find_spec
+
+if sys.platform == "win32":
+    try:
+        import torch
+        torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "lib")
+        if os.path.exists(torch_lib_path):
+            # This is the crucial line for Python 3.8+
+            os.add_dll_directory(torch_lib_path)
+    except (ImportError, AttributeError):
+        pass
+
+import io
 import json
 import math
-import sys
-import subprocess
-import io
 
 from pathlib import Path
 from datetime import datetime
-
 from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent
 from PyQt5.QtGui import (
     QColor,
