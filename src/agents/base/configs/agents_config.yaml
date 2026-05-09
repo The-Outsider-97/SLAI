@@ -1,5 +1,172 @@
 sensitive_attributes: ["gender", "age_group", "race", "education_level"]
 
+issue_database:
+    host: 'localhost'
+    port: 5432
+    database: 'ai_issues'
+    user: 'user'
+    password: ''
+
+operations_notification:
+    email:
+        enabled: true
+        from: "ai-agent@yourdomain.com"
+        to: "ops@yourdomain.com"
+        subject: "URGENT: AI System Hazard"
+        smtp_host: "smtp.yourdomain.com"
+        smtp_port: 587
+        username: "ai-agent"
+        password: "secure-password"
+        use_tls: true
+
+    webhook:
+        enabled: true
+        url: "https://hooks.slack.com/services/..."
+
+    external_logging:
+        enabled: true
+        url: "https://logging-service.yourdomain.com/ingest"
+
+
+agent_factory:
+    enabled: true
+    auto_register_default_agents: true
+    default_version: "2.2.0"
+    strict_base_agent_subclass: false
+    use_instance_cache: true
+    cache_agent_instances: true
+    cache_imports: true
+    cache_constructor_signatures: true
+    allow_runtime_config_override: true
+    allow_unknown_constructor_kwargs: false
+    create_dependencies: true
+    probe_torch_runtime: true
+    block_torch_required_when_unavailable: true
+    enable_out_of_process_fallback: true
+    publish_observability_events: true
+    record_creation_history: true
+    creation_history_size: 100
+    diagnostics_import_check: true
+    diagnostics_constructor_check: true
+    discovery_enabled: false
+    discovery_packages: []
+    required_action_methods:
+      - predict
+      - get_action
+      - act
+      - perform_task
+      - execute
+    native_failure_patterns:
+      - winerror 1114
+      - c10.dll
+      - torch_cuda.dll
+      - cuda error
+    aliases:
+      web: browser
+      obs: observability
+      net: network
+    out_of_process_fallback_agents:
+      - adaptive
+      - alignment
+      - evaluation
+      - knowledge
+      - language
+      - learning
+      - perception
+      - planning
+      - reasoning
+      - safety
+    dependency_profiles:
+      browser:
+        torch_required: false
+        notes: "Selenium/browser stack only."
+      planning:
+        torch_required: false
+        notes: "Core planning is torch-free; perception heads are optional."
+      knowledge:
+        torch_required: false
+        notes: "SBERT/transformers are optional; TF-IDF path can run without torch."
+      reasoning:
+        torch_required: false
+        notes: "Rule/probabilistic reasoning core does not require torch."
+      language:
+        torch_required: false
+        notes: "Lightweight language mode available without torch."
+      evaluation:
+        torch_required: false
+        notes: "Core evaluation works without deep anomaly torch module."
+      observability:
+        torch_required: false
+        notes: "Observability orchestration is telemetry-first and torch-free."
+      network:
+        torch_required: false
+        notes: "Network transport/routing/reliability stack is torch-free."
+      safety:
+        torch_required: false
+        notes: "Safety policy checks run without torch."
+      learning:
+        torch_required: true
+        notes: "RL/meta-learning pipelines require torch."
+      alignment:
+        torch_required: true
+        notes: "Value embedding model is torch-based."
+      adaptive:
+        torch_required: true
+        notes: "Adaptive RL workers are torch-based."
+      perception:
+        torch_required: true
+        notes: "Perception encoder/decoder stack is torch-based."
+    agent_specs:
+      adaptive:
+        module_path: src.agents.adaptive_agent
+        class_name: AdaptiveAgent
+      alignment:
+        module_path: src.agents.alignment_agent
+        class_name: AlignmentAgent
+      browser:
+        module_path: src.agents.browser_agent
+        class_name: BrowserAgent
+      evaluation:
+        module_path: src.agents.evaluation_agent
+        class_name: EvaluationAgent
+      execution:
+        module_path: src.agents.execution_agent
+        class_name: ExecutionAgent
+      handler:
+        module_path: src.agents.handler_agent
+        class_name: HandlerAgent
+      knowledge:
+        module_path: src.agents.knowledge_agent
+        class_name: KnowledgeAgent
+      language:
+        module_path: src.agents.language_agent
+        class_name: LanguageAgent
+      learning:
+        module_path: src.agents.learning_agent
+        class_name: LearningAgent
+      network:
+        module_path: src.agents.network_agent
+        class_name: NetworkAgent
+      observability:
+        module_path: src.agents.observability_agent
+        class_name: ObservabilityAgent
+      perception:
+        module_path: src.agents.perception_agent
+        class_name: PerceptionAgent
+      planning:
+        module_path: src.agents.planning_agent
+        class_name: PlanningAgent
+      reader:
+        module_path: src.agents.reader_agent
+        class_name: ReaderAgent
+      reasoning:
+        module_path: src.agents.reasoning_agent
+        class_name: ReasoningAgent
+      safety:
+        module_path: src.agents.safety_agent
+        class_name: SafetyAgent
+
+
 base_agent:
     defer_initialization: true
     memory_profile: low
@@ -31,6 +198,7 @@ base_agent:
     shared_memory_event_key_prefix: agent_events
     warm_start_key_prefix: warm_state
     retraining_flag_key_prefix: retraining_flag
+
 
 adaptive_agent:
   state_dim: 10
@@ -85,6 +253,7 @@ adaptive_agent:
   skills: {}
   handlers: {}
   env: {}
+
 
 alignment_agent:
   safety_buffer: 0.10
@@ -163,43 +332,14 @@ evaluation_agent:
     collisions: 0
     success: true
 
-issue_database:
-    host: 'localhost'
-    port: 5432
-    database: 'ai_issues'
-    user: 'user'
-    password: ''
-
-operations_notification:
-    email:
-        enabled: true
-        from: "ai-agent@yourdomain.com"
-        to: "ops@yourdomain.com"
-        subject: "URGENT: AI System Hazard"
-        smtp_host: "smtp.yourdomain.com"
-        smtp_port: 587
-        username: "ai-agent"
-        password: "secure-password"
-        use_tls: true
-
-    webhook:
-        enabled: true
-        url: "https://hooks.slack.com/services/..."
-
-    external_logging:
-        enabled: true
-        url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
 
+
 handler_agent:
-    max_retries: 2
-    circuit_breaker_threshold: 5
-    cooldown_seconds: 30
-    failure_budget_window_seconds: 300
-    checkpoint_max_age_seconds: 600
     telemetry_buffer_size: 1000
-    evaluator_hooks_enabled: true
+    checkpoint_max_age_seconds: 600
+
 
 knowledge_agent:
     source: "local_files"
@@ -225,7 +365,9 @@ knowledge_agent:
     safety_check_callback: foodie_security.validate_action
     max_workers: 8
 
+
 language_agent: {}
+
 
 learning_agent:
     rl_algorithm: null
@@ -256,6 +398,7 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
+
 network_agent:
     max_delivery_attempts: 3
     retry_sleep_enabled: False
@@ -268,6 +411,7 @@ network_agent:
     history_shared_key:
         network_agent: "history"
     max_history: 200
+
 
 observability_agent:
     enabled: true
@@ -317,6 +461,7 @@ observability_agent:
         safety_agent_names: ["safety", "safety_agent", "SafetyAgent"]
         evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
 
+
 perception_agent:
     device: "cpu"
     embed_dim: 512
@@ -332,9 +477,12 @@ perception_agent:
     mse_weight: 1.0     # for hybrid loss
     contrastive_weight: 1.0  # for hybrid loss
 
+
 planning_agent: {}
 
+
 privacy_agent: {}
+
 
 quality_agent:
     enabled: true
@@ -380,12 +528,14 @@ quality_agent:
         error_key_prefix: quality_agent.error
         event_channel: quality.events
 
+
 reader_agent:
     default_output_format: "txt"
     output_dir: "output/reader"
     max_concurrency: 4
     enable_cache: true
     recovery_min_quality_score: 0.55
+
 
 reasoning_agent:
     learning_rate: 0.01
