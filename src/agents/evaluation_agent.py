@@ -27,30 +27,30 @@ from dataclasses import dataclass, field
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
 from src.utils.interpretability import InterpretabilityHelper
 from src.utils.database import IssueDBConnector, FallbackIssueTracker
-from src.agents.evaluators.adaptive_risk import RiskAdaptation
-from src.agents.evaluators.base_infra import EvalTuner
-from src.agents.evaluators.safety_evaluator import SafetyEvaluator
-from src.agents.evaluators.behavioral_validator import BehavioralValidator
-from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
-from src.agents.evaluators.autonomous_evaluator import AutonomousEvaluator
-from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
-from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
-from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
-from src.agents.evaluators.modules.certification_framework import CertificationStatus
-from src.agents.evaluators.utils.evaluation_errors import OperationalError, CertificationError
-from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
-from src.agents.evaluators.utils.evaluation_transformer import EvaluationTransformer
-from src.agents.evaluators.utils.validation_protocol import ValidationProtocol
-from src.agents.evaluators.utils.static_analyzer import StaticAnalyzer
-from src.agents.safety.safety_guard import SafetyGuard
-from logs.logger import get_logger, PrettyPrinter
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base_agent import BaseAgent
+from .evaluators.adaptive_risk import RiskAdaptation
+from .evaluators.base_infra import EvalTuner
+from .evaluators.safety_evaluator import SafetyEvaluator
+from .evaluators.behavioral_validator import BehavioralValidator
+from .evaluators.efficiency_evaluator import EfficiencyEvaluator
+from .evaluators.autonomous_evaluator import AutonomousEvaluator
+from .evaluators.statistical_evaluator import StatisticalEvaluator
+from .evaluators.performance_evaluator import PerformanceEvaluator
+from .evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
+from .evaluators.modules.certification_framework import CertificationStatus
+from .evaluators.utils.evaluation_errors import OperationalError, CertificationError
+from .evaluators.utils.evaluators_calculations import EvaluatorsCalculations
+from .evaluators.utils.evaluation_transformer import EvaluationTransformer
+from .evaluators.utils.validation_protocol import ValidationProtocol
+from .evaluators.utils.static_analyzer import StaticAnalyzer
+from .safety.safety_guard import SafetyGuard
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Evaluation Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class FallbackEvaluatorAgent(BaseAgent):
     def __init__(self,
