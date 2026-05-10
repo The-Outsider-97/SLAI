@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.1.0"
 
 import hashlib
 import json
@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .base_agent import BaseAgent
-from .base.issue_handler import (
+from .base.issue_handler import (IssueHandler,
     handle_common_dependency_error,
     handle_memory_error,
     handle_network_error,
@@ -18,13 +18,14 @@ from .base.issue_handler import (
     handle_timeout_error,
     handle_unicode_emoji_error,
 )
+from .base.utils.main_config_loader import get_config_section, load_global_config
 from .handler.adaptive_retry_policy import AdaptiveRetryPolicy
 from .handler.escalation_manager import EscalationManager
-from .handler.handler_memory import HandlerMemory
 from .handler.handler_policy import HandlerPolicy
 from .handler.sla_policy import SLARecoveryPolicy
 from .handler.strategy_selector import ProbabilisticStrategySelector
-from .handler.utils.config_loader import get_config_section, load_global_config
+from .handler.failure_intelligence import FailureIntelligence
+from .handler.utils.handler_helpers import *
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Handler Agent")
@@ -40,16 +41,17 @@ class HandlerAgent(BaseAgent):
     def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.config = load_global_config()
-        self.handler_config = get_config_section("handler_agent")
+        self.agent_config = get_config_section("handler_agent")
         if config:
-            self.handler_config.update(config)
+            self.agent_config.update(config)
 
-        self.memory = HandlerMemory(config=self.handler_config)
-        self.policy = HandlerPolicy(config=self.handler_config)
-        self.adaptive_retry_policy = AdaptiveRetryPolicy(config=self.handler_config)
-        self.strategy_selector = ProbabilisticStrategySelector(config=self.handler_config)
-        self.sla_policy = SLARecoveryPolicy(config=self.handler_config)
-        self.escalation_manager = EscalationManager(config=self.handler_config)
+        self.policy = HandlerPolicy()
+        self.adaptive_retry_policy = AdaptiveRetryPolicy()
+        self.strategy_selector = ProbabilisticStrategySelector()
+        self.sla_policy = SLARecoveryPolicy()
+        self.escalation_manager = EscalationManager()
+        self.failure_intelligence = FailureIntelligence()
+        self.issue_handler = IssueHandler()
 
         self.recovery_strategies = {
             "network": handle_network_error,
@@ -148,7 +150,7 @@ class HandlerAgent(BaseAgent):
             "severity": severity,
             "retryable": retryable,
             "context_hash": context_hash,
-            "timestamp": time.time(),
+            "timestamp": utc_timestamp(),
         }
 
         return normalized
@@ -161,11 +163,18 @@ class HandlerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Write structured telemetry to logs + shared memory for adaptation/evaluation."""
         context = context or {}
+        telemetry_history = self._telemetry_history()
+        insight = self.failure_intelligence.analyze(
+            normalized_failure=normalized_failure,
+            context=context,
+            telemetry_history=telemetry_history,
+        )
         telemetry_event = {
             "event_type": "handler_recovery",
             "timestamp": time.time(),
-            "failure": normalized_failure,
+            "failure": normalize_failure_payload(normalized_failure),
             "recovery": recovery_result,
+            "insight": insight.to_dict(),
             "context": {
                 "route": context.get("route"),
                 "agent": context.get("agent"),
@@ -175,15 +184,11 @@ class HandlerAgent(BaseAgent):
             "strategy_distribution": recovery_result.get("strategy_distribution", {}),
         }
 
-        self.memory.append_telemetry(telemetry_event)
-
         key = "handler:telemetry"
         if hasattr(self.shared_memory, "get") and hasattr(self.shared_memory, "set"):
             current = self.shared_memory.get(key) or []
-            current.append(telemetry_event)
-            max_items = self.handler_config.get("telemetry_buffer_size", 1000)
-            if len(current) > max_items:
-                del current[:-max_items]
+            max_items = coerce_int(self.agent_config.get("telemetry_buffer_size", 1000), 1000, minimum=10, maximum=10000)
+            bounded_append(current, telemetry_event, max_items=max_items)
             self.shared_memory.set(key, current)
 
         logger.info(
@@ -206,16 +211,17 @@ class HandlerAgent(BaseAgent):
         context = context or {}
 
         postmortem = {
-            "timestamp": time.time(),
+            "timestamp": utc_timestamp(),
             "failure_type": normalized_failure.get("type"),
             "severity": normalized_failure.get("severity"),
             "retryable": normalized_failure.get("retryable"),
             "context_hash": normalized_failure.get("context_hash"),
             "recovery_status": recovery_result.get("status"),
             "strategy": recovery_result.get("strategy"),
-            "recommendation": recovery_result.get("recommendation", "collect_more_signals"),
             "task_id": context.get("task_id"),
             "telemetry_ref": telemetry.get("timestamp"),
+            "failure_signature": telemetry.get("insight", {}).get("signature"),
+            "recommendation": telemetry.get("insight", {}).get("recommendation", recovery_result.get("recommendation", "collect_more_signals")),
         }
 
         if hasattr(self.shared_memory, "get") and hasattr(self.shared_memory, "set"):
@@ -288,22 +294,28 @@ class HandlerAgent(BaseAgent):
             "error_message": normalized_failure.get("message", ""),
         }
 
-        checkpoint_id = self.memory.save_checkpoint(
-            label="pre_recovery",
-            state={"task_data": task_data, "context": context, "target_agent_name": target_agent_name},
-            metadata={
-                "strategy": strategy_key,
-                "strategy_distribution": strategy_distribution,
-                "failure_type": normalized_failure.get("type"),
-                "sla": sla,
-            },
-        )
+        checkpoint_id = f"handler:checkpoint:{int(time.time() * 1000)}"
+        if hasattr(self.shared_memory, "set"):
+            self.shared_memory.set(
+                checkpoint_id,
+                {
+                    "label": "pre_recovery",
+                    "state": {"task_data": task_data, "context": context, "target_agent_name": target_agent_name},
+                    "metadata": {
+                        "strategy": strategy_key,
+                        "strategy_distribution": strategy_distribution,
+                        "failure_type": normalized_failure.get("type"),
+                        "sla": sla,
+                    },
+                },
+                ttl=int(self.agent_config.get("checkpoint_max_age_seconds", 600)),
+            )
 
         retries = 0
         last_result = {"status": "failed", "reason": "unattempted"}
 
         while self.policy.retries_allowed(retries, max_retries=max_retries) and sla.get("can_retry", False):
-            result = handler(target_agent, task_data, error_info)
+            result = handler(target_agent, task_data, error_info, self.issue_handler)
             last_result = result if isinstance(result, dict) else {"status": "recovered", "result": result}
 
             if not (isinstance(last_result, dict) and last_result.get("status") == "failed"):
@@ -341,7 +353,7 @@ class HandlerAgent(BaseAgent):
                 except Exception:
                     pass
 
-        restored_state = self.memory.restore_checkpoint(checkpoint_id)
+        restored_state = self.shared_memory.get(checkpoint_id) if hasattr(self.shared_memory, "get") else None
         self.policy.record_failure(target_agent_name)
         failed = {
             "status": "failed",
@@ -367,14 +379,15 @@ class HandlerAgent(BaseAgent):
     def _telemetry_history(self) -> list[Dict[str, Any]]:
         if hasattr(self.shared_memory, "get"):
             return self.shared_memory.get("handler:telemetry") or []
-        return self.memory.recent_telemetry(limit=self.handler_config.get("telemetry_buffer_size", 1000))
+        return []
 
 
 if __name__ == "__main__":
     print("\n=== Running Handler Agent ===\n")
     printer.status("TEST", "Starting Handler Agent tests", "info")
-    from src.agents.agent_factory import AgentFactory
-    from src.agents.collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+    from .adaptive_agent import AdaptiveAgent
 
     memory = SharedMemory()
     factory = AgentFactory()
