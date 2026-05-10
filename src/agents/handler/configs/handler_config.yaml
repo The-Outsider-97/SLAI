@@ -37,6 +37,40 @@ handler_agent:
 memory:
   max_checkpoints: 100
   max_telemetry_events: 1000
+  max_postmortems: 1000
+  default_checkpoint_ttl_seconds: 600
+  default_telemetry_ttl_seconds: null
+  default_postmortem_ttl_seconds: null
+  max_checkpoint_state_chars: 200000
+  max_checkpoint_metadata_chars: 20000
+  max_event_chars: 80000
+  max_query_results: 250
+  copy_on_read: true
+  sanitize_payloads: true
+  mirror_to_shared_memory: false
+  shared_memory_checkpoint_ttl_seconds: 600
+  shared_memory_telemetry_ttl_seconds: null
+  shared_memory_postmortem_ttl_seconds: null
+  error_policy:
+    name: handler_memory.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+intelligence:
+  max_message_chars: 280
+  confidence_floor: 0.35
+  confidence_ceiling: 0.92
+
 
 policy:
   max_retries: 2

@@ -1,4 +1,5 @@
-import yaml
+import yaml # type: ignore
+
 from pathlib import Path
 
 CONFIG_PATH = "handler/configs/handler_config.yaml"

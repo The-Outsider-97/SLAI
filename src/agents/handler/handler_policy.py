@@ -3,11 +3,11 @@ import time
 from collections import defaultdict
 from typing import Dict, Optional
 
-from src.agents.handler.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Handler Policy")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class HandlerPolicy:
     """Policy guardrails for retries, circuit breaker, and evaluator hooks."""

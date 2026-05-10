@@ -9,6 +9,7 @@ The `src/agents/handler/` package provides lightweight operational guardrails fo
 - **`ProbabilisticStrategySelector`** for data-informed strategy routing.
 - **`SLARecoveryPolicy`** for budget-aware retry constraints.
 - **`EscalationManager`** for typed handoff payloads.
+- **`FailureIntelligence`** for deterministic failure signatures, category hints, and bounded confidence recommendations.
 - **`HandlerError`** for structured, severity-aware error reporting.
 - **YAML-driven configuration** loaded through `utils/config_loader.py`.
 
@@ -27,6 +28,7 @@ src/agents/handler/
 ├── strategy_selector.py
 ├── sla_policy.py
 ├── escalation_manager.py
+├── failure_intelligence.py
 ├── configs/
 │   └── handler_config.yaml
 └── utils/

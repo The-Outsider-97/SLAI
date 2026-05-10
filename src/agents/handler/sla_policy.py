@@ -2,11 +2,11 @@ import time
 
 from typing import Any, Dict, Optional
 
-from src.agents.handler.utils.config_loader import get_config_section, load_global_config
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import get_config_section, load_global_config
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLA Recovery Policy")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class SLARecoveryPolicy:
