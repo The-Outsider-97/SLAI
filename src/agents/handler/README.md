@@ -1,19 +1,40 @@
-# Handler Agent Utilities
+# Handler Agent Subsystem (`src/agents/handler`)
 
-## Overview
-The `src/agents/handler/` package provides lightweight operational guardrails for agent orchestration:
+## Purpose
+The Handler subsystem provides a production-oriented resilience layer for SLAI orchestration. It helps the Handler Agent and peer agents make consistent decisions around retries, safeguards, escalation, and postmortem memory while keeping behavior configurable and explainable.
 
-- **`HandlerMemory`** for checkpointing and telemetry buffering.
-- **`HandlerPolicy`** for retries and circuit-breaker control.
-- **`AdaptiveRetryPolicy`** for fingerprint-aware retry budgets.
-- **`ProbabilisticStrategySelector`** for data-informed strategy routing.
-- **`SLARecoveryPolicy`** for budget-aware retry constraints.
-- **`EscalationManager`** for typed handoff payloads.
-- **`FailureIntelligence`** for deterministic failure signatures, category hints, and bounded confidence recommendations.
-- **`HandlerError`** for structured, severity-aware error reporting.
-- **YAML-driven configuration** loaded through `utils/config_loader.py`.
+This package is intentionally modular:
+- policy and safety controls are separated from
+- retry budgeting and strategy selection, which are separated from
+- escalation routing and memory retention.
 
-This module is intentionally minimal and can be used by higher-level agents as a resilience layer around task execution.
+---
+
+## What’s Included
+
+- **`HandlerMemory`** (`handler_memory.py`)  
+  Bounded in-process storage for checkpoints, telemetry, and postmortems, with optional mirroring to shared memory.
+
+- **`HandlerPolicy`** (`handler_policy.py`)  
+  Retry and circuit-breaker governance with policy decisions and failure-budget controls.
+
+- **`AdaptiveRetryPolicy`** (`adaptive_retry_policy.py`)  
+  Dynamic retry budget recommendations based on failure characteristics, confidence, and short-term history.
+
+- **`ProbabilisticStrategySelector`** (`strategy_selector.py`)  
+  Strategy ranking/selection support to choose the most suitable recovery path.
+
+- **`SLARecoveryPolicy`** (`sla_policy.py`)  
+  SLA-aware attempt/timeboxing decisions, including pressure-aware mode recommendations.
+
+- **`EscalationManager`** (`escalation_manager.py`)  
+  Structured handoff decisioning and payload creation for cross-agent escalation.
+
+- **`FailureIntelligence`** (`failure_intelligence.py`)  
+  Failure normalization, signatures/fingerprints, category/severity hints, and recommendation scaffolding.
+
+- **Utility layer** (`utils/`)  
+  Shared error schema, config loading, normalization/coercion helpers.
 
 ---
 
@@ -22,152 +43,213 @@ This module is intentionally minimal and can be used by higher-level agents as a
 ```text
 src/agents/handler/
 ├── __init__.py
-├── handler_memory.py
-├── handler_policy.py
+├── README.md
 ├── adaptive_retry_policy.py
-├── strategy_selector.py
-├── sla_policy.py
 ├── escalation_manager.py
 ├── failure_intelligence.py
+├── handler_memory.py
+├── handler_policy.py
+├── sla_policy.py
+├── strategy_selector.py
 ├── configs/
 │   └── handler_config.yaml
 └── utils/
     ├── __init__.py
     ├── config_loader.py
-    └── handler_error.py
+    ├── handler_error.py
+    └── handler_helpers.py
 ```
 
 ---
 
-## Components
+## System Flow (Decision Pipeline)
 
-### `HandlerMemory`
-File: `handler_memory.py`
+```mermaid
+flowchart TD
+    A[Incoming Task / Failure Context] --> B[FailureIntelligence\nNormalize + classify + fingerprint]
+    B --> C[SLARecoveryPolicy\nResolve remaining budget + pressure]
+    B --> D[AdaptiveRetryPolicy\nRecommend retry budget]
+    B --> E[HandlerPolicy\nCircuit breaker + retry gate]
 
-`HandlerMemory` stores short-lived execution artifacts with bounded memory use.
+    C --> F{Can continue safely\nwithin SLA?}
+    D --> F
+    E --> F
 
-#### Responsibilities
-- Keeps a bounded deque of **state checkpoints** (`max_checkpoints`).
-- Keeps a bounded deque of **telemetry events** (`max_telemetry_events`).
-- Provides restore/search APIs for checkpoint recovery and incident triage.
+    F -- Yes --> G[StrategySelector\nPick recovery strategy]
+    G --> H[Execute recovery attempt]
+    H --> I{Outcome}
+    I -- Success --> J[HandlerMemory\nCheckpoint + telemetry]
+    I -- Failure --> K[HandlerMemory\nPostmortem + telemetry]
+    K --> L[EscalationManager\nRoute/handoff decision]
 
-#### Public API
-- `save_checkpoint(label, state, metadata=None) -> checkpoint_id`
-  - Saves a deep-copied state snapshot.
-  - Checkpoint IDs are generated as `<label>:<epoch_ms>`.
-- `find_checkpoints(label=None, max_age=None) -> list[dict]`
-  - Returns recent checkpoints, optionally filtered by label and age.
-- `restore_checkpoint(checkpoint_id) -> Optional[dict]`
-  - Returns a deep copy of the stored state (or `None` if not found).
-- `append_telemetry(event) -> None`
-  - Appends arbitrary telemetry payloads.
-- `recent_telemetry(limit=100) -> list[dict]`
-  - Returns the most recent telemetry entries.
-
-#### Notes
-- Checkpoint payloads are deep-copied on save and restore to prevent aliasing.
-- Storage is in-memory only; restarts clear all data.
-
-### `HandlerPolicy`
-File: `handler_policy.py`
-
-`HandlerPolicy` manages failure behavior for named agents.
-
-#### Responsibilities
-- Retry gating via `max_retries`.
-- Circuit-breaker state per `agent_name`.
-- Failure-window tracking for budget-aware blocking.
-
-#### Public API
-- `can_attempt(agent_name) -> bool`
-  - `False` while breaker cooldown is active.
-- `retries_allowed(attempted_retries) -> bool`
-  - Compares retries to `max_retries`.
-- `record_failure(agent_name) -> None`
-  - Increments failure counters and may open breaker.
-- `record_success(agent_name) -> None`
-  - Resets failure counters and breaker state.
-- `breaker_status(agent_name) -> dict`
-  - Returns `is_open`, `open_until`, and `seconds_remaining`.
-
-#### Circuit-Breaker Behavior
-1. Failures are tracked by `agent_name`.
-2. If failures exceed `circuit_breaker_threshold`, breaker opens for `cooldown_seconds`.
-3. Calls to `can_attempt` return `False` until cooldown expires.
-4. `record_success` immediately clears breaker and counters.
-
-### `HandlerError`
-File: `utils/handler_error.py`
-
-`HandlerError` is a dataclass exception with normalized metadata:
-
-- `message`
-- `error_type` (default: `HandlerError`)
-- `severity` (`low | medium | high | critical`)
-- `retryable` flag
-- `context` dictionary for diagnostic payloads
-
-Use `to_dict()` when serializing errors to logs, APIs, or telemetry streams.
+    F -- No --> L
+    L --> M[Escalated target agent / terminal action]
+```
 
 ---
 
-## Configuration
-File: `configs/handler_config.yaml`
+## Component Responsibilities and Key APIs
 
-The package reads config through `utils/config_loader.py`, which caches a global parsed YAML document.
+## 1) `HandlerMemory`
+**Primary role:** bounded resilience memory and forensic traceability.
 
-### Key Sections
-- `handler_agent`: top-level runtime defaults.
-- `memory`: buffer sizes used by `HandlerMemory`.
-- `policy`: retry/circuit-breaker values used by `HandlerPolicy`.
+### Core responsibilities
+- Maintains bounded stores for:
+  - checkpoints,
+  - telemetry events,
+  - postmortems.
+- Supports lookup/filter/prune/export behavior for operational tooling.
+- Applies payload sanitization and size limits.
+- Optionally mirrors streams to SharedMemory-like backends.
 
-### Default Values (high-level)
-- Memory:
-  - `max_checkpoints: 100`
-  - `max_telemetry_events: 1000`
-- Policy:
-  - `max_retries: 2`
-  - `circuit_breaker_threshold: 5`
-  - `cooldown_seconds: 30`
-  - `failure_budget_window_seconds: 300`
+### Important usage details
+- **Constructor config overrides are applied** by deep-merging runtime `config` over the `memory` section from YAML. This keeps environment defaults while allowing targeted runtime tuning.
+- Optional shared-memory mirroring can be strict (`require_shared_memory_when_mirroring`) or soft-fail with warnings.
+
+### Representative methods
+- `save_checkpoint(...) -> str`
+- `get_checkpoint(...) -> Optional[dict]`
+- `find_checkpoints(...) -> list[dict]`
+- `append_telemetry(...) -> None`
+- `recent_telemetry(...) -> list[dict]`
+- `append_postmortem(...) -> None`
 
 ---
 
-## Basic Usage
+## 2) `HandlerPolicy`
+**Primary role:** guardrail enforcement for execution safety.
+
+### Core responsibilities
+- Retry gate enforcement.
+- Circuit-breaker lifecycle (closed/open/half-open).
+- Failure-rate and weighted-failure budget checks.
+- Explainable `PolicyDecision` emission for downstream orchestration.
+
+### Typical decision factors
+- severity/category/action/retryability,
+- rolling window failure density,
+- cooldown and half-open probe availability,
+- evaluator hook and budget states.
+
+---
+
+## 3) `AdaptiveRetryPolicy`
+**Primary role:** right-size retries to avoid both under-recovery and runaway loops.
+
+### Core responsibilities
+- Produces recommended retry limits per failure profile.
+- Applies modifiers by severity/category/history/confidence.
+- Supports suppression under consecutive failures or low-confidence regimes.
+
+---
+
+## 4) `SLARecoveryPolicy`
+**Primary role:** keep recovery behavior aligned with time budgets and SLA pressure.
+
+### Core responsibilities
+- Resolves SLA budget from context or defaults.
+- Computes mode/priority/recommended attempts under pressure.
+- Issues structured SLA decisions for orchestration consumers.
+
+### Typical outputs
+- `remaining_seconds`, `recommended_attempts`, `mode`, `can_retry`, `priority`,
+- plus enriched fields (pressure, recommendation, breach status, metadata).
+
+---
+
+## 5) `ProbabilisticStrategySelector`
+**Primary role:** rank and choose recovery strategies with bounded confidence.
+
+### Core responsibilities
+- Scores/ranks candidate strategies from normalized failure context.
+- Produces deterministic decision payloads for handler execution paths.
+
+---
+
+## 6) `EscalationManager`
+**Primary role:** produce consistent escalation routing and handoff payloads.
+
+### Core responsibilities
+- Determines if escalation is required.
+- Selects target via action/category/recommendation/severity matrices.
+- Produces typed, bounded payloads for receiving agents.
+- Can optionally emit escalation events to memory.
+
+---
+
+## 7) `FailureIntelligence`
+**Primary role:** canonical interpretation of failures before policy/action.
+
+### Core responsibilities
+- Normalize raw errors and contexts.
+- Assign category/severity/retryability hints.
+- Generate deterministic fingerprints/signatures.
+- Provide bounded recommendation metadata.
+
+---
+
+## Configuration Model
+Configuration is loaded via `utils/config_loader.py` from `configs/handler_config.yaml`.
+
+### Primary sections
+- `memory`
+- `policy`
+- `sla_policy`
+- `escalation_manager`
+- `adaptive_retry_policy`
+- `strategy_selector`
+- `failure_intelligence`
+
+### Configuration precedence
+1. YAML defaults (global baseline)
+2. subsystem-level runtime `config` overrides (constructor input)
+3. explicit method-level arguments (where supported)
+
+This precedence model ensures predictable defaults with local override flexibility.
+
+---
+
+## Operational Best Practices
+- Use stable labels for checkpoints (`before_*`, `after_*`, `rollback_*`).
+- Include correlation IDs in metadata to connect policy, memory, and escalation trails.
+- Keep telemetry/postmortem payloads concise and structured.
+- Prefer normalized `HandlerError` payloads for external boundaries.
+- Treat breaker-open and SLA-breach modes as first-class observability signals.
+- Use bounded config values and monitor saturation (deque maxlen churn can hide repeated instability).
+
+---
+
+## Minimal Integration Pattern
 
 ```python
-from src.agents.handler import HandlerMemory, HandlerPolicy
-from src.agents.handler.utils.handler_error import HandlerError, FailureSeverity
-
-memory = HandlerMemory()
-policy = HandlerPolicy()
-
-agent_name = "planner_agent"
-
-if not policy.can_attempt(agent_name):
-    raise HandlerError(
-        message="Circuit breaker open",
-        severity=FailureSeverity.HIGH,
-        retryable=True,
-        context=policy.breaker_status(agent_name),
-    )
-
-checkpoint_id = memory.save_checkpoint(
-    label="before_plan",
-    state={"task_id": "t-123", "step": "dispatch"},
-    metadata={"agent": agent_name},
+from src.agents.handler import (
+    HandlerMemory,
+    HandlerPolicy,
+    SLARecoveryPolicy,
+    EscalationManager,
 )
 
-# ... perform operation ...
+memory = HandlerMemory(config={
+    "max_checkpoints": 200,
+    "max_telemetry_events": 5000,
+})
+policy = HandlerPolicy(memory=memory)
+sla = SLARecoveryPolicy(memory=memory)
+escalation = EscalationManager(memory=memory)
 
-policy.record_success(agent_name)
-memory.append_telemetry({"event": "task_success", "checkpoint_id": checkpoint_id})
+# In handler loop:
+# 1) normalize failure/context (FailureIntelligence)
+# 2) evaluate SLA and retry guardrails
+# 3) select strategy + execute
+# 4) write telemetry/postmortem and escalate if needed
 ```
 
 ---
 
-## Operational Guidance
-- Use checkpoint labels consistently (e.g., `before_x`, `after_x`) to simplify recovery workflows.
-- Include compact but meaningful metadata in checkpoints for auditability.
-- Feed breaker status into observability dashboards to detect degraded agent loops.
-- Convert all surfaced exceptions to `HandlerError.to_dict()` before external transport.
+## Scope Boundaries
+To keep coupling low, this package does **not**:
+- execute business-domain task logic,
+- persist long-term storage by itself,
+- replace upstream orchestration governance.
+
+It provides the reliability primitives that higher-level agents can compose.
