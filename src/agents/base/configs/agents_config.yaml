@@ -337,40 +337,48 @@ execution_agent: {}
 
 
 handler_agent:
-  max_retries: 2
-  circuit_breaker_threshold: 5
-  cooldown_seconds: 30
-  failure_budget_window_seconds: 300
-  default_max_input_chars: 500
+  enabled: true
+  enable_recovery: true
+  enable_observability: true
+  enable_learning_loop: true
+  enable_escalation: true
+  enable_lightweight_fallback: true
   checkpoint_max_age_seconds: 600
   telemetry_buffer_size: 1000
-  evaluator_hooks_enabled: true
-  adaptive_retry_min: 0
-  adaptive_retry_max: 4
-  adaptive_retry_min_samples: 3
-  default_recovery_budget_seconds: 30
-  default_sla_max_attempts: 2
-  strategy_priors:
-    network: 0.20
-    timeout: 0.20
-    memory: 0.15
-    runtime: 0.25
-    dependency: 0.10
-    resource: 0.07
-    unicode: 0.03
-  escalation_matrix:
-    critical:
-      retryable: safety_agent
-      non_retryable: planning_agent
-    high:
-      retryable: planning_agent
-      non_retryable: evaluation_agent
-    medium:
-      retryable: handler_agent
-      non_retryable: planning_agent
-    low:
-      retryable: handler_agent
-      non_retryable: handler_agent
+  postmortem_buffer_size: 1000
+  max_strategy_exceptions: 3
+  default_failure_source: handler_agent
+  fallback_strategy: runtime
+  recovery_strategy_order:
+    - network
+    - timeout
+    - memory
+    - runtime
+    - dependency
+    - resource
+    - unicode
+  honor_retry_delay: false
+  publish_last_execution_to_shared_memory: true
+  publish_status_to_shared_memory: true
+  shared_last_result_key: handler:agent:last_execution
+  shared_status_key: handler:agent:status
+
+  include_result_payload: true
+  include_failed_checkpoint_state: false
+
+  error_policy:
+    name: handler_agent.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
 
 
 knowledge_agent:
