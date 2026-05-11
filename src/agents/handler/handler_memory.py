@@ -43,7 +43,8 @@ class HandlerMemory:
         error_policy: Optional[HandlerErrorPolicy] = None,
     ):
         self.config = load_global_config()
-        self.memory_config = get_config_section("memory")
+        base_memory_config = get_config_section("memory")
+        self.memory_config = deep_merge(base_memory_config, config or {}) if isinstance(config, Mapping) else dict(base_memory_config)
 
         self.max_checkpoints = coerce_int(self.memory_config.get("max_checkpoints"), 100, minimum=1, maximum=100_000)
         self.max_telemetry_events = coerce_int(self.memory_config.get("max_telemetry_events"), 1000, minimum=1, maximum=1_000_000)
