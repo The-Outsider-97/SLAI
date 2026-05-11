@@ -1,0 +1,684 @@
+memory:
+  max_checkpoints: 100
+  max_telemetry_events: 1000
+  max_postmortems: 1000
+  default_checkpoint_ttl_seconds: 600
+  default_telemetry_ttl_seconds: null
+  default_postmortem_ttl_seconds: null
+  max_checkpoint_state_chars: 200000
+  max_checkpoint_metadata_chars: 20000
+  max_event_chars: 80000
+  max_query_results: 250
+  copy_on_read: true
+  sanitize_payloads: true
+  mirror_to_shared_memory: false
+  mirror_checkpoints_to_shared_memory: false
+  mirror_telemetry_to_shared_memory: false
+  mirror_postmortems_to_shared_memory: false
+  require_shared_memory_when_mirroring: true
+  shared_memory_checkpoint_ttl_seconds: 600
+  shared_memory_telemetry_ttl_seconds: null
+  shared_memory_postmortem_ttl_seconds: null
+  error_policy:
+    name: handler_memory.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+adaptive_retry_policy:
+  enabled: true
+
+  # Core retry budget. Kept separate from HandlerPolicy's circuit breaker settings.
+  # HandlerPolicy still decides whether an agent may be attempted at all.
+  base_max_retries: 2
+  min_retries: 0
+  max_retries_cap: 4
+  min_samples: 3
+  default_history_limit: 500
+  recent_window_seconds: 300
+
+  # Historical outcome thresholds.
+  high_success_rate_threshold: 0.70
+  low_success_rate_threshold: 0.20
+  recent_failure_rate_threshold: 0.85
+  consecutive_failure_threshold: 3
+  recent_failure_suppression_enabled: true
+  low_confidence_penalty_enabled: true
+  min_confidence_for_retry_bonus: 0.55
+  confidence_floor: 0.35
+  confidence_ceiling: 0.95
+
+  # Retry modifiers. These are additive offsets applied to base_max_retries.
+  severity_modifiers:
+    low: 1
+    medium: 0
+    high: -1
+    critical: -2
+
+  category_modifiers:
+    timeout: 1
+    network: 1
+    resource: 0
+    unicode: 0
+    memory: -1
+    dependency: -1
+    validation: -1
+    security: -4
+    runtime: 0
+
+  action_modifiers:
+    retry: 1
+    degrade: -1
+    escalate: -1
+    fail_fast: -4
+    quarantine: -4
+    none: 0
+
+  non_retryable_actions:
+    - fail_fast
+    - quarantine
+
+  fail_fast_categories:
+    - security
+
+  # SLA-aware constraint. This does not replace SLARecoveryPolicy; it only caps
+  # the retry budget when the available recovery budget is too small.
+  respect_sla_budget: true
+  default_remaining_budget_seconds: 30
+  min_seconds_per_attempt: 1.5
+  sla_safety_margin_seconds: 0.25
+
+  # Backoff hints. HandlerAgent/recovery strategies may use the generated schedule.
+  backoff_initial_seconds: 0.5
+  backoff_multiplier: 2.0
+  backoff_max_seconds: 8.0
+  jitter_fraction: 0.15
+  round_delay_digits: 3
+
+  error_policy:
+    name: adaptive_retry_policy.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+escalation_manager:
+  enabled: true
+  schema_version: handler_escalation.v2
+  handoff_type: handler_escalation.v2
+  default_target_agent: planning_agent
+  fallback_target_agent: planning_agent
+  local_handler_agent: handler_agent
+  default_reason: recovery_exhausted
+  max_reason_chars: 240
+  max_message_chars: 500
+  max_context_fields: 12
+  max_evidence_items: 10
+  max_payload_chars: 120000
+  emit_to_memory: false
+  memory_event_type: handler_escalation
+  include_public_error: true
+  include_internal_evidence: true
+
+  recovery_failed_statuses:
+    - failed
+    - skipped
+    - unknown
+  degraded_statuses:
+    - degraded
+  escalate_degraded_high_severity: true
+  low_sla_budget_seconds: 3.0
+  sla_priority_floor: p1
+
+  escalation_matrix:
+    critical:
+      retryable: safety_agent
+      non_retryable: planning_agent
+    high:
+      retryable: planning_agent
+      non_retryable: evaluation_agent
+    medium:
+      retryable: handler_agent
+      non_retryable: planning_agent
+    low:
+      retryable: handler_agent
+      non_retryable: handler_agent
+
+  action_routes:
+    quarantine: safety_agent
+    fail_fast: planning_agent
+    escalate: planning_agent
+    degrade: handler_agent
+    retry: handler_agent
+    none: planning_agent
+
+  category_routes:
+    security: safety_agent
+    dependency: planning_agent
+    memory: planning_agent
+    sla: planning_agent
+    validation: evaluation_agent
+
+  recommendation_routes:
+    quarantine_security_failure: safety_agent
+    immediate_escalation: planning_agent
+    collect_context_and_escalate: planning_agent
+    open_circuit_or_failover: planning_agent
+    validate_runtime_dependencies: planning_agent
+    validate_payload_and_schema: evaluation_agent
+    preserve_sla_and_fast_failover: planning_agent
+
+  priority_by_severity:
+    critical: p0
+    high: p1
+    medium: p2
+    low: p3
+
+  level_by_priority:
+    p0: page
+    p1: urgent_handoff
+    p2: standard_handoff
+    p3: informational
+
+  ack_by_priority:
+    p0: true
+    p1: true
+    p2: false
+    p3: false
+
+  target_overrides: {}
+
+  error_policy:
+    name: escalation_manager.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+intelligence:
+  enabled: true
+  max_message_chars: 280
+  max_evidence_items: 8
+  max_related_signatures: 5
+  signature_length: 16
+  signature_mode: structural
+  signature_context_fields:
+    - route
+    - agent
+    - task_id
+  default_history_limit: 500
+  recurrence_window_seconds: 3600
+  recurrence_threshold: 3
+  min_historical_samples: 3
+  low_success_rate_threshold: 0.25
+  high_risk_threshold: 0.72
+  high_anomaly_threshold: 0.68
+  confidence_floor: 0.35
+  confidence_ceiling: 0.92
+  recommendation_by_category:
+    security: quarantine_security_failure
+    timeout: retry_with_backoff
+    network: retry_with_backoff
+    memory: degrade_and_reduce_resource_pressure
+    dependency: validate_runtime_dependencies
+    resource: degrade_and_failover_resource
+    unicode: sanitize_encoding_and_retry
+    sla: preserve_sla_and_fast_failover
+    validation: validate_payload_and_schema
+    runtime: collect_context_and_escalate
+  action_by_category:
+    security: quarantine
+    timeout: retry
+    network: retry
+    memory: degrade
+    dependency: escalate
+    resource: degrade
+    unicode: retry
+    sla: degrade
+    validation: degrade
+    runtime: escalate
+  category_risk:
+    security: 0.95
+    memory: 0.76
+    dependency: 0.70
+    resource: 0.62
+    sla: 0.68
+    runtime: 0.58
+    timeout: 0.42
+    network: 0.40
+    validation: 0.44
+    unicode: 0.30
+  severity_risk:
+    low: 0.18
+    medium: 0.42
+    high: 0.72
+    critical: 0.96
+  error_policy:
+    name: failure_intelligence.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+policy:
+  enabled: true
+  max_retries: 2
+
+  # Circuit breaker and rolling failure budget.
+  circuit_breaker_enabled: true
+  circuit_breaker_threshold: 5
+  cooldown_seconds: 30
+  max_cooldown_seconds: 240
+  cooldown_backoff_multiplier: 1.5
+  failure_budget_window_seconds: 300
+  failure_budget_threshold: 5.0
+  failure_rate_threshold: 0.80
+  min_events_for_failure_rate: 4
+  weighted_budget_enabled: true
+
+  # Half-open recovery probe behavior after cooldown expires.
+  half_open_enabled: true
+  half_open_max_probes: 1
+  half_open_success_threshold: 1
+  success_reset_threshold: 1
+
+  # Safety-oriented breaker triggers.
+  open_on_critical_non_retryable: true
+  open_on_quarantine: true
+  block_non_retryable_attempts: false
+
+  # Evaluator and observability hooks.
+  evaluator_hooks_enabled: true
+  emit_to_memory: false
+  memory_event_type: handler_policy
+  max_policy_events: 1000
+  policy_event_ttl_seconds: null
+  max_agent_name_chars: 96
+  include_failure_in_events: true
+  include_context_in_events: true
+
+  # Weighted rolling failure budget. The max of severity/category weight is used.
+  failure_weight_by_severity:
+    low: 1.0
+    medium: 1.5
+    high: 2.5
+    critical: 4.0
+
+  failure_weight_by_category:
+    security: 4.0
+    memory: 2.5
+    dependency: 2.0
+    sla: 2.0
+    resource: 1.5
+    runtime: 1.25
+    timeout: 1.0
+    network: 1.0
+    validation: 1.0
+    unicode: 0.75
+
+  severity_cooldown_multiplier:
+    low: 0.75
+    medium: 1.0
+    high: 1.5
+    critical: 2.0
+
+  category_cooldown_multiplier:
+    security: 2.0
+    memory: 1.5
+    dependency: 1.25
+    sla: 1.25
+    runtime: 1.0
+    resource: 1.0
+    timeout: 0.8
+    network: 0.8
+    validation: 1.0
+    unicode: 0.75
+
+  # Optional per-agent/category/action overrides.
+  agent_overrides: {}
+  category_overrides:
+    security:
+      open_breaker: true
+      max_retries: 0
+  action_overrides:
+    quarantine:
+      open_breaker: true
+      max_retries: 0
+    fail_fast:
+      open_breaker: true
+      max_retries: 0
+
+  error_policy:
+    name: handler_policy.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+sla_policy:
+  enabled: true
+  default_recovery_budget_seconds: 30.0
+  default_max_attempts: 2
+  min_attempts: 0
+  max_attempts: 4
+  allow_retry_without_sla: true
+  retry_non_retryable: false
+  allow_critical_retry: false
+  default_priority: normal
+
+  # SLA pressure thresholds.
+  min_remaining_seconds_for_retry: 0.5
+  fast_failover_threshold_seconds: 3.0
+  conservative_threshold_seconds: 8.0
+  low_budget_threshold_seconds: 3.0
+  sla_safety_margin_seconds: 0.25
+  high_pressure_threshold: 0.75
+  breach_grace_seconds: 0.0
+
+  # Timeboxing hints for recovery strategies.
+  default_estimated_attempt_seconds: 1.5
+  timeout_safety_fraction: 0.80
+  max_timeout_seconds: 30.0
+  max_delay_seconds: 8.0
+
+  priority_by_severity:
+    critical: p0
+    high: p1
+    medium: p2
+    low: p3
+
+  # Optional: raise priority when budget pressure exceeds threshold.
+  # Keys are numeric thresholds represented as YAML strings.
+  priority_floor_by_pressure:
+    "0.75": p1
+    "0.90": p0
+
+  mode_by_action:
+    quarantine: quarantine
+    fail_fast: fail_fast
+    escalate: conservative
+    degrade: degrade
+    retry: standard
+    none: standard
+
+  severity_attempt_modifiers:
+    low: 1
+    medium: 0
+    high: -1
+    critical: -1
+
+  category_attempt_modifiers:
+    timeout: 0
+    network: 0
+    unicode: 0
+    resource: -1
+    memory: -1
+    dependency: -1
+    validation: -1
+    security: -10
+    sla: -1
+    runtime: 0
+
+  category_attempt_seconds:
+    timeout: 1.5
+    network: 1.5
+    unicode: 0.75
+    resource: 2.0
+    memory: 2.5
+    dependency: 3.0
+    validation: 0.75
+    security: 0.0
+    sla: 0.5
+    runtime: 2.0
+
+  degrade_allowed_categories:
+    - timeout
+    - network
+    - memory
+    - resource
+    - sla
+    - runtime
+    - unicode
+
+  fail_fast_actions:
+    - fail_fast
+    - quarantine
+
+  # Optional HandlerMemory telemetry emission.
+  emit_to_memory: false
+  memory_event_type: handler_sla_evaluation
+
+  error_policy:
+    name: sla_recovery_policy.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
+
+strategy_selector:
+  enabled: true
+  allowed_strategies:
+    - runtime
+    - network
+    - timeout
+    - memory
+    - dependency
+    - resource
+    - unicode
+
+  default_strategy: runtime
+  fallback_strategy: runtime
+  include_runtime_fallback: true
+  max_candidates: 5
+  default_history_limit: 500
+  recent_window_seconds: 300
+  min_samples: 3
+
+  # Probability model weights. Values are normalized internally, but keeping them
+  # summing to 1 makes reviews easier.
+  prior_weight: 0.45
+  history_weight: 0.35
+  rule_weight: 0.20
+  default_unknown_success_rate: 0.50
+  min_score: 0.001
+  min_confidence: 0.35
+  max_confidence: 0.95
+
+  high_success_rate_threshold: 0.70
+  low_success_rate_threshold: 0.20
+  penalize_failed_recent_strategy: true
+  recent_failure_penalty: 0.08
+  low_success_penalty: 0.06
+  high_success_bonus: 0.06
+  round_probabilities: 6
+
+  emit_to_memory: false
+  memory_event_type: handler_strategy_selection
+
+  # Legacy fallback: policy.strategy_priors can still exist, but this section is
+  # the production owner for selector-specific priors.
+  strategy_priors:
+    runtime: 0.25
+    network: 0.20
+    timeout: 0.20
+    memory: 0.15
+    dependency: 0.10
+    resource: 0.07
+    unicode: 0.03
+
+  category_candidates:
+    timeout:
+      - timeout
+      - network
+      - runtime
+    network:
+      - network
+      - timeout
+      - runtime
+    memory:
+      - memory
+      - resource
+      - runtime
+    dependency:
+      - dependency
+      - runtime
+    resource:
+      - resource
+      - memory
+      - runtime
+    unicode:
+      - unicode
+      - runtime
+    validation:
+      - runtime
+    sla:
+      - runtime
+      - resource
+    security:
+      - runtime
+    runtime:
+      - runtime
+
+  action_candidates:
+    retry:
+      - timeout
+      - network
+      - unicode
+      - runtime
+    degrade:
+      - resource
+      - memory
+      - runtime
+    escalate:
+      - runtime
+      - dependency
+    fail_fast:
+      - runtime
+    quarantine:
+      - runtime
+    none:
+      - runtime
+
+  strategy_rules:
+    network:
+      - network
+      - connection
+      - socket
+      - dns
+      - http
+      - ssl
+      - tls
+    timeout:
+      - timeout
+      - timed out
+      - deadline exceeded
+    memory:
+      - memory
+      - oom
+      - outofmemory
+      - out of memory
+      - cuda
+    dependency:
+      - dependency
+      - import
+      - module
+      - dll
+      - package
+      - no module named
+      - cannot import
+    resource:
+      - resource
+      - busy
+      - quota
+      - rate limit
+      - cpu
+      - gpu
+      - disk
+    unicode:
+      - unicode
+      - codec
+      - encode
+      - decode
+    runtime:
+      - runtime
+      - exception
+      - error
+      - unknown
+
+  severity_modifiers:
+    low:
+      timeout: 0.04
+      network: 0.04
+      runtime: 0.01
+    medium:
+      runtime: 0.02
+    high:
+      memory: 0.04
+      dependency: 0.04
+      resource: 0.02
+    critical:
+      runtime: 0.08
+      dependency: 0.03
+
+  error_policy:
+    name: strategy_selector.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
