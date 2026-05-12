@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 """
 Production-grade Safety Agent for the SLAI multi-agent runtime.
@@ -12,7 +12,6 @@ allow/review/block decision for incoming content or proposed actions.
 """
 
 import json
-import math
 import os
 import re
 import time
