@@ -184,6 +184,18 @@ class HandlerAgent(BaseAgent):
             ordered.setdefault(strategy_name, handler)
         return ordered
 
+    def _profile_hot_path(self, path: str, started: float, **extra: Any) -> None:
+        duration_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        payload = {
+            "event_type": "hot_path_profile",
+            "path": path,
+            "duration_ms": round(duration_ms, 4),
+        }
+        # Add extra fields that are not None
+        payload.update({k: v for k, v in extra.items() if v is not None})
+        with contextlib.suppress(Exception):
+            self.memory.append_telemetry(payload)
+
     def perform_task(self, task_data: Mapping[str, Any]) -> Dict[str, Any]:
         """Execute the full Handler recovery pipeline."""
         started = monotonic_timestamp()
@@ -323,6 +335,7 @@ class HandlerAgent(BaseAgent):
                 checkpoint_id=None,
             )
 
+        policy_started = time.perf_counter()
         policy_decision = self.policy.evaluate_attempt(
             target_agent_name,
             normalized_failure=failure,
@@ -330,6 +343,7 @@ class HandlerAgent(BaseAgent):
             attempted_retries=0,
         )
         policy_payload = self._payload(policy_decision)
+        self._profile_hot_path("handler.policy.evaluate_attempt", policy_started, target_agent=target_agent_name, allowed=policy_payload.get("allowed"))
         if not coerce_bool(policy_payload.get("allowed"), default=True):
             return self._failed_recovery(
                 normalized_failure=failure,
@@ -457,7 +471,8 @@ class HandlerAgent(BaseAgent):
             return fallback_result
 
         restored_state = self.memory.restore_checkpoint(checkpoint_id) if checkpoint_id else None
-        return self._failed_recovery(
+        escalation_started = time.perf_counter()
+        failed = self._failed_recovery(
             normalized_failure=failure,
             context=context_map,
             strategy=strategy_key,
@@ -478,6 +493,8 @@ class HandlerAgent(BaseAgent):
                 "executed_strategies": executed_strategies,
             },
         )
+        self._profile_hot_path("handler.escalation.failed_recovery", escalation_started, target_agent=target_agent_name, attempts=attempts)
+        return failed
 
     def observability(
         self,
