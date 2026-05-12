@@ -570,11 +570,52 @@ quality_agent:
 
 
 reader_agent:
-    default_output_format: "txt"
-    output_dir: "output/reader"
-    max_concurrency: 4
-    enable_cache: true
-    recovery_min_quality_score: 0.55
+  enabled: true
+  output_dir: output/reader
+  default_output_format: txt
+  max_concurrency: 4
+  fail_fast: false
+  dedupe_files: true
+
+  # Recovery trigger owned by the agent orchestration layer.
+  # Actual RecoveryEngine thresholds/policy remain in reader_config.yaml.
+  auto_recover_low_quality: true
+  low_quality_threshold: 0.55
+
+  # Result shaping. Keep full content out of normal agent responses/checkpoints unless requested.
+  include_documents_by_default: false
+  include_content_by_default: false
+  max_result_documents: 50
+  use_shared_cache: true
+  cache_ttl_seconds: 0
+  cache_key_prefix: reader_agent.cache
+  cache_parse_results: true
+  cache_recovery_results: true
+
+  # SharedMemory-backed checkpoints and observability.
+  write_checkpoints: true
+  checkpoint_key_prefix: reader_agent.checkpoint
+  checkpoint_index_key: reader_agent.checkpoints
+  max_checkpoint_index_entries: 250
+  redact_checkpoints: true
+  publish_events: true
+  event_channel: reader.events
+  result_key_prefix: reader_agent.result
+  summary_key_prefix: reader_agent.summary
+  error_key_prefix: reader_agent.error
+
+  # Error behavior. Set raise_on_pipeline_error=true when you want BaseAgent's issue
+  # recovery envelope to receive exceptions instead of structured Reader error results.
+  raise_on_pipeline_error: false
+  include_debug_errors: false
+  include_traceback_errors: false
+
+  # Transient operation retry policy used around parser/recovery/conversion calls.
+  retry_max_attempts: 2
+  retry_base_delay_seconds: 0.15
+  retry_max_delay_seconds: 2.0
+  retry_backoff_factor: 2.0
+  retry_jitter_ratio: 0.10
 
 
 reasoning_agent:
