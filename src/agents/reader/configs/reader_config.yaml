@@ -1,0 +1,198 @@
+reader:
+  allowed_input_extensions:
+    - .pdf
+    - .docx
+    - .doc
+    - .txt
+    - .html
+    - .xml
+    - .md
+    - .json
+    - .csv
+  supported_output_formats:
+    - txt
+    - md
+    - html
+    - xml
+    - json
+    - csv
+  default_output_format: txt
+  output_dir: output/reader
+  enable_recovery: true
+  enable_semantic_recovery: true
+  max_file_size_bytes: 52428800
+  encoding_candidates:
+    - utf-8
+    - utf-8-sig
+    - latin-1
+
+
+reader_helpers: {}
+
+
+reader_memory:
+  checkpoint_dir: tmp/reader/checkpoints
+  cache_dir: tmp/reader/cache
+  audit_dir: tmp/reader/audit
+
+  # Cache behavior. A value of 0 disables TTL expiry.
+  cache_ttl_seconds: 0
+  cache_namespace: reader
+
+  # Retention controls. ReaderMemory prunes oldest files when limits are exceeded.
+  max_cache_entries: 10000
+  max_checkpoint_entries: 5000
+  prune_on_init: false
+
+  # Safety limits for persisted payloads.
+  max_cache_entry_bytes: 26214400
+  max_checkpoint_payload_bytes: 26214400
+
+  # Persistence and observability.
+  checkpoint_prefix: reader
+  checkpoint_index_file: index.json
+  cache_index_file: index.json
+  write_indexes: true
+  enable_audit_log: true
+  enable_integrity_hash: true
+  redact_sensitive_payloads: true
+
+  # JSON formatting. null keeps compact deterministic JSON.
+  json_indent: null
+
+
+conversion_engine:
+  # Output writing.
+  output_encoding: utf-8
+  overwrite_existing: false
+  preserve_trailing_newline: true
+
+  # Rendering behavior.
+  include_source_headers: true
+  include_metadata: true
+  include_content_hash: true
+
+  # Safety limits.
+  max_output_bytes: 104857600
+  max_merge_documents: 1000
+  max_merge_output_chars: 10000000
+
+  # Markdown/text rendering.
+  markdown_source_header_level: 2
+  text_source_header_prefix: "# Source:"
+
+  # HTML rendering.
+  html_title: "Reader Conversion Output"
+  html_escape_content: true
+
+  # XML rendering.
+  xml_root_tag: reader_documents
+  xml_document_tag: document
+
+  # CSV rendering.
+  csv_delimiter: ","
+  csv_include_header: true
+  csv_line_mode: per_line
+
+  # JSON formatting. null keeps compact deterministic JSON.
+  json_indent: null
+
+
+parser_engine:
+  text_extensions:
+  - .txt
+  - .md
+  - .html
+  - .xml
+  - .json
+  - .csv
+  structured_text_extensions:
+  - .html
+  - .xml
+  - .json
+  - .csv
+  document_extensions:
+  - .pdf
+  - .docx
+  - .doc
+  allow_lossy_decode_fallback: true
+  normalize_newlines: true
+  strip_bom: true
+  preserve_raw_content_for_text: true
+  fail_on_empty_content: false
+  max_parsed_chars: 0
+  binary_signature_sample_size: 4096
+  extract_html_text: true
+  extract_xml_text: true
+  json_pretty_print: true
+  json_indent: 2
+  csv_max_rows: 50000
+  csv_max_columns: 1000
+  csv_sniff_dialect: true
+  csv_delimiter_fallback: ','
+  enable_pdf: true
+  pdf_backend: pypdf
+  pdf_max_pages: 0
+  pdf_extract_page_breaks: true
+  pdf_page_break_template: ''
+
+
+recovery_engine:
+  # Quality thresholds.
+  min_quality_score: 0.55
+  semantic_threshold: 0.40
+  semantic_acceptance_threshold: 0.10
+  min_semantic_quality_improvement: 0.03
+  max_corruption_ratio: 0.85
+  max_control_char_ratio: 0.35
+
+  # Strategy controls.
+  allow_noop_when_clean: true
+  enable_low_level_repair: true
+  enable_semantic_recovery: true
+  allow_low_level_fallback: true
+  return_unrecoverable_placeholder: true
+  unrecoverable_placeholder: "[CORRUPTED_DATA]"
+
+  # Cache controls.
+  cache_enabled: true
+  cache_size: 256
+  cache_include_policy: true
+
+  # Batch behavior.
+  continue_on_batch_error: true
+  include_error_payloads: true
+
+  # Output metadata.
+  include_recovery_history: true
+  include_quality_report: true
+  include_content_hash: true
+  include_debug_preview: false
+  debug_preview_chars: 240
+
+
+semantic_recovery:
+  chunk_size: 20000
+  chunk_overlap: 0
+  max_chunks: null
+
+  max_output_chars: 2000000
+  corrupted_placeholder: "[CORRUPTED_DATA]"
+  low_confidence_placeholder: "[CORRUPTED_DATA]"
+
+  min_token_length: 1
+  max_token_length: 256
+  preserve_line_breaks: true
+  normalize_whitespace: true
+  remove_duplicate_tokens_window: 0
+
+  min_confidence: 0.05
+  max_confidence: 0.95
+  min_success_confidence: 0.10
+  max_corruption_ratio: 0.85
+  max_control_char_ratio: 0.35
+
+  include_debug_preview: false
+  debug_preview_chars: 240
+
+
