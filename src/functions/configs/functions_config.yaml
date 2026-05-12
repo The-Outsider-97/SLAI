@@ -71,3 +71,21 @@ transport:
         type: "satcom"
         reliability: 0.88
         base_latency_ms: 780
+
+email:
+    backend: "smtp"
+    host: "localhost"
+    port: 587
+    username: ""
+    password: ""
+    use_tls: true
+    default_from: ""
+    template_dir: ""
+    queue_max_size: 1024
+    queue_put_timeout_seconds: 1.0
+    queue_reject_on_full: true
+    retry_max: 3
+    retry_base_delay: 0.5
+    retry_max_delay: 30.0
+    retry_backoff_factor: 2.0
+    retry_jitter: true
