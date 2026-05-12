@@ -397,7 +397,9 @@ class ReaderAgent(BaseAgent):
         if task.write_checkpoints:
             self._write_checkpoint(task.run_id, "plan", {"task": task.to_dict(), "plan": plan})
 
+        parse_started = time.perf_counter()
         parsed_stage = await self._parse_files(task)
+        self._profile_hot_path("reader.parse", parse_started, run_id=task.run_id, files=len(task.files), failed=parsed_stage.failed_count)
         if parsed_stage.failed_count and task.fail_fast:
             raise ReaderBatchError("Reader parse stage failed", {"stage": "parse", "errors": parsed_stage.errors}, failed_count=parsed_stage.failed_count, total_count=len(task.files))
         parsed_docs = parsed_stage.items
@@ -408,7 +410,9 @@ class ReaderAgent(BaseAgent):
         recovery_stage = ReaderAgentStageResult(items=[], errors=[])
         should_recover = self._should_run_recovery(task, parsed_docs)
         if should_recover and parsed_docs:
+            recovery_started = time.perf_counter()
             recovery_stage = await self._recover_documents(task, parsed_docs)
+            self._profile_hot_path("reader.recovery", recovery_started, run_id=task.run_id, documents=len(parsed_docs), failed=recovery_stage.failed_count)
             if recovery_stage.failed_count and task.fail_fast:
                 raise ReaderBatchError("Reader recovery stage failed", {"stage": "recovery", "errors": recovery_stage.errors}, failed_count=recovery_stage.failed_count, total_count=len(parsed_docs))
             working_docs = self._merge_recovered_with_originals(parsed_docs, recovery_stage.items)
@@ -426,7 +430,9 @@ class ReaderAgent(BaseAgent):
                 if task.write_checkpoints:
                     self._write_checkpoint(task.run_id, "merge", {"artifact": merge_artifact})
             else:
+                conversion_started = time.perf_counter()
                 conversion_stage = await self._convert_documents(task, working_docs)
+                self._profile_hot_path("reader.conversion", conversion_started, run_id=task.run_id, documents=len(working_docs), failed=conversion_stage.failed_count, output_format=task.output_format)
                 if conversion_stage.failed_count and task.fail_fast:
                     raise ReaderBatchError("Reader conversion stage failed", {"stage": "conversion", "errors": conversion_stage.errors}, failed_count=conversion_stage.failed_count, total_count=len(working_docs))
                 artifacts = conversion_stage.items
@@ -691,6 +697,12 @@ class ReaderAgent(BaseAgent):
                 self.shared_memory.publish(self.event_channel, event)
             if hasattr(self.shared_memory, "notify"):
                 self.shared_memory.notify(self.event_channel, event)
+
+
+    def _profile_hot_path(self, path: str, started: float, **extra: Any) -> None:
+        duration_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        payload = {"path": path, "duration_ms": round(duration_ms, 4), **{k: v for k, v in extra.items() if v is not None}}
+        self._publish_reader_event("hot_path_profile", payload)
 
     def _store_latest_result(self, run_id: str, result: Mapping[str, Any]) -> None:
         with contextlib.suppress(Exception):
