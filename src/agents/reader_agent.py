@@ -15,14 +15,6 @@ Responsibilities
 - use ``SharedMemory`` as the agent state/cache/checkpoint boundary
 - preserve BaseAgent lifecycle, metrics, retry, shared-memory audit, and issue handling
 - return deterministic, JSON-safe Reader task results without fabricating document content
-
-Configuration boundary
-----------------------
-``ReaderAgent`` reads the ``reader_agent`` section from
-``src/agents/base/configs/agents_config.yaml`` through the global config loader.
-It does not load or copy the Reader subsystem config directly. Internal engines
-remain responsible for their own subsystem settings through their existing
-config loader.
 """
 
 import asyncio
