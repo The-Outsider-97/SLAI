@@ -195,6 +195,13 @@ class AgentFactory:
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
     }
 
+    DEFAULT_QOS_PROFILES: Dict[str, Dict[str, Any]] = {
+        "default": {"latency_tier": "standard", "availability_target": 0.99, "error_budget": 0.01},
+        "observability": {"latency_tier": "low", "availability_target": 0.999, "error_budget": 0.001},
+        "safety": {"latency_tier": "high", "availability_target": 0.999, "error_budget": 0.001},
+        "network": {"latency_tier": "low", "availability_target": 0.995, "error_budget": 0.005},
+    }
+
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
         self.global_config = load_global_config()
         if not isinstance(self.global_config, MutableMapping):
@@ -325,6 +332,66 @@ class AgentFactory:
         )
         return defaults
 
+    def _standardized_metadata_payload(self, spec: Mapping[str, Any], name: str, version: str) -> Dict[str, Any]:
+        profile = dict(self._agent_dependency_profiles.get(name, {}))
+        constraints = dict(spec.get("constraints") or {})
+        if "torch_required" not in constraints:
+            constraints["torch_required"] = bool(profile.get("torch_required", False))
+
+        qos_source = dict(self.DEFAULT_QOS_PROFILES.get("default", {}))
+        qos_source.update(self.DEFAULT_QOS_PROFILES.get(name, {}))
+        qos_source.update(dict(spec.get("qos") or {}))
+
+        capabilities = tuple(str(item).strip() for item in (spec.get("capabilities") or ()) if str(item).strip())
+        metadata_payload = dict(spec.get("metadata") or {})
+        metadata_payload.update(
+            {
+                "registration_standard": "slai.agent_factory.metadata.v1",
+                "agent_type": name,
+                "version": version,
+                "capabilities": list(capabilities),
+                "constraints": constraints,
+                "qos": qos_source,
+            }
+        )
+        return metadata_payload
+
+    def _score_health_candidate(self, agent_type: str, metrics: Mapping[str, Any]) -> float:
+        payload = dict(metrics.get(agent_type, {})) if isinstance(metrics.get(agent_type), Mapping) else {}
+        if not payload:
+            return 0.0
+        health = coerce_number(payload.get("health_score", 1.0), field_name=f"{agent_type}.health_score")
+        latency_penalty = coerce_number(payload.get("latency_ms", 0.0), field_name=f"{agent_type}.latency_ms") / 1000.0
+        error_penalty = coerce_number(payload.get("error_rate", 0.0), field_name=f"{agent_type}.error_rate")
+        saturation_penalty = coerce_number(payload.get("load", 0.0), field_name=f"{agent_type}.load")
+        return health - latency_penalty - error_penalty - (0.25 * saturation_penalty)
+
+    def route_agent(self, candidates: Sequence[str], metrics: Mapping[str, Any], *, create_if_missing: bool = True, shared_memory: Any = None, **kwargs: Any) -> Any:
+        started_ms = monotonic_ms()
+        normalized = [self.normalize_agent_type(candidate) for candidate in candidates]
+        available = [name for name in normalized if name not in self.unavailable_agents]
+        if not available:
+            raise AgentSelectionError(
+                "No routable agents available",
+                component="agent_factory",
+                operation="route_agent",
+                context={"candidates": list(normalized), "unavailable": dict(self.unavailable_agents)},
+            )
+
+        # Reuse existing metrics adapter to preserve adaptation semantics and history.
+        self.run_adaptation_cycle(metrics, available)
+
+        scored = sorted(((candidate, self._score_health_candidate(candidate, metrics)) for candidate in available), key=lambda item: item[1], reverse=True)
+        selected, score = scored[0]
+        self._record_event("agent.route.selected", {"selected": selected, "score": score, "candidates": available})
+
+        if selected in self.active_agents:
+            return self.active_agents[selected]
+        self._profile_hot_path("factory.routing", started_ms, selected=selected, candidates=available, create_if_missing=create_if_missing)
+        if create_if_missing:
+            return self.create(selected, shared_memory=shared_memory, **kwargs)
+        return selected
+
     def _metadata_constructor_kwargs(self, spec: Mapping[str, Any], name: str) -> Dict[str, Any]:
         require_required_keys(spec, ("module_path", "class_name"), payload_name=f"agent_specs[{name}]")
         version = str(spec.get("version") or self.settings.default_version or __version__)
@@ -337,6 +404,8 @@ class AgentFactory:
             "required_params": tuple(spec.get("required_params", ()) or ()),
             "description": spec.get("description", ""),
             "author": spec.get("author", "SLAI"),
+            "capabilities": tuple(spec.get("capabilities", ()) or ()),
+            "metadata": self._standardized_metadata_payload(spec, name, version),
         }
         # Newer AgentMetaData versions accept richer fields; older versions do not.
         for optional_key in ("tags", "status", "capabilities", "lifecycle", "metadata"):
@@ -431,6 +500,7 @@ class AgentFactory:
         return resolved
 
     def _get_metadata(self, agent_type: str, version: Optional[str] = None) -> AgentMetaData:
+        started_ms = monotonic_ms()
         normalized = self.normalize_agent_type(agent_type)
         try:
             metadata = self.registry.get(normalized, version=version)
@@ -452,6 +522,7 @@ class AgentFactory:
                 operation="get_metadata",
                 context={"agent_type": normalized, "version": version},
             ) from exc
+        self._profile_hot_path("factory.metadata_lookup", started_ms, agent_type=normalized, version=version)
         return metadata
 
     def _probe_torch_runtime(self) -> Dict[str, str]:
@@ -799,7 +870,7 @@ class AgentFactory:
                 adjustments = adapter.process_metrics(dict(metrics), list(targets))
 
             if hasattr(adapter, "update_factory_config"):
-                adapter.update_factory_config(self, adjustments)
+                adapter.update_factory_config(self, adjustments) # type: ignore
 
             safe_adjustments = safe_serialize(adjustments, redact=True)
             self.cache.set("adaptation:latest", safe_adjustments)
@@ -965,6 +1036,10 @@ class AgentFactory:
             "agent.creation",
             {"agent_type": agent_type, "status": status, "duration_ms": duration_ms, "implementation": implementation, "error": error},
         )
+
+    def _profile_hot_path(self, path: str, started_ms: float, **extra: Any) -> None:
+        payload = {"path": path, "duration_ms": max(0.0, monotonic_ms() - started_ms), **{k: v for k, v in extra.items() if v is not None}}
+        self._record_event("factory.hot_path_profile", payload)
 
     def _record_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if self.settings.publish_observability_events:
