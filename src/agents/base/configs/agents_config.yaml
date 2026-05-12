@@ -441,6 +441,12 @@ learning_agent:
 
 network_agent:
     max_delivery_attempts: 3
+    default_retry_profile: "default"
+    queue_retry_profile: "queue_backpressure"
+    retry_profile_by_channel:
+        queue: "queue_backpressure"
+        amqp: "queue_backpressure"
+        kafka: "queue_backpressure"
     retry_sleep_enabled: False
     max_retry_sleep_ms: 1500
     default_receive_timeout_ms: 5000
@@ -777,4 +783,3 @@ safety_agent:
   safety_policies: []
   formal_specs: {}
   fault_tree_config: {}
-
