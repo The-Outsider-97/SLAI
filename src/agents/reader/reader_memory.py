@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from .utils.config_loader import get_config_section, load_reader_config
+from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
 from .utils.reader_helpers import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -104,7 +104,7 @@ class ReaderMemory:
     """
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
-        load_reader_config()
+        load_global_config()
         self.memory_config = dict(get_config_section("reader_memory") or {})
         if config:
             self.memory_config.update(dict(config))
