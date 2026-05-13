@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from xml.etree import ElementTree as ET
 
-from .utils.config_loader import get_config_section, load_reader_config
+from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
 from .utils.reader_helpers import *
 from .reader_memory import ReaderMemory
@@ -99,7 +99,7 @@ class ParserEngine:
     _PARSER_VERSION = "2.2.0"
 
     def __init__(self, memory: Optional[ReaderMemory] = None) -> None:
-        self.config = load_reader_config()
+        self.config = load_global_config()
         self.reader_config = get_config_section("reader")
         self.parser_config = get_config_section("parser_engine")
 
