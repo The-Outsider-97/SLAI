@@ -40,15 +40,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .base_agent import BaseAgent
+from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .quality import SemanticQuality, StatisticalQuality, StructuralQuality, WorkflowControl
 from .quality.utils.quality_error import (DataQualityError, DataQualityErrorGroup, QualityStage,
                                           QualityDisposition, QualityDomain, QualityErrorType,
                                           QualitySeverity, normalize_quality_exception, quality_error_boundary)
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Quality Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(slots=True)
@@ -127,6 +128,15 @@ class QualityAgent(BaseAgent):
         self.quality_config = get_config_section("quality_agent")
         if config:
             self.quality_config.update(dict(config))
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="quality_agent",
+            agent_config=self.quality_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
 
         self.enabled = bool(self.quality_config.get("enabled", True))
         self.default_window = str(self.quality_config.get("default_window", "latest")).strip() or "latest"
@@ -225,9 +235,7 @@ class QualityAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Runtime wiring
     # ------------------------------------------------------------------
-    def attach_runtime(
-        self,
-        *,
+    def attach_runtime(self, *,
         shared_memory: Any = None,
         handler_bridge: Any = None,
         safety_bridge: Any = None,
@@ -247,10 +255,7 @@ class QualityAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Public orchestration APIs
     # ------------------------------------------------------------------
-    def evaluate_batch(
-        self,
-        records: Sequence[Mapping[str, Any]],
-        *,
+    def evaluate_batch(self, records: Sequence[Mapping[str, Any]], *,
         dataset_id: str,
         source_id: Optional[str] = None,
         batch_id: Optional[str] = None,
@@ -575,7 +580,10 @@ class QualityAgent(BaseAgent):
             if operation in {"summary", "status"}:
                 return self.summary()
             if operation in {"latest_decision", "get_latest_decision"}:
-                return self.latest_decision(task_data.get("batch_id") or payload_map.get("batch_id")) or {}
+                batch_id = task_data.get("batch_id") or payload_map.get("batch_id")
+                if not batch_id:
+                    return {}
+                return self.latest_decision(str(batch_id)) or {}
             if operation in {"workflow_only", "route_quality", "coordinate_batch"}:
                 return self.workflow_control.coordinate_batch(
                     source_id=self._nonempty(payload_map.get("source_id"), "source_id"),
