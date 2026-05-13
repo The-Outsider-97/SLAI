@@ -1,7 +1,5 @@
-import ctypes
-import platform
 import sys, os
-from importlib.util import find_spec
+from pathlib import Path
 
 if sys.platform == "win32":
     try:
@@ -17,11 +15,10 @@ import io
 import json
 import math
 
-from pathlib import Path
 from datetime import datetime
-from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent
-from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QBrush, QRadialGradient, QRegion, QTransform
-from PyQt5.QtWidgets import (QApplication, QLabel, QPushButton, QWidget, QGraphicsDropShadowEffect,
+from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent # type: ignore
+from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QBrush, QRadialGradient, QRegion, QTransform # type: ignore
+from PyQt5.QtWidgets import (QApplication, QLabel, QPushButton, QWidget, QGraphicsDropShadowEffect, # type: ignore
                              QGraphicsOpacityEffect, QFrame, QVBoxLayout, QDialog, QLineEdit, QMessageBox, QHBoxLayout, QTextEdit)
 
 from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
@@ -839,14 +836,31 @@ class HubWindow(QWidget):
                 from component.autopublisher import AutopublisherWindow
                 self.child_window = AutopublisherWindow()
             update_loading(self.app_launch_loader, progress=0.85, message=f"Opening {app_name}…")
+            if hasattr(self.child_window, "home_requested"):
+                self.child_window.home_requested.connect(self._return_from_child_app)
+            
+            self.child_window.destroyed.connect(lambda: setattr(self, "child_window", None))
+            
             self.child_window.show()
             complete_loading(self.app_launch_loader, f"{app_name} ready")
-            self.close()
+            self.hide()
         except Exception as exc:
             complete_loading(self.app_launch_loader, "Launch failed")
             print(f"Failed to launch {app_name}: {exc}")
         finally:
             self._app_launch_in_progress = False
+
+    def _return_from_child_app(self) -> None:
+        child = self.child_window
+        self.child_window = None
+    
+        if child is not None:
+            child.close()
+            child.deleteLater()
+    
+        self.showMaximized()
+        self.raise_()
+        self.activateWindow()
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()
