@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from xml.sax.saxutils import escape as xml_escape
 
-from .utils.config_loader import get_config_section, load_reader_config
+from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
 from .utils.reader_helpers import *
 from .reader_memory import ReaderMemory
@@ -77,7 +77,7 @@ class ConversionEngine:
     """Converts and merges parsed Reader documents using safe filesystem semantics."""
 
     def __init__(self, memory: Optional[ReaderMemory] = None) -> None:
-        self.config = load_reader_config()
+        self.config = load_global_config()
         self.reader_config = get_config_section("reader")
         self.ce_config = get_config_section("conversion_engine") or {}
 
