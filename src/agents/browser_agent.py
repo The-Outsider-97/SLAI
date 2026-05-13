@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "3.0.0"
+__version__ = "2.2.0"
 
 """
 Production-grade Browser Agent facade.
@@ -42,8 +42,9 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
+from .base.utils.main_config_loader import get_config_section, load_global_config
+from .base.utils.config_contract import assert_valid_config_contract
 from .browser.browser_functions import BrowserFunctions
 from .browser.content import ContentHandling
 from .browser.security import SecurityFeatures, exponential_backoff
@@ -258,6 +259,15 @@ class BrowserAgent(BaseAgent):
         self.browser_agent_config: Dict[str, Any] = dict(get_config_section("browser_agent") or {})
         if config:
             self.browser_agent_config.update(dict(config))
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="browser_agent",
+            agent_config=self.browser_agent_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
         if auto_start is not None:
             self.browser_agent_config.setdefault("driver", {})
             if isinstance(self.browser_agent_config["driver"], dict):
