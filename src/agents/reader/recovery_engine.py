@@ -23,7 +23,7 @@ Pipeline
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from .utils.config_loader import get_config_section, load_reader_config
+from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
 from .utils.reader_helpers import *
 from .modules.semantic_recovery import SemanticRecovery
@@ -95,7 +95,7 @@ class RecoveryEngine:
         cache_size: Optional[int] = None,
         memory: Optional[ReaderMemory] = None,
     ) -> None:
-        self.config = load_reader_config()
+        self.config = load_global_config()
         self.recovery_config = get_config_section("recovery_engine") or {}
 
         self.min_quality_score = self._cfg_float(
