@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
-import json
-import subprocess
 import sys
+import json
+import importlib
 import traceback
 
 from pathlib import Path
@@ -13,8 +12,8 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PyQt5.QtCore import Qt, pyqtSignal # type: ignore
+from PyQt5.QtWidgets import ( # type: ignore
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -32,10 +31,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
-from component.utils.loading_overlay import LoadingOverlay
-from component.styles.autopublisher_style import AUTOPUBLISHER_STYLE, sanitize_qss
-from logs.logger import get_logger
+from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading # pyright: ignore[reportMissingImports]
+from .utils.loading_overlay import LoadingOverlay
+from .styles.autopublisher_style import AUTOPUBLISHER_STYLE, sanitize_qss
+from logs.logger import get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("ContentOps Autopublisher")
 
@@ -93,6 +92,7 @@ class Workspace:
 
 
 class AutopublisherWindow(QMainWindow):
+    home_requested = pyqtSignal()
     BOARD_COLUMNS = ["Backlog", "In Progress", "Ready", "Approved"]
     CORE_AGENT_TYPES = ["planning", "browser", "knowledge", "reasoning", "language", "evaluation", "safety", "learning"]
     OPTIONAL_AGENT_TYPES = ["alignment", "adaptive"]
@@ -739,8 +739,15 @@ class AutopublisherWindow(QMainWindow):
         self.fleet_text.setPlainText("\n".join(lines))
 
     def _return_home(self) -> None:
-        main_path = Path(__file__).resolve().parents[1] / "main.py"
-        subprocess.Popen([sys.executable, str(main_path)])
+        if self.receivers(self.home_requested) > 0:
+            self.home_requested.emit()
+            return
+    
+        # Standalone fallback: only used if Autopublisher was launched directly.
+        from main import HubWindow # pyright: ignore[reportMissingImports]
+    
+        self._home_window = HubWindow()
+        self._home_window.showMaximized()
         self.close()
 
     def resizeEvent(self, event) -> None:
