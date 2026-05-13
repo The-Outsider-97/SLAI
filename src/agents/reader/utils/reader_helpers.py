@@ -58,7 +58,7 @@ from typing import (
     TypeVar,
 )
 
-from .config_loader import get_config_section, load_reader_config
+from .config_loader import get_config_section, load_global_config
 from .reader_error import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
