@@ -15,23 +15,24 @@ import math
 import re
 import threading
 import time
-import numpy as np
-import pandas as pd
-import torch
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
+import torch # type: ignore
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
-from scipy.stats import entropy
+from scipy.stats import entropy # pyright: ignore[reportMissingImports]
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base.utils.config_contract import assert_valid_config_contract
 from .alignment.utils import *
 from .alignment import *
 from .base_agent import BaseAgent
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Alignment Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True)
@@ -234,18 +235,12 @@ class AlignmentAgent(BaseAgent):
         "correction_policy",
     )
 
-    def __init__(
-        self,
-        config: Optional[Mapping[str, Any]],
-        shared_memory: Any,
-        agent_factory: Any,
-        *,
-        bias_detector: Optional[BiasDetector] = None,
-        fairness_evaluator: Optional[FairnessEvaluator] = None,
-        ethical_constraints: Optional[EthicalConstraints] = None,
-        value_embedding_model: Optional[ValueEmbeddingModel] = None,
-        counterfactual_auditor: Optional[CounterfactualAuditor] = None,
-    ):
+    def __init__(self, config: Optional[Mapping[str, Any]], shared_memory: Any, agent_factory: Any, *,
+                 bias_detector: Optional[BiasDetector] = None,
+                 fairness_evaluator: Optional[FairnessEvaluator] = None,
+                 ethical_constraints: Optional[EthicalConstraints] = None,
+                 value_embedding_model: Optional[ValueEmbeddingModel] = None,
+                 counterfactual_auditor: Optional[CounterfactualAuditor] = None):
         super().__init__(
             agent_factory=agent_factory,
             shared_memory=shared_memory,
@@ -259,6 +254,15 @@ class AlignmentAgent(BaseAgent):
         self.agent_config = get_config_section("alignment_agent") or {}
         if config:
             self.agent_config.update(dict(config))
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="alignment_agent",
+            agent_config=self.agent_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
         self.runtime_config = dict(self.agent_config)
         self._validate_runtime_configuration()
 
@@ -612,14 +616,9 @@ class AlignmentAgent(BaseAgent):
                 context={"task_keys": list(task_data.keys()) if isinstance(task_data, Mapping) else None},
             ) from exc
 
-    def align(
-        self,
-        data: pd.DataFrame,
-        predictions: Optional[Union[np.ndarray, Sequence[float], torch.Tensor]] = None,
-        labels: Optional[Union[np.ndarray, Sequence[float], torch.Tensor]] = None,
-        *,
-        task_context: Optional[Mapping[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    def align(self, data: pd.DataFrame, predictions: Optional[Union[np.ndarray, Sequence[float], torch.Tensor]] = None,
+              labels: Optional[Union[np.ndarray, Sequence[float], torch.Tensor]] = None, *,
+              task_context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         """
         Full alignment check pipeline with:
         - real-time monitoring,
@@ -739,11 +738,7 @@ class AlignmentAgent(BaseAgent):
             raise DataValidationError("AlignmentAgent received an empty input frame.")
         return frame.reset_index(drop=True)
 
-    def _resolve_predictions_and_labels(
-        self,
-        payload: Mapping[str, Any],
-        data: pd.DataFrame,
-    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    def _resolve_predictions_and_labels(self, payload: Mapping[str, Any], data: pd.DataFrame) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         predictions = payload.get("predictions")
         labels = payload.get("labels")
 
@@ -762,15 +757,11 @@ class AlignmentAgent(BaseAgent):
             label_array = self._coerce_prediction_array(labels, expected_length=len(data), field_name="labels")
         return pred_array, label_array
 
-    def _coerce_prediction_array(
-        self,
-        values: Union[np.ndarray, Sequence[float], torch.Tensor],
-        *,
-        expected_length: int,
-        field_name: str,
-    ) -> np.ndarray:
-        if isinstance(values, torch.Tensor):
-            array = values.detach().cpu().numpy()
+    def _coerce_prediction_array(self, values: Union[np.ndarray, Sequence[float], torch.Tensor], *,
+                                 expected_length: int, field_name: str) -> np.ndarray:
+        # Detect PyTorch tensor by attribute presence (more robust than isinstance)
+        if hasattr(values, "detach") and callable(getattr(values, "detach")):
+            array = values.detach().cpu().numpy()  # type: ignore[union-attr]
         else:
             array = np.asarray(values)
         array = np.asarray(array).reshape(-1)
@@ -1124,12 +1115,8 @@ class AlignmentAgent(BaseAgent):
             return selected
         return [component for component, _ in sorted(component_risks.items(), key=lambda item: item[1], reverse=True)[:2]]
 
-    def _generate_decision(
-        self,
-        report: Mapping[str, Any],
-        risk_profile: RiskAssessment,
-        correction: CorrectionDecision,
-    ) -> Dict[str, Any]:
+    def _generate_decision(self, report: Mapping[str, Any], risk_profile: RiskAssessment,
+                           correction: CorrectionDecision) -> Dict[str, Any]:
         approved = bool(risk_profile.total_risk < self.risk_threshold and correction.action != "human_intervention")
         return {
             "approved": approved,
@@ -1146,13 +1133,8 @@ class AlignmentAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Correction execution and human oversight
     # ------------------------------------------------------------------
-    def _apply_correction(
-        self,
-        correction: CorrectionDecision,
-        *,
-        alignment_report: Mapping[str, Any],
-        task_context: Mapping[str, Any],
-    ) -> Dict[str, Any]:
+    def _apply_correction(self, correction: CorrectionDecision, *, alignment_report: Mapping[str, Any],
+                          task_context: Mapping[str, Any]) -> Dict[str, Any]:
         result = correction.to_dict()
         if correction.action == "no_action":
             return merge_mappings(result, {"status": "skipped"})
@@ -1194,13 +1176,8 @@ class AlignmentAgent(BaseAgent):
             context={"target_components": correction.target_components},
         )
 
-    def _trigger_human_intervention(
-        self,
-        *,
-        alignment_report: Mapping[str, Any],
-        correction: CorrectionDecision,
-        task_context: Mapping[str, Any],
-    ) -> Dict[str, Any]:
+    def _trigger_human_intervention(self, *, alignment_report: Mapping[str, Any], correction: CorrectionDecision,
+                                    task_context: Mapping[str, Any]) -> Dict[str, Any]:
         logger.critical("Initiating human intervention protocol.")
         human_feedback: Dict[str, Any] = {}
         try:
@@ -1231,12 +1208,8 @@ class AlignmentAgent(BaseAgent):
             self._full_system_rollback(reason=str(exc))
             return {"status": "failed", "error": str(exc), "feedback": human_feedback}
 
-    def _build_intervention_report(
-        self,
-        alignment_report: Mapping[str, Any],
-        correction: CorrectionDecision,
-        task_context: Mapping[str, Any],
-    ) -> Dict[str, Any]:
+    def _build_intervention_report(self, alignment_report: Mapping[str, Any], correction: CorrectionDecision,
+                                   task_context: Mapping[str, Any]) -> Dict[str, Any]:
         generator = getattr(InterventionReport, "_generate_intervention_report", None)
         if callable(generator):
             signature = inspect.signature(generator)
@@ -1262,13 +1235,8 @@ class AlignmentAgent(BaseAgent):
         )
         return enriched
 
-    def _request_human_review(
-        self,
-        *,
-        report: Mapping[str, Any],
-        urgency: str,
-        channels: Sequence[str],
-    ) -> Any:
+    def _request_human_review(self, *, report: Mapping[str, Any],
+                              urgency: str, channels: Sequence[str]) -> Any:
         interface = self.human_oversight
         request_intervention = getattr(interface, "request_intervention", None)
         if callable(request_intervention):
@@ -1443,7 +1411,11 @@ class AlignmentAgent(BaseAgent):
     def _trim_snapshots(self) -> None:
         if not hasattr(self.shared_memory, "get_all_keys"):
             return
-        snapshot_keys = sorted([key for key in self.shared_memory.get_all_keys() if str(key).startswith("snapshot:")])
+        # Use generator expression and sort by string representation
+        snapshot_keys = sorted(
+            (key for key in self.shared_memory.get_all_keys() if str(key).startswith("snapshot:")),
+            key=str
+        )
         if len(snapshot_keys) <= self.max_recent_snapshots:
             return
         for obsolete in snapshot_keys[:-self.max_recent_snapshots]:
@@ -1582,13 +1554,8 @@ class AlignmentAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Memory and telemetry
     # ------------------------------------------------------------------
-    def _update_memory(
-        self,
-        report: Mapping[str, Any],
-        risk_assessment: RiskAssessment,
-        correction: CorrectionDecision,
-        task_context: Mapping[str, Any],
-    ) -> None:
+    def _update_memory(self, report: Mapping[str, Any], risk_assessment: RiskAssessment,
+                       correction: CorrectionDecision, task_context: Mapping[str, Any]) -> None:
         timestamp = datetime.now().isoformat()
         record = {
             "timestamp": timestamp,
@@ -1628,15 +1595,8 @@ class AlignmentAgent(BaseAgent):
             },
         )
 
-    def _record_event(
-        self,
-        *,
-        event_type: str,
-        severity: str,
-        risk_level: str,
-        payload: Any,
-        context: Optional[Mapping[str, Any]],
-    ) -> Dict[str, Any]:
+    def _record_event(self, *, event_type: str, severity: str, risk_level: str,
+                      payload: Any, context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         event = build_alignment_event(
             event_type=event_type,
             severity=severity,
@@ -1692,11 +1652,7 @@ class AlignmentAgent(BaseAgent):
             "mean_disparity": float(np.mean(disparities)) if disparities else 0.0,
         }
 
-    def _summarize_fairness_report(
-        self,
-        group_report: Mapping[str, Any],
-        individual_report: Mapping[str, Any],
-    ) -> Dict[str, Any]:
+    def _summarize_fairness_report(self, group_report: Mapping[str, Any], individual_report: Mapping[str, Any]) -> Dict[str, Any]:
         group_gaps: List[float] = []
         group_summary: Dict[str, Any] = {}
         for attr, attr_report in (group_report or {}).items():
@@ -1889,11 +1845,8 @@ class AlignmentAgent(BaseAgent):
                 scope=str(constraint.get("scope", "alignment") or "alignment"),
             )
 
-    def _detect_sensitive_attributes(
-        self,
-        data: Optional[pd.DataFrame] = None,
-        task_context: Optional[Mapping[str, Any]] = None,
-    ) -> List[str]:
+    def _detect_sensitive_attributes(self, data: Optional[pd.DataFrame] = None,
+                                     task_context: Optional[Mapping[str, Any]] = None) -> List[str]:
         detected = set(self.sensitive_attributes)
         known_attrs = self._safe_shared_get("known_sensitive_attributes", default=[])
         if isinstance(known_attrs, Sequence) and not isinstance(known_attrs, (str, bytes, bytearray)):
@@ -1932,7 +1885,7 @@ if __name__ == '__main__':
 
     def synthetic_predictor(df: pd.DataFrame) -> np.ndarray:
         protected_boost = np.where(df["gender"].astype(str).str.lower().eq("male"), 0.15, -0.05)
-        base = 0.35 + 0.25 * (pd.to_numeric(df["score_feature"], errors="coerce").fillna(0.0).to_numpy())
+        base = 0.35 + 0.25 * (pd.to_numeric(df["score_feature"], errors="coerce").fillna(0.0).to_numpy()) # type: ignore
         return np.clip(base + protected_boost, 0.0, 1.0)
 
     shared_memory = SharedMemory()
