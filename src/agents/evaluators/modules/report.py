@@ -24,7 +24,8 @@ import inspect
 import json
 import os
 import hashlib
-import yaml
+import importlib
+import yaml # type: ignore
 
 from collections import deque
 from dataclasses import dataclass
@@ -34,9 +35,35 @@ from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Op
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QPainter, QPixmap, QColor, QFont, QPen
-from PyQt5.QtCore import Qt, QRect, QPointF, QSize, QBuffer
+_PYQT_AVAILABLE = False
+QApplication = QPainter = QPixmap = QColor = QFont = QPen = Qt = QRect = QPointF = QSize = QBuffer = None
+
+
+def _initialize_pyqt_bindings() -> bool:
+    global _PYQT_AVAILABLE, QApplication, QPainter, QPixmap, QColor, QFont, QPen, Qt, QRect, QPointF, QSize, QBuffer
+    try:
+        qt_widgets = importlib.import_module("PyQt5.QtWidgets")
+        qt_gui = importlib.import_module("PyQt5.QtGui")
+        qt_core = importlib.import_module("PyQt5.QtCore")
+    except Exception:
+        _PYQT_AVAILABLE = False
+        return False
+    QApplication = qt_widgets.QApplication
+    QPainter = qt_gui.QPainter
+    QPixmap = qt_gui.QPixmap
+    QColor = qt_gui.QColor
+    QFont = qt_gui.QFont
+    QPen = qt_gui.QPen
+    Qt = qt_core.Qt
+    QRect = qt_core.QRect
+    QPointF = qt_core.QPointF
+    QSize = qt_core.QSize
+    QBuffer = qt_core.QBuffer
+    _PYQT_AVAILABLE = True
+    return True
+
+
+_initialize_pyqt_bindings()
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.evaluation_errors import (ConfigLoadError, EvaluationError, OperationalError,
@@ -44,12 +71,12 @@ from ..utils.evaluation_errors import (ConfigLoadError, EvaluationError, Operati
                                 VisualizationError)
 from .certification_framework import CertificationManager
 from .documentation import AuditTrail, DocumentVersioner, AuditBlock
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Performance Visualizer")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.2.0"
 _global_visualizer: Optional["PerformanceVisualizer"] = None
 
 
