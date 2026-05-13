@@ -10,26 +10,10 @@ from typing import Any, Dict, Mapping, Optional
 
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import load_global_config, get_config_section
-from .network import (
-    NetworkAdapters,
-    NetworkLifecycle,
-    NetworkMemory,
-    NetworkMetrics,
-    NetworkPolicy,
-    NetworkReliability,
-    NetworkStream,
-)
-from .network.utils import (
-    NetworkError,
-    PayloadValidationError,
-    ReliabilityError,
-    ensure_mapping,
-    json_safe,
-    normalize_network_exception,
-    normalize_protocol_name,
-    sanitize_for_logging,
-)
-from logs.logger import PrettyPrinter, get_logger
+from .network import *
+from .network.utils.network_errors import *
+from .network.utils.network_helpers import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Network Agent")
 printer = PrettyPrinter()
@@ -65,6 +49,9 @@ class NetworkAgent(BaseAgent):
         self.name = "NetworkAgent"
         self.enabled = bool(self.network_config.get("enabled", True))
         self.max_delivery_attempts = max(1, int(self.network_config.get("max_delivery_attempts", 3)))
+        self.default_retry_profile = str(self.network_config.get("default_retry_profile", "default")).strip() or "default"
+        self.queue_retry_profile = str(self.network_config.get("queue_retry_profile", "queue_backpressure")).strip() or self.default_retry_profile
+        self.retry_profile_by_channel = ensure_mapping(self.network_config.get("retry_profile_by_channel"), field_name="retry_profile_by_channel", allow_none=True)
         self.retry_sleep_enabled = bool(self.network_config.get("retry_sleep_enabled", False))
         self.max_retry_sleep_ms = max(0, int(self.network_config.get("max_retry_sleep_ms", 1500)))
         self.default_receive_timeout_ms = max(1, int(self.network_config.get("default_receive_timeout_ms", 5000)))
@@ -320,6 +307,7 @@ class NetworkAgent(BaseAgent):
                         message_id=message_id,
                         status_code=getattr(exc, "status_code", None),
                         metadata={"agent": self.name},
+                        retry_profile=self._resolve_retry_profile_for_route(selected_route=selected_route, envelope=canonical_envelope),
                     )
 
                     self.metrics.record_failure(
@@ -412,6 +400,7 @@ class NetworkAgent(BaseAgent):
                         message_id=message_id,
                         status_code=getattr(normalized, "status_code", None),
                         metadata={"agent": self.name, "source": "exception_boundary"},
+                        retry_profile=self._resolve_retry_profile_for_route(selected_route=selected_route, envelope=canonical_envelope),
                     )
                     should_retry = self._should_retry(last_reliability)
                     if attempt < max_attempts and should_retry:
@@ -476,7 +465,7 @@ class NetworkAgent(BaseAgent):
                 channel=canonical_envelope.get("channel"),
                 route=canonical_envelope.get("route"),
                 correlation_id=correlation_id,
-                message_id=message_id,
+                message_id=message_id, # type: ignore
                 metadata={"agent": self.name},
             )
         finally:
@@ -619,6 +608,28 @@ class NetworkAgent(BaseAgent):
             payload={"enabled": self.enabled, "metrics": health.get("metrics")},
         )
         return health
+
+    def _resolve_retry_profile_for_route(self, *, selected_route: Mapping[str, Any], envelope: Mapping[str, Any]) -> str:
+        """Resolve retry profile by explicit envelope hints and channel/protocol defaults."""
+        override = envelope.get("retry_profile") or envelope.get("reliability_retry_profile")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+
+        channel = str(selected_route.get("channel") or envelope.get("channel") or "").strip().lower()
+        protocol = str(selected_route.get("protocol") or envelope.get("protocol") or "").strip().lower()
+
+        if channel and channel in self.retry_profile_by_channel:
+            value = self.retry_profile_by_channel.get(channel)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if protocol and protocol in self.retry_profile_by_channel:
+            value = self.retry_profile_by_channel.get(protocol)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        if channel == "queue" or protocol in {"queue", "amqp", "amqps", "mq", "sqs", "kafka", "pubsub"}:
+            return self.queue_retry_profile
+        return self.default_retry_profile
 
     def _should_retry(self, reliability_payload: Optional[Mapping[str, Any]]) -> bool:
         payload = ensure_mapping(reliability_payload, field_name="reliability_payload", allow_none=True)
@@ -766,7 +777,7 @@ class NetworkAgent(BaseAgent):
             heartbeat = {"status": "active"}
         heartbeat["name"] = self.name
         heartbeat["status"] = "active"
-        heartbeat["last_seen"] = float(now)
+        heartbeat["last_seen"] = float(now) # type: ignore
         heartbeat["operation"] = str(operation)
         heartbeat["stage"] = str(stage)
         self.shared_memory.set(self.agent_presence_key, heartbeat)
@@ -842,7 +853,7 @@ if __name__ == "__main__":
 
         @property
         def endpoint(self) -> str:
-            host, port = self.server.server_address
+            host, port = self.server.server_address # type: ignore
             return f"http://{host}:{port}/relay"
 
         def start(self) -> None:
