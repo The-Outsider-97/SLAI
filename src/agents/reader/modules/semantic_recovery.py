@@ -29,7 +29,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from ..utils.config_loader import get_config_section, load_reader_config
+from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.reader_error import *
 from ..utils.reader_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
@@ -83,7 +83,7 @@ class SemanticRecovery:
     _LINEBREAK_PATTERN = re.compile(r"\n+")
 
     def __init__(self, chunk_size: Optional[int] = None, max_output_chars: Optional[int] = None) -> None:
-        self.config = load_reader_config()
+        self.config = load_global_config()
         self.recovery_config = get_config_section("semantic_recovery") or {}
 
         self.chunk_size = self._cfg_int("chunk_size", chunk_size if chunk_size is not None else 20_000, minimum=1_024)
