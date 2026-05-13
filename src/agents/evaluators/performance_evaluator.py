@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-import numpy as np
-import yaml
+import importlib
+import numpy as np # type: ignore
+import yaml # type: ignore
 
-from PyQt5.QtWidgets import QApplication
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -18,10 +18,10 @@ from .utils.evaluation_errors import (ComparisonError, ConfigLoadError, Evaluati
                                       VisualizationError)
 from .modules.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Performance Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 MODULE_VERSION = "2.0.0"
 _HIGHER_IS_BETTER = frozenset({
@@ -1024,7 +1024,8 @@ def _utcnow() -> datetime:
 if __name__ == "__main__":
     print("\n=== Running Performance Evaluator ===\n")
     import sys
-    app = QApplication(sys.argv)
+    qt_widgets = importlib.import_module("PyQt5.QtWidgets")
+    app = qt_widgets.QApplication(sys.argv)
 
     performance = PerformanceEvaluator()
     logger.info(f"{performance}")
