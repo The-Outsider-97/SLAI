@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, Mapping, Optional
 
 from .base_agent import BaseAgent
+from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .network import *
 from .network.utils.network_errors import *
@@ -45,6 +46,15 @@ class NetworkAgent(BaseAgent):
         self.network_config = get_config_section("network_agent") or {}
         if config:
             self.network_config.update(dict(config))
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="network_agent",
+            agent_config=self.network_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
 
         self.name = "NetworkAgent"
         self.enabled = bool(self.network_config.get("enabled", True))
