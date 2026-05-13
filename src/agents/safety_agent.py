@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .base_agent import BaseAgent
+from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .safety.secure_stpa import SecureSTPA
 from .safety.reward_model import RewardModel
@@ -197,6 +198,15 @@ class SafetyAgent(BaseAgent):
         self.safety_config = get_config_section("safety_agent")
         if config:
             self.safety_config = {**dict(self.safety_config or {}), **dict(config)}
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="safety_agent",
+            agent_config=self.safety_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
         self._validate_configuration()
 
         self.audit_level = coerce_int(self._cfg("audit_level", 2), 2, minimum=0, maximum=5)
