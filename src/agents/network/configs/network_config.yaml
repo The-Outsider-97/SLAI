@@ -304,6 +304,12 @@ network_queue_adapter:
   purge_on_close: false
 
   prefetch_count: 10
+  prefetch_backpressure_enabled: true
+  prefetch_backpressure_high_watermark: 0.80
+  prefetch_backpressure_low_watermark: 0.30
+  prefetch_backpressure_step: 2
+  prefetch_backpressure_min: 2
+  prefetch_backpressure_max: 64
   visibility_timeout_ms: null
   max_message_history_size: 250
   max_queued_inbound_messages: 250
@@ -820,6 +826,29 @@ network_retry_policy:
       retryable_status_codes: [408, 425, 429, 500, 502, 503, 504]
       non_retryable_status_codes: [400, 401, 403, 404, 405, 409, 410, 413, 422]
 
+    queue_backpressure:
+      max_attempts: 5
+      initial_backoff_ms: 300
+      max_backoff_ms: 12000
+      backoff_multiplier: 2.0
+      backoff_strategy: "exponential"
+      jitter_ratio: 0.20
+      jitter_mode: "full"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: false
+      retry_on_duplicate_active: true
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 409, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 410, 413, 422]
+      metadata:
+        transport: "queue"
+        tuning_goal: "backpressure_stability"
+
     streaming:
       max_attempts: 3
       initial_backoff_ms: 200
@@ -1040,6 +1069,29 @@ network_failover_manager:
       respect_required_failover_disposition: true
       minimum_health_score: 0.5
       max_cost_multiplier: 1.5
+
+    queue_backpressure:
+      max_attempts: 5
+      initial_backoff_ms: 300
+      max_backoff_ms: 12000
+      backoff_multiplier: 2.0
+      backoff_strategy: "exponential"
+      jitter_ratio: 0.20
+      jitter_mode: "full"
+      retry_on_timeouts: true
+      retry_on_connection_errors: true
+      retry_on_rate_limits: true
+      retry_on_server_errors: true
+      retry_on_unknown_errors: false
+      retry_on_duplicate_active: true
+      respect_retry_after: true
+      failover_on_required_disposition: true
+      allow_retry_when_non_idempotent: false
+      retryable_status_codes: [408, 409, 425, 429, 500, 502, 503, 504]
+      non_retryable_status_codes: [400, 401, 403, 404, 405, 410, 413, 422]
+      metadata:
+        transport: "queue"
+        tuning_goal: "backpressure_stability"
 
     streaming:
       max_attempts: 3
