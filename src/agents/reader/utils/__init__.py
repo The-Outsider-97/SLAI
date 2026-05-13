@@ -1,10 +1,10 @@
-from .config_loader import get_config_section, load_reader_config
+from .config_loader import get_config_section, load_global_config
 from .reader_error import *
 from .reader_helpers import *
 
 __all__ = [
     "get_config_section",
-    "load_reader_config",
+    "load_global_config",
     # Errors
     "ReaderErrorType",
     "ReaderErrorStage",
@@ -50,7 +50,6 @@ __all__ = [
     # Config / primitive helpers
     "get_reader_helper_config",
     "get_reader_config_value",
-    "load_reader_config",
     "get_config_section",
     "utc_now",
     "utc_timestamp",
