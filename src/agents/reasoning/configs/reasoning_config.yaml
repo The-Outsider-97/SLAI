@@ -5,6 +5,76 @@ embedding_dim: 64
 contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
 markov_logic_weight: 0.7
 
+reasoning_memory:
+  max_size: 10000
+  checkpoint_dir: "src/agents/reasoning/checkpoints"
+  checkpoint_freq: 1000
+  auto_save: True
+  alpha: 0.6
+  beta: 0.4
+  epsilon: 0.00005
+  default_priority: 1.0
+  min_priority: 0.000001
+  max_priority_value: 1000000.0
+  sample_with_replacement: True
+  normalize_importance_weights: True
+  strict_priorities: True
+  checkpoint_keep_last: 5
+  checkpoint_prefix: "memory"
+  context_recent_window: 50
+  context_high_priority_threshold: 0.85
+  context_high_priority_ratio: 0.3
+  context_saturation_threshold: 0.9
+  context_decay_factor: 0.95
+  historical_context_floor: 0.1
+  persistent_context_threshold: 0.5
+  max_context_tags: 8
+  seed: None
+
+adaptive_circuit:
+  hidden_dim: 128
+  num_kb_embeddings: 1000
+
+hybrid_models:
+  cache_enabled: true
+  cache_max_size: 128
+  source_cache_max_size: 64
+  validate_on_create: true
+  validate_acyclic: true
+  deduplicate_edges: true
+  allow_missing_cpt: true
+  strict_cpt_validation: false
+  namespace_on_collision: false
+  functional_cpt_fallback: true
+  record_memory_events: true
+  default_strategy: global_to_local
+  default_bn_key: bn2x2
+  default_grid_key: gn2x2
+  max_strategy_candidates: 8
+  max_explicit_cpt_parents: 12
+  default_probability: 0.5
+  min_probability: 0.01
+  max_probability: 0.99
+  influence_step: 0.1
+  aggregator_threshold: 0.5
+  aggregator_true_probability: 0.95
+  aggregator_false_probability: 0.05
+  or_gate_true_probability: 0.95
+  or_gate_false_probability: 0.01
+  preferred_grid_dimensions:
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 20
+    - 32
+    - 64
+
 inference:
   default_chain_length: 5         # Max steps in chain-of-thought reasoning
   neuro_symbolic_weight: 0.4      # Weight for neural vs symbolic reasoning (0.0-1.0)
@@ -18,6 +88,77 @@ inference:
     temperature: 0.3
     max_tokens: 100
 
+model_compute:
+  schema_version: 1.3
+  reduction: batchmean
+  learning_rate: 0.001
+  optimizer: adam
+  weight_decay: 0.0
+  loss: binary_cross_entropy
+  batch_size: 32
+  revision_epochs: 5
+  revision_history_size: 256
+  schema_increment: 0.1
+  map_steps: 100
+  marginal_map_steps: 10
+  default_probability: 0.5
+  epsilon: 0.000001
+  sample_count: 1000
+  gradient_clip_norm: 5.0
+  l1_regularization: 0.01
+  determinism_threshold: 0.999
+  strict_evidence_bounds: false
+  auto_sigmoid_outputs: true
+  project_sum_weights: false
+  enforce_non_negative_parameters: false
+  max_explanation_items: 32
+  device: auto
+  seed: 7
+
+probabilistic_models:
+  strict_resource_loading: false
+  strict_inference: false
+  bayesian_first: true
+  neural_fallback: true
+  record_memory_events: true
+  enable_multi_hop: true
+  enable_semantic_similarity: true
+  update_knowledge_after_learning: true
+  default_probability: 0.5
+  epsilon: 1.0e-09
+  observation_buffer_size: 1000
+  learning_batch_size: 100
+  convergence_threshold: 0.0001
+  max_learning_cycles: 100
+  posterior_cache_ttl_seconds: 300.0
+  posterior_cache_max_size: 2048
+  similarity_cache_max_size: 4096
+  selector_similarity_threshold: 0.7
+  semantic_similarity_threshold: 0.7
+  similar_confidence_margin: 0.15
+  path_decay: 0.95
+  max_hop_depth: 5
+  hypothesis_depth_limit: 3
+  max_graph_neighbors: 128
+  evidence_confidence_default: 0.9
+  knowledge_conflict_threshold: 0.3
+  knowledge_update_blend: 0.7
+  temporal_halflife_days: 180.0
+  knowledge_halflife_days: 90.0
+  sensor_threshold: 0.7
+  query_weights:
+    base: 0.35
+    evidence: 0.25
+    semantic: 0.2
+    multi_hop: 0.2
+  similarity_weights:
+    - 0.4
+    - 0.4
+    - 0.2
+  cache_enabled: true
+  cache_max_size: 2048
+  cache_ttl_seconds: 300.0
+
 rules:
   enable_learning: true           # Enable adaptive rule discovery
   min_support: 0.3                # Minimum support threshold for discovered rules
@@ -27,6 +168,8 @@ rules:
   max_utterance_length: 50
   discourse_markers_path: "src/agents/language/resources/en/nlg_pack.yaml"
   politeness_strategies_path: "src/agents/language/resources/en/nlg_pack.yaml"
+  manner_filler_words: ["uh", "um", "like", "sort of", "kind of"]  # Gricean manner-maxim disfluency markers
+  quality_hedge_words: ["probably", "perhaps", "maybe", "might", "possibly"]  # Gricean quality-maxim hedge terms
 
 validation:
   enable: true
@@ -37,6 +180,9 @@ validation:
   max_validation_attempts: 5
   enable_semantic_redundancy: False  # or true, depending on your needs
   mln_rule_confidence_threshold: 0.7
+  semantic_conflict_similarity: 0.80      # cosine-sim floor for embedding-based conflict detection
+  semantic_redundancy_similarity: 0.95    # cosine-sim floor for embedding-based redundancy detection
+  semantic_conflict_confidence_gap: 0.30  # minimum confidence gap required to flag a semantic conflict
 
 nlp:
   sentence_transformer: "src/agents/perception/modules/transformer.py"
@@ -50,23 +196,6 @@ storage:
   rule_backup: "src/agents/knowledge/discovered_rules.json"
   lexicon_path: "src/agents/language/resources/en/sentiment_pack.yaml"
   dependency_rules_path: "src/agents/language/resources/en/syntax_pack.yaml"
-
-model_compute:
-  schema_version: 1.2
-  reduction: batchmean
-
-adaptive_circuit:
-  hidden_dim: 128
-  num_kb_embeddings: 1000
-
-reasoning_memory:
-  max_size: 1000
-  checkpoint_dir: "src/agents/reasoning/checkpoints"
-  checkpoint_freq: 1000
-  auto_save: True
-  alpha: 0.6
-  beta: 0.4
-  epsilon: 0.00005
 
 networks:
   bn2x2: "src/agents/reasoning/networks/bayesian_network_2x2.json"
@@ -94,6 +223,44 @@ networks:
   gn32x32: "src/agents/reasoning/networks/grid_network_32x32.json"
   gn64x64: "src/agents/reasoning/networks/grid_network_64x64.json"
 
+reasoning_cache:
+  namespace: reasoning_types
+  max_size: 1024
+  ttl_enabled: true
+  default_ttl_seconds: 300.0
+  ttl_jitter_seconds: 0.0
+  cleanup_interval_seconds: 30.0
+  evict_expired_before_lru: true
+  prune_expired_on_write: true
+  delete_expired_on_read: true
+  cache_none_values: true
+  copy_on_read: false
+  copy_on_write: false
+  strict_keys: false
+  track_key_reprs: true
+  max_key_repr_length: 256
+  max_export_entries: 256
+  hash_algorithm: sha256
+  record_memory_events: false
+  memory_event_tag: reasoning_cache
+  memory_event_priority: 0.3
+  seed: null
+
+reasoning_types:
+  max_combined_types: 3
+  enable_instance_cache: true
+  instance_cache_max_size: 32
+  instance_cache_ttl_seconds: 300.0
+  default_strategy: "abduction+deduction"
+  record_memory_events: false
+  strategy_keywords:
+    abduction: ["explain", "why", "hypothesis", "plausible", "most likely"]
+    deduction: ["prove", "derive", "therefore", "premise", "must be"]
+    induction: ["pattern", "trend", "generalize", "predict", "extrapolate"]
+    analogical: ["analogy", "similar", "compare", "resembles"]
+    decompositional: ["break down", "component", "decompose", "subsystem"]
+    cause_effect: ["effect", "impact", "results in", "causal", "cause"]
+
 base_reasoning:
   confidence: 0.75 # default confidence
   is_supported: True
@@ -108,9 +275,33 @@ reasoning_abduction:
 reasoning_analogical:
   min_similarity: 0.5
   max_analogies: 3
-  structural_weight: 0.6
-  functional_weight: 0.4
+  structural_weight: 0.35
+  functional_weight: 0.25
+  relational_weight: 0.15
+  semantic_weight: 0.15
+  constraint_weight: 0.10
   adaptation_threshold: 0.7
+  mapping_acceptance_threshold: 0.55
+  min_correspondence_similarity: 0.45
+  max_correspondences: 64
+  max_transfer_items: 64
+  max_property_tokens: 256
+  name_similarity_weight: 0.10
+  transfer_confidence_floor: 0.05
+  direct_transfer_bonus: 0.05
+  transformation_penalty: 0.10
+  enable_cache: true
+  cache_ttl_seconds: 300.0
+  record_memory_events: false
+  memory_event_priority: 0.35
+  strict_inputs: true
+  return_context: false
+  include_rejected_mappings: true
+  synonym_groups:
+    - [route, routing, guide, direct]
+    - [traffic, packets, flow, movement]
+    - [resilience, reliability, robustness]
+    - [efficiency, optimization, performance]
 
 reasoning_cause_effect:
   min_confidence: 0.7        # Minimum confidence to accept relationship
@@ -121,26 +312,107 @@ reasoning_cause_effect:
   network_mode: 'bayesian'   # 'bayesian' or 'simple' modeling
 
 reasoning_decompositional:
-  max_depth: 3                   # Maximum decomposition depth
-  min_component_size: 1          # Minimum size for decomposition
-  structural_weight: 0.5         # Weight for structural analysis
-  functional_weight: 0.5         # Weight for functional analysis
-  enable_interaction_analysis: true  # Enable interaction analysis
+  max_depth: 4
+  min_component_size: 1
+  max_components: 512
+  max_children_per_node: 64
+  max_interactions: 1000
+  max_name_length: 96
+  max_property_tokens: 256
+  content_preview_chars: 240
+  structural_weight: 0.45
+  functional_weight: 0.35
+  dependency_weight: 0.15
+  criticality_weight: 0.05
+  enable_interaction_analysis: true
+  interaction_threshold: 0.55
+  criticality_threshold: 0.7
+  vulnerability_threshold: 0.8
+  high_complexity_threshold: 0.8
+  low_cohesion_threshold: 0.3
+  default_strategy: structural
+  strict_inputs: true
+  include_content_preview: true
+  return_context: false
+  enable_cache: true
+  cache_ttl_seconds: 300.0
+  dependency_keys:
+  - dependencies
+  - depends_on
+  - requires
+  - uses
+  - inputs
 
 reasoning_deductive:
-  max_steps: 10
-  certainty_threshold: 0.95
-  enable_fallacy_check: True
-  rule_priority:                  # Rule application order
+  max_steps: 32
+  max_iterations: 8
+  max_premises: 256
+  max_statement_length: 512
+  certainty_threshold: 0.85
+  min_premise_confidence: 0.5
+  enable_fallacy_check: true
+  strict_inputs: true
+  return_trace: true
+  include_rejected_premises: true
+  rule_confidence_decay: 0.95
+  contradiction_penalty: 0.5
+  negation_penalty: 0.7
+  enable_cache: true
+  cache_ttl_seconds: 300.0
+  rule_priority:
     - modus_ponens
     - modus_tollens
     - syllogism
     - disjunctive_syllogism
     - hypothetical_syllogism
+  rule_weights:
+    modus_ponens: 1.0
+    modus_tollens: 0.92
+    syllogism: 0.95
+    disjunctive_syllogism: 0.9
+    hypothetical_syllogism: 0.88
+  allow_atomic_premises: true
 
 reasoning_inductive:
   min_observations: 5
+  max_observations: 10000
+  max_patterns: 128
+  max_predictions: 32
+  max_attribute_values: 512
   confidence_threshold: 0.7
+  min_observation_confidence: 0.0
+  min_pattern_support: 2
+  dominant_value_threshold: 0.7
+  counterexample_tolerance: 0.2
+  numeric_residual_tolerance: 0.2
   extrapolation_limit: 1.5
-  trend_analysis_weight: 0.6
-  pattern_analysis_weight: 0.4
+  trend_analysis_weight: 0.45
+  pattern_analysis_weight: 0.35
+  attribute_analysis_weight: 0.15
+  diversity_weight: 0.05
+  strict_inputs: true
+  return_context: false
+  include_rejected_observations: true
+  enable_cache: true
+  cache_ttl_seconds: 300.0
+  record_memory_events: false
+
+sum_nodes:
+  weight_init: "uniform"       # "uniform" | "random" — initial weight distribution
+  log_space: false             # operate in log domain (numerically stable for deep circuits)
+  temperature: 1.0             # softmax temperature (< 1 sharpens, > 1 flattens weights)
+  min_children: 2              # minimum children required per SumNode
+  max_children: 512            # maximum children allowed per SumNode
+  enforce_smoothness: true     # abort if children scopes differ (SPN smoothness constraint)
+  activation_depth: 8          # maximum recursion depth for trace_activations()
+ 
+product_nodes:
+  log_space: false             # operate in log domain (product becomes sum of logs)
+  min_children: 2              # minimum children required per ProductNode
+  max_children: 512            # maximum children allowed per ProductNode
+  strict_decomposable: true    # abort on overlapping child scopes; false → warning only
+  activation_depth: 8          # maximum recursion depth for trace_activations()
+ 
+leaf_nodes:
+  hidden_dim: 16               # hidden layer width in the leaf MLP projection
+  allow_empty_scope: false     # whether an empty variable scope is permitted

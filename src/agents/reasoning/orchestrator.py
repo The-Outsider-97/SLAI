@@ -8,16 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-from src.agents.reasoning.probabilistic_models import ProbabilisticModels
-from src.agents.reasoning.hybrid_probabilistic_models import HybridProbabilisticModels
-from src.agents.reasoning.reasoning_memory import ReasoningMemory
-from src.agents.reasoning.reasoning_types import ReasoningTypes
-from src.agents.reasoning.rule_engine import RuleEngine
-from src.agents.reasoning.validation import ValidationEngine
-from logs.logger import get_logger, PrettyPrinter
+from .utils.reasoning_errors import *
+from .utils.reasoning_helpers import *
+from .probabilistic_models import ProbabilisticModels
+from .hybrid_probabilistic_models import HybridProbabilisticModels
+from .reasoning_memory import ReasoningMemory
+from .reasoning_types import ReasoningTypes
+from .rule_engine import RuleEngine
+from .validation import ValidationEngine
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reasoning Orchestrator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 Fact = Tuple[str, str, str]
 RuleEntry = Tuple[str, Callable[[Dict[Fact, float]], Dict[Fact, float]], float]
