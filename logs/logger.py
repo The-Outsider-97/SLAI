@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import gzip
+import io
 import logging
 import os, sys
 import time
 import math
 import queue
-import psutil
+import psutil # type: ignore
 import hashlib
 import zlib
 import statistics
@@ -18,7 +19,7 @@ if os.name == 'nt':
 else:
     msvcrt = None
 import uuid
-import pynvml
+import pynvml # type: ignore
 
 from logging.handlers import RotatingFileHandler
 from collections import deque
@@ -325,14 +326,25 @@ def get_logger(name: str) -> logging.Logger:
 
         # File handler (no colors)
         file_handler = RotatingHandler(
-            'logs/app.log', 
-            maxBytes=1000000, 
-            backupCount=5, 
-            delay=True
+            'logs/app.log',
+            maxBytes=1000000,
+            backupCount=5,
+            delay=True,
+            encoding='utf-8',
+            errors='replace'
         )
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(file_handler)
+
+        console_stream = sys.stdout
+        if sys.platform == 'win32' and not isinstance(console_stream, io.TextIOWrapper):
+            console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        elif hasattr(console_stream, 'encoding') and console_stream.encoding != 'utf-8':
+            try:
+                console_stream.reconfigure(encoding='utf-8', errors='replace')
+            except AttributeError: 
+                console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
         # Console handler with colored level names
         console_handler = logging.StreamHandler(sys.stdout)
