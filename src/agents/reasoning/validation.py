@@ -448,7 +448,7 @@ class ValidationEngine:
         Returns:
             Sorted list of rule names participating in at least one cycle.
         """
-        _depth = max_depth or self._max_circular_depth
+        _depth = self._max_circular_depth if max_depth is None else max_depth
         rule_names: Set[str] = {name for name, _, _ in rules}
         rule_graph: Dict[str, Set[str]] = defaultdict(set)
  
@@ -516,7 +516,7 @@ class ValidationEngine:
             Dict with ``"sound"`` and ``"unsound"`` keys, each a list of
             ``(rule_name, match_score)`` sorted descending by score.
         """
-        floor = clamp_confidence(min_score or self.min_soundness_score)
+        floor = clamp_confidence(self.min_soundness_score if min_score is None else min_score)
         sound:   List[Tuple[str, float]] = []
         unsound: List[Tuple[str, float]] = []
  
@@ -576,7 +576,7 @@ class ValidationEngine:
         Returns:
             List of ``(new_fact, kb_fact)`` conflict pairs (de-duplicated).
         """
-        thr = clamp_confidence(threshold or self.contradiction_threshold)
+        thr = clamp_confidence(self.contradiction_threshold if threshold is None else threshold)
         conflicts: List[_ConflictPair] = []
         seen: Set[frozenset] = set()
  
@@ -650,7 +650,7 @@ class ValidationEngine:
         Returns:
             De-duplicated list of redundant fact keys.
         """
-        mgn = clamp_confidence(margin or self.redundancy_margin)
+        mgn = clamp_confidence(self.redundancy_margin if margin is None else margin)
         redundant: List[_Fact] = []
  
         with self._lock:
@@ -726,7 +726,7 @@ class ValidationEngine:
             ``contradictions``, ``redundant_pairs``, ``confidence_violations``,
             ``markov_violations``, ``execution_time_ms``.
         """
-        max_att = attempts or self._max_validation_attempts
+        max_att = self._max_validation_attempts if attempts is None else attempts
         last_exc: Optional[Exception] = None
  
         for attempt in range(1, max_att + 1):
@@ -853,7 +853,9 @@ class ValidationEngine:
             Full MLN evaluation report from ``evaluate_mln_rules``.
         """
         target_kb = kb if kb is not None else dict(self.knowledge_base)
-        threshold = clamp_confidence(min_confidence or self.mln_rule_confidence_threshold)
+        threshold = clamp_confidence(
+            self.mln_rule_confidence_threshold if min_confidence is None else min_confidence
+        )
         return evaluate_mln_rules(
             target_kb,
             min_confidence=threshold,
