@@ -285,17 +285,6 @@ Recommended practice:
 
 ---
 
-## Quick Maintenance Checklist
-
-- [ ] Config keys are documented and have safe defaults.
-- [ ] Override semantics use `is None` where appropriate.
-- [ ] All confidence thresholds are clamped/validated.
-- [ ] Validation output remains schema-consistent.
-- [ ] Memory/cache writes are bounded and observable.
-- [ ] New modules are reflected in this README structure section.
-
----
-
 ## Related Documents
 
 - `src/agents/reasoning/types/README.md`
