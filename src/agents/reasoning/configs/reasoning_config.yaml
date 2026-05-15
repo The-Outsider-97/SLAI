@@ -1,6 +1,4 @@
 semantic_frames_path: "src/agents/reasoning/templates/semantic_frames.json"
-max_circular_depth: 3
-learning_rate: 0.001
 embedding_dim: 64
 contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
 markov_logic_weight: 0.7
@@ -9,16 +7,16 @@ reasoning_memory:
   max_size: 10000
   checkpoint_dir: "src/agents/reasoning/checkpoints"
   checkpoint_freq: 1000
-  auto_save: True
+  auto_save: true
   alpha: 0.6
   beta: 0.4
   epsilon: 0.00005
   default_priority: 1.0
   min_priority: 0.000001
   max_priority_value: 1000000.0
-  sample_with_replacement: True
-  normalize_importance_weights: True
-  strict_priorities: True
+  sample_with_replacement: true
+  normalize_importance_weights: true
+  strict_priorities: true
   checkpoint_keep_last: 5
   checkpoint_prefix: "memory"
   context_recent_window: 50
@@ -29,7 +27,7 @@ reasoning_memory:
   historical_context_floor: 0.1
   persistent_context_threshold: 0.5
   max_context_tags: 8
-  seed: None
+  seed: null
 
 adaptive_circuit:
   hidden_dim: 128
@@ -178,7 +176,7 @@ validation:
   validation_timeout: 1
   min_soundness_score: 0.7
   max_validation_attempts: 5
-  enable_semantic_redundancy: False  # or true, depending on your needs
+  enable_semantic_redundancy: false  # or true, depending on your needs
   mln_rule_confidence_threshold: 0.7
   semantic_conflict_similarity: 0.80      # cosine-sim floor for embedding-based conflict detection
   semantic_redundancy_similarity: 0.95    # cosine-sim floor for embedding-based redundancy detection
