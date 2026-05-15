@@ -1026,7 +1026,7 @@ class RuleEngine:
         Returns:
             List of circular chains (each a list of rule names forming a cycle).
         """
-        depth = max_depth or self._max_circular_depth
+        depth = self._max_circular_depth if max_depth is None else max_depth
         circular_chains: List[List[str]] = []
  
         with self._lock:
@@ -1109,7 +1109,7 @@ class RuleEngine:
             List of ``((s, p, o1, c1), (s, p, o2, c2))`` conflict pairs.
         """
         threshold = clamp_confidence(
-            contradiction_threshold or self.contradiction_threshold
+            self.contradiction_threshold if contradiction_threshold is None else contradiction_threshold
         )
         antonyms: Dict[str, Any] = self.sentiment_lexicon.get("antonyms", {})
         conflicts: List[Tuple[Tuple, Tuple]] = []
@@ -1168,7 +1168,9 @@ class RuleEngine:
         Returns:
             List of ``(fact, kb_confidence, inferred_confidence)`` triples.
         """
-        margin = clamp_confidence(confidence_margin or self._redundancy_margin)
+        margin = clamp_confidence(
+            self._redundancy_margin if confidence_margin is None else confidence_margin
+        )
         inferred = self._apply_all_rules()
         return [
             (fact, kb_conf, inferred.get(fact, 0.0))
