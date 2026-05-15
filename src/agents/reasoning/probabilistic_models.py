@@ -77,6 +77,8 @@ class InferenceTrace:
     duration_seconds: float
     used_cache: bool = False
     diagnostics: Dict[str, Any] = field(default_factory=dict)
+    supporting_facts: List[Tuple[Fact, float]] = field(default_factory=list)
+    rule_contributions: Dict[str, float] = field(default_factory=dict)
 
     def to_memory_event(self) -> Dict[str, Any]:
         return json_safe_reasoning_state(
@@ -990,6 +992,23 @@ class ProbabilisticModels(nn.Module):
         semantic_score = self._semantic_support(query_fact, context=context) if self.enable_semantic_similarity else self.default_probability
         multi_hop_score = self.multi_hop_reasoning(query_fact, context=context, max_depth=self.max_hop_depth) if self.enable_multi_hop else self.default_probability
 
+        supporting = []
+        if base_score > self.default_probability:
+            supporting.append((query_fact, base_score))
+        if evidence_score > self.default_probability:
+            supporting.append((("evidence", "supports", str(query_fact)), evidence_score))
+        if semantic_score > self.default_probability:
+            supporting.append((("evidence", "supports", str(query_fact)), semantic_score))
+        if multi_hop_score > self.default_probability:
+            supporting.append((("evidence", "supports", str(query_fact)), multi_hop_score))
+
+        rule_contrib = {
+            "base": base_score,
+            "evidence": evidence_score,
+            "semantic": semantic_score,
+            "multi_hop": multi_hop_score,
+        }
+
         weighted_result = weighted_confidence(
             [base_score, evidence_score, semantic_score, multi_hop_score],
             [
@@ -1015,6 +1034,8 @@ class ProbabilisticModels(nn.Module):
                     "multi_hop": multi_hop_score,
                     "weights": self.query_weights,
                 },
+                supporting_facts=supporting,
+                rule_contributions=rule_contrib,
             )
         )
         return result
