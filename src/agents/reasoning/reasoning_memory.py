@@ -4,9 +4,12 @@ import os
 import random
 import tempfile
 import time
+import uuid
 import numpy as np # type: ignore
 import torch # type: ignore
+import chromadb # type: ignore
 
+from chromadb.utils import embedding_functions # type: ignore
 from collections import Counter, defaultdict, namedtuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +24,8 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 
 logger = get_logger("Reasoning Memory")
 printer = PrettyPrinter()
+
+CHROMA_AVAILABLE = True
 
 if hasattr(torch.serialization, "add_safe_globals"):
     _np_core = getattr(np, "_core", None)
@@ -208,6 +213,18 @@ class ReasoningMemory:
         self.max_priority = self.default_priority
         self.last_checkpoint_path: Optional[str] = None
 
+        enable_episodic: bool = False
+        collection_name: str = "reasoning_episodes"
+        self.enable_episodic = enable_episodic and CHROMA_AVAILABLE
+        self.episodic_client = None
+        self.episodic_collection = None
+        if self.enable_episodic:
+            self.episodic_client = chromadb.Client()
+            self.episodic_collection = self.episodic_client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=embedding_functions.DefaultEmbeddingFunction(),
+            )
+
         self.tree = SumTree(self.max_size)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Reasoning Memory initialized with prioritized SumTree")
@@ -282,6 +299,32 @@ class ReasoningMemory:
     # ------------------------------------------------------------------
     # Priority / metadata utilities
     # ------------------------------------------------------------------
+    def store_episode(self, state: Dict[str, Any], action: str, outcome: Any, reward: float, metadata: Optional[Dict] = None):
+        if not self.enable_episodic or self.episodic_collection is None:
+            return
+        episode_id = str(uuid.uuid4())
+        document = f"State: {json.dumps(state, default=str)}\nAction: {action}\nOutcome: {outcome}\nReward: {reward}"
+        self.episodic_collection.add(
+            ids=[episode_id],
+            documents=[document],
+            metadatas=[{"timestamp": time.time(), "action": action, "reward": reward, **(metadata or {})}]
+        )
+
+    def retrieve_similar_episodes(self, current_state: Dict[str, Any], n_results: int = 5):
+        if not self.enable_episodic or self.episodic_collection is None:
+            return []
+        query_text = json.dumps(current_state, default=str)
+        results = self.episodic_collection.query(query_texts=[query_text], n_results=n_results)
+        episodes = []
+        for i in range(len(results['ids'][0])):
+            episodes.append({
+                "id": results['ids'][0][i],
+                "document": results['documents'][0][i],
+                "metadata": results['metadatas'][0][i],
+                "distance": results['distances'][0][i] if 'distances' in results else None
+            })
+        return episodes
+
     def _normalize_priority(self, priority: Optional[Any]) -> float:
         """Normalize raw priority before PER alpha transformation."""
         raw = self.max_priority if priority is None else priority
