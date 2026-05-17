@@ -24,6 +24,8 @@ import pynvml # type: ignore
 from logging.handlers import RotatingFileHandler
 from collections import deque
 from typing import Any, TYPE_CHECKING
+
+from .standards import LogDomain, default_log_path, ensure_log_directories
 if TYPE_CHECKING:
     from src.utils.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
 
@@ -33,10 +35,8 @@ if os.name == 'nt':
     os.system("")
 
 
-log_dir = "logs"
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir, exist_ok=True)
-    os.chmod(log_dir, 0o755)  # Read/write for owner, read for others
+ensure_log_directories()
+log_dir = str(default_log_path(LogDomain.RUNTIME, "").parent)
 
 # ========== Status Tags ==========
 INIT       = "[INIT]"
@@ -326,7 +326,7 @@ def get_logger(name: str) -> logging.Logger:
 
         # File handler (no colors)
         file_handler = RotatingHandler(
-            'logs/app.log',
+            str(default_log_path(LogDomain.RUNTIME, 'app.log')),
             maxBytes=1000000,
             backupCount=5,
             delay=True,
