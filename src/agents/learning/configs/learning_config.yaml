@@ -1,0 +1,470 @@
+embedding_buffer_size: 512
+
+learning_memory:
+  max_size: 10000
+  eviction_policy: "LRU"
+
+  # Checkpointing
+  checkpoint_dir: "src/agents/learning/checkpoints/memory"
+  checkpoint_freq: 1000
+  auto_save: true
+  safe_checkpoint_load: true
+  checkpoint_pickle_protocol: 2
+
+  # Prioritized Experience Replay
+  alpha: 0.6
+  beta: 0.4
+  beta_end: 1.0
+  beta_annealing_steps: 100000
+  epsilon: 1.0e-5
+
+  # Sampling behavior
+  allow_empty_sample: true
+  allow_partial_batch: true
+  uniform_without_replacement: true
+
+  # Diagnostics
+  max_recent_rewards: 1000
+
+evolutionary:
+  population_size: 10
+  generations: 20
+  mutation_rate: 0.2
+  top_k: 2
+  evaluation_episodes: 3
+  elite_ratio: 0.3
+  creation_threshold: 0.4
+  promotion_threshold: 3
+  max_temporary_agents: 10
+  garbage_collect_interval: 1000
+  step_size_adaptation: true   # enable self-adaptive step size
+
+dqn:
+  hidden_size: 128
+  gamma: 0.99
+  epsilon: 1.0
+  epsilon_min: 0.01
+  epsilon_decay: 0.995
+  learning_rate: 0.001
+  batch_size: 64
+  target_update_frequency: 100
+  buffer_size: 10000
+
+maml:
+  hidden_size: 64
+  meta_lr: 0.001
+  inner_lr: 0.01
+  inner_steps: 1
+  gamma: 0.99
+
+  # Rollout / adaptation
+  support_episodes: 1
+  query_episodes: 1
+  max_trajectory_steps: 500
+  first_order: false
+  eval_deterministic: false
+
+  # Objective
+  entropy_coef: 0.0
+  normalize_returns: true
+  reward_clip: null
+
+  # Gradient safety
+  grad_clip_norm: 1.0
+  gradient_explosion_threshold: 1000.0
+
+  # Reward shaping / task metrics
+  use_reward_shaping: false
+  novelty_coef: 0.1
+  communication_bonus_coef: 2.0
+  task_completion_bonus_coef: 5.0
+  train_novelty_detector: true
+  fail_fast_task_errors: true
+
+  # Novelty detector
+  novelty_feature_dim: 32
+  novelty_lr: 0.001
+  novelty_hidden_sizes: null
+  novelty_activation: "relu"
+  novelty_grad_clip_norm: 1.0
+
+  # Message / speaking-task support
+  vocab_size: 50
+  max_message_length: 10
+
+  # Training / validation
+  validation_freq: 0
+  reward_history: 250
+  loss_history: 250
+
+  # Decentralized fleet
+  diffusion_type: "average"
+  meta_epochs: 100
+  tasks_per_agent_meta_batch: 5
+  adjacency_matrix: null
+
+  # Persistence
+  checkpoint_dir: "src/agents/learning/checkpoints/maml"
+
+rl:
+  learning_rate: 0.1
+  discount_factor: 0.9
+  epsilon: 0.1
+  trace_decay: 0.7
+  state_dim: 128
+  double_q: false               # enable Double Q-learning (two Q-tables)
+  trace_type: "accumulating"    # "accumulating" or "replacing"
+
+rsi:
+  gamma: 0.95               # discount rate
+  epsilon: 1.0              # exploration rate
+  epsilon_min: 0.01
+  epsilon_decay: 0.995
+  learning_rate: 0.001
+  baseline_performance: None
+  rsi_period: 14                   # Initial RSI period
+  improvement_interval: 100        # Episodes between self-improvement
+  performance_history: 50          # Track recent performance
+  param_mutation_rate: 0.1         # Exploration in parameter space
+  improvement_threshold: 0.05      # 5% minimum improvement
+  target_update_frequency: 100
+
+unified:
+  validation_episodes: 5
+  early_stop_patience: 20
+
+learning_calculations:
+  trend_window: 50
+  epsilon: 1e-12
+  k: 5
+
+learning_env:
+  max_steps: 500
+  seed: null
+  episode_history: 100
+
+  # Spaces / initial state
+  state_low: -10.0
+  state_high: 10.0
+  initial_state_low: -0.5
+  initial_state_high: 0.5
+
+  # Dynamics
+  state_damping: 0.95
+  velocity_damping: 0.90
+  action_scale: 0.2
+  velocity_action_scale: 0.1
+  quantum_jitter_probability: 0.01
+
+  # Replay memory integration
+  memory_enabled: true
+  memory_priority_mode: "abs_reward"   # abs_reward|terminal|none
+
+  # Novelty integration
+  novelty_weight: 1.0
+  novelty_clip: null
+  train_novelty_detector: false
+  strict_novelty_errors: false
+
+  # Reward control
+  reward_clip: null
+  reward_weights:
+    progress: 10.0
+    action_cost: -0.02
+    stability: -0.1
+    smoothness: -0.01
+    goal: 100.0
+    hazard: -10.0
+    alive: 0.0
+    boundary: -1.0
+
+  # Zones use bounds: [x_min, x_max, y_min, y_max]
+  zones:
+    - type: "goal"
+      bounds: [8.0, 9.0, 8.0, 9.0]
+      reward: 100.0
+      terminal: true
+    - type: "hazard"
+      bounds: [-5.0, -4.0, -5.0, -4.0]
+      reward: -10.0
+      terminal: true
+
+  # Physics passed into PhysicsConfig
+  physics:
+    gravity: 9.80665
+    friction_coeff: 0.02
+    rotational_friction: 0.01
+    wind_strength: 0.0
+    wind_direction: 0.0
+    wind_turbulence_ratio: 0.1
+    drag_coeff: 0.01
+    terminal_velocity: 50.0
+    min_speed_for_drag: 0.01
+    elasticity: 0.8
+    tangential_damping: 0.2
+    boundary_margin: 0.01
+    corner_threshold: 0.05
+    max_angular_velocity: 5.0
+    default_mass: 1.0
+    default_charge: 0.0
+    enable_tunneling: false
+    tunneling_probability: 0.05
+    barrier_positions: [-8.0, 8.0]
+    barrier_width: 0.1
+    enable_relativistic: true
+    relativistic_threshold: 0.1
+    relativistic_safety_factor: 0.999999
+    enable_electromagnetic: false
+    electric_field: [0.0, 10.0]
+    magnetic_field: 0.5
+    dt: 0.05
+    enable_history: true
+    history_limit: 200
+    random_seed: null
+
+  # Rendering
+  render_size: 400
+  auto_reset_on_step: false
+
+multi_task_learner:
+  initial_weights: null                # Optional per-task starting weights, e.g. {policy: 0.5, value: 0.5}
+  rebalance_strategy: "softmax"        # none|uniform|softmax|inverse_softmax|proportional|inverse_proportional|dwa|uncertainty
+  rebalance_temp: 1.0                  # Temperature for softmax-style strategies; lower = sharper weighting
+  history_window: 5                    # Recent losses used for adaptive weighting
+  max_history_per_task: 500            # Bounded in-memory history per task
+  normalize_weights: true              # Keep weights summing to 1.0 after post-processing
+  min_weight: 0.0                      # Clamp lower bound before optional normalization
+  max_weight: 1.0                      # Clamp upper bound before optional normalization
+  smoothing_alpha: 0.0                 # Blend old/new weights; 0.0 = immediate, 1.0 = no change
+  max_weight_delta: null               # Optional max absolute change per task per rebalance
+  unknown_task_policy: "warn_ignore"   # error|warn_ignore|auto_add
+  loss_reduction: "mean"              # mean|sum|none for tensor losses
+  auto_rebalance_on_update: false      # Rebalance automatically after update intervals
+  rebalance_interval: 1                # Used when auto_rebalance_on_update is true
+  checkpoint_dir: "src/agents/learning/checkpoints/multi_task_learner"
+  round_precision: 8                   # Precision used when returning display weights
+
+neural_network:
+  layer_dims: [784, 128, 64, 10]   # First/last are overridden by constructor input_dim/output_dim.
+  hidden_activation: "relu"        # relu|leaky_relu|elu|sigmoid|tanh|gelu|mish|silu|swish|linear
+  output_activation: "linear"      # linear for value/Q heads; softmax/sigmoid/tanh when needed for prediction output.
+  loss_function: "mse"             # mse|cross_entropy|huber
+  optimizer: "adam"                # sgd|momentum|rmsprop|adam|adamw
+  learning_rate: 0.001
+  weight_init: "auto"              # auto|kaiming|xavier|orthogonal|normal|zeros
+  momentum_beta: 0.9
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  rmsprop_alpha: 0.99
+  rmsprop_epsilon: 1.0e-8
+  adamw_weight_decay: 0.01
+  huber_delta: 1.0
+  l1_lambda: 0.0
+  l2_lambda: 0.0001
+  gradient_clip_norm: 5.0
+  gradient_explosion_threshold: 10000.0
+  use_output_activation_for_loss: false
+  nan_guard: true
+
+policy_network:
+  hidden_size: 64                    # Backward-compatible shorthand used by some learning modules.
+  hidden_layer_sizes: [128, 64]      # Canonical policy hidden architecture.
+  hidden_activation: 'relu'
+  output_activation: 'softmax'       # softmax for discrete policy gradients; linear/tanh/sigmoid for continuous heads.
+  use_batch_norm: False
+  dropout_rate: 0.0
+  weight_init: 'auto'                # auto|kaiming|xavier|orthogonal|normal
+  gradient_clip_norm: 1.0
+  l1_lambda: 0.0
+  l2_lambda: 0.0001
+  optimizer_config:
+    type: 'adam'                     # sgd|momentum|adam|adamw|rmsprop
+    learning_rate: 0.001
+    momentum_beta: 0.9
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    rmsprop_alpha: 0.99
+    rmsprop_epsilon: 1.0e-8
+  novelty_detector:
+    feature_dim: 32
+    learning_rate: 0.001
+    hidden_sizes: [32]
+    activation: 'relu'
+    gradient_clip_norm: 1.0
+    target_update_tau: 0.01
+
+recovery_system:
+  enabled: true
+  # Error accounting
+  error_decay_time: 3600.0
+  error_decay_factor: 0.5
+  error_thresholds: [3, 6, 9, 12]
+  max_recovery_attempts: 5
+  max_error_events: 100
+  # Learning-rate recovery
+  lr_reduction_factor: 0.5
+  min_learning_rate: 1.0e-6
+  max_learning_rate: 1.0
+  # Strategy safety
+  safe_strategy: "rl"
+  # Snapshot / rollback
+  snapshot_on_recovery: true
+  max_snapshots: 5
+  checkpoint_dir: "src/agents/learning/checkpoints/recovery"
+  # Soft reset behavior
+  reset_exploration_factor: 1.5
+  max_exploration_rate: 1.0
+  clear_buffers_on_soft_reset: true
+  reset_networks_on_soft_reset: true
+  # Error diagnostics
+  record_exception_trace: true
+  error_severity_weights:
+    NaNException: 3
+    InfException: 3
+    NumericalInstabilityError: 3
+    GradientExplosionError: 3
+    CheckpointError: 2
+    ReplayBufferError: 2
+    RecoveryError: 2
+    LearningError: 1
+    Exception: 1
+  # Attributes the recovery system may inspect/reset/snapshot
+  reset_buffer_attributes:
+    - state_history
+    - action_history
+    - reward_history
+    - loss_history
+    - replay_buffer
+    - memory
+    - episode_buffer
+    - trajectory_buffer
+    - recent_transitions
+    - training_buffer
+  network_attributes:
+    - policy_net
+    - target_net
+    - value_net
+    - critic
+    - actor
+    - q_network
+    - model
+    - network
+    - neural_network
+    - policy
+    - target_model
+  optimizer_attributes:
+    - optimizer
+    - policy_optimizer
+    - value_optimizer
+    - meta_optimizer
+    - actor_optimizer
+    - critic_optimizer
+
+  scalar_state_attributes:
+    - learning_rate
+    - epsilon
+    - epsilon_min
+    - exploration_rate
+    - temperature
+    - gamma
+    - discount_factor
+    - training_steps
+    - episode_count
+
+rl_engine:
+  state_processor:
+    tiling_resolution: 0.1
+    num_tilings: 8
+    feature_engineering: true
+    normalize_states: false
+    clip_normalized: true
+    include_cross_terms: true
+    include_rbf: true
+    rbf_sigma: 0.5
+    feature_clip: null
+    seed: 0
+
+  exploration_strategies:
+    strategy: "epsilon_greedy"       # epsilon_greedy|greedy|random|boltzmann|softmax|ucb|thompson|curiosity
+    epsilon: 0.1
+    epsilon_decay: 0.995
+    min_epsilon: 0.01
+    temperature: 1.0
+    ucb_c: 2.0
+    curiosity_weight: 0.1
+    history_size: 1000
+    seed: null
+
+  q_table_optimizer:
+    batch_size: 32
+    momentum: 0.9
+    learning_rate: 0.1
+    compression: true
+    cache_size: 1000
+    default_value: 0.0
+    update_frequency: 100
+    compaction_interval: 1000
+    delta_precision: 6
+    max_sparse_entries: 100000
+
+state_processor_config:
+  normalize: false                 # Enable low/high normalization.
+  normalize_mode: "minmax"         # minmax|centered
+  clip_normalized: true            # Clip normalized output to valid mode range.
+  expected_dim: null               # Optional fixed flattened state dimension.
+  device: "cpu"                    # cpu|cuda, depending on deployment.
+  allow_none_state: true           # Preserve legacy behavior for None states.
+  empty_state_dim: 0               # Size returned when state is None and allowed.
+  non_numeric_policy: "zero"       # zero|error|skip
+  sort_dict_keys: true             # Deterministic flattening for dict observations.
+  detach_tensors: true             # Avoid carrying external autograd graphs.
+  check_finite: true               # Raise on NaN/Inf unless replacement is enabled.
+  replace_non_finite: false        # Replace NaN/Inf instead of raising.
+  non_finite_replacement: 0.0
+  clip_values: null                # Optional symmetric raw input clamp before normalization.
+  round_precision: 8               # Diagnostics precision.
+  max_history: 100                 # Recent norm history for diagnostics.
+
+strategy_selector:
+  task_embedding_dim: 256
+  state_input_dim: 256
+  min_batch: 32
+  embedding_buffer_size: 2048
+
+  # Tensor shaping
+  resize_policy: "pad_truncate"       # pad_truncate|error
+  detach_embeddings: true
+  train_embedder: false
+
+  # Training controls
+  gradient_clip_norm: 1.0
+  gradient_explosion_threshold: 10000.0
+  clear_buffer_after_train: true
+
+  # Selection controls
+  confidence_threshold: 0.0
+  fallback_strategy: null
+  unknown_strategy_policy: "error"    # error|warn_ignore
+
+  # Reproducibility / diagnostics
+  seed: null
+  max_history: 200
+
+temporal_processing:
+  use_sequence_modeling: True
+  sequence_length: 10
+
+visual_processing:
+  use_visual_observations: True
+  encoder_type: "transformer"  # or "cnn"
+  pretrained_weights: "path/to/weights.pth" # not available yet
+
+rl_visualization:
+  heatmap_resolution: 50
+  use_gpu_acceleration: true
+
+state_processor_config:
+  normalize: False
+
