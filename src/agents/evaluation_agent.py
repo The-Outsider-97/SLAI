@@ -28,7 +28,7 @@ from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Any, Tuple
 
 from src.utils.interpretability import InterpretabilityHelper
-from src.utils.database import IssueDBConnector, FallbackIssueTracker
+from .evaluators.utils.issue_db import IssueDBConnector, FallbackIssueTracker
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .base_agent import BaseAgent
 from .evaluators.adaptive_risk import RiskAdaptation
