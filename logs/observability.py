@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import re
-import time
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+
+from .standards import LogDomain, build_event, default_log_path
 
 
 DEFAULT_PII_PATTERNS = {
@@ -60,19 +61,20 @@ class PIIRedactingFormatter(logging.Formatter):
         self.policy = policy
 
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "event": getattr(record, "event", record.msg),
-            "message": record.getMessage(),
-            "service": getattr(record, "service", "slai"),
-            "environment": getattr(record, "environment", "unknown"),
-            "trace_id": getattr(record, "trace_id", None),
-            "span_id": getattr(record, "span_id", None),
-            "component": getattr(record, "component", None),
-            "metadata": getattr(record, "metadata", {}),
-        }
+        payload = build_event(
+            agent=record.name,
+            event=str(getattr(record, "event", record.msg)),
+            severity=record.levelname,
+            payload={
+                "message": record.getMessage(),
+                "service": getattr(record, "service", "slai"),
+                "environment": getattr(record, "environment", "unknown"),
+                "span_id": getattr(record, "span_id", None),
+                "component": getattr(record, "component", None),
+                "metadata": getattr(record, "metadata", {}),
+            },
+            trace_id=getattr(record, "trace_id", None),
+        ).__dict__
         redacted = self._redact(payload)
         return json.dumps(redacted, ensure_ascii=False)
 
@@ -95,7 +97,7 @@ class StructuredLogger:
     def __init__(
         self,
         name: str,
-        log_path: str | Path = "logs/safe_ai.log",
+        log_path: str | Path = default_log_path(LogDomain.RUNTIME, "safe_ai.log"),
         level: int = logging.INFO,
         policy: Optional[LogGovernancePolicy] = None,
     ) -> None:
