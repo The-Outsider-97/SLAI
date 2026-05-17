@@ -4,29 +4,24 @@ from __future__ import annotations
 
 import inspect
 import json
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib.pyplot as plt # type: ignore
+import numpy as np # type: ignore
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from skopt import gp_minimize
-from skopt.space import Categorical, Integer, Real
-from skopt.utils import OptimizeResult, use_named_args
+from skopt import gp_minimize # type: ignore
+from skopt.space import Categorical, Integer, Real # type: ignore
+from skopt.utils import OptimizeResult, use_named_args # type: ignore
 
 from .utils.evaluator import evaluate_bnn_candidate
 from .utils.config_loader import get_config_section, load_global_config
-from .utils.tuning_error import (TuningConfigError, safe_serialize, wrap_exception,
-                                 TuningOptimizationError, raise_for_condition,
-                                 TuningErrorContext, TuningStrategyError,
-                                 TuningEvaluationError, TuningPersistenceError,
-                                 TuningReportingError, TuningSearchSpaceError,
-                                 TuningValidationError)
-from logs.logger import PrettyPrinter, get_logger
+from .utils.tuning_error import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Bayesian Search")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 Dimension = Union[Integer, Real, Categorical]
 
