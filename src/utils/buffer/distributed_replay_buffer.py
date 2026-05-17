@@ -299,11 +299,15 @@ class DistributedReplayBuffer:
         agent_ids = batch[0]
         if len(agent_ids) == 0:
             return
-
+    
         unique, counts = np.unique(agent_ids, return_counts=True)
+        # Skip fairness check if only one group is present
+        if len(unique) < 2:
+            return
+    
         selection_rates = {aid: count / len(agent_ids) for aid, count in zip(unique, counts)}
         self.fairness_stats["fair_batches_checked"] += 1
-
+    
         violation, msg = FairnessMetrics.demographic_parity(
             sensitive_groups=list(selection_rates.keys()),
             positive_rates=selection_rates,
