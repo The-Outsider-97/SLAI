@@ -32,30 +32,30 @@ from datetime import datetime
 from typing import Any as TypingAny, List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                 SafetyMarginError, ResourceViolation, AcademicPlanningError)
-from src.agents.base_agent import BaseAgent
-from src.agents.planning.planning_metrics import PlanningMetrics
-from src.agents.planning.planning_executor import PlanningExecutor
-from src.agents.planning.heuristic_selector import HeuristicSelector
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from src.agents.planning.probabilistic_planner import ProbabilisticPlanner
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
-from src.agents.planning.safety_planning import SafetyPlanning, ResourceMonitor
-from src.agents.planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
+from .base_agent import BaseAgent
+from .planning.planning_metrics import PlanningMetrics
+from .planning.planning_executor import PlanningExecutor
+from .planning.heuristic_selector import HeuristicSelector
+from .planning.task_scheduler import DeadlineAwareScheduler
+from .planning.probabilistic_planner import ProbabilisticPlanner
+from .planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
+from .planning.safety_planning import SafetyPlanning, ResourceMonitor
+from .planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
 try:
-    from src.agents.perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
+    from .perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
 except Exception:
     class ClassificationHead: pass
     class RegressionHead: pass
     class Seq2SeqHead: pass
     print("Warning: perception module unavailable (likely optional torch stack). Using dummy classes.")
 
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 CostProfile = Tuple[float, float]
 StateTuple = Tuple[Tuple[str, TypingAny], ...]
@@ -1606,8 +1606,8 @@ class ExplanatoryPlanner(PlanningAgent):
 if __name__ == "__main__":
     print("\n=== Running AI Planning Agent Test ===\n")
     printer.status("Init", "Planning Agent initialized", "success")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
     import datetime
 
     shared_memory = SharedMemory()
