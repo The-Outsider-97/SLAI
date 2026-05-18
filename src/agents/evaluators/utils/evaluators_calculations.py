@@ -4,23 +4,96 @@ import json
 import math
 import sys
 import importlib
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
-from scipy.stats import f as f_dist
-from scipy.stats import norm, shapiro, t as student_t
-from sklearn.metrics import (confusion_matrix, f1_score, log_loss,
+from scipy.stats import f as f_dist # type: ignore
+from scipy.stats import norm, shapiro, t as student_t # type: ignore
+from sklearn.metrics import (confusion_matrix, f1_score, log_loss, # type: ignore
                              precision_score, recall_score, roc_auc_score)
 
 from .evaluation_errors import (ConfigLoadError, MetricCalculationError, OperationalError,
                                 ThresholdViolationError, ValidationFailureError)
 from .config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Evaluators Calculations")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
+
+class PerformanceMetrics:
+    """Evaluator-facing model performance metrics."""
+
+    @staticmethod
+    def balanced_accuracy(y_true: Sequence[int], y_pred: Sequence[int]) -> float:
+        y_true_arr = np.asarray(y_true, dtype=int)
+        y_pred_arr = np.asarray(y_pred, dtype=int)
+        if y_true_arr.shape != y_pred_arr.shape:
+            raise ValueError("y_true and y_pred must have the same shape.")
+        labels = np.unique(y_true_arr)
+        if labels.size == 0:
+            return 0.0
+
+        recalls = []
+        for label in labels:
+            mask = y_true_arr == label
+            denom = np.sum(mask)
+            if denom == 0:
+                continue
+            recalls.append(float(np.sum(y_pred_arr[mask] == label) / denom))
+        return float(np.mean(recalls)) if recalls else 0.0
+
+    @staticmethod
+    def calibration_error(
+        y_true: Sequence[int],
+        y_prob: Sequence[float],
+        bins: int = 10,
+    ) -> float:
+        """
+        Expected Calibration Error (ECE), binary.
+        y_true in {0,1}, y_prob in [0,1].
+        """
+        yt = np.asarray(y_true, dtype=int)
+        yp = np.asarray(y_prob, dtype=float)
+        if yt.shape != yp.shape:
+            raise ValueError("y_true and y_prob must have the same shape.")
+        if yt.size == 0:
+            return 0.0
+
+        yp = np.clip(yp, 0.0, 1.0)
+        edges = np.linspace(0.0, 1.0, bins + 1)
+        ece = 0.0
+
+        for i in range(bins):
+            lo, hi = edges[i], edges[i + 1]
+            if i == bins - 1:
+                mask = (yp >= lo) & (yp <= hi)
+            else:
+                mask = (yp >= lo) & (yp < hi)
+            count = int(np.sum(mask))
+            if count == 0:
+                continue
+            acc = float(np.mean(yt[mask] == (yp[mask] >= 0.5).astype(int)))
+            conf = float(np.mean(yp[mask]))
+            ece += (count / yt.size) * abs(acc - conf)
+        return float(ece)
+
+    @staticmethod
+    def classification_metrics(
+        y_true: Sequence[int],
+        y_pred: Sequence[int],
+    ) -> Dict[str, float]:
+        yt = np.asarray(y_true, dtype=int)
+        yp = np.asarray(y_pred, dtype=int)
+        if yt.shape != yp.shape:
+            raise ValueError("y_true and y_pred must have the same shape.")
+        if yt.size == 0:
+            return {"accuracy": 0.0, "balanced_accuracy": 0.0}
+
+        accuracy = float(np.mean(yt == yp))
+        bacc = PerformanceMetrics.balanced_accuracy(yt, yp)
+        return {"accuracy": accuracy, "balanced_accuracy": bacc}
 
 class EvaluatorsCalculations:
     """
