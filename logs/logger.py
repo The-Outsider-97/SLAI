@@ -27,7 +27,7 @@ from typing import Any, TYPE_CHECKING
 
 from .standards import LogDomain, default_log_path, ensure_log_directories
 if TYPE_CHECKING:
-    from src.utils.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
+    from monitoring.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
 
 sys.stdout.isatty = lambda: True
 
