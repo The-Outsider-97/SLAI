@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import json
-import yaml
+import yaml # type: ignore
 import csv
 import pickle
-import pandas as pd
-import pyarrow.parquet as pq
-import numpy as np
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
+import pyarrow.parquet as pq # type: ignore
 import re
 import io
 import html
@@ -17,24 +17,18 @@ from typing import Any, Dict, List, Optional, Callable, Union
 from functools import lru_cache
 from pathlib import Path
 
-from src.utils.system_optimizer import SystemOptimizer
-from logs.logger import get_logger
-
-SUPPORTED_FORMATS = ["json", "yaml", "csv", "parquet", "pickle"]
+from monitoring.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
+from .data_error import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Data Loader")
+printer = PrettyPrinter()
 
-# Add SecurityError definition
-class SecurityError(Exception):
-    """Exception for security policy violations"""
-    pass
+SUPPORTED_FORMATS = ["json", "yaml", "csv", "parquet", "pickle"]
 
 # system_metrics placeholder
 system_metrics = {}  # Placeholder for actual metrics implementation
 
-class DataValidationError(Exception):
-    """Custom exception for data validation failures"""
-    pass
 
 class SafeDataLoader:
     """Secure data loader with Ferreres-inspired sanitization framework"""

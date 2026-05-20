@@ -80,7 +80,7 @@ def load_global_config(*, force_reload: bool = False) -> Dict[str, Any]:
             _global_config_signature = current_signature
             _global_config_resolved_path = config_path
 
-        return _global_config
+        return _global_config # type: ignore
 
 
 def get_config_section(section_name: str) -> Dict[str, Any]:
