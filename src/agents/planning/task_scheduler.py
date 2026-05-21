@@ -8,17 +8,17 @@ offers fallback strategies for high‑risk tasks.
 
 import time
 import threading
-import numpy as np
+import numpy as np # type: ignore
 
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Task Scheduler")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class TaskScheduler(ABC):
     """Abstract base class for all task schedulers."""

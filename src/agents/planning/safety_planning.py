@@ -19,10 +19,10 @@ from .utils.resource_monitor import ResourceMonitor
 from .planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
                                                 ClusterResources, RepairCandidate, SafetyViolation)
 from .planning_memory import PlanningMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Safety Planning")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class SafetyPlanning:
     """Core module for safe distributed planning with interactive adjustments"""

@@ -15,10 +15,10 @@ from .heuristics import (
     CaseBasedReasoningHeuristic,
 )
 from .planning_memory import PlanningMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Heuristic Selector")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class HeuristicSelector:
     def __init__(self):

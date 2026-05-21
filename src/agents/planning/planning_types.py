@@ -9,21 +9,19 @@ Includes:
 """
 
 import copy
-import os
 import time
-import yaml, json
 
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any as AnyType, Callable, Dict, List, Optional, Tuple, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
                                                 SafetyMarginError, ResourceViolation, AcademicPlanningError)
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Types")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # -------------------------------------------------------------------------

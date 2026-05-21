@@ -12,12 +12,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.planning_memory import PlanningMemory
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .planning_memory import PlanningMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Probabilistic Planner")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 # Type definitions
 StateTuple = Tuple[Tuple[str, Any], ...]

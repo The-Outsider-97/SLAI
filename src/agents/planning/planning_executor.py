@@ -11,13 +11,13 @@ import time
 
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.planning_memory import PlanningMemory
-from src.agents.planning.planning_types import Task, TaskStatus, TaskType
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .planning_memory import PlanningMemory
+from .planning_types import Task, TaskStatus, TaskType
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Executor")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class PlanningExecutor:
     """

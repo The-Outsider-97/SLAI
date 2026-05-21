@@ -7,17 +7,17 @@ fallback timing, and resource monitoring. Thread‑safe for concurrent usage.
 
 import time
 import threading
-import psutil
+import psutil # type: ignore
 
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import field
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .planning_types import Task, TaskType, TaskStatus
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Metrics")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class PlanningMetrics:
     """
