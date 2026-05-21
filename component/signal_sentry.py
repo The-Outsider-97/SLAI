@@ -39,8 +39,6 @@ from .utils.loading_overlay import LoadingOverlay
 from .utils.main_utils import fmt_pct, utc_timestamp_label
 from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
 from src.agents.agent_factory import AgentFactory
-from src.agents.collaborative.shared_memory import SharedMemory
-from src.agents.collaborative_agent import CollaborativeAgent
 from src.agents.planning.planning_types import Task, TaskType
 
 _BACKEND_IMPORT_ERROR = None
@@ -209,7 +207,9 @@ class SignalSentryWindow(QMainWindow):
         self._planning_task_registered = False
         self._planning_enabled = True
         self._runtime = None
+        self.runtime_status_note = "runtime:not_initialized"
         if _BACKEND_IMPORT_ERROR is not None:
+            self.runtime_status_note = f"backend_import_failed:{_BACKEND_IMPORT_ERROR}"
             return
 
         try:
@@ -221,17 +221,25 @@ class SignalSentryWindow(QMainWindow):
             self.planning_agent = self._runtime.planning_agent
             self.execution_agent = self._runtime.execution_agent
             self.learning_agent = self._runtime.learning_agent
-        except Exception:
-            self.shared_memory = SharedMemory()
-            self.factory = AgentFactory()
-            self.collab = CollaborativeAgent(shared_memory=self.shared_memory, agent_factory=self.factory)
-            self.knowledge_agent = self.factory.create("knowledge", self.shared_memory)
-            self.planning_agent = self.factory.create("planning", self.shared_memory)
-            self.execution_agent = self.factory.create("execution", self.shared_memory)
-            self.learning_agent = self.factory.create("learning", self.shared_memory)
+            self.runtime_status_note = "runtime:ready"
+        except Exception as exc:
+            self.runtime_status_note = f"runtime_init_failed:{type(exc).__name__}: {exc}"
+            self._runtime = None
+            self.shared_memory = None
+            self.factory = None
+            self.collab = None
+            self.knowledge_agent = None
+            self.planning_agent = None
+            self.execution_agent = None
+            self.learning_agent = None
 
     def _ensure_planning_task_registered(self) -> None:
-        if self._planning_task_registered or not self._planning_enabled or _BACKEND_IMPORT_ERROR is not None:
+        if (
+            self._planning_task_registered
+            or not self._planning_enabled
+            or _BACKEND_IMPORT_ERROR is not None
+            or self.planning_agent is None
+        ):
             return
 
         task = Task(
@@ -566,8 +574,8 @@ class SignalSentryWindow(QMainWindow):
                     status_map[agent_name] = f"live · {binding.implementation}"
                 else:
                     status_map[agent_name] = f"error · {binding.error}"
-    
         self.agent_status.clear()
+        self.agent_status.addItem(f"Runtime: {self.runtime_status_note}")
         for agent, state in status_map.items():
             self.agent_status.addItem(f"{agent} Agent: {state}")
 
