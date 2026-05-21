@@ -17,20 +17,20 @@ Real-World Use Case:
 import os
 import json
 import threading
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import defaultdict
 from datetime import datetime, timedelta
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors # type: ignore
+from sklearn.preprocessing import StandardScaler # type: ignore
 from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Case-Based Reasoning Heuristic")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class DotDict(dict):
     def __getattr__(self, item):

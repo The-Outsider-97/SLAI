@@ -14,21 +14,21 @@ algorithm (e.g., A* or RRT) has the highest chance of success under current cond
 import os
 import json
 import threading
-import numpy as np
-import joblib
+import numpy as np # type: ignore
+import joblib # type: ignore
 
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.ensemble import GradientBoostingClassifier # type: ignore
+from sklearn.preprocessing import StandardScaler # type: ignore
+from sklearn.model_selection import train_test_split # type: ignore
+from sklearn.metrics import accuracy_score # type: ignore
 from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Gradient Boosting Heuristic")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class DotDict(dict):
     def __getattr__(self, item):
