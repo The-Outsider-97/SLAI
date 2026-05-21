@@ -820,7 +820,8 @@ class HubWindow(QWidget):
         self.desc_label.show()
 
     def _on_app_clicked(self, app_name: str) -> None:
-        if app_name not in {"SignalSentry", "ContentOps Autopublisher"}:
+        launchers = {"SignalSentry", "ContentOps Autopublisher"}
+        if app_name not in launchers:
             return
         if self._app_launch_in_progress:
             return
@@ -831,10 +832,11 @@ class HubWindow(QWidget):
             update_loading(self.app_launch_loader, progress=0.35, message=f"Initializing {app_name} window…")
             if app_name == "SignalSentry":
                 from component.signal_sentry import SignalSentryWindow
-                self.child_window = SignalSentryWindow()
+                window_cls = SignalSentryWindow
             else:
                 from component.autopublisher import AutopublisherWindow
-                self.child_window = AutopublisherWindow()
+                window_cls = AutopublisherWindow
+            self.child_window = window_cls()
             update_loading(self.app_launch_loader, progress=0.85, message=f"Opening {app_name}…")
             if hasattr(self.child_window, "home_requested"):
                 self.child_window.home_requested.connect(self._return_from_child_app)
@@ -846,7 +848,7 @@ class HubWindow(QWidget):
             self.hide()
         except Exception as exc:
             complete_loading(self.app_launch_loader, "Launch failed")
-            print(f"Failed to launch {app_name}: {exc}")
+            QMessageBox.critical(self, f"{app_name} launch failed", f"Unable to launch {app_name}.\n\n{type(exc).__name__}: {exc}")
         finally:
             self._app_launch_in_progress = False
 
