@@ -2,19 +2,201 @@ dataset:
   max_records: 1000000
   enforce_alignment: true
   allow_empty_payload: false
+  required_modalities:
+    - vision
+    - text
+    - audio
   ingestion:
     min_batch_size: 1
     enforce_batch_alignment: true
+  multimodal_dataset:
+    default_batch_size: 8
+    max_batch_size: 4096
+    drop_remainder: false
+    shuffle: false
+    reshuffle_each_epoch: true
+    seed: null
+    validate_on_init: true
+    validate_batches: true
+    run_quality_gate_on_init: false
+    sanitize_records: false
+    copy_records: true
+    include_batch_metadata: false
+    allow_unaligned_batches: false
+
+  sanitization:
+    escape_html: true
+    strip_control_chars: true
+    max_string_length: 10000
+    max_depth: 32
 
 validation:
   strict_types: true
+  coerce_types: false
   fail_on_unknown_modality: true
+  allow_extra_fields: true
   max_field_items_default: 100000
 
 quality_gate:
   max_null_ratio: 0.0
   fail_on_nulls: true
+  fail_on_ragged_fields: false
+  fail_on_duplicate_ids: false
+  id_field: id
+  max_duplicate_id_ratio: 0.0
 
 versioning:
   registry_path: data/processed/dataset_registry.json
   hash_algorithm: sha256
+  duplicate_policy: raise
+  include_quality_report: true
+
+storage:
+  default_backend: s3          # scheme used when no URI scheme is present
+ 
+  # ── Retry policy (shared across S3 / GCS / Azure via with_retry) ──────────
+  retry:
+    max_attempts: 5
+    base_delay: 0.5            # seconds before the 2nd attempt
+    backoff_factor: 2.0        # exponential multiplier per attempt
+    max_delay: 30.0            # upper cap for any single inter-attempt delay
+    jitter: 0.1                # ±10 % randomisation to avoid thundering herd
+ 
+  # ── Per-file handle defaults (StorageFile base class) ─────────────────────
+  storage_file: {} # No tunables yet; section reserved for future buffer-size config.
+ 
+  # ── Local filesystem ──────────────────────────────────────────────────────
+  local:
+    allow_symlinks: false # reject symlinks for security; set true only in dev
+ 
+  # ── AWS S3 ────────────────────────────────────────────────────────────────
+  s3:
+    region: eu-west-1
+    timeout: 30                # connect_timeout and read_timeout (seconds)
+    # endpoint_url: http://localhost:9000   # uncomment for MinIO / LocalStack
+ 
+  # ── Google Cloud Storage ──────────────────────────────────────────────────
+  gcs:
+    project: my-ml-project
+    credentials_path: /secrets/gcs-key.json   # omit to use ADC
+    timeout: 30
+ 
+  # ── Azure Blob Storage ────────────────────────────────────────────────────
+  azure:
+    connection_string_env: AZURE_STORAGE_CONNECTION_STRING  # env-var name
+    timeout: 30
+    # account_url and credential are passed as constructor arguments when
+    # SAS-token or MSI auth is preferred over a connection string.
+ 
+  # ── HTTP / HTTPS (read-only) ──────────────────────────────────────────────
+  http:
+    timeout: 60                # seconds for connect + read
+    max_retries: 3             # urllib3-level retries (5xx + 429)
+    chunk_size: 8192           # iter_content chunk size in bytes
+    user_agent: "SLAI-DataLoader/2.2"
+
+transforms:
+  # ── Base / shared ──────────────────────────────────────────────────────────
+  # (no shared keys yet; section reserved for future pipeline-level tunables)
+ 
+  # ── Audio: ResampleAudio ──────────────────────────────────────────────────
+  audio:
+    target_sr: 16000
+    res_type: kaiser_best          # librosa resample quality
+    use_librosa: true              # false → torchaudio backend
+ 
+  # ── Audio: ExtractMFCC ────────────────────────────────────────────────────
+  mfcc:
+    n_mfcc: 13
+    n_fft: 2048                    # FFT window size (was wrongly 13 in original)
+    hop_length: 512
+    use_librosa: true
+ 
+  # ── Audio: ExtractMelSpectrogram ──────────────────────────────────────────
+  mel_spectrogram:
+    n_mels: 128
+    n_fft: 2048
+    hop_length: 512
+    fmin: 0.0
+    fmax: null                     # null → sr / 2 (Nyquist)
+ 
+  # ── Text: CleanText ───────────────────────────────────────────────────────
+  text:
+    lowercase: true
+    strip_control_chars: true
+    remove_extra_whitespace: true
+    max_chars: null                # null → no truncation unless passed to constructor
+ 
+  # ── Text: TokenizeText ────────────────────────────────────────────────────
+  token:
+    model_name: bert-base-uncased
+    max_length: 128
+    truncation: true
+    padding: false
+ 
+  # ── Text: TruncateText ────────────────────────────────────────────────────
+  truncate:
+    max_chars: 1000
+ 
+  # ── Vision: ResizeImage ───────────────────────────────────────────────────
+  vision:
+    size: [224, 224]               # [width, height]
+    interpolation: bilinear
+    mean: [0.485, 0.456, 0.406]    # ImageNet mean (used by NormalizeImage)
+    std:  [0.229, 0.224, 0.225]    # ImageNet std  (used by NormalizeImage)
+ 
+  # ── Batch: PadSequences ───────────────────────────────────────────────────
+  sequence:
+    field: input_ids
+    pad_value: 0
+    max_length: null               # null → pad to longest in batch
+ 
+  # ── Batch: StackArrays ────────────────────────────────────────────────────
+  arrays:
+    field: image
+    # output_field defaults to "<field>_stacked" if omitted
+ 
+  # ── Cache: CachedTransform ────────────────────────────────────────────────
+  cache:
+    cache_type: memory             # "memory" | "disk" | "both"
+    memory_maxsize: 128
+    cache_dir: null                # required when cache_type is "disk" or "both"
+    hash_keys:
+      - text
+      - image
+      - audio
+ 
+  # ── Default pipeline (loaded by the dataset layer) ────────────────────────
+  default_pipeline:
+    - type: sequential
+      params:
+        transforms:
+          - type: per_modality
+            params:
+              mapping:
+                vision:
+                  type: sequential
+                  params:
+                    transforms:
+                      - type: resize_image
+                        params: {size: [224, 224], interpolation: bilinear}
+                      - type: normalize_image
+                        params: {}          # reads mean/std from transforms.vision
+                text:
+                  type: sequential
+                  params:
+                    transforms:
+                      - type: clean_text
+                        params: {}
+                      - type: tokenize_text
+                        params: {}          # reads model_name/max_length from transforms.token
+                audio:
+                  type: sequential
+                  params:
+                    transforms:
+                      - type: to_mono
+                        params: {}
+                      - type: resample_audio
+                        params: {}          # reads target_sr from transforms.audio
+                      - type: extract_mfcc
+                        params: {}          # reads n_mfcc etc. from transforms.mfcc
