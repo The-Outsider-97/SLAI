@@ -128,6 +128,7 @@ class AutopublisherWindow(QMainWindow):
             "torch_subsystem": "untested",
             "core_agents": "not_evaluated",
             "optional_agents": "not_evaluated",
+            "collaboration_health": "not_evaluated",
         }
 
         self._build_ui()
@@ -473,7 +474,17 @@ class AutopublisherWindow(QMainWindow):
         start_loading(self.loading_controller, "Generating weekly plan…")
         update_loading(self.loading_controller, progress=0.45, message="Calling planning agent…")
         self.status_label.setText("Generating plan...")
-        planning = self._agent_call("planning", {"objective": "weekly editorial slate", "workspace": "autopublisher"})
+        planning_payload = {"objective": "weekly editorial slate", "workspace": "autopublisher"}
+        planning = self._agent_call("planning", planning_payload)
+        if planning.get("status") != "ok":
+            planning = self._collab_call(
+                {
+                    "mode": "delegate",
+                    "task_type": "planning",
+                    "payload": planning_payload,
+                    "context": {"workspace": "autopublisher"},
+                }
+            )
 
         if planning.get("status") == "ok":
             if self.shared_memory is not None:
@@ -551,7 +562,7 @@ class AutopublisherWindow(QMainWindow):
         alignment = self._agent_call("alignment", {"draft": draft.text, "topic": topic.title})
         collab = {"status": "runtime_unavailable"}
         if self.collab is not None:
-            collab = self.collab.perform_task({
+            collab = self._collab_call({
                 "mode": "assess",
                 "risk_score": 0.4,
                 "task_type": "editorial_qa",
@@ -580,6 +591,17 @@ class AutopublisherWindow(QMainWindow):
             topic.status = "Approved"
         self.status_label.setText(f"QA complete: {verdict}")
         self._refresh_board(); self._update_detail_panels(); self._refresh_agent_fleet()
+
+    def _collab_call(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.collab is None:
+            return {"status": "runtime_unavailable", "error": "collaborative agent unavailable"}
+        try:
+            result = self.collab.perform_task(payload)
+            self.runtime_components["collaboration_health"] = "ok"
+            return result if isinstance(result, dict) else {"status": "ok", "result": result}
+        except Exception as exc:
+            self.runtime_components["collaboration_health"] = f"error ({type(exc).__name__})"
+            return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
     def _compute_scores(self, evaluation: Dict[str, Any], safety: Dict[str, Any], alignment: Dict[str, Any]) -> Dict[str, float]:
         def score_from_payload(payload: Dict[str, Any], fallback: float = 0.6) -> float:
