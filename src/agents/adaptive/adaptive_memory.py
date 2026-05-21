@@ -7,23 +7,23 @@ import hashlib
 import signal
 import sys
 import threading
-import pandas as pd
-import numpy as np
+import pandas as pd # type: ignore
+import numpy as np # type: ignore
 
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-from scipy.stats import entropy
+from scipy.stats import entropy # type: ignore
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
-from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer
+from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer # pyright: ignore[reportMissingImports]
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.sgd_regressor import SGDRegressor
 from .utils.adaptive_errors import *
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Adaptive Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 sys.stdout.flush()
 

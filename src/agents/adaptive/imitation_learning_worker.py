@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pickle
 import random
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np # type: ignore
+import torch # type: ignore
+import torch.nn as nn # type: ignore
+import torch.nn.functional as F # type: ignore
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,10 +16,10 @@ from collections import deque
 from .adaptive_memory import MultiModalMemory
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Imitation Learning")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True)

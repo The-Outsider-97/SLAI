@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import pickle
-import numpy as np
+import numpy as np # type: ignore
 
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union
 from collections import deque
 
-from src.tuning.tuner import HyperparamTuner
-from src.tuning.utils.config_loader import get_config_section as get_tuner_config
+from src.tuning.tuner import HyperparamTuner # pyright: ignore[reportMissingImports]
+from src.tuning.utils.config_loader import get_config_section as get_tuner_config # pyright: ignore[reportMissingImports]
 from .utils.config_loader import load_global_config, get_config_section as get_param_config
 from .utils.adaptive_errors import *
 from .adaptive_memory import MultiModalMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Parameter Tuner")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class LearningParameterTuner:

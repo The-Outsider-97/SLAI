@@ -18,10 +18,10 @@ from .meta_learning_worker import MetaLearningWorker
 from .utils.neural_network import ActorCriticNetwork
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Skill Worker")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass

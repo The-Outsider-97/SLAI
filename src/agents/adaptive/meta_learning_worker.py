@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pickle
 import random
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from pathlib import Path
 from datetime import datetime
@@ -13,11 +13,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
 from .adaptive_memory import MultiModalMemory
-from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
-from logs.logger import get_logger, PrettyPrinter
+from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork # pyright: ignore[reportMissingImports]
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Meta Learning Worker")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class MetaLearningWorker:
@@ -377,7 +377,7 @@ class MetaLearningWorker:
         means = np.asarray(means, dtype=np.float64)
         improvement = means - best_observed - self.exploration_factor
 
-        from scipy.stats import norm  # aligned with the original module pattern
+        from scipy.stats import norm  # type: ignore # aligned with the original module pattern
 
         z = improvement / stds
         ei = improvement * norm.cdf(z) + stds * norm.pdf(z)
