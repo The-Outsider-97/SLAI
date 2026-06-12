@@ -819,38 +819,60 @@ class HubWindow(QWidget):
         self.desc_label.adjustSize()
         self.desc_label.show()
 
+    
     def _on_app_clicked(self, app_name: str) -> None:
-        launchers = {"SignalSentry", "ContentOps Autopublisher"}
-        if app_name not in launchers:
-            return
-        if self._app_launch_in_progress:
-            return
-
+        """
+        Launch only the selected app.
+    
+        No fallback logic is allowed. If Documaster fails, Documaster fails.
+        This method does not try to open SignalSentry, AutoPublisher, or any other app.
+        """
         try:
-            self._app_launch_in_progress = True
-            start_loading(self.app_launch_loader, f"Launching {app_name}…")
-            update_loading(self.app_launch_loader, progress=0.35, message=f"Initializing {app_name} window…")
-            if app_name == "SignalSentry":
-                from component.signal_sentry import SignalSentryWindow
-                window_cls = SignalSentryWindow
-            else:
-                from component.autopublisher import AutopublisherWindow
-                window_cls = AutopublisherWindow
-            self.child_window = window_cls()
-            update_loading(self.app_launch_loader, progress=0.85, message=f"Opening {app_name}…")
-            if hasattr(self.child_window, "home_requested"):
-                self.child_window.home_requested.connect(self._return_from_child_app)
-            
-            self.child_window.destroyed.connect(lambda: setattr(self, "child_window", None))
-            
-            self.child_window.show()
-            complete_loading(self.app_launch_loader, f"{app_name} ready")
-            self.hide()
+            launchers = {
+                "Documaster": self._open_documaster,
+                "SignalSentry": self._open_signal_sentry,
+                "ContentOps Autopublisher": self._open_autopublisher,
+            }
+    
+            launcher = launchers.get(app_name)
+    
+            if launcher is None:
+                QMessageBox.critical(
+                    self,
+                    "Launch error",
+                    f"No launcher is configured for: {app_name}"
+                )
+                return
+    
+            launcher()
+    
         except Exception as exc:
-            complete_loading(self.app_launch_loader, "Launch failed")
-            QMessageBox.critical(self, f"{app_name} launch failed", f"Unable to launch {app_name}.\n\n{type(exc).__name__}: {exc}")
-        finally:
-            self._app_launch_in_progress = False
+            QMessageBox.critical(
+                self,
+                f"{app_name} failed to open",
+                f"{app_name} could not be opened.\n\nError:\n{exc}"
+            )
+            return
+        
+    def _open_documaster(self) -> None:
+        from documaster.documaster import DocumasterWindow
+    
+        self.documaster_window = DocumasterWindow()
+        self.documaster_window.show()
+    
+    
+    def _open_signal_sentry(self) -> None:
+        from component.signal_sentry import SignalSentryWindow
+    
+        self.signal_sentry_window = SignalSentryWindow()
+        self.signal_sentry_window.show()
+    
+    
+    def _open_autopublisher(self) -> None:
+        from component.autopublisher import AutopublisherWindow
+    
+        self.autopublisher_window = AutopublisherWindow()
+        self.autopublisher_window.show()
 
     def _return_from_child_app(self) -> None:
         child = self.child_window
