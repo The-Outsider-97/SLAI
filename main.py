@@ -874,6 +874,69 @@ class HubWindow(QWidget):
         self.autopublisher_window = AutopublisherWindow()
         self.autopublisher_window.show()
 
+    ##    ##
+    ## OR ##
+    ##    ##
+    
+#    APP_LAUNCHERS = {
+#        "ProPlanner": "_launch_proplanner",
+#        "Documaster": "_launch_documaster",
+#        "SignalSentry": "_launch_signal_sentry",
+#        "ContentOps Autopublisher": "_launch_autopublisher",
+#    }
+
+#    def _on_app_clicked(self, app_name: str) -> None:
+#        """Launch exactly the selected SLAIHub app-card.
+#    
+#        There is no cross-app fallback. If Documaster fails, Documaster fails.
+#        """
+#        launcher_name = self.APP_LAUNCHERS.get(app_name)
+#        if launcher_name is None:
+#            QMessageBox.critical(self, "Launch error", f"No launcher is configured for: {app_name}")
+#            return
+    
+#        launcher = getattr(self, launcher_name, None)
+#        if launcher is None:
+#            QMessageBox.critical(self, "Launch error", f"Launcher is missing for: {app_name}")
+#            return
+    
+#        try:
+#            launcher()
+#        except Exception as exc:  # noqa: BLE001
+#            QMessageBox.critical(
+#                self,
+#                f"{app_name} failed to open",
+#                f"{app_name} could not be opened. No fallback app was launched.\n\n{type(exc).__name__}: {exc}",
+#            )
+        
+#    def _open_proplanner(self) -> None:
+#        from proplanner.proplanner import PPWindow
+#    
+#        self.documaster_window = PPWindow()
+#        self.documaster_window.show()
+    
+#    def _open_documaster(self) -> None:
+#        from documaster.documaster import DocumasterWindow
+    
+#        self.documaster_window = DocumasterWindow()
+#        self.documaster_window.show()
+    
+    
+#    def _open_signal_sentry(self) -> None:
+#        from component.signal_sentry import SignalSentryWindow
+#    
+#        self.signal_sentry_window = SignalSentryWindow()
+#        self.signal_sentry_window.show()
+    
+    
+#    def _open_autopublisher(self) -> None:
+#        from component.autopublisher import AutopublisherWindow
+#    
+#        self.autopublisher_window = AutopublisherWindow()
+#        self.autopublisher_window.show()
+
+
+
     def _return_from_child_app(self) -> None:
         child = self.child_window
         self.child_window = None

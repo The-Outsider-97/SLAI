@@ -1,18 +1,19 @@
-"""Privacy-safe document extraction for DocMaster.
+"""Privacy-safe local document extractor for DocuMaster.
 
-The extractor reads uploaded/local files into memory, validates type and size, and
-does not persist private document content. It is shared by the PyQt GUI and the
-optional Flask API routes.
+The SLAI Reader Agent is preferred by DocumentAIService.  This extractor is the
+local degraded path and utility layer for word counts/conversion. It validates
+file type, file size, page count, and readable text without storing content.
 """
 
 from __future__ import annotations
 
 import io
+import os
 import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, List
 
 from bs4 import BeautifulSoup
 from docx import Document
@@ -22,8 +23,9 @@ from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".html", ".htm", ".xml", ".odt"}
-DEFAULT_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
-DEFAULT_MAX_TEXT_CHARS = 120_000
+DEFAULT_MAX_FILE_SIZE_BYTES = int(os.getenv("DOCMASTER_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+DEFAULT_MAX_TEXT_CHARS = int(os.getenv("DOCMASTER_MAX_TEXT_CHARS", "120000"))
+DEFAULT_MAX_PAGES = int(os.getenv("DOCMASTER_MAX_PAGES", "250"))
 
 
 class DocumentExtractionError(ValueError):
@@ -47,9 +49,13 @@ class DocumentExtractor:
         *,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        allowed_extensions: set[str] | None = None,
     ) -> None:
         self.max_file_size_bytes = int(max_file_size_bytes)
         self.max_text_chars = int(max_text_chars)
+        self.max_pages = int(max_pages)
+        self.allowed_extensions = {ext.lower() for ext in (allowed_extensions or SUPPORTED_EXTENSIONS)}
 
     def extract_upload(self, file: FileStorage) -> ExtractedDocument:
         filename = secure_filename(file.filename or "uploaded_document")
@@ -60,17 +66,19 @@ class DocumentExtractor:
         file_path = Path(path)
         if not file_path.exists() or not file_path.is_file():
             raise DocumentExtractionError("Selected file does not exist or is not a file.")
-        raw = file_path.read_bytes()
-        return self.extract_bytes(raw, filename=file_path.name)
+        if file_path.stat().st_size > self.max_file_size_bytes:
+            limit_mb = self.max_file_size_bytes / (1024 * 1024)
+            raise DocumentExtractionError(f"File is too large. Maximum upload size is {limit_mb:.0f} MB.")
+        return self.extract_bytes(file_path.read_bytes(), filename=file_path.name)
 
     def extract_bytes(self, raw: bytes, *, filename: str) -> ExtractedDocument:
         safe_name = secure_filename(filename or "document")
         ext = Path(safe_name).suffix.lower()
         warnings: List[str] = []
 
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in self.allowed_extensions:
             raise DocumentExtractionError(
-                f"Unsupported file type '{ext or 'unknown'}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}."
+                f"Unsupported file type '{ext or 'unknown'}'. Supported: {', '.join(sorted(self.allowed_extensions))}."
             )
         if len(raw) > self.max_file_size_bytes:
             limit_mb = self.max_file_size_bytes / (1024 * 1024)
@@ -79,23 +87,21 @@ class DocumentExtractor:
             raise DocumentExtractionError("The uploaded file is empty.")
 
         stream = io.BytesIO(raw)
+        metadata: Dict[str, Any] = {"file_size_bytes": len(raw)}
         try:
             if ext == ".pdf":
-                text, page_count, pdf_warnings = self._extract_pdf(stream)
+                text, page_count, page_texts, pdf_warnings = self._extract_pdf(stream)
                 warnings.extend(pdf_warnings)
-                metadata = {"page_count": page_count}
+                metadata.update({"page_count": page_count, "page_texts": page_texts})
             elif ext == ".docx":
-                text = self._extract_docx(stream)
-                metadata = {"paragraph_count": text.count("\n") + 1 if text else 0}
+                text, paragraph_count, table_count = self._extract_docx(stream)
+                metadata.update({"paragraph_count": paragraph_count, "table_count": table_count})
             elif ext in {".html", ".htm", ".xml"}:
                 text = self._extract_markup(raw)
-                metadata = {}
             elif ext == ".odt":
                 text = self._extract_odt(raw)
-                metadata = {}
             else:
                 text = self._decode_text(raw)
-                metadata = {}
         except DocumentExtractionError:
             raise
         except PdfReadError as exc:
@@ -116,16 +122,20 @@ class DocumentExtractor:
                 "char_count": len(text),
                 "detected_type": ext.lstrip("."),
                 "language": self._guess_language(text),
+                "reader_agent_used": False,
             }
         )
-        return ExtractedDocument(safe_name, ext.lstrip("."), text, metadata, warnings)
+        return ExtractedDocument(safe_name, ext.lstrip("."), text, metadata, list(dict.fromkeys(warnings)))
 
-    @staticmethod
-    def _extract_pdf(stream: BinaryIO) -> tuple[str, int, List[str]]:
+    def _extract_pdf(self, stream: BinaryIO) -> tuple[str, int, List[Dict[str, Any]], List[str]]:
         reader = PdfReader(stream)
         if getattr(reader, "is_encrypted", False):
             raise DocumentExtractionError("Encrypted PDFs are not processed by default.")
+        page_count = len(reader.pages)
+        if page_count > self.max_pages:
+            raise DocumentExtractionError(f"PDF has {page_count} pages. The configured limit is {self.max_pages} pages.")
         chunks: List[str] = []
+        page_texts: List[Dict[str, Any]] = []
         warnings: List[str] = []
         for index, page in enumerate(reader.pages):
             try:
@@ -133,21 +143,23 @@ class DocumentExtractor:
             except Exception:  # noqa: BLE001
                 page_text = ""
                 warnings.append(f"Page {index + 1} could not be extracted.")
-            if page_text.strip():
-                chunks.append(page_text)
-        return "\n".join(chunks), len(reader.pages), warnings
+            cleaned = self._clean_text(page_text)
+            page_texts.append({"page_number": index + 1, "char_count": len(cleaned), "preview": cleaned[:240]})
+            if cleaned:
+                chunks.append(cleaned)
+        return "\n\n".join(chunks), page_count, page_texts, warnings
 
     @staticmethod
-    def _extract_docx(stream: BinaryIO) -> str:
+    def _extract_docx(stream: BinaryIO) -> tuple[str, int, int]:
         doc = Document(stream)
-        paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
         table_cells: List[str] = []
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     if cell.text and cell.text.strip():
                         table_cells.append(cell.text.strip())
-        return "\n".join(paragraphs + table_cells)
+        return "\n".join(paragraphs + table_cells), len(paragraphs), len(doc.tables)
 
     @staticmethod
     def _extract_odt(raw: bytes) -> str:
@@ -185,11 +197,9 @@ class DocumentExtractor:
 
     @staticmethod
     def _guess_language(text: str) -> str:
-        sample = text[:3000].lower()
-        dutch_markers = {" de ", " het ", " een ", " voor ", " zijn ", " worden ", " niet "}
-        english_markers = {" the ", " and ", " for ", " with ", " this ", " that ", " not "}
-        nl = sum(1 for m in dutch_markers if m in f" {sample} ")
-        en = sum(1 for m in english_markers if m in f" {sample} ")
+        sample = f" {text[:3000].lower()} "
+        nl = sum(marker in sample for marker in (" de ", " het ", " een ", " voor ", " zijn ", " worden ", " niet "))
+        en = sum(marker in sample for marker in (" the ", " and ", " for ", " with ", " this ", " that ", " not "))
         if nl > en:
             return "nl"
         if en > nl:
