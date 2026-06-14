@@ -65,6 +65,15 @@ agent_factory:
       web: browser
       obs: observability
       net: network
+      reader_agent: reader
+      language_agent: language
+      knowledge_agent: knowledge
+      privacy_agent: privacy
+      quality_agent: quality
+      safety_agent: safety
+      observability_agent: observability
+      reasoning_agent: reasoning
+      evaluation_agent: evaluation
     out_of_process_fallback_agents:
       - adaptive
       - alignment
@@ -104,6 +113,12 @@ agent_factory:
       safety:
         torch_required: false
         notes: "Safety policy checks run without torch."
+      privacy:
+        torch_required: false
+        notes: "Privacy policy checks are rule/config driven and torch-free."
+      quality:
+        torch_required: false
+        notes: "Document/data quality gates are dependency-light and torch-free by default."
       learning:
         torch_required: true
         notes: "RL/meta-learning pipelines require torch."
@@ -156,6 +171,12 @@ agent_factory:
       planning:
         module_path: src.agents.planning_agent
         class_name: PlanningAgent
+      privacy:
+        module_path: src.agents.privacy_agent
+        class_name: PrivacyAgent
+      quality:
+        module_path: src.agents.quality_agent
+        class_name: QualityAgent
       reader:
         module_path: src.agents.reader_agent
         class_name: ReaderAgent
@@ -625,20 +646,58 @@ reader_agent:
 
 
 reasoning_agent:
-    learning_rate: 0.01
-    exploration_rate: 0.1
-    tuple_key: ["subject", "predicate", "object"]
-    hypothesis_graph:
-        nodes: {}
-        edges: {}
-        confedence: 0.0
-    language_config_path: "src/agents/language/configs/language_config.yaml"
-    knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
-    glove_path: "data/embeddings/glove.6B.200d.json"
-    ner_tag: None
-    embedding: None
-    decay: 0.8
-    max_iterations: 100
+  learning_rate: 0.05
+  exploration_rate: 0.1
+  tuple_key:
+  - subject
+  - predicate
+  - object
+  hypothesis_graph:
+    nodes: {}
+    edges: {}
+    confidence: 0.0
+  decay: 0.95
+  knowledge_db: src/agents/knowledge/templates/knowledge_db.json
+  glove_path: data/embeddings/glove.6B.200d.json
+  ner_tag: None
+  embedding: None
+  max_iterations: 20
+  contradiction_threshold: 0.25
+  redundancy_margin: 0.05
+  large_kb_threshold: 500
+  low_confidence_threshold: 0.4
+  max_action_results: 20
+  max_chain_depth: 4
+  max_react_steps: 5
+  max_trace_items: 250
+  enable_shared_memory_publish: true
+  enable_knowledge_persistence: true
+  enable_memory_logging: true
+  enable_probabilistic_fallback: true
+  auto_register_builtin_rules: true
+  strict_fact_validation: true
+  human_intervention_key: human_intervention_requests
+  knowledge_memory_key: reasoning_agent:knowledge_base
+  last_validation_key: reasoning_agent:last_validated_fact
+  reasoning_trace_topic: reasoning_trace
+  memory_event_tag: reasoning_agent
+  memory_event_priority: 0.75
+  strategy_default: deduction
+  reasoning_type_aliases:
+    deductive: deduction
+    inductive: induction
+    abductive: abduction
+    causal: cause_effect
+    cause-and-effect: cause_effect
+    decomposition: decompositional
+    analytical: analogical
+    analitical: analogical
+  builtin_rule_weights:
+    identity_rule: 1.0
+    transitive_rule: 0.8
+
+
+
 
 
 safety_agent:
