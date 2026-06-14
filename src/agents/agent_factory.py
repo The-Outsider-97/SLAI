@@ -168,6 +168,8 @@ class AgentFactory:
         "observability": {"module_path": "src.agents.observability_agent", "class_name": "ObservabilityAgent"},
         "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
         "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
+        "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
+        "quality": {"module_path": "src.agents.quality_agent", "class_name": "QualityAgent"},
         "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
@@ -177,6 +179,16 @@ class AgentFactory:
         "web": "browser",
         "obs": "observability",
         "net": "network",
+
+        "reader_agent": "reader",
+        "language_agent": "language",
+        "knowledge_agent": "knowledge",
+        "privacy_agent": "privacy",
+        "quality_agent": "quality",
+        "safety_agent": "safety",
+        "observability_agent": "observability",
+        "reasoning_agent": "reasoning",
+        "evaluation_agent": "evaluation",
     }
 
     DEFAULT_DEPENDENCY_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -189,6 +201,8 @@ class AgentFactory:
         "observability": {"torch_required": False, "notes": "Observability orchestration is telemetry-first and torch-free."},
         "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
+        "privacy": {"torch_required": False, "notes": "Privacy policy checks are rule/config driven and torch-free."},
+        "quality": {"torch_required": False, "notes": "Document/data quality gates are dependency-light and torch-free by default."},
         "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
