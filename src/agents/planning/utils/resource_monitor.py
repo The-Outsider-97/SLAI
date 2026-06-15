@@ -25,24 +25,22 @@ import copy
 import socket
 import threading
 import time
-
-from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
+import psutil  # type: ignore
+import requests  # type: ignore
 
 try:
     import GPUtil  # type: ignore
 except ImportError:  # Optional GPU telemetry; CPU/RAM monitoring still works.
     GPUtil = None  # type: ignore
-import psutil  # type: ignore
-import requests  # type: ignore
+
+from collections import deque
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 from requests.exceptions import RequestException  # type: ignore
 
 from .config_loader import get_config_section, load_global_config
 from .planning_errors import *
 from .planning_helpers import *
-
-if TYPE_CHECKING:
-    from ..planning_types import ClusterResources, ResourceProfile
+from ..planning_types import ClusterResources, ResourceProfile
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Resource Monitor")
@@ -51,6 +49,11 @@ printer = PrettyPrinter()
 ResourceMetrics = Dict[str, Dict[str, float]]
 NodeResourceData = Dict[str, Any]
 
+def _cluster_resources_cls():
+    return ClusterResources
+
+def _resource_profile_cls():
+    return ResourceProfile
 
 class ResourceMonitor:
     """
@@ -104,7 +107,7 @@ class ResourceMonitor:
         self.reserved_hardware = set(resource_buffers.get("specialized_hardware", []) or [])
 
         # Observed cluster capacity.  Task reservations are not stored here.
-        self.cluster_resources = ClusterResources()
+        self.cluster_resources = _cluster_resources_cls()()
         self.node_allocations: Dict[str, ResourceProfile] = {}
         self.allocations: Dict[str, ResourceProfile] = {}
         self.resource_graph: Dict[str, NodeResourceData] = {}
@@ -347,7 +350,7 @@ class ResourceMonitor:
             for hw in (profile.specialized_hardware or [])
         }
 
-        return ClusterResources(
+        return _cluster_resources_cls()(
             gpu_total=int(round(max(0.0, gpu_total - allocated_gpu))),
             ram_total=int(round(max(0.0, ram_total - allocated_ram))),
             specialized_hardware_available=[hw for hw in hardware if hw not in allocated_hw],
@@ -545,7 +548,7 @@ class ResourceMonitor:
     def _update_resource_map(self) -> None:
         """Refresh the observed cluster resource map in a thread-safe way."""
         nodes = self._discover_cluster_nodes()
-        observed = ClusterResources(
+        observed = _cluster_resources_cls()(
             gpu_total=0,
             ram_total=0,
             specialized_hardware_available=[],
@@ -571,7 +574,7 @@ class ResourceMonitor:
                     observed.specialized_hardware_available.append(hw)
                     seen_hardware.add(hw)
 
-            observed_allocations[node_id] = ResourceProfile(
+            observed_allocations[node_id] = _resource_profile_cls()(
                 gpu=int(round(float(node_data.get("gpu_allocated", 0.0) or 0.0))),
                 ram=int(round(float(node_data.get("ram_allocated", 0.0) or 0.0))),
                 specialized_hardware=list(node_data.get("specialized_allocated", []) or []),
@@ -580,7 +583,7 @@ class ResourceMonitor:
         if not resource_graph:
             logger.warning("No resource telemetry available; using fallback profile")
             fallback = dict(self.monitor_config.get("fallback_profile", {}) or {})
-            observed = ClusterResources(
+            observed = _cluster_resources_cls()(
                 gpu_total=int(round(float(fallback.get("gpu_total", 0.0)))),
                 ram_total=int(round(float(fallback.get("ram_total", 16.0)))),
                 specialized_hardware_available=list(fallback.get("specialized_hardware_available", []) or []),
@@ -648,7 +651,7 @@ class ResourceMonitor:
                 )
 
     def _validate_resource_profile(self, profile: ResourceProfile, name: str) -> None:
-        require_type(profile, ResourceProfile, name)
+        require_type(profile, _resource_profile_cls(), name)
         require_non_negative(float(profile.gpu), f"{name}.gpu")
         require_non_negative(float(profile.ram), f"{name}.ram")
         if profile.specialized_hardware is None:
@@ -693,7 +696,7 @@ class ResourceMonitor:
 
     @staticmethod
     def _copy_profile(profile: ResourceProfile) -> ResourceProfile:
-        return ResourceProfile(
+        return _resource_profile_cls()(
             gpu=int(profile.gpu),
             ram=int(profile.ram),
             specialized_hardware=list(profile.specialized_hardware or []),
@@ -786,14 +789,14 @@ if __name__ == "__main__":
     monitor.stop_monitoring()
 
     # Use deterministic test capacity independent of host hardware.
-    monitor.cluster_resources = ClusterResources(
+    monitor.cluster_resources = _cluster_resources_cls()(
         gpu_total=2,
         ram_total=32,
         specialized_hardware_available=["tensor_core", "npu"],
         current_allocations={},
     )
 
-    req = ResourceProfile(gpu=1, ram=4, specialized_hardware=["tensor_core"])
+    req = _resource_profile_cls()(gpu=1, ram=4, specialized_hardware=["tensor_core"])
     assert monitor.acquire_resources(req, task_id="task_a") is True
     available = monitor.get_available_resources()
     assert available.gpu_total == 1
