@@ -1,409 +1,743 @@
 """
-Planning Calculations – Centralized service for safety‑critical planning computations.
+Planning Calculations – Centralised service for safety-critical planning computations.
 
-Provides methods to compute resource margins, temporal margins, dependency risk,
-plan duration/cost, probability of success, and risk scores. All calculations
-respect the global configuration and can be safely called from multiple threads.
+Provides methods to compute resource margins, temporal margins, critical-path
+duration, dependency risk, plan cost, probability of success, and composite risk
+scores. All public methods are thread-safe and delegate low-level numeric work to
+the shared helpers module to avoid duplication.
 """
 
-import time
+from __future__ import annotations
+
 import threading
+import time
 
-from typing import Dict, List, Optional, Union, Any
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
-from ..planning_types import Task, ResourceProfile, ClusterResources
+if TYPE_CHECKING:
+    from ..planning_types import ClusterResources, Task, TaskStatus, TaskType
 from .config_loader import get_config_section, load_global_config
+from .planning_errors import *
+from .planning_helpers import *
 from .resource_monitor import ResourceMonitor
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Calculations")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+# ---------------------------------------------------------------------------
+# Typing aliases
+# ---------------------------------------------------------------------------
+TaskOrList = Union['Task', List['Task']]
+MarginReport = Dict[str, float]
 
 
 class PlanningCalculations:
     """
-    Central service for planning‑related calculations.
-    All public methods are thread‑safe and use cached results where appropriate.
+    Central service for planning-related calculations.
+
+    All public methods are thread-safe. Expensive results (e.g. critical-path
+    length) are memoised with a configurable TTL to avoid redundant recomputation
+    when called repeatedly within a single planning cycle.
     """
 
+    # ------------------------------------------------------------------
+    # Construction & configuration
+    # ------------------------------------------------------------------
     def __init__(self) -> None:
         self.config = load_global_config()
         self.safety_config = get_config_section("safety_margins")
-        self.resource_buffers = self.safety_config.get("resource_buffers", {})
-        self.temporal_config = self.safety_config.get("temporal", {})
+        self.calc_config  = get_config_section("planning_calculations")
 
-        # Default buffers from config or hardcoded
-        self.gpu_buffer = self.resource_buffers.get("gpu", 0.15)
-        self.ram_buffer = self.resource_buffers.get("ram", 0.2)
-        self.hw_buffer = 0.1  # default buffer for specialized hardware
-        self.time_buffer = self.temporal_config.get("time_buffer", 120)
-        self.min_task_duration = self.temporal_config.get("min_task_duration", 30)
+        # --- Resource buffers (fractions reserved as safety headroom) ---
+        resource_buffers = self.safety_config.get("resource_buffers", {})
+        self.gpu_buffer: float  = float(resource_buffers.get("gpu",  0.15))
+        self.ram_buffer: float  = float(resource_buffers.get("ram",  0.20))
+        self.hw_buffer:  float  = float(resource_buffers.get("specialized_hardware_buffer", 0.10))
 
-        # Resource monitor (may be None if not initialised)
+        # --- Temporal configuration ---
+        temporal = self.safety_config.get("temporal", {})
+        self.time_buffer:       float = float(temporal.get("time_buffer",       120.0))
+        self.min_task_duration: float = float(temporal.get("min_task_duration",  30.0))
+        self.max_concurrent:    int   = int  (temporal.get("max_concurrent",       5))
+
+        # --- Calculation tuning ---
+        self.default_fallback_margin:   float = float(self.calc_config.get("default_fallback_margin",   0.70))
+        self.default_success_threshold: float = float(self.calc_config.get("default_success_threshold", 0.90))
+        self.cache_ttl_seconds:         float = float(self.calc_config.get("cache_ttl_seconds",         30.0))
+        self.risk_weights: Dict[str, float]   = dict (self.calc_config.get("risk_weights", {
+            "failure_probability": 0.50,
+            "dependency_complexity": 0.30,
+            "duration_uncertainty": 0.20,
+        }))
+
+        # --- Runtime state ---
         self.resource_monitor: Optional[ResourceMonitor] = None
-        self._warned_missing_resource_monitor = False
+        self._warned_no_monitor: bool = False
 
-        # Simple caches with locks
-        self._cache: Dict[str, Any] = {}
+        # Thread-safe result cache: key -> (value, expiry_timestamp)
+        self._cache: Dict[str, Tuple[Any, float]] = {}
         self._cache_lock = threading.RLock()
 
         logger.info("PlanningCalculations initialised")
 
-    # -------------------------------------------------------------------------
-    # Resource calculations
-    # -------------------------------------------------------------------------
-    def calculate_resource_margin(
-        self, tasks: Union[Task, List[Task]], resource_state: Optional[ClusterResources] = None
+    # ------------------------------------------------------------------
+    # Public interface – Resource
+    # ------------------------------------------------------------------
+    def calculate_resource_margin(self, tasks: TaskOrList,
+        resource_state: Optional[ClusterResources] = None,
     ) -> float:
         """
-        Calculate resource margin for a task or list of tasks (0‑1 scale, 1 = best).
+        Compute a normalised resource margin for a task or list of tasks [0, 1].
 
-        Uses the current cluster resource state if resource_state is provided,
-        otherwise tries to obtain it from the resource monitor.
+        The margin reflects how much spare capacity remains after accounting for
+        the aggregated requirements of *tasks* and per-resource safety buffers.
+        A value of 1.0 means resources are unconstrained; 0.0 means the limit
+        has been reached (or breached).
 
-        Args:
-            tasks: Single task or list of tasks.
-            resource_state: Optional current cluster resources (if not provided, uses monitor).
+        Parameters
+        ----------
+        tasks :
+            One or more Task objects whose resource_requirements are summed.
+        resource_state :
+            Live cluster resource snapshot.  If omitted, the injected
+            ``ResourceMonitor`` is queried; if that is also absent a
+            documented conservative default is returned.
 
-        Returns:
-            Float between 0 and 1 representing the margin (1 = fully safe).
+        Returns
+        -------
+        float
+            Geometric mean of per-resource margins, clamped to [0, 1].
+
+        Raises
+        ------
+        SafetyMarginError
+            If any resource breaches its configured safety buffer.
         """
+        tasks = self._normalise_task_list(tasks)
         if not tasks:
             return 1.0
 
-        if not isinstance(tasks, list):
-            tasks = [tasks]
+        available = self._resolve_resource_state(resource_state)
+        if available is None:
+            return self.default_fallback_margin
 
-        # Get available resources
-        if resource_state is None:
-            if self.resource_monitor is None:
-                if not self._warned_missing_resource_monitor:
-                    logger.warning("No resource monitor available – returning conservative default margin")
-                    self._warned_missing_resource_monitor = True
-                return 0.7  # Conservative default
-            available = self.resource_monitor.get_available_resources()
-        else:
-            available = resource_state
+        # Aggregate numeric requirements across all tasks
+        totals = aggregate_resource_requirements(tasks)
+        gpu_req = totals.get("gpu", 0.0)
+        ram_req = totals.get("ram", 0.0)
 
-        # Aggregate requirements
-        total_req = ResourceProfile()
+        # Collect specialised hardware requirements (union across tasks)
+        hw_required: List[str] = []
         for task in tasks:
-            req = task.resource_requirements
-            total_req.gpu += req.gpu
-            total_req.ram += req.ram
-            total_req.specialized_hardware = list(
-                set(total_req.specialized_hardware) | set(req.specialized_hardware)
-            )
+            hw_required = list(set(hw_required) | set(task.resource_requirements.specialized_hardware))
 
-        # Calculate component margins
-        gpu_margin = self._calculate_component_margin(total_req.gpu, available.gpu_total, "gpu")
-        ram_margin = self._calculate_component_margin(total_req.ram, available.ram_total, "ram")
-        hw_margin = self._calculate_hardware_margin(
-            total_req.specialized_hardware, available.specialized_hardware_available
-        )
+        gpu_margin = compute_resource_margin(gpu_req, float(available.gpu_total),
+                                             safety_buffer=self.gpu_buffer)
+        ram_margin = compute_resource_margin(ram_req, float(available.ram_total),
+                                             safety_buffer=self.ram_buffer)
+        hw_margin  = self._hardware_margin(hw_required, available.specialized_hardware_available)
 
-        # Geometric mean for balanced view
-        return (gpu_margin * ram_margin * hw_margin) ** (1 / 3)
+        # Raise SafetyMarginError for any fully-exhausted resource
+        for resource, margin, req, cap in [
+            ("gpu", gpu_margin, gpu_req, available.gpu_total),
+            ("ram", ram_margin, ram_req, available.ram_total),
+        ]:
+            if margin <= 0.0 and req > 0:
+                utilisation = req / max(cap, 1e-9)
+                raise SafetyMarginError(
+                    f"{resource.upper()} safety buffer breached: "
+                    f"utilisation {utilisation:.1%} exceeds safe limit",
+                    resource_type=resource,
+                    buffer_amount=getattr(self, f"{resource}_buffer"),
+                    measured_utilisation=utilisation,
+                    requested=req,
+                    available=cap,
+                )
 
-    def _calculate_component_margin(self, required: float, available: float, resource_type: str) -> float:
-        """Calculate margin for a single resource type."""
-        if required <= 0:
-            return 1.0
-        if available <= 0:
-            return 0.0
+        return geometric_mean(gpu_margin, ram_margin, hw_margin)
 
-        utilization = required / available
-        margin = 1 - utilization
-
-        # Apply configured buffer
-        if resource_type == "gpu":
-            buffer = self.gpu_buffer
-        elif resource_type == "ram":
-            buffer = self.ram_buffer
-        else:
-            buffer = 0.0  # fallback
-
-        return max(0.0, min(1.0, margin - buffer))
-
-    def _calculate_hardware_margin(self, required: List[str], available: List[str]) -> float:
-        """Calculate margin for specialised hardware."""
+    def _hardware_margin(self, required: List[str], available: List[str]) -> float:
+        """Fraction of required hardware items that are available, minus hw_buffer."""
         if not required:
             return 1.0
         if not available:
             return 0.0
-
         coverage = len(set(required) & set(available)) / len(required)
-        return max(0.0, min(1.0, coverage - self.hw_buffer))
+        return clamp(coverage - self.hw_buffer, 0.0, 1.0)
 
-    # -------------------------------------------------------------------------
-    # Temporal calculations
-    # -------------------------------------------------------------------------
-    def calculate_temporal_margin(
-        self, tasks: Union[Task, List[Task]], current_time: Optional[float] = None
-    ) -> float:
+    # ------------------------------------------------------------------
+    # Public interface – Temporal
+    # ------------------------------------------------------------------
+    def calculate_temporal_margin(self, tasks: TaskOrList, current_time: Optional[float] = None) -> float:
         """
-        Calculate temporal margin for a task or list of tasks (0‑1 scale, 1 = best).
+        Compute a normalised temporal margin [0, 1] for a task or list of tasks.
 
-        Uses the earliest deadline and total estimated duration, respecting dependencies
-        if the tasks are part of a plan.
+        Uses the critical-path duration (via helpers) when dependency information
+        is present, falling back to a sequential-sum estimate otherwise.
 
-        Args:
-            tasks: Single task or list of tasks.
-            current_time: Current timestamp (default = time.time()).
+        Parameters
+        ----------
+        tasks :
+            One or more Task objects.
+        current_time :
+            Reference timestamp (defaults to ``time.time()``).
 
-        Returns:
-            Float between 0 and 1 representing the margin.
+        Returns
+        -------
+        float
+            Temporal margin in [0, 1].  0 = no time left; 1 = fully unconstrained.
+
+        Raises
+        ------
+        DeadlineExceededError
+            If the earliest deadline has already passed.
         """
+        tasks = self._normalise_task_list(tasks)
         if not tasks:
             return 1.0
-
-        if not isinstance(tasks, list):
-            tasks = [tasks]
 
         if current_time is None:
             current_time = time.time()
 
-        # For a simple list, we sum durations and take the latest deadline.
-        # More sophisticated methods (e.g., critical path) would require a plan structure.
-        total_duration = 0.0
-        max_deadline = 0.0
+        # Determine total work and binding deadline
+        dep_map  = build_dependency_map(tasks)
+        dur_map  = {t.id: max(getattr(t, "duration", 300.0), self.min_task_duration)
+                    for t in tasks}
 
-        for task in tasks:
-            duration = getattr(task, "duration", 300.0)
-            deadline = getattr(task, "deadline", current_time + 3600.0)
+        # Use critical-path duration when dependencies exist, else sequential sum
+        has_deps = any(deps for deps in dep_map.values())
+        if has_deps:
+            cp_duration, _ = compute_critical_path(list(dep_map.keys()), dep_map, dur_map)
+            total_duration = cp_duration
+        else:
+            total_duration = sum(dur_map.values())
 
-            total_duration += duration
-            if deadline > max_deadline:
-                max_deadline = deadline
+        # Earliest-binding deadline (tasks sorted EDF; pick the first with a real deadline)
+        sorted_tasks = sort_tasks_by_deadline(tasks)
+        binding_deadline = next(
+            (getattr(t, "deadline", 0.0) for t in sorted_tasks
+             if getattr(t, "deadline", 0.0) > 0.0),
+            current_time + 3600.0,  # 1-hour default if no deadline set
+        )
 
-        available_time = max(0.0, max_deadline - current_time)
-        if available_time <= 0:
-            return 0.0
+        available_time = binding_deadline - current_time
+        if available_time < 0.0:
+            raise DeadlineExceededError(
+                f"Binding deadline already passed by {abs(available_time):.1f}s",
+                task_name=getattr(sorted_tasks[0], "name", ""),
+                task_id=getattr(sorted_tasks[0], "id", ""),
+                deadline=binding_deadline,
+                projected_completion=current_time + total_duration,
+            )
 
-        utilization = total_duration / available_time
-        margin = 1 - utilization
-        return max(0.0, min(1.0, margin - (self.time_buffer / max(available_time, 1e-6))))
+        return compute_temporal_margin(
+            total_duration, available_time, time_buffer=self.time_buffer
+        )
 
-    def calculate_plan_duration(self, plan: List[Task]) -> float:
+    def calculate_plan_duration(self, plan: List[Task], *, use_critical_path: bool = True) -> float:
         """
-        Estimate total plan duration considering task durations and dependencies.
+        Estimate total plan duration in seconds.
 
-        This is a simplified estimate; a full critical‑path analysis would require
-        a dependency graph.
+        When ``use_critical_path=True`` and dependency information is present,
+        the critical-path length is used (more accurate for parallel plans).
+        Otherwise the sequential sum is returned.
 
-        Args:
-            plan: List of tasks in execution order.
+        Parameters
+        ----------
+        plan :
+            Ordered list of tasks.
+        use_critical_path :
+            Whether to prefer CPM over sequential sum.
 
-        Returns:
-            Total estimated duration in seconds.
+        Returns
+        -------
+        float
+            Estimated duration in seconds.
         """
         if not plan:
             return 0.0
-        # Simple sum (assumes sequential execution)
-        return sum(task.duration for task in plan)
 
-    def estimate_remaining_time(self, plan: List[Task], current_time: float) -> float:
+        dur_map = {t.id: max(getattr(t, "duration", 300.0), self.min_task_duration)
+                   for t in plan}
+        dep_map = build_dependency_map(plan)
+
+        if use_critical_path and any(deps for deps in dep_map.values()):
+            cp_duration, _ = compute_critical_path(list(dep_map.keys()), dep_map, dur_map)
+            return cp_duration
+
+        return sum(dur_map.values())
+
+    def estimate_remaining_time(self, plan: List[Task], current_time: Optional[float] = None) -> float:
         """
-        Estimate remaining time based on currently executing task.
+        Estimate wall-clock seconds remaining until the plan completes.
 
-        Args:
-            plan: List of tasks in order.
-            current_time: Current timestamp.
+        For currently-executing tasks, the already-elapsed portion is subtracted.
+        Completed and failed tasks are ignored.
 
-        Returns:
-            Estimated seconds remaining, or 0.0 if plan is empty.
+        Parameters
+        ----------
+        plan :
+            Full task list in execution order.
+        current_time :
+            Reference timestamp (defaults to ``time.time()``).
+
+        Returns
+        -------
+        float
+            Non-negative remaining seconds.
         """
         if not plan:
             return 0.0
 
-        # Find the index of the first non‑completed task
+        if current_time is None:
+            current_time = time.time()
+
         remaining = 0.0
         for task in plan:
-            if task.status.value < 2:  # not SUCCESS or FAILED
-                # If it's currently executing, add remaining duration (estimated)
-                if task.start_time and task.duration:
-                    elapsed = current_time - task.start_time
-                    remaining += max(0.0, task.duration - elapsed)
-                else:
-                    remaining += task.duration
-            # else completed, skip
+            status = getattr(task, "status", None)
+            # Skip completed/failed tasks
+            if status is not None and status in (TaskStatus.SUCCESS, TaskStatus.FAILED):
+                continue
+
+            duration = max(getattr(task, "duration", 300.0), self.min_task_duration)
+            start    = getattr(task, "start_time", 0.0) or 0.0
+
+            if status == TaskStatus.EXECUTING and start > 0.0:
+                elapsed = current_time - start
+                remaining += max(0.0, duration - elapsed)
+            else:
+                remaining += duration
+
         return remaining
 
-    # -------------------------------------------------------------------------
-    # Risk and probability calculations
-    # -------------------------------------------------------------------------
-    def calculate_dependency_risk(self, tasks: Union[Task, List[Task]]) -> float:
+    # ------------------------------------------------------------------
+    # Public interface – Dependency risk
+    # ------------------------------------------------------------------
+    def calculate_dependency_risk(self, tasks: TaskOrList) -> float:
         """
-        Calculate risk associated with dependencies (0‑1 scale, 1 = best / no risk).
+        Compute a dependency-graph risk score [0, 1] (1 = safe / low risk).
 
-        Uses graph complexity metrics.
+        Risk is modelled as a weighted combination of:
+        - Normalised critical-path length (depth of the dependency chain).
+        - Edge density of the dependency graph.
 
-        Args:
-            tasks: Single task or list of tasks.
+        Parameters
+        ----------
+        tasks :
+            One or more Task objects.
 
-        Returns:
-            Float between 0 and 1 (1 = safe).
+        Returns
+        -------
+        float
+            Risk margin in [0, 1] — higher is safer.
         """
+        tasks = self._normalise_task_list(tasks)
         if not tasks:
             return 1.0
 
-        if not isinstance(tasks, list):
-            tasks = [tasks]
+        dep_map  = build_dependency_map(tasks)
+        dur_map  = {t.id: max(getattr(t, "duration", 300.0), self.min_task_duration)
+                    for t in tasks}
 
-        # Build dependency graph (task.id -> list of dependency ids)
-        graph: Dict[str, List[str]] = {}
-        for task in tasks:
-            deps = getattr(task, "dependencies", [])
-            if deps:
-                graph[task.id] = deps
+        # Nodes that actually participate in any dependency edge
+        nodes_with_deps = {tid for tid, deps in dep_map.items() if deps}
+        if not nodes_with_deps:
+            return 1.0  # No dependencies → no dependency risk
 
-        num_nodes = len(graph)
-        if num_nodes == 0:
-            return 1.0
+        n = len(nodes_with_deps)
+        e = sum(len(dep_map.get(tid, [])) for tid in nodes_with_deps)
 
-        num_edges = sum(len(deps) for deps in graph.values())
+        # Normalised edge density (max possible edges = n*(n-1))
+        edge_density = e / (n * (n - 1)) if n > 1 else 0.0
 
-        # Criticality (longest path)
-        criticality = self._find_criticality(graph)
+        # Normalised critical-path depth
+        cp_duration, _ = compute_critical_path(list(dep_map.keys()), dep_map, dur_map)
+        total_duration  = sum(dur_map.values()) or 1.0
+        cp_depth        = clamp(cp_duration / total_duration, 0.0, 1.0)
 
-        # Normalise
-        edge_density = num_edges / (num_nodes * (num_nodes - 1)) if num_nodes > 1 else 0
-        normalized_criticality = criticality / num_nodes if num_nodes > 0 else 0
+        risk = (self.risk_weights.get("dependency_complexity", 0.30) * (
+            0.6 * cp_depth + 0.4 * edge_density
+        ))
+        return clamp(1.0 - risk, 0.0, 1.0)
 
-        risk = 0.6 * normalized_criticality + 0.4 * edge_density
-        return max(0.0, min(1.0, 1.0 - risk))  # convert to margin
-
-    def _find_criticality(self, graph: Dict[str, List[str]]) -> int:
-        """Find longest path length in a DAG (if cycle exists, returns maximum)."""
-        if not graph:
-            return 0
-
-        # Build in‑degree
-        in_degree = {node: 0 for node in graph}
-        for deps in graph.values():
-            for dep in deps:
-                if dep in in_degree:
-                    in_degree[dep] += 1
-
-        # Kahn's algorithm to compute longest distances
-        dist = {node: 0 for node in graph}
-        queue = [node for node in graph if in_degree.get(node, 0) == 0]
-
-        while queue:
-            node = queue.pop(0)
-            for neighbor in graph.get(node, []):
-                if neighbor in in_degree:
-                    in_degree[neighbor] -= 1
-                    if dist[neighbor] < dist[node] + 1:
-                        dist[neighbor] = dist[node] + 1
-                    if in_degree[neighbor] == 0:
-                        queue.append(neighbor)
-
-        return max(dist.values()) if dist else 0
-
+    # ------------------------------------------------------------------
+    # Public interface – Probability & risk
+    # ------------------------------------------------------------------
     def calculate_probability_of_success(self, task: Task) -> float:
         """
-        Estimate probability of success for a task.
+        Estimate the probability that *task* will succeed [0, 1].
 
-        Uses task's probabilistic actions if available, otherwise falls back
-        to historical success rate from memory (if accessible).
+        Resolution order:
+        1. Explicit ``success_threshold`` attribute on the task (if probabilistic
+           actions are present, the maximum action-level success rate is used).
+        2. Method-level statistics from the task's history (if available).
+        3. Configured ``default_success_threshold`` (fallback).
 
-        Args:
-            task: The task to evaluate.
+        Parameters
+        ----------
+        task :
+            The task to evaluate.
 
-        Returns:
-            Float between 0 and 1.
+        Returns
+        -------
+        float
+            Probability in [0, 1].
         """
-        if task.is_probabilistic and task.probabilistic_actions:
-            # For now, take the maximum success probability among actions
-            # (A more sophisticated approach would combine them)
-            max_prob = 0.0
-            for action in task.probabilistic_actions:
-                # Assume action has a 'success_probability' attribute or we compute from outcomes
-                prob = getattr(action, "success_rate", 0.0)
-                max_prob = max(max_prob, prob)
-            if max_prob > 0:
-                return max_prob
-        # Fallback: use success threshold as a crude estimate
-        return getattr(task, "success_threshold", 0.9)
+        # 1. Probabilistic actions
+        if getattr(task, "is_probabilistic", False):
+            actions = getattr(task, "probabilistic_actions", [])
+            if actions:
+                rates = [getattr(a, "success_rate", 0.0) for a in actions]
+                best  = max(rates, default=0.0)
+                if best > 0.0:
+                    return clamp(best, 0.0, 1.0)
+
+        # 2. Historical success rate from task.history
+        history = getattr(task, "history", [])
+        if history:
+            outcomes = [
+                h.get("outcome") for h in history
+                if isinstance(h, dict) and "outcome" in h
+            ]
+            if outcomes:
+                success_count = sum(1 for o in outcomes if o == "success")
+                return clamp(success_count / len(outcomes), 0.0, 1.0)
+
+        # 3. Configured fallback
+        return clamp(
+            getattr(task, "success_threshold", self.default_success_threshold),
+            0.0, 1.0,
+        )
 
     def estimate_risk_score(self, task: Task) -> float:
         """
-        Estimate risk score for a task (0‑1, where 0 = safe, 1 = very risky).
+        Compute a composite risk score for *task* [0, 1] (higher = riskier).
 
-        Combines probability of failure, uncertainty, and dependency impact.
+        The score combines:
+        - Probability of failure (weight: ``risk_weights.failure_probability``).
+        - Pre-computed or estimated ``risk_score`` attribute on the task
+          (weight: ``risk_weights.dependency_complexity``).
+        - Duration uncertainty expressed as the coefficient of variation of
+          actual vs. estimated duration (weight: ``risk_weights.duration_uncertainty``).
 
-        Args:
-            task: The task to evaluate.
+        Parameters
+        ----------
+        task :
+            The task to evaluate.
 
-        Returns:
-            Float between 0 and 1 (higher = riskier).
+        Returns
+        -------
+        float
+            Risk score in [0, 1].
         """
+        w_fail = self.risk_weights.get("failure_probability",    0.50)
+        w_dep  = self.risk_weights.get("dependency_complexity",  0.30)
+        w_dur  = self.risk_weights.get("duration_uncertainty",   0.20)
+
+        # Component 1 – failure probability
         prob_failure = 1.0 - self.calculate_probability_of_success(task)
-        # Uncertainty could be derived from variance of duration or cost; placeholder
-        uncertainty = getattr(task, "risk_score", 0.0)  # if task has a pre‑computed risk
-        return min(1.0, prob_failure + uncertainty * 0.5)
 
-    # -------------------------------------------------------------------------
-    # Safety margin checks
-    # -------------------------------------------------------------------------
-    def check_safety_margins(
-        self, plan: List[Task], resources: Optional[ClusterResources] = None
-    ) -> Dict[str, float]:
-        """
-        Check all safety margins (resource and temporal) for a plan.
+        # Component 2 – pre-computed risk attribute (e.g. set by safety planner)
+        task_risk = clamp(getattr(task, "risk_score", 0.0), 0.0, 1.0)
 
-        Returns a dictionary of margin names and their values.
-        """
-        margins = {
-            "resource": self.calculate_resource_margin(plan, resources),
-            "temporal": self.calculate_temporal_margin(plan),
-        }
-        if plan:
-            margins["dependency"] = self.calculate_dependency_risk(plan)
-        return margins
+        # Component 3 – duration uncertainty: |actual - estimated| / estimated
+        estimated = max(getattr(task, "estimated_duration", 0.0), 1e-9)
+        actual    = getattr(task, "actual_duration", 0.0)
+        dur_uncertainty = clamp(abs(actual - estimated) / estimated, 0.0, 1.0) if actual > 0.0 else 0.0
 
-    # -------------------------------------------------------------------------
-    # Cost calculations
-    # -------------------------------------------------------------------------
+        score = w_fail * prob_failure + w_dep * task_risk + w_dur * dur_uncertainty
+        return clamp(score, 0.0, 1.0)
+
+    # ------------------------------------------------------------------
+    # Public interface – Plan-level aggregates
+    # ------------------------------------------------------------------
+
     def calculate_plan_cost(self, plan: List[Task]) -> float:
         """
-        Calculate total cost of a plan.
-        """
-        return sum(task.cost for task in plan)
+        Sum the ``cost`` attribute across all tasks in *plan*.
 
-    # -------------------------------------------------------------------------
-    # Cache management (optional)
-    # -------------------------------------------------------------------------
+        Parameters
+        ----------
+        plan :
+            List of Task objects.
+
+        Returns
+        -------
+        float
+            Total plan cost (non-negative).
+        """
+        if not plan:
+            return 0.0
+        require_type(plan, list, "plan")
+        return sum(max(getattr(t, "cost", 1.0), 0.0) for t in plan)
+
+    def check_safety_margins(self, plan: List[Task],
+        resources: Optional[ClusterResources] = None,
+        *,
+        current_time: Optional[float] = None,
+    ) -> MarginReport:
+        """
+        Evaluate all safety margins for *plan* and return a consolidated report.
+
+        The returned dict always contains the keys ``"resource"``, ``"temporal"``,
+        and ``"dependency"``.  Values are in [0, 1] (1 = safe).  If any margin
+        is at or below 0, the plan is considered unsafe.
+
+        Parameters
+        ----------
+        plan :
+            List of Task objects in execution order.
+        resources :
+            Optional live resource state; falls back to the injected monitor.
+        current_time :
+            Reference timestamp for temporal calculations.
+
+        Returns
+        -------
+        MarginReport
+            Dict with keys ``resource``, ``temporal``, ``dependency``.
+
+        Raises
+        ------
+        SafetyMarginError
+            Propagated from ``calculate_resource_margin`` if a buffer is breached.
+        DeadlineExceededError
+            Propagated from ``calculate_temporal_margin`` if a deadline has passed.
+        """
+        if current_time is None:
+            current_time = time.time()
+
+        margins: MarginReport = {
+            "resource":   self.calculate_resource_margin(plan, resources),
+            "temporal":   self.calculate_temporal_margin(plan, current_time),
+            "dependency": self.calculate_dependency_risk(plan),
+        }
+
+        unsafe = {k: v for k, v in margins.items() if v <= 0.0}
+        if unsafe:
+            logger.warning(
+                "Safety margin(s) exhausted: %s",
+                truncate_for_logging(unsafe),
+            )
+
+        return margins
+
+    def calculate_plan_risk_profile(self, plan: List[Task]) -> Dict[str, Any]:
+        """
+        Build a rich risk profile for the entire plan.
+
+        Returns a dict with:
+        - ``overall_risk``: composite risk score in [0, 1].
+        - ``per_task``: dict mapping task.id -> individual risk score.
+        - ``highest_risk_task``: id of the riskiest task (or None).
+        - ``plan_cost``: total plan cost.
+        - ``plan_duration``: estimated plan duration in seconds.
+
+        Parameters
+        ----------
+        plan :
+            List of Task objects.
+
+        Returns
+        -------
+        Dict[str, Any]
+        """
+        if not plan:
+            return {
+                "overall_risk": 0.0,
+                "per_task": {},
+                "highest_risk_task": None,
+                "plan_cost": 0.0,
+                "plan_duration": 0.0,
+            }
+
+        per_task: Dict[str, float] = {
+            t.id: self.estimate_risk_score(t) for t in plan
+        }
+        overall_risk = sum(per_task.values()) / len(per_task)
+        highest      = max(per_task, key=per_task.__getitem__) if per_task else None
+
+        return {
+            "overall_risk":       clamp(overall_risk, 0.0, 1.0),
+            "per_task":           per_task,
+            "highest_risk_task":  highest,
+            "plan_cost":          self.calculate_plan_cost(plan),
+            "plan_duration":      self.calculate_plan_duration(plan),
+        }
+
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
     def clear_cache(self) -> None:
-        """Clear internal calculation cache."""
+        """Evict all memoised calculation results."""
         with self._cache_lock:
             self._cache.clear()
             logger.debug("Calculation cache cleared")
 
-    # -------------------------------------------------------------------------
-    # Resource monitor integration
-    # -------------------------------------------------------------------------
+    def _cache_get(self, key: str) -> Optional[Any]:
+        """Return a cached value if it exists and has not expired, else None."""
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            value, expiry = entry
+            if time.time() > expiry:
+                del self._cache[key]
+                return None
+            return value
+
+    def _cache_set(self, key: str, value: Any) -> None:
+        """Store *value* in the cache with the configured TTL."""
+        with self._cache_lock:
+            self._cache[key] = (value, time.time() + self.cache_ttl_seconds)
+
+    # ------------------------------------------------------------------
+    # ResourceMonitor integration
+    # ------------------------------------------------------------------
     def set_resource_monitor(self, monitor: ResourceMonitor) -> None:
-        """Inject a resource monitor instance."""
+        """
+        Inject a live ``ResourceMonitor`` instance.
+
+        Once set, resource-margin calculations will query the monitor instead
+        of returning the conservative default.
+
+        Parameters
+        ----------
+        monitor :
+            Initialised ResourceMonitor.
+        """
+        require_type(monitor, ResourceMonitor, "monitor")
         self.resource_monitor = monitor
-        logger.info("Resource monitor set")
+        self._warned_no_monitor = False
+        logger.info("ResourceMonitor injected into PlanningCalculations")
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalise_task_list(tasks: TaskOrList) -> List[Task]:
+        """Coerce a single Task or list of Tasks to a list; return [] for falsy input."""
+        if not tasks:
+            return []
+        return [tasks] if isinstance(tasks, Task) else list(tasks)
+
+    def _resolve_resource_state(
+        self, resource_state: Optional[ClusterResources]
+    ) -> Optional[ClusterResources]:
+        """
+        Return *resource_state* if provided, else query the monitor.
+        Returns None (and warns once) if neither is available.
+        """
+        if resource_state is not None:
+            return resource_state
+        if self.resource_monitor is not None:
+            return self.resource_monitor.get_available_resources()
+        if not self._warned_no_monitor:
+            logger.warning(
+                "No ResourceMonitor set – resource margin will use "
+                "conservative default (%.2f)", self.default_fallback_margin
+            )
+            self._warned_no_monitor = True
+        return None
 
 
+# ---------------------------------------------------------------------------
+# __main__ – compact test block
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n=== Running Planning Calculations Test ===\n")
-    printer.status("Init", "Planning Calculations initialized", "success")
+    print("\n=== Running Planning Calculations ===\n")
+    printer.status("TEST", "PlanningCalculations initialized", "info")
 
-    # Create some dummy tasks
-    task1 = Task("A", preconditions=[], effects=[], duration=10.0, cost=5.0)
-    task2 = Task("B", preconditions=[], effects=[], duration=20.0, cost=3.0, dependencies=[task1.id])
+    # Build a small 3-task plan: A → B → C (sequential dependencies)
+    t_a = Task("Preprocess",  task_type=TaskType.PRIMITIVE, duration=60.0,  cost=2.0)
+    t_b = Task("CoreProcess", task_type=TaskType.PRIMITIVE, duration=120.0, cost=5.0,
+               dependencies=[t_a.id])
+    t_c = Task("Postprocess", task_type=TaskType.PRIMITIVE, duration=40.0,  cost=1.5,
+               dependencies=[t_b.id])
 
+    # Give tasks realistic deadlines
+    now = time.time()
+    t_a.deadline = now + 600
+    t_b.deadline = now + 600
+    t_c.deadline = now + 600
+
+    plan = [t_a, t_b, t_c]
     calc = PlanningCalculations()
-    print(f"Resource margin (single task): {calc.calculate_resource_margin(task1):.3f}")
-    print(f"Temporal margin (two tasks): {calc.calculate_temporal_margin([task1, task2]):.3f}")
-    print(f"Dependency risk: {calc.calculate_dependency_risk([task1, task2]):.3f}")
-    print(f"Plan duration: {calc.calculate_plan_duration([task1, task2]):.1f} s")
-    print(f"Plan cost: {calc.calculate_plan_cost([task1, task2]):.1f}")
-    print(f"Probability of success (task1): {calc.calculate_probability_of_success(task1):.3f}")
 
-    print("\n=== Successfully Ran Planning Calculations ===\n")
+    # --- Resource margin (no monitor → conservative default) ---
+    rm = calc.calculate_resource_margin(plan)
+    printer.status("CALC", f"Resource margin (no monitor): {rm:.3f}", "info")
+    assert 0.0 <= rm <= 1.0, "Resource margin out of range"
+
+    # --- Temporal margin ---
+    tm = calc.calculate_temporal_margin(plan)
+    printer.status("CALC", f"Temporal margin: {tm:.3f}", "info")
+    assert 0.0 <= tm <= 1.0, "Temporal margin out of range"
+
+    # --- Plan duration (critical path) ---
+    dur = calc.calculate_plan_duration(plan)
+    printer.status("CALC", f"Plan duration (CPM): {dur:.1f}s", "info")
+    assert dur == 220.0, f"Expected 220s sequential, got {dur}s"
+
+    # --- Remaining time (no tasks executing) ---
+    rem = calc.estimate_remaining_time(plan)
+    printer.status("CALC", f"Remaining time: {rem:.1f}s", "info")
+    assert rem == dur
+
+    # --- Remaining time with one task already executing ---
+    t_a.status     = TaskStatus.EXECUTING
+    t_a.start_time = now - 30.0          # 30s into a 60s task
+    rem2 = calc.estimate_remaining_time(plan)
+    printer.status("CALC", f"Remaining time (A executing 30s): {rem2:.1f}s", "info")
+    assert rem2 < rem, "Remaining time should decrease while a task executes"
+    t_a.status     = TaskStatus.PENDING
+    t_a.start_time = 0.0
+
+    # --- Dependency risk ---
+    dr = calc.calculate_dependency_risk(plan)
+    printer.status("CALC", f"Dependency risk margin: {dr:.3f}", "info")
+    assert 0.0 <= dr <= 1.0
+
+    # --- Probability of success ---
+    t_b.success_threshold = 0.85
+    ps = calc.calculate_probability_of_success(t_b)
+    printer.status("CALC", f"P(success) for CoreProcess: {ps:.3f}", "info")
+    assert ps == 0.85
+
+    # History-based success rate overrides threshold
+    t_b.history = [{"outcome": "success"}, {"outcome": "success"}, {"outcome": "failure"}]
+    ps_hist = calc.calculate_probability_of_success(t_b)
+    printer.status("CALC", f"P(success) from history (2/3): {ps_hist:.3f}", "info")
+    assert abs(ps_hist - 2/3) < 1e-9
+    t_b.history = []
+
+    # --- Risk score ---
+    t_c.risk_score = 0.4
+    rs = calc.estimate_risk_score(t_c)
+    printer.status("CALC", f"Risk score for Postprocess: {rs:.3f}", "info")
+    assert 0.0 <= rs <= 1.0
+
+    # --- Plan cost ---
+    cost = calc.calculate_plan_cost(plan)
+    printer.status("CALC", f"Plan cost: {cost:.1f}", "info")
+    assert cost == 8.5
+
+    # --- Full safety margin report ---
+    margins = calc.check_safety_margins(plan)
+    printer.status("CALC", f"Safety margins: {margins}", "info")
+    assert set(margins.keys()) == {"resource", "temporal", "dependency"}
+
+    # --- Risk profile ---
+    profile = calc.calculate_plan_risk_profile(plan)
+    printer.status("CALC", f"Overall risk: {profile['overall_risk']:.3f}", "info")
+    assert "per_task" in profile and len(profile["per_task"]) == 3
+
+    # --- Cache ---
+    calc._cache_set("test_key", 42)
+    assert calc._cache_get("test_key") == 42
+    calc.clear_cache()
+    assert calc._cache_get("test_key") is None
+    printer.status("CALC", "Cache set/get/clear: OK", "success")
+
+    print("\n=== Test ran successfully ===\n")
