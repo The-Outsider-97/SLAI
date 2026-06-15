@@ -12,10 +12,9 @@ from __future__ import annotations
 import threading
 import time
 
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-if TYPE_CHECKING:
-    from ..planning_types import ClusterResources, Task, TaskStatus, TaskType
+from ..planning_types import ClusterResources, Task, TaskStatus, TaskType
 from .config_loader import get_config_section, load_global_config
 from .planning_errors import *
 from .planning_helpers import *
@@ -28,7 +27,7 @@ printer = PrettyPrinter()
 # ---------------------------------------------------------------------------
 # Typing aliases
 # ---------------------------------------------------------------------------
-TaskOrList = Union['Task', List['Task']]
+TaskOrList = Union[Task, List[Task]]
 MarginReport = Dict[str, float]
 
 
