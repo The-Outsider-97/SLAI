@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.2.0"
 
 """
 Planning Agent with Alternative Method Search Strategies
@@ -21,29 +21,21 @@ Real-World Usage:
 6. Healthcare Coordination: Adaptive treatment plan generation considering patient responses and resource availability
 """
 
-from datetime import timedelta
-from email.policy import Policy
 import math
 import time
 import heapq
 import random
 
-from datetime import datetime
+from email.policy import Policy
+from datetime import datetime, timedelta
 from typing import Any as TypingAny, List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
-from .planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
-                                                SafetyMarginError, ResourceViolation, AcademicPlanningError)
 from .base_agent import BaseAgent
-from .planning.planning_metrics import PlanningMetrics
-from .planning.planning_executor import PlanningExecutor
-from .planning.heuristic_selector import HeuristicSelector
-from .planning.task_scheduler import DeadlineAwareScheduler
-from .planning.probabilistic_planner import ProbabilisticPlanner
+from .planning.utils.planning_errors import *
+from .planning import *
 from .planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
-from .planning.safety_planning import SafetyPlanning, ResourceMonitor
-from .planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
 try:
     from .perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
 except Exception:
@@ -75,10 +67,10 @@ class PlanningAgent(BaseAgent):
         self.agent_factory = agent_factory
 
         self.current_goal: Optional[Task] = None
-        self.task_library: Dict[str, Task] = {} # Stores registered task templates
-        self.current_plan: List[Task] = [] # The sequence of primitive tasks to execute
-        self.world_state: Dict[str, Any] = {} # Current state of the world
-        self.execution_history = deque(maxlen=100) # Keep track of recently executed tasks
+        self.task_library: Dict[str, Task] = {}     # Stores registered task templates
+        self.current_plan: List[Task] = []          # The sequence of primitive tasks to execute
+        self.world_state: Dict[str, Any] = {}       # Current state of the world
+        self.execution_history = deque(maxlen=100)  # Keep track of recently executed tasks
         self.plan_history = deque(maxlen=1000)
         self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}) # For Bayesian method selection
         self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
@@ -92,7 +84,7 @@ class PlanningAgent(BaseAgent):
         self.metrics = PlanningMetrics()
         self.heuristic_selector = HeuristicSelector()
         self.safety_planner = SafetyPlanning()
-        self.resource_monitor = ResourceMonitor()
+        self.resource_monitor = self.resource_monitor
         self.executor = PlanningExecutor()
         self.executor.agent = self
         self.probabilistic_planner = ProbabilisticPlanner()
