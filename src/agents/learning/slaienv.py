@@ -25,7 +25,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from ..base.modules.physics_constraints import PhysicsEngine, PhysicsConfig
+from ..base.modules.physics_constraints import PhysicsEngine
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.learning_error import *
 from .utils.learning_calculations import *
@@ -151,18 +151,18 @@ class SLAIEnv(gym.Env):
     # Configuration / setup
     # ------------------------------------------------------------------
     def _sync_physics_shortcuts(self) -> None:
-        self.dt = float(self.physics.config.dt)
-        self.gravity = float(self.physics.config.gravity)
-        self.friction_coeff = float(self.physics.config.friction_coeff)
-        self.elasticity = float(self.physics.config.elasticity)
-        self.wind_strength = float(self.physics.config.wind_strength)
-        self.wind_direction = float(self.physics.config.wind_direction)
-        self.drag_coeff = float(self.physics.config.drag_coeff)
-        self.terminal_velocity = float(self.physics.config.terminal_velocity)
-        self.rotational_friction = float(self.physics.config.rotational_friction)
-        self.mass = float(self.physics.config.default_mass)
+        self.dt = float(self.physics.dt)
+        self.gravity = float(self.physics.gravity)
+        self.friction_coeff = float(self.physics.friction_coeff)
+        self.elasticity = float(self.physics.elasticity)
+        self.wind_strength = float(self.physics.wind_strength)
+        self.wind_direction = float(self.physics.wind_direction)
+        self.drag_coeff = float(self.physics.drag_coeff)
+        self.terminal_velocity = float(self.physics.terminal_velocity)
+        self.rotational_friction = float(self.physics.rotational_friction)
+        self.mass = float(self.physics.default_mass)
 
-    def _build_physics_config(self) -> PhysicsConfig:
+    def _build_physics_config(self) -> Dict[str, Any]:
         cfg = self.env_config.get("physics", {})
         if cfg is None:
             cfg = {}
@@ -181,38 +181,50 @@ class SLAIEnv(gym.Env):
         electric_field = (coerce_float(raw_efield[0], default=0.0),
                           coerce_float(raw_efield[1], default=0.0))
     
-        return PhysicsConfig(
-            gravity=get_float("gravity", 9.80665, minimum=0.0),
-            friction_coeff=get_float("friction_coeff", 0.02, minimum=0.0),
-            rotational_friction=get_float("rotational_friction", 0.01, minimum=0.0),
-            wind_strength=get_float("wind_strength", 0.0, minimum=0.0),
-            wind_direction=get_float("wind_direction", 0.0),
-            wind_turbulence_ratio=get_float("wind_turbulence_ratio", 0.1, minimum=0.0),
-            drag_coeff=get_float("drag_coeff", 0.01, minimum=0.0),
-            terminal_velocity=get_float("terminal_velocity", 50.0, minimum=0.0),
-            min_speed_for_drag=get_float("min_speed_for_drag", 0.01, minimum=0.0),
-            elasticity=get_float("elasticity", 0.8, minimum=0.0, maximum=1.0),
-            tangential_damping=get_float("tangential_damping", 0.2, minimum=0.0, maximum=1.0),
-            boundary_margin=get_float("boundary_margin", 0.01, minimum=0.0),
-            corner_threshold=get_float("corner_threshold", 0.05, minimum=0.0),
-            max_angular_velocity=get_float("max_angular_velocity", 5.0, minimum=0.0),
-            default_mass=get_float("default_mass", 1.0, minimum=1.0e-12),
-            default_charge=get_float("default_charge", 0.0),
-            enable_tunneling=coerce_bool(cfg.get("enable_tunneling", False), default=False),
-            tunneling_probability=get_float("tunneling_probability", 0.05, minimum=0.0, maximum=1.0),
-            barrier_positions=tuple(coerce_float(v, default=0.0) for v in ensure_list(cfg.get("barrier_positions", [-8.0, 8.0]))),
-            barrier_width=get_float("barrier_width", 0.1, minimum=0.0),
-            enable_relativistic=coerce_bool(cfg.get("enable_relativistic", True), default=True),
-            relativistic_threshold=get_float("relativistic_threshold", 0.1, minimum=0.0, maximum=1.0),
-            relativistic_safety_factor=get_float("relativistic_safety_factor", 0.999999, minimum=0.0, maximum=1.0),
-            enable_electromagnetic=coerce_bool(cfg.get("enable_electromagnetic", False), default=False),
-            electric_field=electric_field,   # <-- now properly defined
-            magnetic_field=get_float("magnetic_field", 0.5),
-            dt=get_float("dt", 0.05, minimum=1.0e-12),
-            enable_history=coerce_bool(cfg.get("enable_history", True), default=True),
-            history_limit=coerce_int(cfg.get("history_limit", 200), default=200, minimum=1),
-            random_seed=(None if cfg.get("random_seed") in (None, "", "none", "None") else coerce_int(cfg.get("random_seed"), default=0)),
-        )
+        return {
+            "gravity": get_float("gravity", 9.80665, minimum=0.0),
+            "friction_coeff": get_float("friction_coeff", 0.02, minimum=0.0),
+            "rotational_friction": get_float("rotational_friction", 0.01, minimum=0.0),
+            "wind_strength": get_float("wind_strength", 0.0, minimum=0.0),
+            "wind_direction": get_float("wind_direction", 0.0),
+            "wind_turbulence_ratio": get_float("wind_turbulence_ratio", 0.1, minimum=0.0),
+            "drag_coeff": get_float("drag_coeff", 0.01, minimum=0.0),
+            "terminal_velocity": get_float("terminal_velocity", 50.0, minimum=0.0),
+            "min_speed_for_drag": get_float("min_speed_for_drag", 0.01, minimum=0.0),
+            "elasticity": get_float("elasticity", 0.8, minimum=0.0, maximum=1.0),
+            "tangential_damping": get_float("tangential_damping", 0.2, minimum=0.0, maximum=1.0),
+            "boundary_margin": get_float("boundary_margin", 0.01, minimum=0.0),
+            "corner_threshold": get_float("corner_threshold", 0.05, minimum=0.0),
+            "max_angular_velocity": get_float("max_angular_velocity", 5.0, minimum=0.0),
+            "default_mass": get_float("default_mass", 1.0, minimum=1.0e-12),
+            "default_charge": get_float("default_charge", 0.0),
+            "enable_tunneling": coerce_bool(cfg.get("enable_tunneling", False), default=False),
+            "tunneling_probability": get_float("tunneling_probability", 0.05, minimum=0.0, maximum=1.0),
+            "barrier_positions": tuple(
+                coerce_float(v, default=0.0)
+                for v in ensure_list(cfg.get("barrier_positions", [-8.0, 8.0]))
+            ),
+            "barrier_width": get_float("barrier_width", 0.1, minimum=0.0),
+            "enable_relativistic": coerce_bool(cfg.get("enable_relativistic", True), default=True),
+            "relativistic_threshold": get_float("relativistic_threshold", 0.1, minimum=0.0, maximum=1.0),
+            "relativistic_safety_factor": get_float(
+                "relativistic_safety_factor",
+                0.999999,
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            "enable_electromagnetic": coerce_bool(cfg.get("enable_electromagnetic", False), default=False),
+            "electric_field": electric_field,
+            "magnetic_field": get_float("magnetic_field", 0.5),
+            "dt": get_float("dt", 0.05, minimum=1.0e-12),
+            "enable_history": coerce_bool(cfg.get("enable_history", True), default=True),
+            "history_limit": coerce_int(cfg.get("history_limit", 200), default=200, minimum=1),
+            "random_seed": (
+                None
+                if cfg.get("random_seed") in (None, "", "none", "None")
+                else coerce_int(cfg.get("random_seed"), default=0)
+            ),
+        }
 
     def _load_reward_weights(self) -> Dict[str, float]:
         raw = dict(self.DEFAULT_REWARD_WEIGHTS)
@@ -559,8 +571,8 @@ class SLAIEnv(gym.Env):
         low, high = self._space_bounds()
         if len(state) < 2:
             return 0.0
-        near_low = np.isclose(state[:2], low[:2], atol=max(self.physics.config.boundary_margin, 1.0e-6))
-        near_high = np.isclose(state[:2], high[:2], atol=max(self.physics.config.boundary_margin, 1.0e-6))
+        near_low = np.isclose(state[:2], low[:2], atol=max(self.physics.boundary_margin, 1.0e-6))
+        near_high = np.isclose(state[:2], high[:2], atol=max(self.physics.boundary_margin, 1.0e-6))
         return float(np.any(near_low | near_high))
 
     def _check_zone_rewards(self, state: np.ndarray) -> float:
