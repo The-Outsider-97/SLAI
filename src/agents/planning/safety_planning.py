@@ -184,9 +184,7 @@ class SafetyPlanning:
         self.resource_monitor = resource_monitor or ResourceMonitor()
         self.calculations.set_resource_monitor(self.resource_monitor)
 
-        self.distributed_orchestrator = distributed_orchestrator or DistributedOrchestrator(
-            self.safety_config.get("distributed_decomposition", {})
-        )
+        self.distributed_orchestrator = distributed_orchestrator or DistributedOrchestrator()
         self.adjustment_queue: PriorityQueue[Tuple[int, float, str, Dict[str, Any]]] = PriorityQueue(
             maxsize=int(self.safety_config.get("queue_max_size", 1000))
         )
@@ -215,11 +213,8 @@ class SafetyPlanning:
         """Validate and apply a runtime plan adjustment when it remains safe."""
         printer.status("SAFETY", "Processing adjustment", "info")
         if not adjustment or not isinstance(adjustment, dict):
-            raise AdjustmentError(
-                "Adjustment must be a non-empty dictionary",
-                adjustment=adjustment or {},
-            )
-
+            raise AdjustmentError("Adjustment must be a non-empty dictionary", adjustment=adjustment or {})
+    
         with self.lock:
             try:
                 self._validate_adjustment(adjustment)
@@ -231,6 +226,10 @@ class SafetyPlanning:
                     self._checkpoint("adjustment_applied", {"adjustment": adjustment})
             except (AdjustmentError, ResourceViolation, TemporalError, PlanningError) as exc:
                 self.handle_adjustment_failure(exc, adjustment)
+                raise  # Re-raise after handling, so caller knows it failed
+            except Exception as exc:
+                self.handle_adjustment_failure(exc, adjustment)
+                raise AdjustmentError("Unexpected error during adjustment", adjustment=adjustment, conflict_details={"error": str(exc)}) from exc
 
     def _apply_adjustment(self, current_plan: List[Task], adjustment: Dict[str, Any]) -> List[Task]:
         """Return a safely modified copy of the current plan."""
@@ -398,71 +397,71 @@ class SafetyPlanning:
                 if not self.safety_config.get("enabled", True):
                     self.last_safety_report = {"enabled": False, "safe": True}
                     return True
-
-                self._validate_plan_structure(safe_plan)
-                available = self.resource_monitor.get_available_resources()
-                margin_report = self.calculations.check_safety_margins(safe_plan, available)
-                self._validate_margin_report(margin_report, safe_plan)
-
+    
+                try:
+                    self._validate_plan_structure(safe_plan)
+                except (CyclicDependencyError, DecompositionError, SchedulingConflictError) as e:
+                    self._record_violation("structural", e.__class__.__name__, 1.0, 0.0, "", severity="critical")
+                    if raise_on_failure:
+                        raise
+                    return False
+    
+                try:
+                    available = self.resource_monitor.get_available_resources()
+                    margin_report = self.calculations.check_safety_margins(safe_plan, available)
+                    self._validate_margin_report(margin_report, safe_plan)
+                except (ResourceViolation, SafetyMarginError) as e:
+                    self._record_violation("resource", e.resource_type, getattr(e, "measured_utilisation", 1.0), 0.0, "")
+                    if raise_on_failure:
+                        raise
+                    return False
+    
                 for task in safe_plan:
-                    self._validate_temporal_constraints(task)
-                    self._validate_equipment_constraints(task)
-                    self._validate_safety_margins(task, available)
-                    self._validate_task_risk(task)
-
+                    try:
+                        self._validate_temporal_constraints(task)
+                        self._validate_equipment_constraints(task)
+                        self._validate_safety_margins(task, available)
+                        self._validate_task_risk(task)
+                    except (TemporalViolation, DeadlineExceededError, ResourceViolation) as e:
+                        self._record_violation("task", task.id, 1.0, 0.0, task.id)
+                        if raise_on_failure:
+                            raise
+                        return False
+    
+                # Custom policies
                 for name, policy in list(self.safety_policies.items()):
-                    if not bool(policy(safe_plan)):
-                        self._record_violation(
-                            "policy",
-                            name,
-                            1.0,
-                            0.0,
-                            "",
-                            severity="high",
-                            corrective_action="review_policy_failure",
-                            impact_analysis={"policy": name},
-                        )
-
+                    try:
+                        if not bool(policy(safe_plan)):
+                            self._record_violation("policy", name, 1.0, 0.0, "")
+                            if raise_on_failure:
+                                raise SafetyMarginError(f"Policy {name} failed", resource_type="policy")
+                    except Exception as e:
+                        logger.warning("Safety policy %s raised %s", name, e)
+    
                 risk_profile = self.calculations.calculate_plan_risk_profile(safe_plan)
-                if risk_profile["overall_risk"] > float(self.safety_config.get("max_plan_risk_score", 0.90)):
-                    self._record_violation(
-                        "risk",
-                        "plan",
-                        risk_profile["overall_risk"],
-                        float(self.safety_config.get("max_plan_risk_score", 0.90)),
-                        str(risk_profile.get("highest_risk_task") or ""),
-                        severity="high",
-                        corrective_action="reduce_plan_risk_or_replan",
-                        impact_analysis=risk_profile,
-                    )
-
+                max_risk = float(self.safety_config.get("max_plan_risk_score", 0.90))
+                if risk_profile["overall_risk"] > max_risk:
+                    self._record_violation("risk", "plan", risk_profile["overall_risk"], max_risk, "")
+                    if raise_on_failure:
+                        raise SafetyMarginError(f"Plan risk {risk_profile['overall_risk']:.2f} exceeds threshold {max_risk:.2f}", resource_type="risk")
+    
                 self.last_safety_report = {
                     "safe": not self.current_violations,
                     "timestamp": time.time(),
                     "task_count": len(safe_plan),
                     "margins": margin_report,
                     "risk_profile": risk_profile,
-                    "violations": [violation.to_dict() for violation in self.current_violations],
-                    "available_resources": available.to_dict() if hasattr(available, "to_dict") else self._cluster_to_dict(available),
+                    "violations": [v.to_dict() for v in self.current_violations],
                 }
-                if self.current_violations:
-                    self._extend_violation_history(self.current_violations)
-                    if raise_on_failure:
-                        first = self.current_violations[0]
-                        raise SafetyMarginError(
-                            f"Plan failed safety check: {first.violation_type}:{first.resource}",
-                            resource_type=first.resource,
-                            buffer_amount=0.0,
-                            requested=first.measured_value,
-                            available=first.threshold,
-                            measured_utilisation=first.measured_value,
-                        )
-                    return False
-                return True
+                return not self.current_violations
             except PlanningError:
                 if raise_on_failure:
                     raise
-                logger.warning("Safety check failed: %s", truncate_for_logging(self.current_violations or "planning_error"))
+                return False
+            except Exception as e:
+                logger.error("Unexpected error in safety_check: %s", e, exc_info=True)
+                if raise_on_failure:
+                    raise PlanningError("Safety check failed unexpectedly", context={"original_error": str(e)}) from e
                 return False
 
     def _validate_plan_structure(self, plan: List[Task]) -> None:
@@ -834,6 +833,7 @@ class SafetyPlanning:
                 task.update_status(TaskStatus.EXECUTING)
             return bool(result)
         except ResourceAcquisitionError:
+            # Already a proper PlanningError – let it propagate
             raise
         except ResourceViolation as exc:
             raise ResourceAcquisitionError(
@@ -843,6 +843,14 @@ class SafetyPlanning:
                 available=exc.available,
                 task_id=task.id,
             ) from exc
+        except Exception as e:
+            raise ResourceAcquisitionError(
+                f"Unexpected error allocating resources for {task.name}",
+                resource_type="unknown",
+                requested=task.resource_requirements.to_dict(),
+                available={},
+                task_id=task.id,
+            ) from e
 
     # ------------------------------------------------------------------
     # Replanning and repair selection
@@ -1286,12 +1294,17 @@ class SafetyPlanning:
     def __enter__(self) -> "SafetyPlanning":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        if hasattr(self.resource_monitor, "stop_monitoring"):
-            self.resource_monitor.stop_monitoring()
-
-
-__all__ = ["SafetyPlanning", "DistributedOrchestrator", "ResourceMonitor"]
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Ensure resources are released even if an exception occurred."""
+        try:
+            if hasattr(self.resource_monitor, "stop_monitoring"):
+                self.resource_monitor.stop_monitoring()
+        except Exception as e:
+            logger.error("Error stopping resource monitor during exit: %s", e)
+        # Optionally run emergency shutdown if a critical error occurred
+        if exc_type is not None and issubclass(exc_type, (ResourceViolation, TemporalError, PlanningError)):
+            logger.warning("Emergency shutdown triggered due to %s", exc_type.__name__)
+            self._emergency_shutdown_procedure()
 
 
 if __name__ == "__main__":
