@@ -1,1532 +1,1328 @@
+"""
+Safety Planning – production-grade safety orchestration for the planning stack.
 
-import random
+This module owns high-level safety policy decisions and recovery orchestration.
+It deliberately delegates low-level numeric work to PlanningCalculations,
+resource telemetry/reservation to ResourceMonitor, persistence to PlanningMemory,
+and validation/serialisation primitives to planning_helpers.
+"""
+
+from __future__ import annotations
+
+import copy
 import threading
-import json, yaml
-import time, copy
-import requests
+import time
+import uuid
+import requests  # type: ignore
 
-from dataclasses import field
 from queue import PriorityQueue
-from collections import defaultdict
-from requests.exceptions import RequestException
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from requests.exceptions import RequestException  # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
-                                                       SafetyMarginError, ResourceViolation)
+from .utils.planning_errors import *
+from .utils.planning_helpers import *
 from .utils.planning_calculations import PlanningCalculations
 from .utils.resource_monitor import ResourceMonitor
-from .planning_types import (Task, TaskType, TaskStatus, ResourceProfile,
-                                                ClusterResources, RepairCandidate, SafetyViolation)
+from .planning_types import (
+    ClusterResources,
+    RepairCandidate,
+    ResourceProfile,
+    SafetyMargins,
+    SafetyViolation,
+    Task,
+    TaskStatus,
+    TaskType,
+)
 from .planning_memory import PlanningMemory
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Safety Planning")
 printer = PrettyPrinter()
 
-class SafetyPlanning:
-    """Core module for safe distributed planning with interactive adjustments"""
-    safety_margins: Dict[str, float] = field(default_factory=dict)
-    violation_history: List[SafetyViolation] = field(default_factory=list)
-    current_violations: List[SafetyViolation] = field(default_factory=list)
-    safety_policies: Dict[str, Callable] = field(default_factory=dict)
-    resource_monitor: ResourceMonitor = field(default_factory=ResourceMonitor)
 
-    def __init__(self):
-        self.config = load_global_config()
-        self.ram_limit = self.config.get('ram_limit')
-        self.gpu_limit = self.config.get('gpu_limit')
+class DistributedOrchestrator:
+    """Deterministic decomposition helper for distributed repair strategies."""
 
-        self.safety_config = get_config_section('safety_planning')
-        self.margins_config = get_config_section('safety_margins')
-        self.resource_buffers = self.margins_config.get('resource_buffers', {
-            'gpu', 'ram', 'specialized_hardware'
-        })
-        self.temporal = self.margins_config.get('temporal', {
-            'min_task_duration', 'max_concurrent', 'time_buffer'
-        })
-        self.lock = threading.RLock()
-        self.memory = PlanningMemory()
-        self.calculations = PlanningCalculations()
-        self.adjustment_queue = PriorityQueue()
+    def __init__(self) -> None:
+        self.do_config = get_config_section("distributed_decomposition") or {}
+        self.max_horizontal_splits = int(self.do_config.get("max_horizontal_splits", 4))
+        require_positive(self.max_horizontal_splits, "distributed.max_horizontal_splits")
+        self.vertical_stage_count = int(self.do_config.get("vertical_stage_count", 3))
+        require_positive(self.vertical_stage_count, "distributed.vertical_stage_count")
+        self.split_duration_factor = float(self.do_config.get("split_duration_factor", 0.50))
+        self.split_resource_factor = float(self.do_config.get("split_resource_factor", 0.50))
+
         self.resource_monitor = ResourceMonitor()
-        self.distributed_orchestrator = DistributedOrchestrator()
-        self.current_plan = []  # Add internal plan storage
-        self.task_library = []  # Add task library if needed
-        # Materialize class-level dataclass Field placeholders into runtime containers
-        self.violation_history = []
-        self.current_violations = []
-        self.safety_policies = {}
-        self.base_state = {"execution_history": []}
+        validate_probability(clamp(self.split_duration_factor, 0.0, 1.0), "distributed.split_duration_factor")
+        validate_probability(clamp(self.split_resource_factor, 0.0, 1.0), "distributed.split_resource_factor")
+
+    def horizontal_split(self, task: Task) -> List[Task]:
+        """Split a task into parallel shards with reduced resource pressure."""
+        require_type(task, Task, "task")
+        shard_count = min(self.max_horizontal_splits, max(2, int(getattr(task, "workload", 0) or 2)))
+        result: List[Task] = []
+        for index in range(shard_count):
+            shard = task.copy()
+            shard.id = f"{task.id}_h{index + 1}"
+            shard.name = f"{task.name}_horizontal_{index + 1}"
+            shard.parent = task
+            shard.parent_task = task
+            shard.dependencies = list(getattr(task, "dependencies", []) or [])
+            shard.duration = max(1.0, float(task.duration or 0.0) * self.split_duration_factor)
+            shard.estimated_duration = max(1.0, float(task.estimated_duration or shard.duration) * self.split_duration_factor)
+            shard.resource_requirements = self._scaled_resource_profile(
+                task.resource_requirements,
+                self.split_resource_factor,
+            )
+            shard.status = TaskStatus.PENDING
+            result.append(shard)
+        return result
+
+    def vertical_split(self, task: Task) -> List[Task]:
+        """Split a task into ordered preparation/execution/verification stages."""
+        require_type(task, Task, "task")
+        stage_names = ["prepare", "execute", "verify"][: self.vertical_stage_count]
+        if len(stage_names) < self.vertical_stage_count:
+            stage_names.extend(f"stage_{i}" for i in range(len(stage_names) + 1, self.vertical_stage_count + 1))
+
+        result: List[Task] = []
+        previous_id: Optional[str] = None
+        duration = max(1.0, float(task.duration or task.estimated_duration or 1.0) / len(stage_names))
+        for index, stage in enumerate(stage_names):
+            subtask = task.copy()
+            subtask.id = f"{task.id}_v{index + 1}"
+            subtask.name = f"{task.name}_{stage}"
+            subtask.parent = task
+            subtask.parent_task = task
+            subtask.dependencies = list(getattr(task, "dependencies", []) or [])
+            if previous_id:
+                subtask.dependencies.append(previous_id)
+            subtask.duration = duration
+            subtask.estimated_duration = duration
+            subtask.resource_requirements = self._scaled_resource_profile(
+                task.resource_requirements,
+                1.0 if stage == "execute" else self.split_resource_factor,
+            )
+            subtask.status = TaskStatus.PENDING
+            result.append(subtask)
+            previous_id = subtask.id
+        return result
+
+    def hybrid_split(self, task: Task) -> List[Task]:
+        """Combine vertical control stages with horizontal execution shards."""
+        vertical = self.vertical_split(task)
+        if len(vertical) < 2:
+            return self.horizontal_split(task)
+        execution_stage = vertical[min(1, len(vertical) - 1)]
+        shards = self.horizontal_split(execution_stage)
+        shards[0].dependencies = list(vertical[0].dependencies) + [vertical[0].id]
+        for shard in shards[1:]:
+            shard.dependencies = list(vertical[0].dependencies) + [vertical[0].id]
+        if len(vertical) > 2:
+            vertical[-1].dependencies = [shard.id for shard in shards]
+            return [vertical[0], *shards, vertical[-1]]
+        return [vertical[0], *shards]
+
+    def decompose_and_distribute(self, task: Task, strategy: Optional[str] = None) -> List[Task]:
+        """Return a decomposition using the requested strategy."""
+        selected = (strategy or self.do_config.get("default_strategy", "hybrid")).lower()
+        if selected == "horizontal":
+            return self.horizontal_split(task)
+        if selected == "vertical":
+            return self.vertical_split(task)
+        if selected == "hybrid":
+            return self.hybrid_split(task)
+        raise DecompositionError(
+            f"Unsupported distributed decomposition strategy: {selected}",
+            task_name=getattr(task, "name", ""),
+            task_id=getattr(task, "id", ""),
+            attempted_methods=[selected],
+        )
+
+    @staticmethod
+    def _scaled_resource_profile(profile: ResourceProfile, factor: float) -> ResourceProfile:
+        return ResourceProfile(
+            gpu=max(0.0, float(profile.gpu) * factor),
+            ram=max(0.0, float(profile.ram) * factor),
+            specialized_hardware=list(profile.specialized_hardware),
+        )
+
+
+class SafetyPlanning:
+    """
+    Safety orchestration layer for planning and execution.
+
+    Public compatibility surface
+    ----------------------------
+    - ``safety_check(plan)`` validates a candidate plan.
+    - ``interactive_adjustment_handler(adjustment)`` applies safe plan changes.
+    - ``dynamic_replanning_pipeline(failed_task)`` produces a repair plan.
+    - ``update_allocations(task)`` reserves resources through ResourceMonitor.
+    """
+
+    def __init__(self, *, memory: Optional[PlanningMemory] = None,
+        calculations: Optional[PlanningCalculations] = None,
+        resource_monitor: Optional[ResourceMonitor] = None,
+        distributed_orchestrator: Optional[DistributedOrchestrator] = None,
+    ) -> None:
+        self.config = load_global_config()
+        self.ram_limit = self.config.get("ram_limit")
+        self.gpu_limit = self.config.get("gpu_limit")
+
+        self.safety_config = get_config_section("safety_planning", config=self.config, default={})
+        self.margins_config = get_config_section("safety_margins", config=self.config, default={})
+        self.resource_buffers = dict(self.margins_config.get("resource_buffers", {}))
+        self.temporal = dict(self.margins_config.get("temporal", {}))
+        self.safety_margin_model = SafetyMargins.from_config(self.config)
+
+        self._validate_config()
+
+        self.lock = threading.RLock()
+        self.memory = memory or PlanningMemory()
+        self.calculations = calculations or PlanningCalculations()
+        self.resource_monitor = resource_monitor or ResourceMonitor()
+        self.calculations.set_resource_monitor(self.resource_monitor)
+
+        self.distributed_orchestrator = distributed_orchestrator or DistributedOrchestrator(
+            self.safety_config.get("distributed_decomposition", {})
+        )
+        self.adjustment_queue: PriorityQueue[Tuple[int, float, str, Dict[str, Any]]] = PriorityQueue(
+            maxsize=int(self.safety_config.get("queue_max_size", 1000))
+        )
+
+        self.current_plan: List[Task] = []
+        self.task_library: Dict[str, Task] = {}
+        self.violation_history: List[SafetyViolation] = []
+        self.current_violations: List[SafetyViolation] = []
+        self.safety_policies: Dict[str, Callable[[List[Task]], bool]] = {}
+        self.base_state: Dict[str, Any] = {"execution_history": []}
+        self.last_safety_report: Dict[str, Any] = {}
+        self.last_repair_candidates: List[RepairCandidate] = []
+        self.last_adjustment_log: List[Dict[str, Any]] = []
+
+        logger.info("Safety Planning successfully initialized")
 
     @property
-    def safety_margins(self):
+    def safety_margins(self) -> Dict[str, Any]:
+        """Backward-compatible access to the configured safety margins."""
         return self.margins_config
 
-    def interactive_adjustment_handler(self, adjustment: Dict) -> None:
-        """Handle real-time plan modifications from UI/API"""
-        printer.status("INIT", "Interactive handler succesfully initialized", "info")
-
-        if not adjustment or not adjustment.get("type"):
-            printer.status("ADJUST-REJECT", "Empty or invalid adjustment received", "warning")
-            return  # Prevent recursion or undefined behavior
+    # ------------------------------------------------------------------
+    # Interactive adjustment flow
+    # ------------------------------------------------------------------
+    def interactive_adjustment_handler(self, adjustment: Dict[str, Any]) -> None:
+        """Validate and apply a runtime plan adjustment when it remains safe."""
+        printer.status("SAFETY", "Processing adjustment", "info")
+        if not adjustment or not isinstance(adjustment, dict):
+            raise AdjustmentError(
+                "Adjustment must be a non-empty dictionary",
+                adjustment=adjustment or {},
+            )
 
         with self.lock:
             try:
                 self._validate_adjustment(adjustment)
-                adjusted_plan = self._apply_adjustment(
-                    self.current_plan,
-                    adjustment
-                )
-                if adjusted_plan and self.safety_check(adjusted_plan):
-                    self.current_plan = adjusted_plan  # Store internally
-                    self.log_adjustment(adjustment)
-            except AdjustmentError as e:
-                self.handle_adjustment_failure(e, adjustment)
+                adjusted_plan = self._apply_adjustment(self.current_plan, adjustment)
+                self.safety_check(adjusted_plan, raise_on_failure=True)
+                self.current_plan = adjusted_plan
+                self.log_adjustment(adjustment)
+                if self.safety_config.get("auto_checkpoint_on_repair", True):
+                    self._checkpoint("adjustment_applied", {"adjustment": adjustment})
+            except (AdjustmentError, ResourceViolation, TemporalError, PlanningError) as exc:
+                self.handle_adjustment_failure(exc, adjustment)
 
-    def _apply_adjustment(self, current_plan: List[Task], adjustment: Dict) -> List[Task]:
-        """
-        Applies a real-time plan adjustment safely by modifying the current task list.
-        
-        Supported adjustment types:
-        - "modify_task": updates parameters like deadline, resources, or duration
-        - "add_task": appends a new validated task
-        - "remove_task": deletes a task (and possibly dependent tasks)
-        
-        Raises:
-            AdjustmentError if the adjustment is invalid or unsafe.
-        """
-        adjusted_plan = current_plan.copy()
-        adjustment_type = adjustment.get("type")
-        task_id = adjustment.get("task_id")
-    
-        if adjustment_type == "modify_task":
-            updated = False
-            for i, task in enumerate(adjusted_plan):
-                if task.name == task_id:
-                    for key, value in adjustment.get("updates", {}).items():
-                        if hasattr(task, key):
-                            setattr(task, key, value)
-                    updated = True
-                    break
-            if not updated:
-                raise AdjustmentError(f"Task {task_id} not found for modification", adjustment)
-    
-        elif adjustment_type == "add_task":
-            new_task = adjustment.get("task")
-            if not new_task:
-                raise AdjustmentError("Missing 'task' in add_task adjustment", adjustment)
-            adjusted_plan.append(new_task)
-    
-        elif adjustment_type == "remove_task":
-            adjusted_plan = [t for t in adjusted_plan if t.id != task_id]
-            # Optional: also remove dependents if needed
-    
-        else:
-            raise AdjustmentError(f"Unsupported adjustment type: {adjustment_type}", adjustment)
-    
-        return adjusted_plan
-
-    def _validate_adjustment(self, adjustment: Dict) -> None:
-        """Comprehensive validation of adjustment requests with safety checks"""
-        printer.status("VALIDATE", f"Validating adjustment: {adjustment.get('type')}", "info")
-        
-        # Basic structural validation
-        if not isinstance(adjustment, dict):
-            raise AdjustmentError("Adjustment must be a dictionary", adjustment)
-        
+    def _apply_adjustment(self, current_plan: List[Task], adjustment: Dict[str, Any]) -> List[Task]:
+        """Return a safely modified copy of the current plan."""
+        require_type(current_plan, list, "current_plan")
         adj_type = adjustment.get("type")
-        if adj_type not in ["modify_task", "add_task", "remove_task"]:
-            raise AdjustmentError(f"Invalid adjustment type: {adj_type}", adjustment)
-        
-        # Type-specific validation
+        adjusted_plan = [self._copy_task(task) for task in current_plan]
+
+        if adj_type == "modify_task":
+            task_id = str(adjustment.get("task_id", ""))
+            validate_task_id(task_id, "modify_task")
+            updates = dict(adjustment.get("updates") or {})
+            for task in adjusted_plan:
+                if task.id == task_id or task.name == task_id:
+                    self._apply_task_updates(task, updates)
+                    task.validate()
+                    return adjusted_plan
+            raise AdjustmentError(
+                f"Task {task_id!r} not found for modification",
+                adjustment=adjustment,
+                conflict_details={"current_task_ids": [task.id for task in adjusted_plan]},
+            )
+
+        if adj_type == "add_task":
+            new_task = self._coerce_task(adjustment.get("task"), "adjustment.task")
+            if any(task.id == new_task.id for task in adjusted_plan):
+                raise AdjustmentError(
+                    f"Task ID {new_task.id!r} already exists",
+                    adjustment=adjustment,
+                    conflict_details={"duplicate_task_id": new_task.id},
+                )
+            self._validate_dependencies_known(new_task, adjusted_plan, allow_existing_only=True)
+            adjusted_plan.append(new_task)
+            return adjusted_plan
+
+        if adj_type == "remove_task":
+            task_id = str(adjustment.get("task_id", ""))
+            validate_task_id(task_id, "remove_task")
+            cascade = bool(adjustment.get("cascade", False))
+            removed_ids = {task_id}
+            if cascade:
+                removed_ids |= set(self._dependent_ids(adjusted_plan, task_id))
+            else:
+                dependents = self._dependent_ids(adjusted_plan, task_id)
+                if dependents:
+                    raise AdjustmentError(
+                        f"Cannot remove task {task_id!r}; dependent tasks exist",
+                        adjustment=adjustment,
+                        conflict_details={"dependents": dependents},
+                    )
+            result = [task for task in adjusted_plan if task.id not in removed_ids and task.name not in removed_ids]
+            if len(result) == len(adjusted_plan):
+                raise AdjustmentError(
+                    f"Task {task_id!r} not found for removal",
+                    adjustment=adjustment,
+                    conflict_details={"current_task_ids": [task.id for task in adjusted_plan]},
+                )
+            return result
+
+        raise AdjustmentError(
+            f"Unsupported adjustment type: {adj_type}",
+            adjustment=adjustment,
+            conflict_details={"allowed": self.safety_config.get("allowed_update_fields", [])},
+        )
+
+    def _validate_adjustment(self, adjustment: Dict[str, Any]) -> None:
+        """Validate adjustment structure and high-level constraints."""
+        require_type(adjustment, dict, "adjustment")
+        adj_type = adjustment.get("type")
+        if adj_type not in {"modify_task", "add_task", "remove_task"}:
+            raise AdjustmentError(
+                f"Invalid adjustment type: {adj_type}",
+                adjustment=adjustment,
+                conflict_details={"allowed": ["modify_task", "add_task", "remove_task"]},
+            )
+
+        if adj_type in {"modify_task", "remove_task"}:
+            task_id = adjustment.get("task_id")
+            if not task_id:
+                raise AdjustmentError("Missing task_id", adjustment=adjustment)
+            validate_task_id(str(task_id), f"{adj_type}.task_id")
+
         if adj_type == "modify_task":
             self._validate_modification(adjustment)
         elif adj_type == "add_task":
             self._validate_addition(adjustment)
         elif adj_type == "remove_task":
             self._validate_removal(adjustment)
-        
-        # Temporal validation (deadline consistency)
-        if 'deadline' in adjustment.get('updates', {}):
-            new_deadline = adjustment['updates']['deadline']
-            if new_deadline < time.time():
-                raise TemporalViolation(
-                    f"Adjusted deadline {new_deadline} is in the past",
-                    scheduled_time=new_deadline,
-                    current_time=time.time()
-                )
-        
-        # Resource validation
-        if 'resource_requirements' in adjustment.get('updates', {}):
-            new_req = adjustment['updates']['resource_requirements']
-            self._validate_equipment_constraints(Task(resource_requirements=new_req))
-            self._validate_safety_margins(Task(resource_requirements=new_req))
-        
-        printer.status("VALIDATE-SUCCESS", "Adjustment validation passed", "success")
-    
-    def _validate_modification(self, adjustment: Dict) -> None:
-        """Validate task modification requests"""
-        task_id = adjustment.get("task_id")
-        updates = adjustment.get("updates", {})
-        
-        if not task_id:
-            raise AdjustmentError("Missing task_id for modification", adjustment)
-        
-        if not updates:
-            raise AdjustmentError("No updates specified for task modification", adjustment)
-        
-        # Verify task exists in current plan
-        task_exists = any(t.id == task_id for t in self.current_plan)
-        if not task_exists:
-            raise AdjustmentError(f"Task {task_id} not found in current plan", adjustment)
-        
-        # Validate update keys
-        valid_keys = {'deadline', 'priority', 'resource_requirements', 'dependencies'}
-        invalid_keys = set(updates.keys()) - valid_keys
-        if invalid_keys:
-            raise AdjustmentError(f"Invalid update keys: {invalid_keys}", adjustment)
-    
-    def _validate_addition(self, adjustment: Dict) -> None:
-        """Validate new task addition requests"""
-        new_task = adjustment.get("task")
-        
-        if not new_task:
-            raise AdjustmentError("Missing task object for addition", adjustment)
-        
-        # Basic task validation
-        if not hasattr(new_task, 'id'):
-            raise AdjustmentError("New task missing ID field", adjustment)
-        
-        # Check for duplicate IDs
-        if any(t.id == new_task.id for t in self.current_plan):
-            raise AdjustmentError(f"Task ID {new_task.id} already exists", adjustment)
-        
-        # Validate dependencies
-        for dep_id in getattr(new_task, 'dependencies', []):
-            if not any(t.id == dep_id for t in self.current_plan):
-                raise AdjustmentError(f"Dependency {dep_id} not found", adjustment)
-    
-    def _validate_removal(self, adjustment: Dict) -> None:
-        """Validate task removal requests"""
-        task_id = adjustment.get("task_id")
-        
-        if not task_id:
-            raise AdjustmentError("Missing task_id for removal", adjustment)
-        
-        # Verify task exists
-        if not any(t.id == task_id for t in self.current_plan):
-            raise AdjustmentError(f"Task {task_id} not found in current plan", adjustment)
-        
-        # Check for dependent tasks
-        if getattr(adjustment, 'cascade', False):
-            return  # Allow removal with dependents if cascade is specified
-        
-        dependents = [t.id for t in self.current_plan 
-                     if task_id in getattr(t, 'dependencies', [])]
-        if dependents:
+
+    def _validate_modification(self, adjustment: Dict[str, Any]) -> None:
+        updates = adjustment.get("updates")
+        if not isinstance(updates, dict) or not updates:
+            raise AdjustmentError("No updates specified for task modification", adjustment=adjustment)
+        allowed = set(self.safety_config.get("allowed_update_fields", []))
+        invalid = sorted(set(updates) - allowed)
+        if invalid:
             raise AdjustmentError(
-                f"Cannot remove task {task_id} with dependents: {dependents}",
-                adjustment,
-                conflict_details={'dependents': dependents}
+                f"Invalid update field(s): {invalid}",
+                adjustment=adjustment,
+                conflict_details={"invalid_fields": invalid, "allowed_fields": sorted(allowed)},
+            )
+        target = self._find_task(self.current_plan, str(adjustment.get("task_id")))
+        if target is None:
+            raise AdjustmentError(
+                f"Task {adjustment.get('task_id')!r} not found in current plan",
+                adjustment=adjustment,
+                conflict_details={"current_task_ids": [task.id for task in self.current_plan]},
             )
 
-    def handle_adjustment_failure(self, e: AdjustmentError, adjustment: Dict) -> None:
-        """Comprehensive failure handling with fallback strategies"""
-        printer.status("ADJUST-FAIL", f"Adjustment failed: {str(e)}", "error")
-        
-        # Log detailed diagnostics
-        failure_data = {
-            'timestamp': time.time(),
-            'adjustment': adjustment,
-            'error_type': type(e).__name__,
-            'message': str(e),
-            'current_plan': [t.id for t in self.current_plan],
-            'resource_status': self.resource_monitor.get_available_resources().__dict__
-        }
-        
-        if isinstance(e, ResourceViolation):
-            self._handle_resource_failure(e, adjustment)
-        elif isinstance(e, TemporalViolation):
-            self._handle_temporal_failure(e, adjustment)
-        else:
-            self._handle_generic_failure(e, adjustment)
-        
-        # Notify monitoring systems
-        self._send_alert_notification(failure_data)
-        
-        # Create diagnostic checkpoint
-        self.memory.save_checkpoint(
-            label=f"adjust_fail_{adjustment.get('type')}",
-            metadata=failure_data
-        )
-    
-    def _handle_resource_failure(self, e: ResourceViolation, adjustment: Dict) -> None:
-        """Resource-specific failure handling"""
-        printer.status("RESOURCE-FAIL", f"Resource violation: {str(e)}", "warning")
-        
-        # Attempt to scale resources
-        if self._attempt_resource_scaling(e.required, e.available):
-            printer.status("RESOURCE-RECOVER", "Resource scaled successfully", "success")
-            # Retry adjustment after scaling
-            self.interactive_adjustment_handler(adjustment)
-            return
-        
-        # Fallback to task decomposition
-        if adjustment.get("type") == "add_task":
-            self.task = adjustment.get("task")
-            try:
-                subtasks = self.distributed_decomposition(task)
-                if subtasks:
-                    # Replace single task with decomposed subtasks
-                    adjustment['type'] = "add_subtasks"
-                    adjustment['subtasks'] = subtasks
-                    adjustment.pop('task', None)
-                    printer.status("DECOMPOSE-FALLBACK", "Using task decomposition", "warning")
-                    self.interactive_adjustment_handler(adjustment)
-                    return
-            except Exception as decomp_error:
-                logger.error(f"Decomposition failed: {str(decomp_error)}")
-        
-        # Final fallback: queue for later execution
-        self._queue_for_later_execution(adjustment)
-        printer.status("QUEUED", "Adjustment queued for later execution", "info")
-    
-    def _handle_temporal_failure(self, e: TemporalViolation, adjustment: Dict) -> None:
-        """Temporal constraint failure handling"""
-        printer.status("TIME-FAIL", f"Temporal violation: {str(e)}", "warning")
-        
-        # Attempt to reprioritize
-        if 'deadline' in adjustment.get('updates', {}):
-            original_deadline = adjustment['updates']['deadline']
-            extended = original_deadline + self.temporal.time_buffer * 2
-            adjustment['updates']['deadline'] = extended
-            
-            try:
-                printer.status("DEADLINE-EXTEND", f"Extending deadline to {extended}", "info")
-                self.interactive_adjustment_handler(adjustment)
-                return
-            except Exception:
-                # Reset to original if extension fails
-                adjustment['updates']['deadline'] = original_deadline
-        
-        # Fallback to resource reallocation
-        if self._reallocate_resources_for_priority(adjustment):
-            return
-        
-        # Final fallback: partial execution
-        self._enable_partial_execution(adjustment)
-    
-    def _handle_generic_failure(self, e: Exception, adjustment: Dict) -> None:
-        """Generic failure handling strategy"""
-        printer.status("GENERIC-FAIL", f"Generic failure: {str(e)}", "error")
-        
-        # Attempt simple retry with backoff
-        max_retries = self.config.get('adjustment_retries', 5)
-        retry_count = adjustment.get('_retry_count', 0)
-        
-        if retry_count < max_retries:
-            adjustment['_retry_count'] = retry_count + 1
-            backoff = 2 ** retry_count
-            printer.status("RETRY", f"Retrying in {backoff}s (attempt {retry_count+1}/{max_retries})", "info")
-            time.sleep(backoff)
-            self.interactive_adjustment_handler(adjustment)
-            return
-        
-        # Fallback to human intervention
-        self._escalate_to_human_operator(adjustment, str(e))
-    
-    # Helper methods for failure handling
-    def _attempt_resource_scaling(self, required: Dict, available: Dict) -> bool:
-        """Attempt to scale cluster resources dynamically"""
-        printer.status("SCALING", "Attempting resource scaling", "info")
-        # Implementation would interface with cloud provider APIs
-        # or cluster orchestration systems
-        return False  # Placeholder
-    
-    def _reallocate_resources_for_priority(self, adjustment: Dict) -> bool:
-        """Reallocate resources from lower-priority tasks"""
-        task_id = adjustment.get("task_id")
-        if not task_id:
-            return False
-        
-        # Find lower priority tasks that could yield resources
-        candidate_tasks = [
-            t for t in self.current_plan 
-            if t.priority > adjustment.get('priority', 1)
-            and t.id != task_id
-        ]
-        
-        if not candidate_tasks:
-            return False
-        
-        # Try pausing lowest priority task
-        candidate_tasks.sort(key=lambda x: x.priority)
-        task_to_pause = candidate_tasks[0]
-        
-        try:
-            pause_adjustment = {
-                'type': 'modify_task',
-                'task_id': task_to_pause.id,
-                'updates': {'status': 'paused'}
-            }
-            self.interactive_adjustment_handler(pause_adjustment)
-            
-            # Retry original adjustment
-            self.interactive_adjustment_handler(adjustment)
-            return True
-        except Exception:
-            # Revert pausing if fails
-            resume_adjustment = {
-                'type': 'modify_task',
-                'task_id': task_to_pause.id,
-                'updates': {'status': 'active'}
-            }
-            self.interactive_adjustment_handler(resume_adjustment)
-            return False
-    
-    def _queue_for_later_execution(self, adjustment: Dict) -> None:
-        """Add adjustment to pending queue for later execution"""
-        # Create prioritized queue item
-        priority = adjustment.get('priority', 3)
-        queue_item = {
-            'adjustment': adjustment,
-            'priority': priority,
-            'timestamp': time.time(),
-            'retry_count': 0
-        }
-        
-        # Add to priority queue (thread-safe)
+        if "deadline" in updates and float(updates["deadline"]) > 0:
+            self._validate_deadline_value(float(updates["deadline"]), adjustment)
+        if "resource_requirements" in updates or "requirements" in updates:
+            profile = self._coerce_resource_profile(
+                updates.get("resource_requirements", updates.get("requirements"))
+            )
+            preview = self._copy_task(target)
+            preview.resource_requirements = profile
+            self._validate_equipment_constraints(preview)
+            self._validate_safety_margins(preview)
+
+    def _validate_addition(self, adjustment: Dict[str, Any]) -> None:
+        task = self._coerce_task(adjustment.get("task"), "adjustment.task")
+        task.validate()
+        if self._find_task(self.current_plan, task.id) is not None:
+            raise AdjustmentError(
+                f"Task ID {task.id!r} already exists",
+                adjustment=adjustment,
+                conflict_details={"duplicate_task_id": task.id},
+            )
+        self._validate_dependencies_known(task, self.current_plan, allow_existing_only=True)
+        self._validate_temporal_constraints(task)
+        self._validate_equipment_constraints(task)
+        self._validate_safety_margins(task)
+
+    def _validate_removal(self, adjustment: Dict[str, Any]) -> None:
+        task_id = str(adjustment.get("task_id"))
+        if self._find_task(self.current_plan, task_id) is None:
+            raise AdjustmentError(
+                f"Task {task_id!r} not found in current plan",
+                adjustment=adjustment,
+                conflict_details={"current_task_ids": [task.id for task in self.current_plan]},
+            )
+        if not bool(adjustment.get("cascade", False)):
+            dependents = self._dependent_ids(self.current_plan, task_id)
+            if dependents:
+                raise AdjustmentError(
+                    f"Cannot remove task {task_id!r} with dependents",
+                    adjustment=adjustment,
+                    conflict_details={"dependents": dependents},
+                )
+
+    # ------------------------------------------------------------------
+    # Safety checks
+    # ------------------------------------------------------------------
+    def safety_check(self, plan: List[Task], *, raise_on_failure: bool = False) -> bool:
+        """
+        Validate structural, resource, temporal, dependency, and custom safety rules.
+
+        Returns True when safe. When ``raise_on_failure`` is True, the first
+        structured planning error is propagated after violation records are built.
+        """
         with self.lock:
-            self.adjustment_queue.put((-priority, time.time(), queue_item))
-        
-        logger.info(f"Queued adjustment for later execution (priority: {priority})")
-    
-    def _enable_partial_execution(self, adjustment: Dict) -> None:
-        """Enable partial execution mode for time-constrained tasks"""
-        task_id = adjustment.get("task_id")
-        if not task_id:
-            return
-        
-        # Find task in current plan
-        for task in self.current_plan:
-            if task.id == task_id:
-                # Enable partial execution mode
-                if hasattr(task, 'execution_modes') and 'partial' in task.execution_modes:
-                    adjustment['updates'] = adjustment.get('updates', {})
-                    adjustment['updates']['execution_mode'] = 'partial'
-                    try:
-                        self.interactive_adjustment_handler(adjustment)
-                        printer.status("PARTIAL-EXEC", "Enabled partial execution mode", "warning")
-                    except Exception:
-                        logger.error("Failed to enable partial execution")
-                break
-    
-    def _escalate_to_human_operator(self, adjustment: Dict, error_msg: str) -> None:
-        """Escalate failure to human operators"""
-        alert_payload = {
-            'type': 'adjustment_failure',
-            'adjustment': adjustment,
-            'error': error_msg,
-            'timestamp': time.time(),
-            'resource_status': self.resource_monitor.get_available_resources().__dict__,
-            'plan_status': [t.id for t in self.current_plan]
-        }
-        
-        # Send to monitoring dashboard
-        self._send_alert_notification(alert_payload)
-        printer.status("HUMAN-ESCALATE", "Adjustment requires human intervention", "critical")
-    
-    def _send_alert_notification(self, payload: Dict) -> None:
-        """Send alert to monitoring system (stub implementation)"""
-        # Actual implementation would use:
-        # - Slack/Teams webhooks
-        # - PagerDuty API
-        # - Custom dashboard integration
-        logger.error(f"SAFETY ALERT: {json.dumps(payload, indent=2)}")
+            self.current_violations = []
+            try:
+                safe_plan = self._normalise_plan(plan)
+                if not self.safety_config.get("enabled", True):
+                    self.last_safety_report = {"enabled": False, "safe": True}
+                    return True
 
-    def distributed_decomposition(self, task: Task) -> List[Task]:
-        """Distribute task across available resources"""
-        if not self.resource_monitor.check_global_resources(task):
-            raise ResourceViolation(
-                "Global resources insufficient for distributed execution",
-                task.resource_requirements,
-                self.resource_monitor.cluster_resources
-            )
+                self._validate_plan_structure(safe_plan)
+                available = self.resource_monitor.get_available_resources()
+                margin_report = self.calculations.check_safety_margins(safe_plan, available)
+                self._validate_margin_report(margin_report, safe_plan)
 
-        #return self.distributed_orchestrator.decompose_and_distribute(
-        #    task, self.agent.task_library, self.resource_monitor.current_loads)
-        return self.distributed_orchestrator.decompose_and_distribute(task)
+                for task in safe_plan:
+                    self._validate_temporal_constraints(task)
+                    self._validate_equipment_constraints(task)
+                    self._validate_safety_margins(task, available)
+                    self._validate_task_risk(task)
 
-    def _reset_temporal_attributes(self, task: Task) -> None:
-        """Reset temporal attributes to current time + buffer"""
-        current_time = time.time()
-        buffer = 60  # 1 minute buffer
-        
-        # Always reset start time to current time + buffer
-        task.start_time = current_time + buffer
-        
-        # Reset deadline if it's invalid
-        if getattr(task, 'deadline', 0) < task.start_time:
-            if hasattr(task, 'duration'):
-                task.deadline = task.start_time + task.duration
-            else:
-                task.deadline = task.start_time + 300  # Default 5 minutes
+                for name, policy in list(self.safety_policies.items()):
+                    if not bool(policy(safe_plan)):
+                        self._record_violation(
+                            "policy",
+                            name,
+                            1.0,
+                            0.0,
+                            "",
+                            severity="high",
+                            corrective_action="review_policy_failure",
+                            impact_analysis={"policy": name},
+                        )
 
-    def safety_check(self, plan: List[Task]) -> bool:
-        """Comprehensive safety validation for plans"""
-        # resource_usage = defaultdict(float)
-        current_time = time.time()
+                risk_profile = self.calculations.calculate_plan_risk_profile(safe_plan)
+                if risk_profile["overall_risk"] > float(self.safety_config.get("max_plan_risk_score", 0.90)):
+                    self._record_violation(
+                        "risk",
+                        "plan",
+                        risk_profile["overall_risk"],
+                        float(self.safety_config.get("max_plan_risk_score", 0.90)),
+                        str(risk_profile.get("highest_risk_task") or ""),
+                        severity="high",
+                        corrective_action="reduce_plan_risk_or_replan",
+                        impact_analysis=risk_profile,
+                    )
 
-        # Process each task in the plan
+                self.last_safety_report = {
+                    "safe": not self.current_violations,
+                    "timestamp": time.time(),
+                    "task_count": len(safe_plan),
+                    "margins": margin_report,
+                    "risk_profile": risk_profile,
+                    "violations": [violation.to_dict() for violation in self.current_violations],
+                    "available_resources": available.to_dict() if hasattr(available, "to_dict") else self._cluster_to_dict(available),
+                }
+                if self.current_violations:
+                    self._extend_violation_history(self.current_violations)
+                    if raise_on_failure:
+                        first = self.current_violations[0]
+                        raise SafetyMarginError(
+                            f"Plan failed safety check: {first.violation_type}:{first.resource}",
+                            resource_type=first.resource,
+                            buffer_amount=0.0,
+                            requested=first.measured_value,
+                            available=first.threshold,
+                            measured_utilisation=first.measured_value,
+                        )
+                    return False
+                return True
+            except PlanningError:
+                if raise_on_failure:
+                    raise
+                logger.warning("Safety check failed: %s", truncate_for_logging(self.current_violations or "planning_error"))
+                return False
+
+    def _validate_plan_structure(self, plan: List[Task]) -> None:
+        ids: List[str] = []
         for task in plan:
+            task.validate()
+            ids.append(task.id)
 
-            # Handle missing temporal attributes
-            if not hasattr(task, 'start_time') or task.start_time is None:
-                task.start_time = current_time + 60  # Default 1min buffer
-
-            if not hasattr(task, 'deadline') or task.deadline is None:
-                task.deadline = task.start_time + 3600  # Default 1hr
-
-            # Get safety margin values
-            gpu_margin = self.margins_config.get('gpu_buffer', 0.15)
-            ram_margin = self.margins_config.get('ram_buffer', 0.20)
-            
-            # GPU buffer check
-            req = task.resource_requirements
-            if req.gpu > self.gpu_limit * (1 - gpu_margin):
-                violation = SafetyViolation(
-                    violation_type="ResourceExceeded",
-                    resource="gpu",
-                    measured_value=req.gpu,
-                    threshold=self.gpu_limit * (1 - gpu_margin),
-                    task_id=task.id,
-                    severity="high",
-                    corrective_action="Reduce GPU usage"
-                )
-                self.current_violations.append(violation)
-                return False
-            
-            # RAM buffer check
-            if req.ram > self.ram_limit * (1 - ram_margin):
-                violation = SafetyViolation(
-                    violation_type="ResourceExceeded",
-                    resource="ram",
-                    measured_value=req.ram,
-                    threshold=self.ram_limit * (1 - ram_margin),
-                    task_id=task.id,
-                    severity="high",
-                    corrective_action="Reduce RAM usage"
-                )
-                self.current_violations.append(violation)
-                return False
-
-          # Validate temporal constraints for this task
-            # Accept both absolute epoch timestamps and legacy relative offsets.
-            if isinstance(task.start_time, (int, float)) and task.start_time <= 0:
-                task.start_time = current_time + 10
-            elif isinstance(task.start_time, (int, float)) and task.start_time < current_time:
-                skew_seconds = current_time - task.start_time
-                task.start_time = current_time + 10
-                if skew_seconds > 30:
-                    raise TemporalViolation(f"Task {task.name} starts in past")
-                logger.warning(
-                    "Adjusted task '%s' start_time by %.3fs clock skew to keep plan safe",
-                    task.name,
-                    skew_seconds,
-                )
-
-            if isinstance(task.deadline, (int, float)) and task.deadline:
-                if task.deadline <= current_time:
-                    # Legacy planners can still provide relative seconds instead of epoch time.
-                    task.deadline = task.start_time + max(float(task.deadline), 300.0)
-                if task.deadline < task.start_time:
-                    task.deadline = task.start_time + 300  # Default 5min duration
-                    raise TemporalViolation(f"Task {task.name} has invalid deadline")
-        
-        return True
-
-    def log_adjustment(self, adjustment: Dict) -> None:
-        """Comprehensive adjustment logging with contextual metadata"""
-        if not adjustment:
-            return
-        
-        log_entry = {
-            'timestamp': time.time(),
-            'type': adjustment.get('type'),
-            'origin': adjustment.get('origin', 'api'),
-            'status': 'applied',
-            'adjustment': copy.deepcopy(adjustment),
-            'plan_snapshot': {
-                'task_ids': [t.id for t in self.current_plan],
-                'resource_utilization': self._get_resource_utilization()
-            },
-            'perf_metrics': self._collect_performance_metrics()
-        }
-        
-        # Remove sensitive data if present
-        if 'credentials' in log_entry['adjustment']:
-            log_entry['adjustment']['credentials'] = 'REDACTED'
-        
-        # Store in execution history
-        with self.lock:
-            self.base_state['execution_history'].append(log_entry)
-        
-        # Publish to monitoring stream
-        self._publish_adjustment_event(log_entry)
-        
-        # Create audit checkpoint periodically
-        if len(self.base_state['execution_history']) % self.config.audit_interval == 0:
-            self.memory.save_checkpoint(
-                label=f"audit_{int(time.time())}",
-                metadata={'last_adjustment': log_entry}
+        duplicates = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
+        if duplicates:
+            raise PlanningConfigError(
+                f"Duplicate task IDs in plan: {duplicates}",
+                config_key="plan.task_ids",
+                config_section="safety_planning",
+                expected_type="unique task IDs",
             )
-        
-        logger.info(f"Logged adjustment: {adjustment.get('type')}")
-    
-    def _get_resource_utilization(self) -> Dict:
-        """Capture resource utilization metrics"""
-        resources = self.resource_monitor.get_available_resources()
-        return {
-            'gpu_utilization': f"{resources.gpu_allocated}/{resources.gpu_total}",
-            'ram_utilization': f"{resources.ram_allocated}GB/{resources.ram_total}GB",
-            'specialized_hardware': resources.specialized_hardware_available
-        }
-    
-    def _collect_performance_metrics(self) -> Dict:
-        """Collect real system performance metrics"""
-        metrics = {
-            'timestamp': time.time(),
-            'system_load': self._get_system_load(),
-            'network_latency': self._measure_network_latency(),
-            'service_health': self._check_service_health(),
-            'plan_execution_rate': len(self.base_state['execution_history']) / 60  # tasks/min
-        }
-        return metrics
-    
-    def _get_system_load(self) -> float:
-        """Get system load average using psutil if available"""
-        try:
-            import psutil
-            return psutil.getloadavg()[0]  # 1-minute load average
-        except ImportError:
-            # Fallback to dummy value
-            return 0.75
-    
-    def _measure_network_latency(self) -> float:
-        """Measure network latency to a control server"""
-        try:
-            target = self.config.get('monitoring', {}).get('latency_target', '8.8.8.8')
-            start = time.perf_counter()
-            requests.get(f"http://{target}", timeout=0.5)
-            return (time.perf_counter() - start) * 1000  # ms
-        except RequestException:
-            return -1  # Error indicator
-    
-    def _check_service_health(self) -> Dict[str, str]:
-        """Check health of critical services"""
-        services = {
-            'resource_monitor': self.resource_monitor,
-            'distributed_orchestrator': self.distributed_orchestrator,
-            'planning_memory': self.memory
-        }
-        return {name: "OK" if service else "DOWN" for name, service in services.items()}
-    
-    def _publish_adjustment_event(self, log_entry: Dict) -> None:
-        """Publish adjustment event to monitoring systems"""
-        event_type = f"adjustment.{log_entry['type']}"
-        payload = {
-            'event_type': event_type,
-            'data': log_entry,
-            'metadata': {
-                'service': 'safety_planning',
-                'version': self.config.version
-            }
-        }
-        
-        # Elasticsearch integration
-        if self.config.get('elasticsearch', {}).get('enabled', False):
-            try:
-                from elasticsearch import Elasticsearch
-                es = Elasticsearch(self.config['elasticsearch']['hosts'])
-                es.index(
-                    index=self.config['elasticsearch']['index'],
-                    body=payload
-                )
-            except ImportError:
-                logger.error("Elasticsearch client not available")
-            except Exception as e:
-                logger.error(f"Elasticsearch indexing failed: {str(e)}")
-        
-        # Kafka integration
-        if self.config.get('kafka', {}).get('enabled', False):
-            try:
-                from kafka import KafkaProducer
-                producer = KafkaProducer(
-                    bootstrap_servers=self.config['kafka']['bootstrap_servers'],
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
-                )
-                producer.send(self.config['kafka']['topic'], payload)
-            except ImportError:
-                logger.error("Kafka producer not available")
-            except Exception as e:
-                logger.error(f"Kafka publish failed: {str(e)}")
-        
-        # Prometheus metrics
-        if self.config.get('prometheus', {}).get('enabled', False):
-            try:
-                from prometheus_client import CollectorRegistry, Counter, push_to_gateway
-                registry = CollectorRegistry()
-                c = Counter('adjustment_events_total', 'Total adjustment events', 
-                            ['event_type'], registry=registry)
-                c.labels(event_type=event_type).inc()
-                push_to_gateway(
-                    self.config['prometheus']['pushgateway'],
-                    job='safety_planning',
-                    registry=registry
-                )
-            except ImportError:
-                logger.error("Prometheus client not available")
-            except Exception as e:
-                logger.error(f"Prometheus push failed: {str(e)}")
-        
-        # Original debug logging
-        if self.config.get('enable_event_logging'):
-            logger.debug(f"PUBLISHED EVENT: {json.dumps(payload, indent=2)}")
 
-    def update_allocations(self, task: Task) -> None:
-        """Update resource allocations with safety checks and atomic operations"""
-        with self.lock:
-            requirements = task.resource_requirements
-            available = self.resource_monitor.get_available_resources()
-            
-            # Validate before allocation
-            self._validate_equipment_constraints(task)
-            self._validate_safety_margins(task)
-            
-            # Perform atomic allocation
-            try:
-                # Deduct from global pool
-                self.resource_monitor.cluster_resources.gpu_total -= requirements.gpu
-                self.resource_monitor.cluster_resources.ram_total -= requirements.ram
-                
-                # Remove specialized hardware
-                self.resource_monitor.cluster_resources.specialized_hardware_available = [
-                    hw for hw in self.resource_monitor.cluster_resources.specialized_hardware_available 
-                    if hw not in requirements.specialized_hardware
-                ]
-                
-                # Track per-task allocation
-                self.resource_monitor.current_allocations[task.name] = requirements  # Changed task.id -> task.name
-                logger.info(f"Allocated resources for task {task.name}: {requirements}")  # Changed task.id -> task.name
-                
-            except Exception as e:
-                logger.error(f"Resource allocation failed for {task.name}: {str(e)}")  # Changed task.id -> task.name
-                # Rollback changes
-                self.resource_monitor.cluster_resources.gpu_total += requirements.gpu
-                self.resource_monitor.cluster_resources.ram_total += requirements.ram
-                raise ResourceViolation(
-                    f"Allocation rollback for {task.name}",  # Changed task.id -> task.name
-                    requirements,
-                    available
+        dep_map = build_dependency_map(plan)
+        cycle = detect_cycles(ids, dep_map)
+        if cycle:
+            raise CyclicDependencyError("Plan contains cyclic dependencies", cycle_path=cycle)
+
+        known = set(ids)
+        missing: Dict[str, List[str]] = {
+            task.id: [dep for dep in task.dependencies if dep not in known]
+            for task in plan
+            if any(dep not in known for dep in task.dependencies)
+        }
+        if missing:
+            raise DecompositionError(
+                "Plan contains missing dependencies",
+                attempted_methods=["dependency_validation"],
+                context={"missing_dependencies": missing},
+            )
+
+        max_concurrent = int(self.safety_margin_model.max_concurrent)
+        concurrent = sum(1 for task in plan if getattr(task, "status", None) == TaskStatus.EXECUTING)
+        if concurrent > max_concurrent:
+            raise SchedulingConflictError(
+                f"Concurrent task limit exceeded: {concurrent}>{max_concurrent}",
+                conflicting_task_ids=[task.id for task in plan if task.status == TaskStatus.EXECUTING],
+                conflict_type="max_concurrent",
+            )
+
+    def _validate_margin_report(self, margins: Dict[str, float], plan: List[Task]) -> None:
+        thresholds = dict(self.safety_config.get("min_margin_thresholds", {}))
+        for name, value in margins.items():
+            threshold = float(thresholds.get(name, 0.0))
+            if float(value) < threshold:
+                self._record_violation(
+                    "margin",
+                    name,
+                    float(value),
+                    threshold,
+                    ",".join(task.id for task in plan[:3]),
+                    severity="critical" if value <= 0.0 else "high",
+                    corrective_action=f"improve_{name}_margin",
+                    impact_analysis={"margins": margins},
                 )
 
     def _validate_temporal_constraints(self, task: Task) -> None:
-        """Comprehensive temporal validation with dependency resolution and timeline projection"""
-        try:
-            # Initialize with safe defaults if attributes are missing
-            current_time = time.time()
-            task_deadline = getattr(task, 'deadline', current_time + 3600)  # Default 1hr deadline
-            task_start = getattr(task, 'start_time', current_time + 60)  # Default 1min buffer
-            task_duration = getattr(task, 'duration', 300)  # Default 5min duration
-            dependencies = getattr(task, 'dependencies', [])
-    
-            # Timeline validation
-            if task_start and task_start < time.time():
+        """Validate task-level time windows and deadlines."""
+        require_type(task, Task, "task")
+        now = time.time()
+        tc = task.temporal_constraints
+        if tc is not None:
+            if not tc.validate(now):
                 raise TemporalViolation(
-                    f"Task {getattr(task, 'name', 'unknown')} scheduled in past",
-                    scheduled_time=task_start,
-                    current_time=current_time
+                    f"Temporal constraints failed for task {task.name}",
+                    violation_type="window",
+                    task_name=task.name,
+                    task_id=task.id,
+                    constraint_details=tc.to_dict() if hasattr(tc, "to_dict") else {},
                 )
-            
-            if task_deadline < (task_start + task_duration):
-                raise TemporalViolation(
-                    f"Insufficient time for task {getattr(task, 'name', 'unknown')}",
-                    required_duration=task_duration,
-                    available_window=task_deadline - task_start
-                )
-            
-            # Dependency validation
-            if dependencies:
-                dependency_end_times = []
-                for dep_id in dependencies:
-                    dep_task = next((t for t in self.current_plan if getattr(t, 'id', None) == dep_id), None)
-                    if dep_task:
-                        dep_end = getattr(dep_task, 'end_time', getattr(dep_task, 'start_time', 0) + getattr(dep_task, 'duration', 0))
-                        dependency_end_times.append(dep_end)
-                    else:
-                        logger.warning(f"Dependency task {dep_id} not found in current plan")
-                
-                if dependency_end_times:
-                    latest_dep_end = max(dependency_end_times)
-                    if task_start < latest_dep_end:
-                        raise TemporalViolation(
-                            f"Task {getattr(task, 'name', 'unknown')} starts before dependency completion",
-                            dependency_end=latest_dep_end,
-                            scheduled_start=task_start
-                        )
-            
-            # Schedule conflict detection
-            concurrent_tasks = [t for t in self.current_plan 
-                               if getattr(t, 'start_time', 0) <= task_start <= getattr(t, 'end_time', 0)]
-            if len(concurrent_tasks) > self.temporal.get('max_concurrent', 5):
-                raise TemporalViolation(
-                    f"Too many concurrent tasks at start time",
-                    max_allowed=self.temporal.get('max_concurrent', 5),
-                    scheduled_count=len(concurrent_tasks)
-                )
-                
-        except Exception as e:
-            logger.error(f"Temporal validation failed: {str(e)}")
-            raise
     
-    def _validate_safety_margins(self, task: Task) -> None:
-        """Resource buffer validation with dynamic margin calculation"""
-        try:
-            # Get available resources with fallback
-            available = self.resource_monitor.get_available_resources() if self.resource_monitor else ClusterResources()
-            
-            # Handle and convert resource requirements
-            if not hasattr(task, 'resource_requirements') or not isinstance(task.resource_requirements, ResourceProfile):
-                logger.warning(f"Task {getattr(task, 'name', 'unknown')} has invalid resource requirements, converting to ResourceProfile")
-                task.resource_requirements = ResourceProfile()
-                
-            req = task.resource_requirements
-            
-            # Calculate safety buffers
-            gpu_buffer = self.resource_buffers.get('gpu', 0.1) * getattr(available, 'gpu_total', 1)
-            ram_buffer = self.resource_buffers.get('ram', 0.1) * getattr(available, 'ram_total', 8)
-            hw_buffer = self.resource_buffers.get('specialized_hardware', [])
-            
-            # GPU margin validation
-            if getattr(req, 'gpu', 0) > 0:
-                available_gpu = getattr(available, 'gpu_total', 0) - getattr(available, 'gpu_allocated', 0)
-                if (available_gpu - req.gpu) < gpu_buffer:
-                    raise SafetyMarginError(
-                        f"GPU allocation violates safety buffer",
-                        resource_type='gpu',
-                        requested=req.gpu,
-                        available=available_gpu,
-                        buffer_needed=gpu_buffer
-                    )
-            
-            # RAM margin validation
-            if getattr(req, 'ram', 0) > 0:
-                available_ram = getattr(available, 'ram_total', 0) - getattr(available, 'ram_allocated', 0)
-                if (available_ram - req.ram) < ram_buffer:
-                    raise SafetyMarginError(
-                        f"RAM allocation violates safety buffer",
-                        resource_type='ram',
-                        requested=req.ram,
-                        available=available_ram,
-                        buffer_needed=ram_buffer
-                    )
-            
-            # Specialized hardware validation
-            required_hw = set(getattr(req, 'specialized_hardware', []) or [])
-            if required_hw:
-                available_hw = set(getattr(available, 'specialized_hardware_available', []) or [])
-                reserved_hw = available_hw - set(hw_buffer)
-                
-                if not required_hw.issubset(reserved_hw):
-                    missing = required_hw - reserved_hw
-                    raise SafetyMarginError(
-                        f"Specialized hardware buffer violated",
-                        resource_type='specialized_hardware',
-                        missing_hardware=list(missing),
-                        buffer_hardware=hw_buffer
-                    )
-            
-            # Temporal safety buffer
-            min_duration = self.temporal.get('min_task_duration', 10)
-            if getattr(task, 'duration', 0) < min_duration:
-                raise SafetyMarginError(
-                    f"Task duration too short for safe execution",
-                    resource_type='temporal',
-                    current_duration=getattr(task, 'duration', 0),
-                    minimum_duration=min_duration
-                )
-                
-        except Exception as e:
-            logger.error(f"Safety margin validation failed: {str(e)}")
-            raise
+        duration = max(float(getattr(task, "estimated_duration", 0.0) or getattr(task, "duration", 0.0) or 0.0), 0.0)
+        min_duration = float(self.safety_margin_model.min_task_duration)
+        if duration > 0.0 and duration < min_duration:
+            self._record_violation(
+                "temporal",
+                "min_task_duration",
+                duration,
+                min_duration,
+                task.id,
+                severity="low",
+                corrective_action="increase_estimated_duration_or_confirm_fast_task",
+            )
     
+        start = float(getattr(task, "start_time", 0.0) or time.time())
+        deadline = float(getattr(task, "deadline", 0.0) or 0.0)
+        if deadline > 0.0:
+            projected = estimate_end_time(start, duration, time_buffer=float(self.safety_margin_model.time_buffer))
+            if projected > deadline:
+                raise DeadlineExceededError(
+                    f"Task {task.name} would miss its deadline",
+                    task_name=task.name,
+                    task_id=task.id,
+                    deadline=deadline,
+                    projected_completion=projected,
+                )
+
+    def _validate_safety_margins(
+        self,
+        task: Task,
+        available: Optional[ClusterResources] = None,
+    ) -> Dict[str, float]:
+        """Validate a single task's numeric resource safety margins."""
+        require_type(task, Task, "task")
+        available = available or self.resource_monitor.get_available_resources()
+        requirements = task.resource_requirements
+        margins = check_resource_feasibility(
+            {"gpu": float(requirements.gpu), "ram": float(requirements.ram)},
+            {"gpu": float(available.gpu_total), "ram": float(available.ram_total)},
+            safety_buffers={
+                "gpu": float(self.safety_margin_model.gpu_buffer),
+                "ram": float(self.safety_margin_model.ram_buffer),
+            },
+            task_id=task.id,
+        )
+        for resource, margin in margins.items():
+            if margin <= 0.0:
+                self._record_violation(
+                    "resource",
+                    resource,
+                    0.0,
+                    float(self.safety_config.get("min_margin_thresholds", {}).get("resource", 0.05)),
+                    task.id,
+                    severity="critical",
+                    corrective_action="reduce_resource_request_or_reallocate",
+                    impact_analysis={"requirements": requirements.to_dict()},
+                )
+        return margins
+
     def _validate_equipment_constraints(self, task: Task) -> None:
-        """Resource availability validation with comprehensive error handling"""
-        try:
-            # Handle and convert resource requirements
-            if not hasattr(task, 'resource_requirements') or not isinstance(task.resource_requirements, ResourceProfile):
-                logger.warning(f"Task {getattr(task, 'name', 'unknown')} has invalid resource requirements, converting to ResourceProfile")
-                task.resource_requirements = ResourceProfile()
-                
-            req = task.resource_requirements
-            available = self.resource_monitor.get_available_resources() if self.resource_monitor else ClusterResources()
-            
-            # GPU validation
-            if getattr(req, 'gpu', 0) > 0:
-                available_gpu = getattr(available, 'gpu_total', 0) - getattr(available, 'gpu_allocated', 0)
-                if req.gpu > available_gpu:
-                    raise ResourceViolation(
-                        f"Insufficient GPU resources",
-                        'gpu',
-                        req.gpu,
-                        available_gpu
-                    )
-            
-            # RAM validation
-            if getattr(req, 'ram', 0) > 0:
-                available_ram = getattr(available, 'ram_total', 0) - getattr(available, 'ram_allocated', 0)
-                if req.ram > available_ram:
-                    raise ResourceViolation(
-                        f"Insufficient RAM resources",
-                        'ram',
-                        req.ram,
-                        available_ram
-                    )
-            
-            # Specialized hardware validation
-            required_hw = set(getattr(req, 'specialized_hardware', []) or [])
-            if required_hw:
-                available_hw = set(getattr(available, 'specialized_hardware_available', []) or [])
-                missing_hw = required_hw - available_hw
-                
-                if missing_hw:
-                    raise ResourceViolation(
-                        f"Missing specialized hardware",
-                        'specialized_hardware',
-                        list(missing_hw),
-                        list(available_hw)
-                    )
-                    
-            # Edge case: No resource requirements
-            if not any([req.gpu, req.ram, required_hw]):
-                logger.info(f"Task {getattr(task, 'name', 'unknown')} has no resource requirements")
-                
-        except Exception as e:
-            logger.error(f"Equipment validation failed: {str(e)}")
-            raise
+        """Validate specialized hardware requirements."""
+        require_type(task, Task, "task")
+        available = self.resource_monitor.get_available_resources()
+        required = set(task.resource_requirements.specialized_hardware or [])
+        available_hw = set(available.specialized_hardware_available or [])
+        missing = sorted(required - available_hw)
+        if missing:
+            self._record_violation(
+                "resource",
+                "specialized_hardware",
+                len(missing),
+                0.0,
+                task.id,
+                severity="critical",
+                corrective_action="route_task_to_capable_node_or_change_method",
+                impact_analysis={"missing": missing, "available": sorted(available_hw)},
+            )
+            raise ResourceViolation(
+                f"Missing specialized hardware for task {task.name}: {missing}",
+                resource_type="specialized_hardware",
+                requested=missing,
+                available=sorted(available_hw),
+                task_id=task.id,
+            )
 
-    # Additional Core Methods
-    def dynamic_replanning_pipeline(self, failed_task: Task) -> List[Task]:
-        """Full safety-aware replanning workflow"""
-        alternatives = []
-        
-        # Strategy 1: Reduce resource requirements
-        reduced_resource_task = failed_task.copy()
-        reduced_resource_task.resource_requirements.gpu *= 0.8
-        reduced_resource_task.resource_requirements.ram *= 0.8
-        self._reset_temporal_attributes(reduced_resource_task)  # Reset temporal attributes
-        if self.safety_check([reduced_resource_task]):
-            alternatives.append([reduced_resource_task])
-            
-        # Strategy 2: Alternative method with lower requirements
-        if failed_task.task_type == TaskType.ABSTRACT:
-            for method_idx in range(len(failed_task.methods)):
-                alt_task = failed_task.copy()
-                alt_task.selected_method = method_idx
-                self._reset_temporal_attributes(alt_task)  # Reset temporal attributes
-                if self.safety_check([alt_task]):
-                    alternatives.append(alt_task.get_subtasks())
+    def _validate_task_risk(self, task: Task) -> None:
+        limit = float(self.safety_config.get("max_task_risk_score", 0.95))
+        risk = float(getattr(task, "risk_score", 0.0) or 0.0)
+        if risk > limit:
+            self._record_violation(
+                "risk",
+                "task",
+                risk,
+                limit,
+                task.id,
+                severity="high",
+                corrective_action="choose_lower_risk_method",
+                impact_analysis={"task_name": task.name},
+            )
 
-        with self.lock:
+    # ------------------------------------------------------------------
+    # Failure handling and diagnostics
+    # ------------------------------------------------------------------
+    def handle_adjustment_failure(self, e: Exception, adjustment: Dict[str, Any]) -> None:
+        """Record diagnostics and route failure to a recovery strategy."""
+        printer.status("ADJUST-FAIL", f"Adjustment failed: {str(e)}", "error")
+        failure_data = {
+            "timestamp": time.time(),
+            "adjustment": copy.deepcopy(adjustment),
+            "error_type": type(e).__name__,
+            "message": str(e),
+            "current_plan": [task.id for task in self.current_plan],
+            "resource_status": self._cluster_to_dict(self.resource_monitor.get_available_resources()),
+        }
+
+        if isinstance(e, ResourceViolation):
+            self._handle_resource_failure(e, adjustment)
+        elif isinstance(e, TemporalError):
+            self._handle_temporal_failure(e, adjustment)
+        else:
+            self._handle_generic_failure(e, adjustment)
+
+        self._send_alert_notification(failure_data)
+        if self.safety_config.get("auto_checkpoint_on_failure", True):
+            self._checkpoint(f"adjust_fail_{adjustment.get('type', 'unknown')}", failure_data)
+
+    def _handle_resource_failure(self, e: ResourceViolation, adjustment: Dict[str, Any]) -> None:
+        """Queue or decompose adjustments that cannot currently acquire resources."""
+        if self._attempt_resource_scaling(e.requested, e.available):
+            adjustment["_retry_count"] = int(adjustment.get("_retry_count", 0)) + 1
+            self._queue_for_later_execution(adjustment)
+            return
+
+        if adjustment.get("type") == "add_task" and adjustment.get("task") is not None:
             try:
-                candidates = self._generate_repair_candidates(failed_task)
-                validated = [
-                    c for c in candidates
-                    if self.safety_check(c.repaired_plan)
-                ]
-                if not validated:
-                    return None
-                return self._select_optimal_repair(validated)
-            except ReplanningError as e:
-                logger.error(f"Emergency shutdown triggered: {str(e)}")
-                self._emergency_shutdown_procedure()
-        
-        return None or alternatives
+                task = self._coerce_task(adjustment.get("task"), "adjustment.task")
+                subtasks = self.distributed_decomposition(task)
+                if subtasks:
+                    queued = {
+                        "type": "add_subtasks",
+                        "subtasks": subtasks,
+                        "origin": adjustment.get("origin", "safety_repair"),
+                        "priority": adjustment.get("priority", 3),
+                    }
+                    self._queue_for_later_execution(queued)
+                    return
+            except PlanningError as exc:
+                logger.warning("Resource fallback decomposition failed: %s", exc)
 
-    def _generate_repair_candidates(self, failed_task: Task) -> List['RepairCandidate']:
-        """
-        Generates multiple repair candidates for a failed task using various strategies.
-        Implements academic principles from task repair literature and distributed systems.
-        """
-        candidates = []
-        logger.info(f"Generating repair candidates for failed task: {failed_task.name}")
+        self._queue_for_later_execution(adjustment)
 
-        # Strategy 1: Simple Retry (with resource boost)
-        try:
-            retry_task = copy.deepcopy(failed_task)
-            retry_task.status = TaskStatus.PENDING
-            self._reset_temporal_attributes(retry_task) 
+    def _handle_temporal_failure(self, e: TemporalError, adjustment: Dict[str, Any]) -> None:
+        """Apply temporal fallback policies without mutating unsafe live state."""
+        if "updates" in adjustment and "deadline" in adjustment.get("updates", {}):
+            extended = copy.deepcopy(adjustment)
+            original = float(extended["updates"]["deadline"])
+            extended["updates"]["deadline"] = original + float(self.safety_margin_model.time_buffer) * 2.0
+            extended["_retry_count"] = int(extended.get("_retry_count", 0)) + 1
+            self._queue_for_later_execution(extended)
+            return
 
-            # Apply resource boost for retry attempts
-            available = self.resource_monitor.get_available_resources()
-            retry_task.resource_requirements.gpu = min(
-                retry_task.resource_requirements.gpu * 1.5,
-                available.gpu_total
+        if self._reallocate_resources_for_priority(adjustment):
+            return
+
+        self._enable_partial_execution(adjustment)
+
+    def _handle_generic_failure(self, e: Exception, adjustment: Dict[str, Any]) -> None:
+        """Use bounded retry metadata and queue unsafe adjustments for later."""
+        retries = int(adjustment.get("_retry_count", 0))
+        max_retries = int(self.safety_config.get("max_adjustment_retries", 3))
+        if retries < max_retries:
+            retry = copy.deepcopy(adjustment)
+            retry["_retry_count"] = retries + 1
+            retry["not_before"] = time.time() + compute_backoff_delay(
+                retry["_retry_count"],
+                base_delay=float(self.safety_config.get("retry_base_delay", 0.25)),
+                backoff_factor=float(self.safety_config.get("retry_backoff_factor", 2.0)),
+                max_delay=float(self.safety_config.get("max_retry_delay", 5.0)),
             )
-            retry_task.resource_requirements.ram = min(
-                retry_task.resource_requirements.ram * 1.2,
-                available.ram_total
+            self._queue_for_later_execution(retry)
+            return
+        self._escalate_to_human_operator(adjustment, str(e))
+
+    def _attempt_resource_scaling(self, required: Any, available: Any) -> bool:
+        """Hook for cluster autoscaling; returns False unless explicitly enabled."""
+        if not self.safety_config.get("resource_scaling_enabled", False):
+            return False
+        logger.info(
+            "Resource scaling requested: required=%s available=%s",
+            truncate_for_logging(required),
+            truncate_for_logging(available),
+        )
+        return False
+
+    def _reallocate_resources_for_priority(self, adjustment: Dict[str, Any]) -> bool:
+        """Release resources from lower-priority tasks when a higher-priority task needs them."""
+        task_id = str(adjustment.get("task_id", ""))
+        target = self._find_task(self.current_plan, task_id) if task_id else None
+        if target is None:
+            return False
+
+        victims = self._find_resource_victims(target)
+        if not victims:
+            return False
+
+        for victim in victims:
+            self.resource_monitor.release_resources(victim.id)
+            victim.update_status(TaskStatus.BLOCKED, reason="resources_reallocated")
+        self._queue_for_later_execution(adjustment)
+        return True
+
+    def _queue_for_later_execution(self, adjustment: Dict[str, Any]) -> None:
+        """Queue an adjustment with bounded priority and stable ordering."""
+        priority = int(adjustment.get("priority", 3))
+        record = (priority, float(adjustment.get("not_before", time.time())), uuid.uuid4().hex, copy.deepcopy(adjustment))
+        try:
+            self.adjustment_queue.put_nowait(record)
+        except Exception as exc:
+            raise AdjustmentError(
+                "Adjustment queue is full",
+                adjustment=adjustment,
+                conflict_details={"queue_max_size": self.safety_config.get("queue_max_size")},
+            ) from exc
+
+    def _enable_partial_execution(self, adjustment: Dict[str, Any]) -> None:
+        """Mark a failed adjustment for partial execution when policy allows it."""
+        if not self.safety_config.get("partial_execution_enabled", True):
+            self._escalate_to_human_operator(adjustment, "partial_execution_disabled")
+            return
+        partial = copy.deepcopy(adjustment)
+        partial["execution_mode"] = "partial"
+        partial["not_before"] = time.time()
+        self._queue_for_later_execution(partial)
+
+    def _escalate_to_human_operator(self, adjustment: Dict[str, Any], error_msg: str) -> None:
+        """Create an escalation payload without assuming an external operator exists."""
+        payload = {
+            "timestamp": time.time(),
+            "type": "human_escalation",
+            "enabled": bool(self.safety_config.get("human_escalation_enabled", False)),
+            "adjustment": copy.deepcopy(adjustment),
+            "error": error_msg,
+        }
+        logger.warning("Safety escalation created: %s", truncate_for_logging(payload))
+        self._publish_adjustment_event(payload)
+
+    def _send_alert_notification(self, payload: Dict[str, Any]) -> None:
+        """Send an optional webhook alert; failures are logged and non-fatal."""
+        url = str(self.safety_config.get("alert_webhook_url", "") or "").strip()
+        if not url:
+            return
+        try:
+            requests.post(
+                url,
+                data=safe_json_dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=float(self.safety_config.get("alert_timeout_seconds", 2.0)),
             )
-            
-            repair_plan = self._create_repair_plan(failed_task, [retry_task])
-            candidates.append(RepairCandidate(
-                strategy="retry_with_boost",
-                repaired_plan=repair_plan,
-                estimated_cost=self._estimate_repair_cost(retry_task),
-                risk_assessment=self._assess_repair_risk(retry_task, "retry")
-            ))
+        except RequestException as exc:
+            logger.warning("Safety alert notification failed: %s", exc)
 
-        except Exception as e:
-            logger.error(f"Retry candidate generation failed: {str(e)}", exc_info=True)
+    # ------------------------------------------------------------------
+    # Distributed decomposition and allocation
+    # ------------------------------------------------------------------
+    def distributed_decomposition(self, task: Task) -> List[Task]:
+        """Decompose a task using registered methods or the distributed orchestrator."""
+        require_type(task, Task, "task")
+        if task.task_type == TaskType.ABSTRACT and task.methods:
+            method_index = int(getattr(task, "selected_method", 0) or 0)
+            subtasks = task.get_subtasks(method_index=method_index)
+        else:
+            strategy = self.safety_config.get("distributed_decomposition", {}).get("default_strategy", "hybrid")
+            subtasks = self.distributed_orchestrator.decompose_and_distribute(task, strategy=strategy)
 
-        # Strategy 2: Alternative Method Execution
+        for subtask in subtasks:
+            self._reset_temporal_attributes(subtask)
+            subtask.validate()
+        return subtasks
+
+    def _reset_temporal_attributes(self, task: Task) -> None:
+        """Reset runtime timing on a cloned subtask while preserving deadlines."""
+        task.start_time = 0.0
+        task.end_time = 0.0
+        task.status = TaskStatus.PENDING
+        task.actual_duration = 0.0
+        task.progress = 0.0
+        task.last_updated = time.time()
+
+    def update_allocations(self, task: Task) -> bool:
+        """Reserve resources for a task through ResourceMonitor."""
+        require_type(task, Task, "task")
         try:
-            if failed_task.task_type == TaskType.ABSTRACT and failed_task.methods:
-                for method_idx in range(len(failed_task.methods)):
-                    if method_idx == failed_task.selected_method:
-                        continue  # Skip the failed method
-                    
-                    subtasks = failed_task.get_subtasks(method_idx)
-                    for subtask in subtasks:
-                        self._reset_temporal_attributes(subtask)
-                    repair_plan = self._create_repair_plan(failed_task, subtasks)
-                    
-                    candidates.append(RepairCandidate(
-                        strategy=f"alt_method_{method_idx}",
-                        repaired_plan=repair_plan,
-                        estimated_cost=self._estimate_repair_cost(subtasks),
-                        risk_assessment=self._assess_repair_risk(subtasks, "alt_method")
-                    ))
-        except Exception as e:
-            logger.error(f"Alternative method candidate failed: {str(e)}")
+            result = self.resource_monitor.acquire_resources(task.resource_requirements, task_id=task.id)
+            if result:
+                task.update_status(TaskStatus.EXECUTING)
+            return bool(result)
+        except ResourceAcquisitionError:
+            raise
+        except ResourceViolation as exc:
+            raise ResourceAcquisitionError(
+                f"Failed to allocate resources for {task.name}: {exc}",
+                resource_type=exc.resource_type,
+                requested=exc.requested,
+                available=exc.available,
+                task_id=task.id,
+            ) from exc
 
-        # Strategy 3: Task Decomposition
+    # ------------------------------------------------------------------
+    # Replanning and repair selection
+    # ------------------------------------------------------------------
+    def dynamic_replanning_pipeline(self, failed_task: Task) -> List[Task]:
+        """Generate and apply the lowest-risk repair plan for a failed task."""
+        require_type(failed_task, Task, "failed_task")
+        with self.lock:
+            failed_task.mark_failed(getattr(failed_task, "failure_reason", "") or "dynamic_replanning_requested")
+            candidates = self._generate_repair_candidates(failed_task)
+            self.last_repair_candidates = candidates
+            if not candidates:
+                raise ReplanningError(
+                    "No repair candidates generated",
+                    failed_task=failed_task,
+                    candidates=[],
+                    failure_reason="no_candidates",
+                )
+
+            best = self._select_optimal_repair(candidates)
+            if best is None:
+                raise ReplanningError(
+                    "No safe repair candidate selected",
+                    failed_task=failed_task,
+                    candidates=candidates,
+                    failure_reason="no_safe_candidate",
+                )
+
+            if not self.safety_check(best.repaired_plan):
+                raise ReplanningError(
+                    "Selected repair failed safety validation",
+                    failed_task=failed_task,
+                    candidates=candidates,
+                    failure_reason="selected_candidate_unsafe",
+                )
+
+            self.current_plan = best.repaired_plan
+            if self.safety_config.get("auto_checkpoint_on_repair", True):
+                self._checkpoint(
+                    f"repair_{best.strategy}",
+                    {"failed_task": failed_task.id, "candidate": best.to_dict()},
+                )
+            return self.current_plan
+
+    def _generate_repair_candidates(self, failed_task: Task) -> List[RepairCandidate]:
+        """Build repair candidates using retry, prune, decomposition, and reallocation strategies."""
+        base_plan = [self._copy_task(task) for task in self.current_plan]
+        candidates: List[RepairCandidate] = []
+
+        if failed_task.remaining_retries > 0:
+            retry_plan = self._replace_task(
+                base_plan,
+                failed_task.id,
+                self._retry_task(failed_task),
+            )
+            candidates.append(self._make_repair_candidate("retry_failed_task", retry_plan, failed_task))
+
+        pruned = self._create_pruned_plan(base_plan, failed_task)
+        candidates.append(self._make_repair_candidate("prune_failed_branch", pruned, failed_task))
+
         try:
-            decomposed = self.distributed_orchestrator.decompose_and_distribute(failed_task)
-            if decomposed:
-                # Reset temporal attributes for all subtasks
-                for task in decomposed:
-                    self._reset_temporal_attributes(task)
-                repair_plan = self._create_repair_plan(failed_task, decomposed)
-                candidates.append(RepairCandidate(
-                    strategy="distributed_decomposition",
-                    repaired_plan=repair_plan,
-                    estimated_cost=self._estimate_repair_cost(decomposed),
-                    risk_assessment=self._assess_repair_risk(decomposed, "decomposition")
-                ))
-        except Exception as e:
-            logger.error(f"Decomposition candidate failed: {str(e)}", exc_info=True)
+            decomposition = self.distributed_decomposition(failed_task)
+            if decomposition:
+                repaired = self._create_repair_plan(failed_task, decomposition, self._get_dependent_tasks(base_plan, failed_task))
+                candidates.append(self._make_repair_candidate("distributed_decomposition", repaired, failed_task))
+        except PlanningError as exc:
+            logger.debug("Repair decomposition skipped: %s", exc)
 
-        # Strategy 4: Partial Execution Mode
-        try:
-            if 'partial' in getattr(failed_task, 'execution_modes', []):
-                partial_task = copy.deepcopy(failed_task)
-                partial_task.execution_mode = 'partial'
-                self._reset_temporal_attributes(partial_task)
-                repair_plan = self._create_repair_plan(failed_task, [partial_task])
-                
-                candidates.append(RepairCandidate(
-                    strategy="partial_execution",
-                    repaired_plan=repair_plan,
-                    estimated_cost=self._estimate_repair_cost(partial_task),
-                    risk_assessment=self._assess_repair_risk(partial_task, "partial")
-                ))
-        except Exception as e:
-            logger.error(f"Partial execution candidate failed: {str(e)}", exc_info=True)
+        victims = self._find_resource_victims(failed_task)
+        if victims:
+            repaired = self._create_repair_plan(failed_task, [self._retry_task(failed_task)], victims)
+            candidates.append(self._make_repair_candidate("resource_reallocation", repaired, failed_task, victims=victims))
 
-        # Strategy 5: Resource Reallocation
-        try:
-            if self._can_reallocate_resources(failed_task):
-                reallocated_task = copy.deepcopy(failed_task)
-                self._reset_temporal_attributes(reallocated_task)
-                victims = self._find_resource_victims(failed_task)
-                
-                repair_plan = self._create_repair_plan(failed_task, [reallocated_task], victims)
-                
-                candidates.append(RepairCandidate(
-                    strategy="resource_reallocation",
-                    repaired_plan=repair_plan,
-                    estimated_cost=self._estimate_repair_cost(reallocated_task, victims),
-                    risk_assessment=self._assess_repair_risk(reallocated_task, "reallocation", victims)
-                ))
-        except Exception as e:
-            logger.error(f"Resource reallocation candidate failed: {str(e)}", exc_info=True)
-
-        # Fallback strategy: Skip and Replan
-        try:
-            pruned_plan = self._create_pruned_plan(self.current_plan, failed_task)
-            candidates.append(RepairCandidate(
-                strategy="skip_and_replan",
-                repaired_plan=pruned_plan,
-                estimated_cost=0,  # Cost will come from later replanning
-                risk_assessment={
-                    "risk_score": 0.9,
-                    "risk_level": "high",
-                    "details": "Task skipped, requires manual review"
-                }
-            ))
-        except Exception as e:
-            logger.error(f"Skip candidate failed: {str(e)}", exc_info=True)
-
-        logger.info(f"Generated {len(candidates)} repair candidates")
         return candidates
 
     def _create_pruned_plan(self, original_plan: List[Task], failed_task: Task) -> List[Task]:
-        """
-        Generates a pruned version of the original plan by removing the failed task and its dependents.
-        """
-        failed_index = next(
-            (
-                idx
-                for idx, task in enumerate(original_plan)
-                if task.id == failed_task.id or task.name == failed_task.name
-            ),
-            None,
-        )
-        if failed_index is None:
-            logger.warning(f"Failed task '{failed_task.name}' not in original plan")
-            return original_plan
-        failed_task = original_plan[failed_index]
-    
-        # Build a dependency graph if needed
-        dependents = self._get_dependent_tasks(original_plan, failed_task)
-    
-        pruned_plan = [t for t in original_plan if t != failed_task and t not in dependents]
-    
-        logger.info(f"Pruned plan: removed {1 + len(dependents)} tasks")
-        return pruned_plan
+        """Remove a failed task and its dependent branch from a plan."""
+        remove_ids = {failed_task.id}
+        remove_ids |= set(self._dependent_ids(original_plan, failed_task.id))
+        return [task for task in original_plan if task.id not in remove_ids]
 
     def _get_dependent_tasks(self, plan: List[Task], task: Task) -> List[Task]:
-        """
-        Recursively finds all tasks in the plan that depend on the given task.
-        """
-        dependents = []
-        for t in plan:
-            if task.id in t.dependencies:
-                dependents.append(t)
-                dependents += self._get_dependent_tasks(plan, t)
-        return dependents
+        ids = set(self._dependent_ids(plan, task.id))
+        return [candidate for candidate in plan if candidate.id in ids]
 
-    def _create_repair_plan(self, failed_task: Task, replacement_tasks: List[Task], 
-                               victims: List[Task] = None) -> List[Task]:
-            """Creates a repaired plan by replacing the failed task with new tasks"""
-            new_plan = []
-            replaced = False
-            victims = victims or []
-            
-            for task in self.current_plan:
-                if task.id == failed_task.id or task.name == failed_task.name:
-                    new_plan.extend(replacement_tasks)
-                    replaced = True
-                elif task in victims:
-                    # Pause victim tasks for resource reallocation
-                    paused_task = copy.deepcopy(task)
-                    paused_task.status = TaskStatus.PENDING
-                    paused_task.priority = min(paused_task.priority, 1)  # Demote priority
-                    new_plan.append(paused_task)
-                else:
-                    # Copy existing tasks, updating dependencies if needed
-                    new_task = copy.deepcopy(task)
-                    
-                    # Update dependencies if they point to the failed task
-                    if failed_task.id in new_task.dependencies:
-                        new_task.dependencies = [
-                            dep for dep in new_task.dependencies if dep != failed_task.id
-                        ] + [t.id for t in replacement_tasks]
-                    
-                    new_plan.append(new_task)
-            
-            if not replaced:
-                logger.warning(f"Failed task {failed_task.id} not in current plan. Creating new plan from replacements.")
-                return replacement_tasks
-            
-            return new_plan
+    def _create_repair_plan(self, failed_task: Task, replacement_tasks: List[Task], victims: Optional[List[Task]] = None) -> List[Task]:
+        """Replace a failed task with repair tasks and optionally block resource victims."""
+        victim_ids = {victim.id for victim in victims or []}
+        repaired: List[Task] = []
+        inserted = False
+        for task in self.current_plan:
+            if task.id in victim_ids:
+                blocked = self._copy_task(task)
+                blocked.update_status(TaskStatus.BLOCKED, reason="repair_resource_victim")
+                repaired.append(blocked)
+                continue
+            if task.id == failed_task.id:
+                repaired.extend([self._copy_task(subtask) for subtask in replacement_tasks])
+                inserted = True
+            else:
+                repaired.append(self._copy_task(task))
+        if not inserted:
+            repaired.extend([self._copy_task(subtask) for subtask in replacement_tasks])
+        return repaired
 
-    def _select_optimal_repair(self, candidates: List['RepairCandidate']) -> List[Task]:
-        """
-        Selects the optimal repair candidate using a multi-criteria decision analysis approach.
-        Considers cost, risk, resource usage, and temporal constraints.
-        """
+    def _select_optimal_repair(self, candidates: List[RepairCandidate]) -> Optional[RepairCandidate]:
+        """Select the lowest weighted score among safe repair candidates."""
         if not candidates:
-            raise ReplanningError("No valid repair candidates available", None)
-        
-        logger.info(f"Selecting optimal repair from {len(candidates)} candidates")
-        
-        # Score each candidate using weighted factors
-        scored_candidates = []
-        weights = self.config.get('replanning_weights', {
-            'cost': 0.4,
-            'risk': 0.3,
-            'time': 0.2,
-            'resource': 0.1
-        })
-        
+            return None
+        weights = dict(self.safety_config.get("repair_weights", {}))
+        best: Optional[RepairCandidate] = None
+        best_score = float("inf")
         for candidate in candidates:
-            # Normalize scores (lower is better for cost and risk)
-            cost_score = self._normalize_cost(candidate.estimated_cost)
-            risk_score = self._normalize_risk(candidate.risk_assessment)
-            time_score = self._estimate_time_efficiency(candidate.repaired_plan)
-            resource_score = self._assess_resource_efficiency(candidate.repaired_plan)
-            
-            # Calculate composite score
-            composite_score = (
-                weights['cost'] * cost_score +
-                weights['risk'] * risk_score +
-                weights['time'] * time_score +
-                weights['resource'] * resource_score
+            if not candidate.repaired_plan:
+                continue
+            try:
+                if not self.safety_check(candidate.repaired_plan):
+                    continue
+            except PlanningError:
+                continue
+            score = (
+                float(weights.get("cost", 0.35)) * self._normalize_cost(candidate.estimated_cost)
+                + float(weights.get("risk", 0.40)) * self._normalize_risk(candidate.risk_assessment)
+                + float(weights.get("time", 0.15)) * (1.0 - self._estimate_time_efficiency(candidate.repaired_plan))
+                + float(weights.get("resource", 0.10)) * (1.0 - self._assess_resource_efficiency(candidate.repaired_plan))
             )
-            
-            scored_candidates.append((composite_score, candidate))
-        
-        # Select candidate with highest composite score
-        scored_candidates.sort(key=lambda x: x[0], reverse=True)
-        best_candidate = scored_candidates[0][1]
-        
-        logger.info(f"Selected repair strategy: {best_candidate.strategy} "
-                   f"(score: {scored_candidates[0][0]:.2f})")
-        
-        return best_candidate.repaired_plan
+            if score < best_score:
+                best = candidate
+                best_score = score
+        return best
 
-    # Helper methods for candidate evaluation
-    def _estimate_repair_cost(self, tasks: Union[Task, List[Task]], victims: List[Task] = None) -> float:
-        """Estimates the cost of a repair operation"""
-        if not isinstance(tasks, list):
-            tasks = [tasks]
-        
-        victim_cost = sum(v.cost for v in (victims or [])) if victims else 0
-        task_cost = sum(t.cost for t in tasks)
-        
-        # Add overhead cost based on strategy complexity
-        overhead = self.config.get('repair_overheads', {
-            'retry': 0.1,
-            'alt_method': 0.2,
-            'decomposition': 0.3,
-            'partial': 0.4,
-            'reallocation': 0.5
-        }).get(tasks[0].strategy if hasattr(tasks[0], 'strategy') else 'unknown', 0.3)
-        
-        return (task_cost + victim_cost) * (1 + overhead)
-
-    def _assess_repair_risk(self, tasks: Union[Task, List[Task]], strategy: str, 
-                           victims: List[Task] = None) -> Dict[str, Any]:
-        """Assesses the risk of a repair strategy using historical data"""
-        risk_factors = {
-            'success_rate': self.memory.get_method_success_rate(strategy),
-            'resource_margin': self.calculations.calculate_resource_margin(tasks),
-            'temporal_margin': self.calculations.calculate_temporal_margin(tasks),
-            'dependency_risk': self.calculations.calculate_dependency_risk(tasks),
-            'victim_impact': len(victims) if victims else 0
-        }
-        
-        # Calculate composite risk score (0-1, higher is riskier)
-        risk_score = min(1.0, (
-            0.4 * (1 - risk_factors['success_rate']) +
-            0.3 * risk_factors['resource_margin'] +
-            0.2 * risk_factors['temporal_margin'] +
-            0.1 * risk_factors['dependency_risk'] +
-            0.05 * min(1.0, risk_factors['victim_impact'] / 5.0)
-        ))
-
-        try:
-            success_rate = self.memory.get_method_success_rate(strategy)
-        except AttributeError:
-            success_rate = 0.5
-        
-        return {
-            'risk_score': risk_score,
-            'factors': risk_factors,
-            'risk_level': 'low' if risk_score < 0.3 else 'medium' if risk_score < 0.6 else 'high'
-        }
-
-    def _can_reallocate_resources(self, task: Task) -> bool:
-        """Determines if resource reallocation is possible"""
-        required_gpu = task.resource_requirements.gpu
-        required_ram = task.resource_requirements.ram
-        
-        # Check if lower priority tasks exist that could free resources
-        return any(
-            t for t in self.current_plan 
-            if t.priority > task.priority and 
-            t.id != task.id and
-            t.status == TaskStatus.EXECUTING and
-            (t.resource_requirements.gpu >= required_gpu or 
-             t.resource_requirements.ram >= required_ram)
+    def _make_repair_candidate(
+        self,
+        strategy: str,
+        plan: List[Task],
+        failed_task: Task,
+        *,
+        victims: Optional[List[Task]] = None,
+    ) -> RepairCandidate:
+        return RepairCandidate(
+            strategy=strategy,
+            repaired_plan=plan,
+            estimated_cost=self._estimate_repair_cost(plan, victims or []),
+            risk_assessment=self._assess_repair_risk(plan, strategy, victims or []),
         )
 
+    def _estimate_repair_cost(self, tasks: List[Task], victims: Optional[List[Task]] = None) -> float:
+        base_cost = self.calculations.calculate_plan_cost(tasks)
+        victim_penalty = sum(float(getattr(victim, "cost", 1.0) or 1.0) for victim in (victims or []))
+        return max(0.0, base_cost + victim_penalty)
+
+    def _assess_repair_risk(
+        self,
+        tasks: List[Task],
+        strategy: str,
+        victims: Optional[List[Task]] = None,
+    ) -> Dict[str, Any]:
+        profile = self.calculations.calculate_plan_risk_profile(tasks)
+        profile["strategy"] = strategy
+        profile["victim_count"] = len(victims or [])
+        profile["resource_efficiency"] = self._assess_resource_efficiency(tasks)
+        profile["time_efficiency"] = self._estimate_time_efficiency(tasks)
+        return profile
+
+    def _can_reallocate_resources(self, task: Task) -> bool:
+        return bool(self._find_resource_victims(task))
+
     def _find_resource_victims(self, task: Task) -> List[Task]:
-        """Finds lower priority tasks to pause for resource reallocation"""
-        required_gpu = task.resource_requirements.gpu
-        required_ram = task.resource_requirements.ram
-        candidates = []
-        
-        # Find suitable candidates to pause
-        for t in self.current_plan:
-            if (t.priority > task.priority and 
-                t.id != task.id and
-                t.status == TaskStatus.EXECUTING):
-                
-                # Check if this task could free sufficient resources
-                if (t.resource_requirements.gpu >= required_gpu and
-                    t.resource_requirements.ram >= required_ram):
-                    return [t]  # Found a single victim
-                
-                # Otherwise collect partial matches
-                if (t.resource_requirements.gpu > 0 or 
-                    t.resource_requirements.ram > 0):
-                    candidates.append(t)
-        
-        # Try to find a combination of victims
-        gpu_total = 0
-        ram_total = 0
-        selected = []
-        
-        for t in sorted(candidates, key=lambda x: x.priority):
-            if gpu_total < required_gpu or ram_total < required_ram:
-                gpu_total += t.resource_requirements.gpu
-                ram_total += t.resource_requirements.ram
-                selected.append(t)
-        
-        if gpu_total >= required_gpu and ram_total >= required_ram:
-            return selected
-        
-        return []  # No suitable combination found
+        """Return lower-priority tasks that can be paused for resource recovery."""
+        priority = int(getattr(task, "priority", 0) or 0)
+        candidates = [
+            candidate
+            for candidate in self.current_plan
+            if candidate.id != task.id
+            and int(getattr(candidate, "priority", 0) or 0) < priority
+            and getattr(candidate, "status", None) in {TaskStatus.EXECUTING, TaskStatus.PENDING}
+        ]
+        return sorted(candidates, key=lambda item: (int(getattr(item, "priority", 0) or 0), float(getattr(item, "risk_score", 0.0) or 0.0)))
 
-    # Helper methods for optimal selection
     def _normalize_cost(self, cost: float) -> float:
-        """Normalizes cost to a 0-1 scale (1 is best)"""
-        max_cost = self.config.get('replanning_max_cost', 100.0)
-        return max(0, 1 - min(cost / max_cost, 1.0))
+        plan_cost = max(1.0, self.calculations.calculate_plan_cost(self.current_plan))
+        return clamp(float(cost) / plan_cost, 0.0, 1.0)
 
-    def _normalize_risk(self, risk_assessment: Dict) -> float:
-        """Normalizes risk to a 0-1 scale (1 is best)"""
-        return 1 - risk_assessment.get('risk_score', 1.0)
+    def _normalize_risk(self, risk_assessment: Dict[str, Any]) -> float:
+        return clamp(float(risk_assessment.get("overall_risk", 0.0) or 0.0), 0.0, 1.0)
 
     def _estimate_time_efficiency(self, plan: List[Task]) -> float:
-        """Estimates the time efficiency of a plan (0-1, higher is better)"""
-        total_time = sum(t.duration for t in plan if hasattr(t, 'duration'))
-        min_possible = sum(self.memory.get_min_duration(t.name) for t in plan)
-        
-        if min_possible == 0:
-            return 0.5  # Neutral score if no data
-        
-        return min(1.0, min_possible / total_time)
+        if not plan:
+            return 1.0
+        duration = self.calculations.calculate_plan_duration(plan)
+        deadline_tasks = [float(task.deadline) for task in plan if float(getattr(task, "deadline", 0.0) or 0.0) > 0.0]
+        if not deadline_tasks:
+            return 1.0
+        available = max(1.0, min(deadline_tasks) - time.time())
+        return compute_temporal_margin(duration, available, time_buffer=float(self.safety_margin_model.time_buffer))
 
     def _assess_resource_efficiency(self, plan: List[Task]) -> float:
-        """Assesses resource utilization efficiency (0-1, higher is better)"""
-        total_gpu = sum(t.resource_requirements.gpu for t in plan)
-        total_ram = sum(t.resource_requirements.ram for t in plan)
-        
-        # Get available cluster resources
-        cluster = self.resource_monitor.get_available_resources()
-        max_gpu = cluster.gpu_total
-        max_ram = cluster.ram_total
-        
-        if max_gpu == 0 or max_ram == 0:
-            return 0.5  # Neutral score if no resource data
-        
-        gpu_efficiency = total_gpu / max_gpu
-        ram_efficiency = total_ram / max_ram
-        
-        # Handle division by zero cases
-        if gpu_efficiency == 0 and ram_efficiency == 0:
+        if not plan:
+            return 1.0
+        try:
+            return self.calculations.calculate_resource_margin(plan, self.resource_monitor.get_available_resources())
+        except ResourceViolation:
             return 0.0
-        if gpu_efficiency == 0 or ram_efficiency == 0:
-            return max(gpu_efficiency, ram_efficiency)
-        
-        # Use harmonic mean for balanced efficiency
-        return 2 * (gpu_efficiency * ram_efficiency) / (gpu_efficiency + ram_efficiency) 
 
-    def _emergency_shutdown_procedure(self):
-        """Internal emergency handling"""
-        logger.critical("Initiating emergency shutdown sequence")
-        self.current_plan = []
+    # ------------------------------------------------------------------
+    # Logging, metrics, and compatibility helpers
+    # ------------------------------------------------------------------
+    def log_adjustment(self, adjustment: Dict[str, Any]) -> None:
+        """Log and persist a compact adjustment event."""
+        entry = {
+            "timestamp": time.time(),
+            "adjustment": copy.deepcopy(adjustment),
+            "plan_size": len(self.current_plan),
+            "resource_utilization": self._get_resource_utilization(),
+            "performance": self._collect_performance_metrics(),
+        }
+        self.last_adjustment_log.append(entry)
+        self._publish_adjustment_event(entry)
 
-class DistributedOrchestrator:
-    """Manages distributed execution across multiple agents/nodes"""
-    
-    def __init__(self):
-        self.config = load_global_config()
-        self.do_config = get_config_section('decomposition')
-        self.min_chunk_size = self.do_config.get('min_chunk_size')
-        self.max_parallel_chunks = self.do_config.get('max_parallel_chunks')
-        self.min_ram_per_chunk = self.do_config.get('min_ram_per_chunk')
-        self.stage_time_buffer = self.do_config.get('stage_time_buffer')
-        self.vertical_stages = self.do_config.get('vertical_stages', {
-            'ABSTRACT', 'processing_pipeline'
-        })
-
-        self.memory = PlanningMemory()
-        self.decomposition_strategies = {
-            'horizontal': self.horizontal_split,
-            'vertical': self.vertical_split,
-            'hybrid': self.hybrid_split
+    def _get_resource_utilization(self) -> Dict[str, Any]:
+        report = self.resource_monitor.get_resource_report()
+        return {
+            "available": report.get("available", {}),
+            "allocations": report.get("allocations", {}),
+            "last_update": report.get("last_update", 0.0),
         }
 
-        logger.info(f"Distributed Orchestrator succesfully initialized with: {self.decomposition_strategies}")
+    def _collect_performance_metrics(self) -> Dict[str, Any]:
+        return {
+            "system_load": self._get_system_load(),
+            "network_latency": self._measure_network_latency(),
+            "service_health": self._check_service_health(),
+            "queued_adjustments": self.adjustment_queue.qsize(),
+        }
 
-    def horizontal_split(self, task: Task) -> List[Task]:
-        """Data-parallel decomposition with dynamic chunk sizing"""
+    def _get_system_load(self) -> float:
+        report = self.resource_monitor.get_resource_report()
+        history = report.get("history", [])
+        if not history:
+            return 0.0
+        latest = history[-1]
+        cpu_values = list((latest.get("cpu_utilization") or {}).values())
+        return clamp(sum(cpu_values) / max(len(cpu_values), 1), 0.0, 1.0)
+
+    def _measure_network_latency(self) -> float:
+        url = str(self.safety_config.get("network_probe_url", "") or "").strip()
+        if not url:
+            return -1.0
+        started = time.time()
         try:
-            # Calculate optimal split count based on data size and cluster resources
-            data_size = len(task.input_data)
-            chunk_size = max(
-                self.min_chunk_size,
-                data_size // self.memory.cluster_size
-            )
-            
-            subtasks = []
-            for i in range(0, data_size, chunk_size):
-                chunk = task.input_data[i:i+chunk_size]
-                subtask = Task(
-                    id=f"{task.id}_h{i//chunk_size}",
-                    input_data=chunk,
-                    resource_requirements=task.resource_requirements.copy(),
-                    parent_task=task.id,
-                    dependencies=task.dependencies,
-                    deadline=task.deadline
-                )
-                # Reduce memory requirements for smaller chunks
-                subtask.resource_requirements.ram = max(
-                    task.resource_requirements.ram // 2,
-                    self.min_ram_per_chunk
-                )
-                subtasks.append(subtask)
-            
-            logger.info(f"Split task {task.id} into {len(subtasks)} horizontal chunks")
-            return subtasks
-            
-        except (AttributeError, TypeError) as e:
-            logger.error(f"Horizontal split failed for {task.id}: {str(e)}")
-            return [task]
+            requests.head(url, timeout=float(self.safety_config.get("network_probe_timeout", 1.0)))
+            return (time.time() - started) * 1000.0
+        except RequestException:
+            return -1.0
 
-    def vertical_split(self, task: Task) -> List[Task]:
-        """Functional decomposition into processing stages"""
-        stages = getattr(self.vertical_stages, str(task.task_type), [])
-        if not stages:
-            logger.warning(f"No vertical stages defined for {task.task_type}")
-            return [task]
+    def _check_service_health(self) -> Dict[str, str]:
+        report = self.resource_monitor.get_resource_report()
+        return {
+            "resource_monitor": "healthy" if not report.get("last_error") else "degraded",
+            "memory": "healthy",
+            "calculations": "healthy",
+        }
 
-        subtasks = []
-        prev_stage = None
-        for stage_num, stage_config in enumerate(stages):
-            subtask = Task(
-                name=f"{task.name}_v{stage_num}",
-                processing_stage = stage_config.name,
-                resource_requirements=ResourceProfile(
-                    gpu = getattr(stage_config, 'gpu', 0),
-                    ram = getattr(stage_config, 'ram', task.resource_requirements.ram),
-                    specialized_hardware = getattr(stage_config, 'specialized_hw', [])
-                ),
-                parent_task=task.name,
-                dependencies=[prev_stage.name] if prev_stage else task.dependencies,
-                deadline=task.deadline - (len(stages) - stage_num) * self.stage_time_buffer
-            )
-            if prev_stage:
-                prev_stage.output_target = subtask.name
-            subtasks.append(subtask)
-            prev_stage = subtask
+    def _publish_adjustment_event(self, log_entry: Dict[str, Any]) -> None:
+        logger.info("Safety adjustment event: %s", truncate_for_logging(safe_json_dumps(log_entry), 512))
 
-        logger.info(f"Vertically decomposed {task.id} into {len(subtasks)} stages")
-        return subtasks
+    def _emergency_shutdown_procedure(self) -> None:
+        """Release planner-owned resources and block current executing tasks."""
+        with self.lock:
+            for task in self.current_plan:
+                if task.status == TaskStatus.EXECUTING:
+                    task.update_status(TaskStatus.BLOCKED, reason="emergency_shutdown")
+                    self.resource_monitor.release_resources(task.id)
+            self.resource_monitor.release_all_resources()
+            self._checkpoint("emergency_shutdown", {"reason": "safety_procedure"})
 
-    def hybrid_split(self, task: Task) -> List[Task]:
-        """Combined vertical and horizontal decomposition"""
-        vertical_stages = self.vertical_split(task)
-        hybrid_tasks = []
-        
-        for stage in vertical_stages:
-            if stage.resource_requirements.gpu > 0:  # Only split GPU-heavy stages
-                horizontal_subtasks = self.horizontal_split(stage)
-                hybrid_tasks.extend(horizontal_subtasks)
+    # ------------------------------------------------------------------
+    # Internal utilities
+    # ------------------------------------------------------------------
+    def _validate_config(self) -> None:
+        require_type(self.safety_config, dict, "safety_planning")
+        require_positive(int(self.safety_config.get("max_adjustment_retries", 3)) + 1, "safety.max_adjustment_retries_plus_one")
+        require_positive(int(self.safety_config.get("queue_max_size", 1000)), "safety.queue_max_size")
+        require_positive(int(self.safety_config.get("violation_history_limit", 1000)), "safety.violation_history_limit")
+        require_type(self.safety_config.get("allowed_update_fields", []), list, "safety.allowed_update_fields")
+        thresholds = self.safety_config.get("min_margin_thresholds", {})
+        require_type(thresholds, dict, "safety.min_margin_thresholds")
+        for key, value in thresholds.items():
+            validate_probability(float(value), f"safety.min_margin_thresholds.{key}")
+
+    def _normalise_plan(self, plan: List[Task]) -> List[Task]:
+        require_type(plan, list, "plan")
+        normalised: List[Task] = []
+        for item in plan:
+            normalised.append(self._coerce_task(item, "plan item"))
+        return normalised
+
+    def _coerce_task(self, value: Any, name: str = "task") -> Task:
+        if isinstance(value, Task):
+            return value
+        if isinstance(value, dict):
+            return Task.from_dict(value)
+        raise AdjustmentError(
+            f"{name} must be a Task or task dictionary",
+            adjustment={"value_type": type(value).__name__},
+        )
+
+    def _copy_task(self, task: Task) -> Task:
+        return task.copy() if hasattr(task, "copy") else copy.deepcopy(task)
+
+    def _coerce_resource_profile(self, value: Any) -> ResourceProfile:
+        if isinstance(value, ResourceProfile):
+            return value
+        if isinstance(value, dict):
+            return ResourceProfile.from_dict(value)
+        raise ResourceViolation(
+            "resource_requirements must be ResourceProfile or dict",
+            resource_type="resource_profile",
+            requested=type(value).__name__,
+            available=["ResourceProfile", "dict"],
+        )
+
+    def _apply_task_updates(self, task: Task, updates: Dict[str, Any]) -> None:
+        for key, value in updates.items():
+            if key in {"resource_requirements", "requirements"}:
+                task.resource_requirements = self._coerce_resource_profile(value)
+            elif key == "status":
+                task.update_status(value)
+            elif hasattr(task, key):
+                setattr(task, key, value)
             else:
-                hybrid_tasks.append(stage)
-                
-        # Rebuild dependencies between stages
-        for i in range(1, len(hybrid_tasks)):
-            if hybrid_tasks[i].parent_task != hybrid_tasks[i-1].parent_task:
-                hybrid_tasks[i].dependencies.append(hybrid_tasks[i-1].id)
-                
-        return hybrid_tasks
-    
-    def decompose_and_distribute(self, task: Task) -> Optional[List[Task]]:
-        """
-        Decomposes a complex task and distributes its components across available agents or nodes.
-        """
-        if not task.methods:
-            logger.warning(f"Using default decomposition for {task.name}")
-            return [task]
-    
-        for method_idx, method in enumerate(task.methods):
-            try:
-                subtasks = method if isinstance(method, list) else []
-                if not subtasks:
-                    continue
+                raise AdjustmentError(
+                    f"Task has no updateable field {key!r}",
+                    adjustment={"type": "modify_task", "task_id": task.id, "updates": updates},
+                )
+        task._post_init()
 
-                logger.info(f"Decomposed '{task.name}' into {len(subtasks)} subtasks using method index {method_idx}.")
-    
-                # Distribute subtasks across compute nodes (this is pseudo-coded for orchestration)
-                distributed = []
-                for subtask_template in subtasks:
-                    #assigned_node = self.resource_allocator.select_node(subtask)
-                    #subtask.assigned_node = assigned_node
-                    new_task = subtask_template.copy()
-                    new_task.id = f"{subtask_template.name}_{int(time.time()*1000)}_{random.randint(0,999)}"
-                    new_task.parent = task
-                    distributed.append(new_task)
+    def _validate_deadline_value(self, deadline: float, adjustment: Dict[str, Any]) -> None:
+        if deadline < time.time():
+            raise TemporalViolation(
+                "Adjusted deadline is in the past",
+                violation_type="window",
+                task_id=str(adjustment.get("task_id", "")),
+                constraint_details={"deadline": deadline, "now": time.time()},
+            )
 
-                return distributed
-            except Exception as e:
-                logger.error(f"Decomposition failed: {str(e)}")
-                continue
-    
-        logger.error(f"Failed to decompose and distribute task '{task.name}'")
+    def _validate_dependencies_known(self, task: Task, plan: List[Task], *, allow_existing_only: bool) -> None:
+        known = {candidate.id for candidate in plan}
+        missing = [dep for dep in getattr(task, "dependencies", []) if dep not in known]
+        if missing and allow_existing_only:
+            raise AdjustmentError(
+                f"Task {task.id} has unknown dependencies",
+                adjustment={"type": "add_task", "task_id": task.id},
+                conflict_details={"missing_dependencies": missing},
+            )
+
+    def _dependent_ids(self, plan: List[Task], task_id: str) -> List[str]:
+        dep_map = build_dependency_map(plan)
+        if task_id not in dep_map:
+            # task names are also accepted by legacy call sites
+            match = self._find_task(plan, task_id)
+            if match is not None:
+                task_id = match.id
+        return sorted(get_all_successors(task_id, dep_map))
+
+    def _find_task(self, plan: List[Task], task_id_or_name: str) -> Optional[Task]:
+        for task in plan:
+            if task.id == task_id_or_name or task.name == task_id_or_name:
+                return task
         return None
 
-# ====================== Usage Example ======================
+    def _replace_task(self, plan: List[Task], task_id: str, replacement: Task) -> List[Task]:
+        result: List[Task] = []
+        replaced = False
+        for task in plan:
+            if task.id == task_id:
+                result.append(replacement)
+                replaced = True
+            else:
+                result.append(task)
+        if not replaced:
+            result.append(replacement)
+        return result
+
+    def _retry_task(self, task: Task) -> Task:
+        retry = self._copy_task(task)
+        retry.retry_count = int(getattr(retry, "retry_count", 0) or 0) + 1
+        retry.status = TaskStatus.PENDING
+        retry.progress = 0.0
+        retry.failure_reason = ""
+        retry.start_time = 0.0
+        retry.end_time = 0.0
+        return retry
+
+    def _record_violation(
+        self,
+        violation_type: str,
+        resource: str,
+        measured_value: float,
+        threshold: float,
+        task_id: str,
+        *,
+        severity: str = "medium",
+        corrective_action: str = "",
+        impact_analysis: Optional[Dict[str, Any]] = None,
+    ) -> SafetyViolation:
+        violation = SafetyViolation(
+            violation_type=violation_type,
+            resource=resource,
+            measured_value=float(measured_value),
+            threshold=float(threshold),
+            task_id=task_id,
+            severity=severity,
+            corrective_action=corrective_action,
+            impact_analysis=dict(impact_analysis or {}),
+        )
+        self.current_violations.append(violation)
+        return violation
+
+    def _extend_violation_history(self, violations: Iterable[SafetyViolation]) -> None:
+        self.violation_history.extend(list(violations))
+        limit = int(self.safety_config.get("violation_history_limit", 1000))
+        if len(self.violation_history) > limit:
+            self.violation_history = self.violation_history[-limit:]
+
+    def _checkpoint(self, label: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            self.memory.save_checkpoint(label=label, metadata=metadata or {})
+        except Exception as exc:
+            logger.warning("Safety checkpoint failed: %s", exc)
+
+    @staticmethod
+    def _cluster_to_dict(resources: ClusterResources) -> Dict[str, Any]:
+        return resources.to_dict() if hasattr(resources, "to_dict") else {
+            "gpu_total": getattr(resources, "gpu_total", 0.0),
+            "ram_total": getattr(resources, "ram_total", 0.0),
+            "specialized_hardware_available": list(getattr(resources, "specialized_hardware_available", []) or []),
+            "current_allocations": dict(getattr(resources, "current_allocations", {}) or {}),
+        }
+
+    def __enter__(self) -> "SafetyPlanning":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if hasattr(self.resource_monitor, "stop_monitoring"):
+            self.resource_monitor.stop_monitoring()
+
+
+__all__ = ["SafetyPlanning", "DistributedOrchestrator", "ResourceMonitor"]
+
+
 if __name__ == "__main__":
     print("\n=== Running Safety Planning ===\n")
-    adjustment = None
-    task = Task()
-    task.resource_requirements = ResourceProfile(gpu=1, ram=16, specialized_hardware=[])
-    task.deadline = time.time() + 3600
-    task.dependencies = []  
+    printer.status("TEST", "Safety Planning initialized", "info")
 
-    safety = SafetyPlanning()
-    safety.current_plan = []
-    orchestrator = DistributedOrchestrator()
+    planner = SafetyPlanning()
+    try:
+        task = Task(
+            id="safety_task",
+            name="SafetySmokeTask",
+            task_type=TaskType.PRIMITIVE,
+            resource_requirements=ResourceProfile(gpu=0.0, ram=0.1),
+            duration=60,
+            deadline=3600,
+            priority=5,
+        )
+        planner.current_plan = [task]
+        assert planner.safety_check(planner.current_plan) is True
 
-    safety.interactive_adjustment_handler({})
-    orchestrator.vertical_split(task)
+        update = {"type": "modify_task", "task_id": task.id, "updates": {"priority": 8}}
+        planner.interactive_adjustment_handler(update)
+        assert planner.current_plan[0].priority == 8
 
-    print(f"Selected action: {safety}")
-    print(orchestrator)
+        subtasks = planner.distributed_decomposition(task)
+        assert subtasks
 
-    print("\n* * * * * Phase 2 * * * * *\n") 
-    failed_task = Task(
-        name="evacuate_building",
-        id="task_evacuate",
-        task_type=TaskType.PRIMITIVE,
-        status=TaskStatus.FAILED,
-        resource_requirements=ResourceProfile(gpu=1, ram=4),
-        start_time=time.time() + 60,  # Start in 1 minute
-        deadline=time.time() + 300,   # 5 minutes from now
-        duration=200
-    )
+        candidate = planner._generate_repair_candidates(task)
+        assert candidate
 
-    safety.current_plan = [failed_task]
-    
-    pipeline = safety.dynamic_replanning_pipeline(failed_task=failed_task)
-
-    printer.pretty("REPLAN", pipeline, "success" if pipeline else "error")
-    print("\n=== Successfully Ran Safety Planning ===\n")
+        print("\n=== Test ran successfully ===\n")
+    finally:
+        if hasattr(planner.resource_monitor, "stop_monitoring"):
+            planner.resource_monitor.stop_monitoring()
