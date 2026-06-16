@@ -30,7 +30,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.planning_errors import *
@@ -254,7 +254,7 @@ class DeadlineAwareScheduler(TaskScheduler):
     # ------------------------------------------------------------------
     def schedule(
         self,
-        tasks: List[TaskLike],
+        tasks: Sequence[TaskLike],
         agents: Dict[str, AgentLike],
         risk_assessor: Optional[Callable] = None,
         state: Optional[Dict] = None,
@@ -263,7 +263,7 @@ class DeadlineAwareScheduler(TaskScheduler):
         diagnostics = ScheduleDiagnostics()
         with self._lock:
             try:
-                normal_tasks = self._normalise_tasks(tasks)
+                normal_tasks = self._normalise_tasks(tasks) # type: ignore
                 normal_agents = self._normalise_agents(agents)
                 diagnostics.task_count = len(normal_tasks)
                 diagnostics.agent_count = len(normal_agents)
