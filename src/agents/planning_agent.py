@@ -1,50 +1,34 @@
-__version__ = "2.2.0"
-
 """
-Planning Agent with Alternative Method Search Strategies
-Implements grid search and Bayesian-inspired decomposition selection
-
-References:
-1. Nau, D., Au, T., Ilghami, O., et al. (2003). SHOP2: A HTN Planning System
-2. Wilkins, D. (1988). SIPE-2: Systematic Initiative Planning Environment
-3. Martelli, A., Montanari, U. (1973). Optimal Efficiency of AO* Algorithm
-4. Bonet, B., Geffner, H. (2001). Heuristic Planning with HSP
-5. Allen, J. (1983). Maintaining Knowledge about Temporal Intervals
-
-Real-World Usage:
-1. Robotics Task Planning: Domestic robots or warehouse robots need to break down complex goals like "prepare breakfast" or "pick 10 items" into primitive tasks: navigate, grip, open, etc.
-2. Game AI / NPC Behavior: Strategy games (RTS) or open-world RPGs require AI to plan goals like "defend base" or "patrol zone" using adaptive strategies.
-3. Workflow Automation in Enterprise Systems: A digital assistant receives a request like “schedule a customer onboarding session,” which it decomposes into tasks like:
-    - Check calendar → Create Zoom link → Email invite → Log session
-4. Military or Disaster Response Simulation: Simulated agents plan missions like “clear building,” which break into “scan,” “enter,” “check room,” etc.
-5. Cognitive Assistants: Personalized assistants adapting through method statistics tracking
-6. Healthcare Coordination: Adaptive treatment plan generation considering patient responses and resource availability
+Production-hardened Planning Agent entry point for SLAI.
 """
 
-import math
-import time
-import heapq
+from __future__ import annotations
+
+__version__ = "2.1.0"
+
+import copy
 import random
+import time
 
-from email.policy import Policy
-from datetime import datetime, timedelta
-from typing import Any as TypingAny, List, Dict, Optional, Callable, Tuple, Set
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Any as TypingAny, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .base_agent import BaseAgent
-from .planning.utils.planning_errors import *
-from .planning import *
-from .planning.planning_types import Task, TaskType, TaskStatus, WorldState, Any, ResourceProfile
-try:
-    from .perception.modules.transformer import ClassificationHead, RegressionHead, Seq2SeqHead
-except Exception:
-    class ClassificationHead: pass
-    class RegressionHead: pass
-    class Seq2SeqHead: pass
-    print("Warning: perception module unavailable (likely optional torch stack). Using dummy classes.")
 
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from .planning.planning_types import Any, ResourceProfile, Task, TaskStatus, TaskType, WorldState
+from .planning.planning_metrics import PlanningMetrics
+from .planning.planning_executor import PlanningExecutor
+from .planning.heuristic_selector import HeuristicSelector
+from .planning.task_scheduler import DeadlineAwareScheduler
+from .planning.probabilistic_planner import ProbabilisticPlanner
+from .planning.safety_planning import SafetyPlanning
+from .planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
+from .planning.utils.resource_monitor import ResourceMonitor
+from .planning.utils.planning_errors import *
+from .planning.utils.planning_helpers import *
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Agent")
 printer = PrettyPrinter()
@@ -52,683 +36,1470 @@ printer = PrettyPrinter()
 CostProfile = Tuple[float, float]
 StateTuple = Tuple[Tuple[str, TypingAny], ...]
 
+
+def _coerce_float(value: TypingAny, default: float = 0.0, *, minimum: Optional[float] = None,
+                  maximum: Optional[float] = None) -> float:
+    """Coerce numeric input while delegating bounds to the shared clamp helper."""
+    try:
+        result = default if value is None else float(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(float(minimum), result)
+    if maximum is not None:
+        result = min(float(maximum), result)
+    return result
+
+
+def _coerce_int(value: TypingAny, default: int = 0, *, minimum: Optional[int] = None,
+                maximum: Optional[int] = None) -> int:
+    """Coerce integer input with optional bounds."""
+    try:
+        result = default if value is None else int(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(int(minimum), result)
+    if maximum is not None:
+        result = min(int(maximum), result)
+    return result
+
+
+def _status_name(value: TypingAny) -> str:
+    """Return a stable status name for enum and non-enum values."""
+    if isinstance(value, TaskStatus):
+        return value.name
+    return str(value)
+
+
+def _error_payload(error: BaseException) -> Dict[str, TypingAny]:
+    """Return structured, JSON-safe error information."""
+    if isinstance(error, PlanningError):
+        return error.to_dict()
+    return {
+        "error_class": type(error).__name__,
+        "message": str(error),
+        "timestamp": time.time(),
+    }
+
+
+def _safe_error_message(error: BaseException, limit: int = 240) -> str:
+    """Return a logging-safe error message using the shared truncation helper."""
+    try:
+        return truncate_for_logging(str(error), limit)
+    except Exception:
+        return str(error)[:limit]
+
+
 class PlanningAgent(BaseAgent):
-    """Enhanced planner with alternative search strategies"""
-    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
+    """
+    Agent-level coordinator for hierarchical, scheduled, safety-aware planning.
+
+    This class intentionally does not own the planning subsystem configuration.
+    Agent-level settings are loaded from the global agents configuration via
+    ``get_config_section("planning_agent")``.  Subsystem objects such as
+    DeadlineAwareScheduler, PlanningExecutor, PlanningMetrics, SafetyPlanning,
+    PlanningMemory, HeuristicSelector, and ProbabilisticPlanner load their own
+    planning subsystem settings internally.
+    """
+
+    def __init__(self, shared_memory, agent_factory, config: Optional[Dict[str, TypingAny]] = None, **kwargs):
         super().__init__(
             shared_memory=shared_memory,
             agent_factory=agent_factory,
-            config=config
+            config=config,
         )
+
         self.config = load_global_config()
-        self.planning_config = get_config_section('planning_agent')
+        self.agent_config: Dict[str, TypingAny] = self._load_agent_config(config)
+        # Backward-compatible alias.  This is agent config, not planning subsystem config.
+        self.planning_config = self.agent_config
 
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
 
-        self.current_goal: Optional[Task] = None
-        self.task_library: Dict[str, Task] = {}     # Stores registered task templates
-        self.current_plan: List[Task] = []          # The sequence of primitive tasks to execute
-        self.world_state: Dict[str, Any] = {}       # Current state of the world
-        self.execution_history = deque(maxlen=100)  # Keep track of recently executed tasks
-        self.plan_history = deque(maxlen=1000)
-        self.method_stats = defaultdict(lambda: {'success': 0, 'total': 0, 'avg_cost': 0.0}) # For Bayesian method selection
-        self.schedule_state = {'agent_loads': defaultdict(float), 'task_history': defaultdict(list)}
+        history_window = _coerce_int(self.agent_config.get("execution_history_window"), 100)
+        plan_history_window = _coerce_int(self.agent_config.get("plan_history_window"), 1000)
 
-        # Performance tracking
+        self.current_goal: Optional[Task] = None
+        self.current_plan: List[Task] = []
+        self.task_library: Dict[str, Task] = {}
+        self.world_state: Dict[str, TypingAny] = {}
+        self.execution_history: Deque[Dict[str, TypingAny]] = deque(maxlen=history_window)
+        self.plan_history: Deque[Dict[str, TypingAny]] = deque(maxlen=plan_history_window)
+        self.method_stats: Dict[TypingAny, Dict[str, float]] = defaultdict(
+            lambda: {"success": 0.0, "total": 0.0, "avg_cost": 0.0}
+        )
+        self.schedule_state: Dict[str, TypingAny] = {
+            "agent_loads": defaultdict(float),
+            "task_history": defaultdict(list),
+        }
+        self.memo_table: Dict[Tuple[Tuple[str, int], WorldState], List[Task]] = {}
+        self.expected_state_projections: Dict[str, Dict[str, TypingAny]] = {}
+        self.execution_interrupted = False
+        self.adaptive_context: Dict[str, TypingAny] = {}
+        self._node_cache: Dict[str, TypingAny] = {}
         self._planning_start_time: Optional[float] = None
         self._planning_end_time: Optional[float] = None
+        self._last_replan_at: float = 0.0
+        self.last_error: Optional[Dict[str, TypingAny]] = None
+        self.last_diagnostics: Dict[str, TypingAny] = {}
 
-        self.memo_table = {}
         self.scheduler = DeadlineAwareScheduler()
         self.metrics = PlanningMetrics()
         self.heuristic_selector = HeuristicSelector()
         self.safety_planner = SafetyPlanning()
-        self.resource_monitor = self.resource_monitor
+        self.resource_monitor = ResourceMonitor()
         self.executor = PlanningExecutor()
         self.executor.agent = self
         self.probabilistic_planner = ProbabilisticPlanner()
-        self.safety_planner.resource_monitor = self.resource_monitor
-        local_cfg = self.planning_config.get("local_planning", {})
         self.local_arbitrator = LocalBehaviorArbitrator()
 
-        self.resource_monitor.gpu_limit = self.planning_config.get('gpu_limit', 1.0)  # Default 1.0 if not configured
-        self.resource_monitor.ram_limit = self.planning_config.get('ram_limit', 16.0)  # Default 16GB if not configured
+        # Wire shared resources where subsystem classes expose compatible fields.
+        if hasattr(self.safety_planner, "resource_monitor"):
+            self.safety_planner.resource_monitor = self.resource_monitor
+        if hasattr(self.safety_planner, "base_state"):
+            self.safety_planner.base_state = {"execution_history": self.execution_history}
 
-        self.expected_state_projections = {}
-        self.execution_interrupted = False
-        self._node_cache = {}
-        self.adaptive_context = {}
-        if "execution_history" not in self.shared_memory.base_state:
-            self.shared_memory.base_state["execution_history"] = []
+        # self._configure_resource_limits()
+        self._ensure_shared_memory_defaults()
 
-        logger.info(f"PlanningAgent succesfully initialized")
+        logger.info("PlanningAgent successfully initialized")
 
-        # Task head registry
-        self.task_heads = {
-            'classification': ClassificationHead,
-            'regression': RegressionHead,
-            'seq2seq': Seq2SeqHead
+    # ------------------------------------------------------------------
+    # Configuration and shared-memory helpers
+    # ------------------------------------------------------------------
+    def _load_agent_config(self, explicit_config: Optional[Dict[str, TypingAny]]) -> Dict[str, TypingAny]:
+        """
+        Load agent-level configuration from agents_config.yaml via main_config_loader.
+
+        The planning subsystem still owns planning_config.yaml internally.  This
+        method intentionally reads only agent-level settings.
+        """
+        defaults = {
+            "execution_history_window": 100,
+            "plan_history_window": 1000,
+            "gpu_limit": 1.0,
+            "ram_limit": 16.0,
+            "fallback_agent_id": "planner",
+            "fallback_agent_capabilities": ["gpu", "ram"],
+            "fallback_task_duration": 30.0,
+            "fallback_task_deadline_seconds": 3600.0,
+            "heuristic_time_budget": 0.5,
+            "default_start_offset_seconds": 1.0,
+            "default_deadline_seconds": 3600.0,
+            "max_policy_steps": 100,
+            "replan_debounce_seconds": 1.0,
+            "high_load_replan_threshold": 85.0,
+            "low_score_replan_threshold": 0.60,
+            "resource_safety_buffers": {"gpu": 0.15, "ram": 0.20},
         }
 
-    def configure_task_head(self, task_type: str, **kwargs):
-        """Dynamically attach task heads based on current plan"""
-        if task_type not in self.task_heads:
-            raise ValueError(f"Unsupported task type: {task_type}")
-            
-        # Get transformer instance from text encoder
-        transformer = self.shared_memory['text_encoder'].transformer
-        return self.task_heads[task_type](transformer, **kwargs)
+        if isinstance(explicit_config, dict):
+            raw = explicit_config
+        else:
+            raw = get_config_section("planning_agent")
+            if not isinstance(raw, dict):
+                agents_section = get_config_section("agents")
+                raw = {}
+                if isinstance(agents_section, dict):
+                    nested = agents_section.get("planning_agent") or agents_section.get("PlanningAgent")
+                    if isinstance(nested, dict):
+                        raw = nested
 
-    def get_current_state_tuple(self) -> WorldState:
-        """Returns an immutable representation of the world state for memoization/hashing."""
-        # Convert complex objects in state to a hashable representation if needed
-        items = []
-        for k, v in self.world_state.items():
+        config = deep_update(defaults, dict(raw or {}))
+
+        try:
+            config["execution_history_window"] = _coerce_int(config.get("execution_history_window"), 100, minimum=1)
+            config["plan_history_window"] = _coerce_int(config.get("plan_history_window"), 1000, minimum=1)
+            config["gpu_limit"] = _coerce_float(config.get("gpu_limit"), 1.0, minimum=0.0)
+            config["ram_limit"] = _coerce_float(config.get("ram_limit"), 16.0, minimum=0.0)
+            config["fallback_task_duration"] = _coerce_float(config.get("fallback_task_duration"), 30.0, minimum=1.0)
+            config["fallback_task_deadline_seconds"] = _coerce_float(config.get("fallback_task_deadline_seconds"), 3600.0, minimum=1.0)
+            config["heuristic_time_budget"] = _coerce_float(config.get("heuristic_time_budget"), 0.5, minimum=0.001)
+            validate_probability(_coerce_float(config.get("low_score_replan_threshold"), 0.60, minimum=0.0, maximum=1.0), "planning_agent.low_score_replan_threshold")
+            if not isinstance(config.get("fallback_agent_capabilities"), list):
+                raise PlanningConfigError(
+                    "planning_agent.fallback_agent_capabilities must be a list",
+                    config_key="fallback_agent_capabilities",
+                    config_section="planning_agent",
+                    expected_type="list[str]",
+                )
+        except PlanningError:
+            raise
+        except Exception as exc:
+            raise PlanningConfigError(
+                f"Invalid planning_agent configuration: {exc}",
+                config_section="planning_agent",
+                context={"source": "agents_config.yaml"},
+            ) from exc
+
+        if not raw:
+            logger.warning("No planning_agent section found in agents_config.yaml. Using safe agent defaults.")
+        return config
+
+    #def _configure_resource_limits(self) -> None:
+    #    """Apply agent-level resource caps without overriding subsystem internals unnecessarily."""
+    #    gpu_limit = _coerce_float(self.agent_config.get("gpu_limit"), 1.0, minimum=0.0)
+    #    ram_limit = _coerce_float(self.agent_config.get("ram_limit"), 16.0, minimum=0.0)
+    #    if hasattr(self.resource_monitor, "gpu_limit"):
+    #        self.resource_monitor.gpu_limit = gpu_limit
+    #    if hasattr(self.resource_monitor, "ram_limit"):
+    #        self.resource_monitor.ram_limit = ram_limit
+
+    def _ensure_shared_memory_defaults(self) -> None:
+        base_state = getattr(self.shared_memory, "base_state", None)
+        if isinstance(base_state, dict):
+            base_state.setdefault("execution_history", [])
+            base_state.setdefault("planning", {})
+            base_state["planning"].setdefault("plan_history", [])
+
+    def _sm_get(self, key: str, default: TypingAny = None) -> TypingAny:
+        if self.shared_memory is None:
+            return default
+        getter = getattr(self.shared_memory, "get", None)
+        if callable(getter):
             try:
-                # Attempt to make the value hashable, convert complex objects to str as fallback
-                hashable_value = v if isinstance(v, (int, float, str, bool, tuple)) else str(v)
-                items.append((k, hashable_value))
+                return getter(key, default=default)
+            except TypeError:
+                try:
+                    value = getter(key)
+                    return default if value is None else value
+                except Exception:
+                    return default
             except Exception:
-                items.append((k, str(v))) # Fallback for unhashable items
+                return default
+        if isinstance(self.shared_memory, dict):
+            return self.shared_memory.get(key, default)
+        try:
+            return self.shared_memory[key]
+        except Exception:
+            return default
+
+    def _sm_set(self, key: str, value: TypingAny) -> None:
+        if self.shared_memory is None:
+            return
+        setter = getattr(self.shared_memory, "set", None)
+        if callable(setter):
+            try:
+                setter(key, value)
+                return
+            except Exception as exc:
+                logger.debug("Shared memory set failed for key %s: %s", key, _safe_error_message(exc))
+        if isinstance(self.shared_memory, dict):
+            self.shared_memory[key] = value
+
+    def _record_error(
+        self,
+        error: BaseException,
+        *,
+        stage: str,
+        task: Optional[Task] = None,
+        extra: Optional[Dict[str, TypingAny]] = None,
+    ) -> Dict[str, TypingAny]:
+        """Store the latest structured planning error and mirror it into shared memory."""
+        payload = _error_payload(error)
+        payload["stage"] = stage
+        if task is not None:
+            payload["task_name"] = getattr(task, "name", "")
+            payload["task_id"] = getattr(task, "id", getattr(task, "name", ""))
+        if extra:
+            payload["extra"] = dict(extra)
+
+        self.last_error = payload
+        self.last_diagnostics.setdefault("errors", []).append(payload)
+        self._sm_set("planning:last_error", payload)
+        return payload
+
+    # ------------------------------------------------------------------
+    # State conversion
+    # ------------------------------------------------------------------
+    def get_current_state_tuple(self) -> WorldState:
+        """Return an immutable, stable representation of the current world state."""
+        items: List[Tuple[str, TypingAny]] = []
+        for key, value in self.world_state.items():
+            if isinstance(value, Any):          # type: ignore # custom class
+                value = value.value          # type: ignore
+            try:
+                hash(value)
+                hashable_value = value
+            except Exception:
+                hashable_value = safe_json_dumps(value)
+            items.append((str(key), hashable_value))
         return tuple(sorted(items))
 
-    def load_state_from_tuple(self, state_tuple: WorldState):
-        """Restores the world state from an immutable tuple (used in backtracking)."""
+    def load_state_from_tuple(self, state_tuple: WorldState) -> None:
+        """Restore world_state from an immutable tuple representation."""
         self.world_state = dict(state_tuple)
-        logger.debug(f"World state restored to: {self.world_state}")
+        logger.debug("World state restored from tuple")
 
-    def register_task(self, task: Task):
-        """Register task with possible decomposition methods"""
-        if not self._validate_task_safety(task):
-            logger.error(f"Task {task.name} failed safety validation")
-            return
-        
-        if not task.name:
-            raise AcademicPlanningError("Task name cannot be empty")
-        if not isinstance(task.task_type, TaskType):
-            raise TypeError("Invalid task type")
+    # ------------------------------------------------------------------
+    # Task registration and safety
+    # ------------------------------------------------------------------
+    def register_task(self, task: Task) -> None:
+        """Register a task template and its decomposition methods."""
+        self._validate_task_identity(task)
+        self._validate_task_safety(task)
 
         if task.name in self.task_library:
-            logger.warning(f"Task '{task.name}' already registered. Overwriting.")
-
+            logger.warning("Task %r already registered. Overwriting.", task.name)
         self.task_library[task.name] = task
 
-        # Initialize probabilistic actions if applicable
-        if task.is_probabilistic:
-            for prob_action in task.probabilistic_actions:
-                if isinstance(prob_action, tuple) and len(prob_action) == 2:
-                    probability, effect = prob_action
-                    # Optionally wrap in your own ProbabilisticAction type if you have one
-                    self.probabilistic_planner.register_action({
-                        "task_name": task.name,
-                        "probability": probability,
-                        "effect": effect
-                    })
-                else:
-                    logger.warning(f"Skipping malformed probabilistic action for task {task.name}")
+        if getattr(task, "is_probabilistic", False):
+            self._register_probabilistic_task_actions(task)
 
-        # Initialize stats for Bayesian method selection if it's an abstract task
         if task.task_type == TaskType.ABSTRACT and not task.methods:
-            logger.warning(f"Abstract task {task.name} has no methods. Adding default fallback.")
-            fallback = Task(
-                name=f"{task.name}_fallback",
-                task_type=TaskType.PRIMITIVE,
-                preconditions=[lambda state: True],
-                effects=[lambda state: state.update({'fallback_completed': True})],
-                resource_requirements=ResourceProfile(
-                    gpu=0.1,
-                    ram=0.5,
-                    specialized_hardware=[]
-                ),
-                start_time=10,
-                deadline=3600,
-                duration=300
+            logger.warning("Abstract task %r has no methods. Adding safe fallback.", task.name)
+            task.methods = [[self._build_fallback_task(task)]]
+
+    def _validate_task_identity(self, task: Task) -> None:
+        """Validate task identity through the shared planning error model."""
+        if not isinstance(task, Task):
+            raise PlanningConfigError(
+                "register_task expects a planning_types.Task instance",
+                config_key="task",
+                config_section="planning_agent",
+                expected_type="Task",
+                context={"actual_type": type(task).__name__},
             )
-            task.methods = [[fallback]]  # Single method with fallback task
+        if not getattr(task, "name", ""):
+            raise AcademicPlanningError(
+                "Task name cannot be empty",
+                context={"task_id": getattr(task, "id", "")},
+            )
+        if not isinstance(getattr(task, "task_type", None), TaskType):
+            raise AcademicPlanningError(
+                "Invalid task_type for task",
+                context={"task_name": task.name, "task_type": repr(getattr(task, "task_type", None))},
+            )
+        task_id = str(getattr(task, "id", ""))
+        if task_id and not is_valid_task_id(task_id):
+            raise AcademicPlanningError(
+                f"Invalid task id for {task.name!r}: {task_id!r}",
+                context={"task_name": task.name, "task_id": task_id},
+            )
 
     def _validate_task_safety(self, task: Task) -> bool:
-        """Ensure task meets basic safety constraints before registration"""
-        if not hasattr(task, 'resource_requirements'):
-            logger.warning(f"Task {task.name} missing resource requirements")
-            return False
-        
-        # Validate safety margins
-        if task.resource_requirements.gpu > 0.8 * self.resource_monitor.gpu_limit:
-            raise SafetyMarginError(
-                f"GPU safety margin violated for {task.name}",
-                "gpu",
-                task.resource_requirements.gpu
-            )
-        if task.resource_requirements.ram > 0.8 * self.resource_monitor.ram_limit:
-            raise SafetyMarginError(
-                f"RAM safety margin violated for {task.name}",
-                "ram",
-                task.resource_requirements.ram
-            )
-        return True
+        """
+        Validate resource safety through planning_helpers.check_resource_feasibility.
 
-    def decompose_task(self, task_to_decompose: Task, current_state: Dict) -> Optional[List[Task]]:
-        """Recursive decomposition with method selection tracking"""
-        logger.debug(f"Decomposing task: {task_to_decompose.name}")
+        This keeps resource math consistent with the rest of the planning subsystem.
+        """
+        profile = getattr(task, "resource_requirements", None)
+        if profile is None:
+            raise ResourceViolation(
+                f"Task {task.name!r} is missing resource requirements",
+                resource_type="resource_profile",
+                requested=None,
+                available={},
+                task_id=getattr(task, "id", task.name),
+            )
 
-        # Base case: If the task is primitive, it's already decomposed.
+        requirements = {
+            "gpu": _coerce_float(getattr(profile, "gpu", 0.0), 0.0, minimum=0.0),
+            "ram": _coerce_float(getattr(profile, "ram", 0.0), 0.0, minimum=0.0),
+        }
+        available = {
+            "gpu": max(_coerce_float(getattr(self.resource_monitor, "gpu_limit", self.agent_config.get("gpu_limit")), 1.0), 1e-9),
+            "ram": max(_coerce_float(getattr(self.resource_monitor, "ram_limit", self.agent_config.get("ram_limit")), 16.0), 1e-9),
+        }
+        buffers = dict(self.agent_config.get("resource_safety_buffers", {}) or {})
+
+        try:
+            check_resource_feasibility(
+                requirements,
+                available,
+                safety_buffers=buffers,
+                task_id=getattr(task, "id", task.name),
+            )
+            return True
+        except ResourceViolation as exc:
+            self._record_error(exc, stage="task_safety", task=task)
+            raise
+
+    def _register_probabilistic_task_actions(self, task: Task) -> None:
+        for item in getattr(task, "probabilistic_actions", []) or []:
+            try:
+                if isinstance(item, tuple) and len(item) == 2:
+                    probability, effect = item
+                    validate_probability(float(probability), f"{task.name}.probability")
+                    self.probabilistic_planner.register_action(
+                        {
+                            "name": task.name,
+                            "probability": probability,
+                            "effect": effect,
+                            "preconditions": lambda _state: True,
+                        }
+                    )
+                else:
+                    raise MethodSelectionError(
+                        "Malformed probabilistic action",
+                        task_name=task.name,
+                        task_id=getattr(task, "id", task.name),
+                        candidate_methods=[repr(item)],
+                    )
+            except PlanningError as exc:
+                self._record_error(exc, stage="probabilistic_action_registration", task=task)
+                logger.warning("Skipping probabilistic action for %s: %s", task.name, _safe_error_message(exc))
+            except Exception as exc:
+                wrapped = MethodSelectionError(
+                    f"Failed to register probabilistic action for {task.name}: {exc}",
+                    task_name=task.name,
+                    task_id=getattr(task, "id", task.name),
+                )
+                self._record_error(wrapped, stage="probabilistic_action_registration", task=task)
+                logger.warning("%s", _safe_error_message(wrapped))
+
+    def _build_fallback_task(self, task: Task) -> Task:
+        return Task(
+            name=f"{task.name}_fallback",
+            task_type=TaskType.PRIMITIVE,
+            preconditions=[lambda _state: True],
+            effects=[lambda state: state.update({"fallback_completed": True})],
+            resource_requirements=ResourceProfile(gpu=0, ram=0, specialized_hardware=[]),
+            duration=_coerce_float(self.agent_config.get("fallback_task_duration"), 30.0),
+            deadline=time.time() + _coerce_float(self.agent_config.get("fallback_task_deadline_seconds"), 3600.0),
+            priority=getattr(task, "priority", 1),
+        )
+
+    # ------------------------------------------------------------------
+    # Decomposition and planning
+    # ------------------------------------------------------------------
+    def decompose_task(self, task_to_decompose: Task, current_state: Dict[str, TypingAny]) -> Optional[List[Task]]:
+        """Recursively decompose an abstract task into primitive tasks."""
+        try:
+            self._validate_task_identity(task_to_decompose)
+        except PlanningError as exc:
+            self._record_error(exc, stage="decomposition_identity", task=task_to_decompose if isinstance(task_to_decompose, Task) else None)
+            raise
+
+        logger.debug("Decomposing task: %s", task_to_decompose.name)
+
         if task_to_decompose.task_type == TaskType.PRIMITIVE:
-            if task_to_decompose.check_preconditions(current_state):
-                if task_to_decompose.start_time is None:
-                    task_to_decompose.start_time = time.time()
+            try:
+                check_preconditions(
+                    current_state,
+                    list(getattr(task_to_decompose, "preconditions", []) or []),
+                    task_name=task_to_decompose.name,
+                    task_id=getattr(task_to_decompose, "id", task_to_decompose.name),
+                )
+                self._ensure_task_timing(task_to_decompose)
                 return [task_to_decompose]
-            else:
-                logger.warning(f"Preconditions failed for primitive task: {task_to_decompose.name}")
+            except PreconditionViolation as exc:
                 task_to_decompose.status = TaskStatus.FAILED
+                self._record_error(exc, stage="primitive_preconditions", task=task_to_decompose)
+                logger.warning("%s", _safe_error_message(exc))
                 return None
+            except PlanningError:
+                raise
 
-        # Retrieve the task template from the library
-        library_task = self.task_library.get(task_to_decompose.name)
-        if not library_task:
-            logger.error(f"Task '{task_to_decompose.name}' not registered!")
-            task_to_decompose.status = TaskStatus.FAILED
-            return None
-
-        scores = []
-        for i in range(len(library_task.methods)):
-            # Use HeuristicSelector to get success probability
-            prob = self.heuristic_selector.predict_success_prob(
-                task={
-                    "name": task_to_decompose.name,
-                    "selected_method": i,
-                    "priority": getattr(task_to_decompose, 'priority', 0.5),
-                    "goal_state": getattr(task_to_decompose, 'goal_state', {}),
-                    "parent": getattr(task_to_decompose, 'parent', None),
-                    "creation_time": getattr(task_to_decompose, 'creation_time', None),
-                    "deadline": getattr(task_to_decompose, 'deadline', None)
-                },
-                world_state=self.world_state,
-                method_stats=self.method_stats,
-                method_id=str(i)  # Convert method index to string
+        library_task = self.task_library.get(task_to_decompose.name, task_to_decompose)
+        if not getattr(library_task, "methods", None):
+            error = DecompositionError(
+                f"Task {task_to_decompose.name!r} has no registered decomposition methods",
+                task_name=task_to_decompose.name,
+                task_id=getattr(task_to_decompose, "id", task_to_decompose.name),
+                attempted_methods=[],
             )
-            scores.append((i, prob))
-        
-        if not scores:
-            logger.error(f"No methods available for task '{task_to_decompose.name}'.")
             task_to_decompose.status = TaskStatus.FAILED
-            return None
-        
-        # Select method with highest predicted success
-        method_index_to_try = max(scores, key=lambda x: x[1])[0]
-        task_to_decompose.selected_method = method_index_to_try
-
-        memo_key = ((task_to_decompose.name, method_index_to_try), self.get_current_state_tuple())
-        if memo_key in self.memo_table:
-            logger.debug(f"Memo hit for {memo_key}")
-            return self.memo_table[memo_key]
-
-        if not (0 <= method_index_to_try < len(library_task.methods)):
-            logger.error(f"Selected method index {method_index_to_try} out of range for task '{task_to_decompose.name}'")
-            task_to_decompose.status = TaskStatus.FAILED
+            self._record_error(error, stage="decomposition", task=task_to_decompose)
+            logger.error("%s", _safe_error_message(error))
             return None
 
-        # Get the list of subtasks for the selected method
-        subtasks_template = library_task.get_subtasks(method_index_to_try)
-        if not subtasks_template:
-            logger.warning(f"Method {method_index_to_try} for task '{task_to_decompose.name}' has no subtasks or is invalid.")
-            # Optionally, try another method here if implementing replanning/backtracking within decompose
-            task_to_decompose.status = TaskStatus.FAILED
-            return None
+        attempted: List[str] = []
+        for method_index, _score in self._rank_methods(task_to_decompose, library_task):
+            attempted.append(str(method_index))
+            memo_key = ((task_to_decompose.name, int(method_index)), self.get_current_state_tuple())
+            if memo_key in self.memo_table:
+                return [task.copy() for task in self.memo_table[memo_key]]
 
-        logger.debug(f"Trying method {method_index_to_try} for task '{task_to_decompose.name}' with subtasks: {[st.name for st in subtasks_template]}")
+            candidate = self._try_decomposition_method(task_to_decompose, library_task, int(method_index), current_state)
+            if candidate:
+                self.memo_table[memo_key] = [task.copy() for task in candidate]
+                return candidate
 
-        fully_decomposed_plan: List[Task] = []
-        simulated_world_state = current_state.copy()
-
-        for subtask_template in subtasks_template:
-            subtask_instance = subtask_template.copy()
-            current_time = time.time()
-            if not hasattr(subtask_instance, 'start_time'):
-                subtask_instance.start_time = current_time + 60  # Default: start in 60 seconds
-            if not hasattr(subtask_instance, 'deadline'):
-                subtask_instance.deadline = subtask_instance.start_time + 3600  # Default: 1hr deadline
-            if not hasattr(subtask_instance, 'duration'):
-                subtask_instance.duration = 300  # Default: 5min duration
-            subtask_instance.parent = task_to_decompose # Link for hierarchy tracking
-
-            # Check subtask preconditions in the *current* (simulated) world state
-            if not subtask_instance.check_preconditions(simulated_world_state):
-                logger.warning(f"Precondition failed for subtask '{subtask_instance.name}' during decomposition of '{task_to_decompose.name}'. Aborting method {method_index_to_try}.")
-                # Backtracking would happen here: try another method for task_to_decompose
-                # Try alternative methods instead of failing hard on first method
-                fully_decomposed_plan = []
-                break
-
-            decomposed_subplan = self.decompose_task(subtask_instance, simulated_world_state)
-
-            if decomposed_subplan is None:
-                logger.warning(f"Failed to decompose subtask '{subtask_instance.name}'. Aborting method {method_index_to_try} for '{task_to_decompose.name}'.")
-                # Backtracking point: Try a different method for task_to_decompose if possible
-                # Try alternative methods instead of failing hard on first method
-                fully_decomposed_plan = []
-                break
-
-            fully_decomposed_plan.extend(decomposed_subplan)
-
-            # Update the simulated world state by applying effects of the *primitive* tasks just added
-            # This is crucial for the preconditions of subsequent subtasks in the *same* method.
-            for primitive_task in decomposed_subplan:
-                if primitive_task.task_type == TaskType.PRIMITIVE:
-                    primitive_task.apply_effects(simulated_world_state)
-
-        # If loop completes, the decomposition for this method was successful
-        if fully_decomposed_plan:
-            logger.debug(f"Successfully decomposed '{task_to_decompose.name}' using method {method_index_to_try}. Current state: {current_state}")
-            return fully_decomposed_plan
-
-        # Fallback: try remaining methods ordered by predicted success
-        alternative_methods = [idx for idx, _ in sorted(scores, key=lambda item: item[1], reverse=True) if idx != method_index_to_try]
-        for alt_idx in alternative_methods:
-            task_to_decompose.selected_method = alt_idx
-            alt_subtasks = library_task.get_subtasks(alt_idx)
-            if not alt_subtasks:
-                continue
-            alt_plan = []
-            alt_state = current_state.copy()
-            ok = True
-            for alt_subtask_template in alt_subtasks:
-                alt_subtask = alt_subtask_template.copy()
-                alt_subtask.parent = task_to_decompose
-                if not alt_subtask.check_preconditions(alt_state):
-                    ok = False
-                    break
-                nested = self.decompose_task(alt_subtask, alt_state)
-                if not nested:
-                    ok = False
-                    break
-                alt_plan.extend(nested)
-                for primitive_task in nested:
-                    if primitive_task.task_type == TaskType.PRIMITIVE:
-                        primitive_task.apply_effects(alt_state)
-            if ok and alt_plan:
-                return alt_plan
-
+        error = DecompositionError(
+            f"All decomposition methods failed for task {task_to_decompose.name!r}",
+            task_name=task_to_decompose.name,
+            task_id=getattr(task_to_decompose, "id", task_to_decompose.name),
+            attempted_methods=attempted,
+        )
+        task_to_decompose.status = TaskStatus.FAILED
+        self._record_error(error, stage="decomposition", task=task_to_decompose)
         return None
 
-    def _find_alternative_methods(self, task: Task) -> List[int]:
-        """
-        Finds alternative decomposition method indices for a failed abstract task.
-        Uses a hybrid strategy: Bayesian optimization and grid search fallback.
-
-        Args:
-            task (Task): The abstract task that failed decomposition or execution.
-
-        Returns:
-            List[int]: A list of alternative method indices to try, ordered by
-                       estimated likelihood of success.
-        """
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.task_type != TaskType.ABSTRACT or len(library_task.methods) <= 1:
-            return []
-            
-        # Use HeuristicSelector to get best methods
+    def _rank_methods(self, task: Task, library_task: Task) -> List[Tuple[int, float]]:
         candidate_methods = [str(i) for i in range(len(library_task.methods))]
-        best_method, _ = self.heuristic_selector.select_best_method(
-            task={
-                "name": task.name,
-                "priority": getattr(task, 'priority', 0.5),
-                "goal_state": getattr(task, 'goal_state', {}),
-                "creation_time": getattr(task, 'creation_time', None),
-                "deadline": getattr(task, 'deadline', None)
-            },
-            world_state=self.world_state,
-            candidate_methods=candidate_methods,
-            method_stats=self.method_stats
-        )
-        
-        # Convert string method IDs back to integers
-        return [int(method_id) for method_id in candidate_methods 
-                if method_id != str(task.selected_method)]
+        scores: List[Tuple[int, float]] = []
 
-#    def _update_method_stats(self, task: Task, success: bool, cost: float):
-#        """Updates statistics for the selected decomposition method."""
-#        if task.task_type != TaskType.ABSTRACT or task.parent is None:
-#             # Only update stats for methods chosen for a parent abstract task
-#             # Or potentially update based on overall plan success if task is the root goal.
-#            return
+        if not candidate_methods:
+            raise MethodSelectionError(
+                f"No candidate methods available for {task.name}",
+                task_name=task.name,
+                task_id=getattr(task, "id", task.name),
+                candidate_methods=[],
+            )
 
-#        # Find the parent and the method index used to generate this task instance
-#        # This requires careful tracking during decomposition or execution feedback.
-#        parent_task = task.parent
-#        method_idx = parent_task.selected_method # Method index of the PARENT task that led to this `task`
+        for method_id in candidate_methods:
+            try:
+                probability = self.heuristic_selector.predict_success_prob(
+                    task=self._task_feature_payload(task, int(method_id)),
+                    world_state=self.world_state,
+                    method_stats=self.method_stats,
+                    method_id=method_id,
+                    time_budget=_coerce_float(self.agent_config.get("heuristic_time_budget"), 0.5, minimum=0.001),
+                )
+                validate_probability(float(probability), f"{task.name}.method_{method_id}.probability")
+            except PlanningError as exc:
+                self._record_error(exc, stage="method_ranking", task=task)
+                logger.debug("Heuristic probability fallback for %s method %s: %s", task.name, method_id, _safe_error_message(exc))
+                probability = self._method_success_rate(task.name, method_id)
+            except Exception as exc:
+                wrapped = MethodSelectionError(
+                    f"Heuristic failed for method {method_id}: {exc}",
+                    task_name=task.name,
+                    task_id=getattr(task, "id", task.name),
+                    candidate_methods=candidate_methods,
+                )
+                self._record_error(wrapped, stage="method_ranking", task=task)
+                probability = self._method_success_rate(task.name, method_id)
 
-#        key = (parent_task.name, method_idx)
-#        stats = self.method_stats[key]
-#        stats['total'] += 1
-#        if success:
-#            stats['success'] += 1
+            scores.append((int(method_id), clamp(float(probability), 0.0, 1.0)))
 
-#        # Update average cost using Welford's online algorithm or simpler moving average
-#        # Simple moving average:
-#        current_total_cost = stats['avg_cost'] * (stats['total'] -1) # Get previous total cost
-#        new_avg_cost = (current_total_cost + cost) / stats['total']
-#        stats['avg_cost'] = new_avg_cost
+        scores.sort(key=lambda item: (item[1], -item[0]), reverse=True)
+        return scores
 
-#        logger.debug(f"Updated stats for method {key}: Success={success}, Cost={cost:.2f}, New Avg Cost={new_avg_cost:.2f}")
+    def _task_feature_payload(self, task: Task, selected_method: Optional[int] = None) -> Dict[str, TypingAny]:
+        return {
+            "id": getattr(task, "id", getattr(task, "name", "task")),
+            "name": getattr(task, "name", "task"),
+            "selected_method": selected_method if selected_method is not None else getattr(task, "selected_method", 0),
+            "priority": _coerce_float(getattr(task, "priority", 1), 1.0),
+            "goal_state": getattr(task, "goal_state", {}) or {},
+            "parent": getattr(task, "parent", None),
+            "creation_time": getattr(task, "created_at", None),
+            "deadline": getattr(task, "deadline", None),
+            "risk_score": _coerce_float(getattr(task, "risk_score", 0.0), 0.0),
+            "task_type": getattr(getattr(task, "task_type", None), "name", str(getattr(task, "task_type", ""))),
+        }
 
-    def replan(self, failed_task: Task) -> Optional[List[Task]]:
-        """Enhanced replanning with alternative method selection"""
-        logger.warning(f"Replanning triggered by failed task: {failed_task.name}")
-        
-        # Find alternative methods
-        alternative_method_indices = self._find_alternative_methods(failed_task)
-        if not alternative_method_indices:
-            logger.error("No alternative methods found")
+    def _method_success_rate(self, task_name: str, method_id: Union[str, int]) -> float:
+        keys = [(task_name, str(method_id)), (task_name, int(method_id)) if str(method_id).isdigit() else None, str(method_id)]
+        for key in keys:
+            if key is None:
+                continue
+            stats = self.method_stats.get(key)
+            if stats:
+                total = _coerce_float(stats.get("total"), 0.0, minimum=0.0)
+                if total > 0:
+                    return clamp(_coerce_float(stats.get("success"), 0.0, minimum=0.0) / total, 0.0, 1.0)
+        return 0.5
+
+    def _try_decomposition_method(
+        self,
+        task_to_decompose: Task,
+        library_task: Task,
+        method_index: int,
+        current_state: Dict[str, TypingAny],
+    ) -> Optional[List[Task]]:
+        if not (0 <= method_index < len(library_task.methods)):
             return None
-        
-        # Update scheduler state with failure information
+
+        task_to_decompose.selected_method = method_index
+        simulated_state = copy.deepcopy(current_state)
+        result: List[Task] = []
+
+        for subtask_template in library_task.get_subtasks(method_index):
+            subtask = subtask_template.copy()
+            subtask.parent = task_to_decompose
+            subtask.parent_task = task_to_decompose
+            try:
+                self._ensure_task_timing(subtask)
+                check_preconditions(
+                    simulated_state,
+                    list(getattr(subtask, "preconditions", []) or []),
+                    task_name=subtask.name,
+                    task_id=getattr(subtask, "id", subtask.name),
+                )
+            except PreconditionViolation as exc:
+                self._record_error(exc, stage="method_preconditions", task=subtask)
+                logger.debug(
+                    "Method %s rejected for %s because subtask %s failed preconditions: %s",
+                    method_index,
+                    task_to_decompose.name,
+                    subtask.name,
+                    _safe_error_message(exc),
+                )
+                return None
+
+            nested = self.decompose_task(subtask, simulated_state)
+            if not nested:
+                return None
+
+            result.extend(nested)
+            for primitive in nested:
+                if primitive.task_type == TaskType.PRIMITIVE:
+                    simulated_state = apply_state_effects(simulated_state, list(getattr(primitive, "effects", []) or []))
+
+        return result or None
+
+    def _ensure_task_timing(self, task: Task) -> None:
+        """Normalise task timing using shared temporal helpers."""
+        now = time.time()
+        duration = _coerce_float(getattr(task, "duration", 0.0), 0.0, minimum=1.0)
+        task.duration = duration
+
+        start = getattr(task, "start_time", 0.0)
+        if not isinstance(start, (int, float)) or start <= 0 or start < now:
+            start = now + _coerce_float(self.agent_config.get("default_start_offset_seconds"), 1.0, minimum=0.0)
+        task.start_time = float(start)
+
+        deadline = getattr(task, "deadline", 0.0)
+        if not isinstance(deadline, (int, float)) or deadline <= task.start_time:
+            deadline = task.start_time + max(
+                duration,
+                _coerce_float(self.agent_config.get("default_deadline_seconds"), 3600.0, minimum=duration),
+            )
+        task.deadline = float(deadline)
+
+        try:
+            compute_schedule_window(task.start_time, task.deadline, duration)
+        except TemporalViolation as exc:
+            self._record_error(exc, stage="task_timing", task=task)
+            raise
+
+        task.end_time = estimate_end_time(task.start_time, duration)
+
+    def _find_alternative_methods(self, task: Task) -> List[int]:
+        library_task = self.task_library.get(task.name, task)
+        if task.task_type != TaskType.ABSTRACT or not getattr(library_task, "methods", None):
+            return []
+
+        candidate_methods = [str(i) for i in range(len(library_task.methods))]
+        current = str(getattr(task, "selected_method", 0))
+
+        try:
+            best_method, _confidence = self.heuristic_selector.select_best_method(
+                task=self._task_feature_payload(task),
+                world_state=self.world_state,
+                candidate_methods=candidate_methods,
+                method_stats=self.method_stats,
+                time_budget=_coerce_float(self.agent_config.get("heuristic_time_budget"), 0.5),
+            )
+            ordered = [str(best_method)] + [m for m in candidate_methods if m != str(best_method)]
+        except Exception:
+            ordered = [str(idx) for idx, _score in self._rank_methods(task, library_task)]
+
+        return [int(method_id) for method_id in ordered if method_id != current and str(method_id).isdigit()]
+
+    def replan(self, failed_task: Optional[Task]) -> Optional[List[Task]]:
+        """Replan after failure using alternative methods or full goal decomposition."""
+        failed_task = failed_task or self.current_goal
+        if failed_task is None:
+            logger.error("Cannot replan: failed_task and current_goal are both None")
+            return None
+
+        logger.warning("Replanning triggered by failed task: %s", failed_task.name)
         self._update_scheduler_state(failed_task)
-        
-        # Try alternatives in recommended order
-        for method_idx in alternative_method_indices:
-            task_copy = failed_task.copy()
-            task_copy.selected_method = method_idx
-            new_plan = self.decompose_task(task_copy, self.world_state)
-            
-            # Validate plan and check safety
-            if new_plan and self._validate_plan(new_plan) and self.safety_planner.safety_check(new_plan):
-                return new_plan
-        
+
+        for method_idx in self._find_alternative_methods(failed_task):
+            candidate_root = failed_task.copy()
+            candidate_root.selected_method = method_idx
+            candidate_plan = self.decompose_task(candidate_root, self.world_state)
+            if candidate_plan and self._validate_plan(candidate_plan):
+                self.current_plan = candidate_plan
+                return candidate_plan
+
+        if self.current_goal and failed_task is not self.current_goal:
+            fallback = self.decompose_task(self.current_goal.copy(), self.world_state)
+            if fallback and self._validate_plan(fallback):
+                self.current_plan = fallback
+                return fallback
+
         logger.error("All replanning attempts failed")
         return None
 
-    def _check_preconditions(self, task: Task, state: Dict[str, Any]) -> bool:
-        """Formal verification of task preconditions against a state"""
+    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
+        """Generate a safe, scheduled executable plan for a goal task."""
         try:
-            return all(precond(state) for precond in task.preconditions)
-        except Exception as e:
-            logger.error(
-                f"Precondition check failed for {task.name}: {str(e)}",
-                exc_info=True
+            self._validate_task_identity(goal_task)
+        except PlanningError as exc:
+            self._record_error(exc, stage="goal_validation", task=goal_task if isinstance(goal_task, Task) else None)
+            raise
+
+        self._planning_start_time = time.time()
+        self.current_goal = goal_task
+        self._refresh_task_tree_timing(goal_task)
+
+        try:
+            if getattr(goal_task, "is_probabilistic", False):
+                probabilistic_task = self._plan_probabilistic_goal(goal_task)
+                if probabilistic_task is None:
+                    raise GoalUnreachableError(
+                        f"Probabilistic planner could not reach goal for {goal_task.name}",
+                        goal_state=getattr(goal_task, "goal_state", {}) or {},
+                        reason="probabilistic_policy_unavailable",
+                    )
+                plan = [probabilistic_task]
+            else:
+                plan = self.decompose_task(goal_task, self.world_state)
+
+            if isinstance(plan, Task):
+                plan = [plan]
+            if not plan:
+                raise GoalUnreachableError(
+                    f"Task decomposition produced no executable plan for {goal_task.name}",
+                    goal_state=getattr(goal_task, "goal_state", {}) or {},
+                    reason="decomposition_failed",
+                )
+
+            self._assert_plan_acyclic(plan)
+
+            if not self._validate_plan(plan):
+                raise AcademicPlanningError(
+                    "Generated plan failed safety validation",
+                    context={"goal": goal_task.name, "plan_length": len(plan)},
+                )
+
+            scheduled_payload = self._convert_to_schedule_format(plan)
+            schedule = self.scheduler.schedule(
+                tasks=scheduled_payload,
+                agents=self._get_available_agents(),
+                risk_assessor=self._sm_get("risk_assessor"),
+                state={"tasks": scheduled_payload, "dependency_map": self._dependency_map_for_schedule(plan)},
             )
-            return False
-    
-    def _check_temporal_constraints(self, 
-                                   previous_task: Task,
-                                   current_task: Task,
-                                   state: Dict[str, Any]) -> bool:
-        """
-        Implements Allen's interval algebra checks for temporal consistency
-        between consecutive tasks
-        """
-        # Get temporal constraints from task metadata
-        constraints = getattr(current_task, 'temporal_constraints', [])
-        
-        # Check each constraint against simulated state
-        for constraint in constraints:
-            if not constraint(state):
-                return False
-        
-        # Default temporal relationship checks
-        if previous_task.end_time and current_task.start_time:
-            if previous_task.end_time > current_task.start_time:
-                logger.debug("Temporal overlap detected between "
-                            f"{previous_task.name} and {current_task.name}")
-                return False
-        
-        return True
 
-#    def copy(self):
-#        new_task = Task(name=self.name, type=self.type)
-#        # Copy other attributes like preconditions, effects, etc.
-#        new_task.preconditions = self.preconditions.copy()
-#        new_task.effects = self.effects.copy()
-#        return new_task
+            if not schedule:
+                raise SchedulingConflictError(
+                    "Scheduling failed; no valid schedule was created",
+                    conflicting_task_ids=[getattr(task, "id", task.name) for task in plan],
+                    conflict_type="no_feasible_schedule",
+                )
 
-    def _convert_to_schedule_format(self, plan):
-        """Map plan tasks to scheduler format"""
-        now = time.time()
+            self._planning_end_time = time.time()
+            self.current_plan = self._convert_to_plan(schedule, source_plan=plan)
+            self.expected_state_projections = self._generate_state_projections(self.current_plan)
+            self._record_plan_generation_metrics(plan, schedule) # type: ignore
+            self.plan_history.append(
+                {
+                    "goal": goal_task.name,
+                    "plan_length": len(self.current_plan),
+                    "created_at": self._planning_end_time,
+                    "schedule": schedule,
+                }
+            )
+            self.last_diagnostics["last_schedule_report"] = getattr(self.scheduler, "last_schedule_report", {})
+            return self.current_plan
+        except PlanningError as exc:
+            self._record_error(exc, stage="generate_plan", task=goal_task)
+            logger.error("%s", _safe_error_message(exc))
+            return self._handle_safety_violation(goal_task, exc) if isinstance(exc, (SafetyMarginError, ResourceViolation, TemporalError)) else None
+        except Exception as exc:
+            wrapped = PlanningError(
+                f"Unexpected plan generation failure: {exc}",
+                context={"goal": getattr(goal_task, "name", "")},
+            )
+            self._record_error(wrapped, stage="generate_plan", task=goal_task)
+            logger.error("%s", _safe_error_message(wrapped))
+            return None
 
-        def _requirements_from_task(task: Task):
-            reqs = []
-            profile = getattr(task, 'resource_requirements', None)
-            if profile:
-                if getattr(profile, 'gpu', 0):
-                    reqs.append('gpu')
-                if getattr(profile, 'ram', 0):
-                    reqs.append('ram')
-                reqs.extend(getattr(profile, 'specialized_hardware', []) or [])
-            return reqs
+    def _plan_probabilistic_goal(self, goal_task: Task) -> Optional[Task]:
+        goal_state = getattr(goal_task, "goal_state", {}) or {}
+        if not isinstance(goal_state, dict):
+            raise PlanningConfigError(
+                "Probabilistic goal_state must be a dictionary",
+                config_key="goal_state",
+                config_section="planning_agent",
+                expected_type="dict",
+            )
 
-        def _dependency_ids(task: Task):
-            deps = getattr(task, 'dependencies', []) or []
-            if not isinstance(deps, list):
-                return []
-            dep_ids = []
-            for dep in deps:
-                if isinstance(dep, Task):
-                    dep_ids.append(dep.name)
-                elif isinstance(dep, str):
-                    dep_ids.append(dep)
-            return dep_ids
-
-        def _normalized_deadline(task: Task):
-            deadline = getattr(task, 'deadline', 0) or 0
-            if not isinstance(deadline, (int, float)) or deadline <= now:
-                return now + max(getattr(task, 'duration', 300.0), 300.0)
-            return deadline
-
-        return [{
-            'id': task.name,
-            'requirements': _requirements_from_task(task),
-            'deadline': _normalized_deadline(task),
-            'risk_score': task.risk_score,
-            'dependencies': _dependency_ids(task)
-        } for task in plan]
-
-    def _create_task_from_assignment(self, assignment: Dict[str, Any]) -> Task:
-        """Rehydrate a scheduler assignment into a primitive executable task."""
-        return Task(
-            name=assignment.get('task_id', 'scheduled_task'),
-            task_type=TaskType.PRIMITIVE,
-            start_time=assignment.get('start_time', 0),
-            end_time=assignment.get('end_time', 0),
-            deadline=assignment.get('end_time', 0),
-            risk_score=assignment.get('risk_score', 0.0),
-            context={
-                'assigned_agent': assignment.get('agent_id'),
-                'assignment': assignment,
-            },
+        report_or_policy = self.probabilistic_planner.perform_task(
+            {
+                "initial_state": self._json_safe_state(self.world_state),
+                "goal_state": goal_state,
+                "success_threshold": clamp(_coerce_float(getattr(goal_task, "success_threshold", 0.9), 0.9), 0.0, 1.0),
+            }
         )
+        if not report_or_policy:
+            logger.error("Probabilistic planner did not produce a policy for %s", goal_task.name)
+            return None
 
-    def _convert_to_plan(self, schedule):
-        """Convert scheduler output to executable plan"""
-        return [self._create_task_from_assignment(a) for a in schedule.values()]
+        task = goal_task.copy()
+        task.task_type = TaskType.PRIMITIVE
+        task.type = TaskType.PRIMITIVE
+        task.context = dict(getattr(task, "context", {}) or {})
+        task.context["probabilistic_policy"] = report_or_policy
+        task.preconditions = task.preconditions or [lambda _state: True]
+        return task
 
-    def _get_available_agents(self):
-        """Get agent capabilities from collaborative agent's registry"""
-        registry = self.shared_memory.get('agent_registry', default={})
+    def _json_safe_state(self, state: Dict[str, TypingAny]) -> Dict[str, TypingAny]:
+        """Convert world state to a JSON-safe dict using shared serialization helpers."""
+        result: Dict[str, TypingAny] = {}
+        for key, value in state.items():
+            if isinstance(value, Any):
+                value = value.value
+            if isinstance(value, (str, int, float, bool, type(None), list, dict)):
+                result[str(key)] = value
+            else:
+                try:
+                    result[str(key)] = safe_json_loads(safe_json_dumps(value, fallback_str=repr(value)))
+                except Exception:
+                    result[str(key)] = repr(value)
+            return result
+
+    def _refresh_task_tree_timing(self, task: Task) -> None:
+        self._ensure_task_timing(task)
+        for method in getattr(task, "methods", []) or []:
+            for subtask in method:
+                if isinstance(subtask, Task):
+                    self._refresh_task_tree_timing(subtask)
+
+    # ------------------------------------------------------------------
+    # Scheduling conversion
+    # ------------------------------------------------------------------
+    def _convert_to_schedule_format(self, plan: Sequence[Task]) -> List[Dict[str, TypingAny]]:
+        return [self._task_to_schedule_payload(task) for task in plan]
+
+    def _task_to_schedule_payload(self, task: Task) -> Dict[str, TypingAny]:
+        self._ensure_task_timing(task)
+        profile = getattr(task, "resource_requirements", ResourceProfile())
+        requirements: List[str] = list(getattr(task, "required_skills", []) or [])
+        if _coerce_float(getattr(profile, "gpu", 0.0), 0.0) > 0:
+            requirements.append("gpu")
+        if _coerce_float(getattr(profile, "ram", 0.0), 0.0) > 0:
+            requirements.append("ram")
+        requirements.extend(list(getattr(profile, "specialized_hardware", []) or []))
+
+        return {
+            "id": getattr(task, "id", task.name),
+            "name": task.name,
+            "requirements": sorted(set(str(req) for req in requirements if str(req).strip())),
+            "deadline": getattr(task, "deadline", 0.0),
+            "duration": max(_coerce_float(getattr(task, "duration", 1.0), 1.0), 1.0),
+            "estimated_duration": max(_coerce_float(getattr(task, "estimated_duration", getattr(task, "duration", 1.0)), 1.0), 1.0),
+            "risk_score": clamp(_coerce_float(getattr(task, "risk_score", 0.0), 0.0), 0.0, 1.0),
+            "priority": _coerce_float(getattr(task, "priority", 1), 1.0),
+            "dependencies": self._dependency_ids(task),
+            "resource_requirements": profile,
+            "metadata": {"source_task_name": task.name},
+        }
+
+    def _dependency_ids(self, task: Task) -> List[str]:
+        result: List[str] = []
+        for dependency in getattr(task, "dependencies", []) or []:
+            if isinstance(dependency, Task):
+                result.append(getattr(dependency, "id", dependency.name))
+            elif isinstance(dependency, str):
+                result.append(dependency)
+        return result
+
+    def _dependency_map_for_schedule(self, plan: Sequence[Task]) -> Dict[str, List[str]]:
+        return {getattr(task, "id", task.name): self._dependency_ids(task) for task in plan}
+
+    def _assert_plan_acyclic(self, plan: Sequence[Task]) -> None:
+        """Validate the task dependency graph through shared helper functions."""
+        dependency_map = self._dependency_map_for_schedule(plan)
+        task_ids = [getattr(task, "id", task.name) for task in plan]
+        cycle = detect_cycles(task_ids, dependency_map)
+        if cycle:
+            raise CyclicDependencyError(
+                "Generated plan contains a cyclic dependency",
+                cycle_path=cycle,
+                context={"dependency_map": dependency_map},
+            )
+        # topological_sort raises CyclicDependencyError as a second guard and
+        # gives downstream code a deterministic execution order if needed.
+        topological_sort(task_ids, dependency_map)
+
+    def _create_task_from_assignment(
+        self,
+        assignment: Dict[str, TypingAny],
+        source_task: Optional[Task] = None,
+    ) -> Task:
+        task = source_task.copy() if source_task is not None else Task(
+            name=assignment.get("task_name") or assignment.get("task_id") or "scheduled_task",
+            task_type=TaskType.PRIMITIVE,
+        )
+        task.id = str(assignment.get("task_id", getattr(task, "id", task.name)))
+        task.start_time = _coerce_float(assignment.get("start_time"), getattr(task, "start_time", 0.0))
+        task.end_time = _coerce_float(assignment.get("end_time"), getattr(task, "end_time", 0.0))
+        task.deadline = _coerce_float(assignment.get("deadline"), getattr(task, "deadline", 0.0))
+        task.duration = max(_coerce_float(assignment.get("duration"), getattr(task, "duration", 1.0)), 1.0)
+        task.risk_score = _coerce_float(assignment.get("risk_score"), getattr(task, "risk_score", 0.0))
+        task.context = dict(getattr(task, "context", {}) or {})
+        task.context["assigned_agent"] = assignment.get("agent_id")
+        task.context["assignment"] = copy.deepcopy(assignment)
+        return task
+
+    def _convert_to_plan(
+        self,
+        schedule: Dict[str, Dict[str, Any]],
+        source_plan: Optional[Sequence[Task]] = None,
+    ) -> List[Task]:
+        source_by_id = {getattr(task, "id", task.name): task for task in (source_plan or [])}
+        ordered_assignments = sorted(
+            schedule.values(),
+            key=lambda item: (_coerce_float(item.get("start_time")), str(item.get("task_id")))
+        )
+        result: List[Task] = []
+        for assignment in ordered_assignments:
+            task_id = str(assignment.get("task_id", ""))
+            source = source_by_id.get(task_id)
+            if source is None:
+                # Fallback: create a minimal task if source not found (should not happen)
+                source = Task(
+                    name=assignment.get("task_name") or assignment.get("task_id") or "scheduled_task", # type: ignore
+                    task_type=TaskType.PRIMITIVE,
+                )
+            # Make a proper deep copy of the source task (now preserves callables)
+            task = source.copy()
+            # Update timing and assignment metadata from the schedule
+            task.start_time = _coerce_float(assignment.get("start_time"), getattr(task, "start_time", 0.0))
+            task.end_time = _coerce_float(assignment.get("end_time"), getattr(task, "end_time", 0.0))
+            task.deadline = _coerce_float(assignment.get("deadline"), getattr(task, "deadline", 0.0))
+            task.duration = max(_coerce_float(assignment.get("duration"), getattr(task, "duration", 1.0)), 1.0)
+            task.risk_score = _coerce_float(assignment.get("risk_score"), getattr(task, "risk_score", 0.0))
+            task.context = dict(getattr(task, "context", {}) or {})
+            task.context["assigned_agent"] = assignment.get("agent_id")
+            task.context["assignment"] = copy.deepcopy(assignment)
+            result.append(task)
+        return result
+
+    def _get_available_agents(self) -> Dict[str, Dict[str, TypingAny]]:
+        registry = self._sm_get("agent_registry", default={})
         if isinstance(registry, dict) and registry:
             return registry
 
-        # Safe fallback to keep scheduling operational even when no collaborative
-        # registry has been bootstrapped yet.
+        fallback_agent_id = str(self.agent_config.get("fallback_agent_id", "planner"))
         return {
-            'planner': {
-                'capabilities': ['gpu', 'ram'],
-                'current_load': 0.0,
-                'successes': 1,
-                'failures': 0,
-                'efficiency': 1.0,
+            fallback_agent_id: {
+                "capabilities": list(self.agent_config.get("fallback_agent_capabilities", ["gpu", "ram"])),
+                "current_load": 0.0,
+                "successes": 1,
+                "failures": 0,
+                "efficiency": 1.0,
+                "status": "available",
+                "available_resources": {
+                    "gpu": _coerce_float(self.agent_config.get("gpu_limit"), 1.0),
+                    "ram": _coerce_float(self.agent_config.get("ram_limit"), 16.0),
+                    "specialized_hardware": [],
+                },
             }
         }
 
-    def generate_plan(self, goal_task: Task) -> Optional[List[Task]]:
-        self._planning_start_time = time.time()
-        current_time = self._planning_start_time
-
-        # Refresh all task timestamps
-        def refresh_timestamps(task):
-            if hasattr(task, 'start_time') and task.start_time < current_time:
-                task.start_time = current_time + 10
-            if hasattr(task, 'deadline') and task.deadline < current_time:
-                task.deadline = current_time + 3600
-            for subtask in task.get_subtasks():
-                refresh_timestamps(subtask)
-                
-        refresh_timestamps(goal_task)
-
-        if not hasattr(goal_task, 'deadline') or not goal_task.deadline or goal_task.deadline < goal_task.start_time:
-            goal_task.deadline = goal_task.start_time + 3600 # Default 1hr deadline
-
-        # Use probabilistic planner for probabilistic tasks
-        if goal_task.is_probabilistic:
-            task_data = {
-                'initial_state': self.world_state,
-                'goal_state': goal_task.goal_state,
-                'success_threshold': goal_task.success_threshold
-            }
-            policy = self.probabilistic_planner.perform_task(task_data)
-            if policy:
-                return policy
-            return None
-        plan = self.decompose_task(goal_task, self.world_state)
-
-        # Wrap single task in a list if needed
-        if isinstance(plan, Task):
-            plan = [plan]
+    # ------------------------------------------------------------------
+    # Safety, state projections, and metrics
+    # ------------------------------------------------------------------
+    def _validate_plan(self, plan: Sequence[Task]) -> bool:
         if not plan:
-            logger.error("Task decomposition produced no executable plan")
-            return None
+            self._record_error(
+                GoalUnreachableError("Plan is empty", reason="empty_plan"),
+                stage="plan_validation",
+            )
+            return False
 
-        # Integrated safety check
         try:
-            self.safety_planner.current_plan = plan
-            if not self.safety_planner.safety_check(plan):
-                raise AcademicPlanningError("Plan failed initial safety validation")
-        except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
-            logger.error(f"Safety violation: {str(e)}")
-            return self._handle_safety_violation(goal_task, e)
-        
-        # Schedule with resource awareness
-        scheduled_tasks = self._convert_to_schedule_format(plan)
-        schedule = self.scheduler.schedule(
-            tasks=scheduled_tasks,
-            agents=self._get_available_agents(),
-            risk_assessor=self.shared_memory.get('risk_assessor'),
-            state={'tasks': scheduled_tasks, **(self.world_state if isinstance(self.world_state, dict) else {})}
-        )
+            self._assert_plan_acyclic(plan)
+            self.safety_planner.current_plan = plan # type: ignore
+            safe = bool(self.safety_planner.safety_check(plan)) # type: ignore
+            if not safe:
+                raise AcademicPlanningError(
+                    "SafetyPlanning returned False",
+                    context={"plan_length": len(plan)},
+                )
+            return True
+        except PlanningError as exc:
+            self._record_error(exc, stage="plan_validation")
+            logger.warning("Plan validation failed: %s", _safe_error_message(exc))
+            return False
+        except Exception as exc:
+            wrapped = PlanningError(
+                f"Unexpected plan validation failure: {exc}",
+                context={"plan_length": len(plan)},
+            )
+            self._record_error(wrapped, stage="plan_validation")
+            logger.warning("%s", _safe_error_message(wrapped))
+            return False
 
-        if not schedule:
-            logger.error("Scheduling failed, a valid schedule could not be created. Aborting plan.")
-            return None
-
-        self._planning_end_time = time.time()
-        self.current_plan = self._convert_to_plan(schedule)
-        
-        # Track planning metrics
-        self.metrics.track_plan_start(self.current_plan)
-
-        # Record planning metrics
-        self.metrics.record_planning_metrics(
-            plan_length=len(plan),
-            planning_time=self._planning_end_time - self._planning_start_time,
-            success_rate=1.0 if plan else 0.0
-        )
-        self.expected_state_projections = self._generate_state_projections(plan)
-
-        # Calculate estimated completion time from the schedule
-        max_completion_time = 0.0
-        if schedule:
-            end_times = [assignment.get('end_time', 0) for assignment in schedule.values()]
-            if end_times:
-                max_completion_time = max(end_times)
-
-        self.shared_memory.set(
-            "planning:last_plan_metadata",
-            {
-                "goal": goal_task.name,
-                "estimated_completion": max_completion_time,
-                "schedule": schedule,
-            },
-        )
-        return self.current_plan
-    
-    def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Any]:
-        """Generate expected state after each task execution"""
-        projections = {}
-        sim_state = self.world_state.copy()
-        
+    def _generate_state_projections(self, plan: List[Task]) -> Dict[str, Dict[str, TypingAny]]:
+        projections: Dict[str, Dict[str, TypingAny]] = {}
+        sim_state = copy.deepcopy(self.world_state)
         for task in plan:
             if task.task_type == TaskType.PRIMITIVE:
-                # Apply task effects to simulated state
-                for effect in task.effects:
-                    effect(sim_state)
-                projections[task.name] = sim_state.copy()
-        
+                sim_state = apply_state_effects(sim_state, list(getattr(task, "effects", []) or []))
+                projections[task.name] = copy.deepcopy(sim_state)
         return projections
 
     def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
-        """Handle safety violations during planning"""
-        logger.warning(f"Safety violation detected: {str(error)}")
-        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
-        
-        for candidate in candidates:
-            if self.safety_planner.safety_check([candidate]):
-                logger.info("Safety-compliant alternative found")
-                return [candidate]
-                
-        logger.error("No safe alternatives available")
+        logger.warning("Safety violation detected for %s: %s", task.name, _safe_error_message(error))
+        self._record_error(error, stage="safety_violation", task=task)
+
+        try:
+            candidates = self.safety_planner.dynamic_replanning_pipeline(task)
+        except PlanningError as exc:
+            self._record_error(exc, stage="safety_replanning", task=task)
+            logger.error("Safety replanning failed: %s", _safe_error_message(exc))
+            return None
+        except Exception as exc:
+            wrapped = ReplanningError(
+                f"Safety replanning failed: {exc}",
+                failed_task=task,
+                failure_reason="safety_replanning_exception",
+            )
+            self._record_error(wrapped, stage="safety_replanning", task=task)
+            logger.error("%s", _safe_error_message(wrapped))
+            return None
+
+        for candidate in candidates or []:
+            candidate_plan = candidate if isinstance(candidate, list) else [candidate]
+            if self._validate_plan(candidate_plan):
+                return candidate_plan
+
+        no_candidate = ReplanningError(
+            "No safety-compliant alternative found",
+            failed_task=task,
+            candidates=list(candidates or []),
+            failure_reason="no_safe_candidate",
+        )
+        self._record_error(no_candidate, stage="safety_replanning", task=task)
+        logger.error("%s", _safe_error_message(no_candidate))
         return None
 
-    def _execute_policy(self, policy: Dict[WorldState, TypingAny], goal_task: Task) -> Dict[str, TypingAny]:
-        """Execute probabilistic policy from PPDDL planner"""
-        current_state = self.get_current_state_tuple()
-        execution_path = []
-        success = False
-        
-        for _ in range(100):  # Max 100 steps
-            if current_state not in policy:
-                logger.error(f"No policy defined for state: {current_state}")
-                break
-            
-            action = policy[current_state]
-            if not action.preconditions(dict(current_state)):
-                logger.warning(f"Preconditions failed for {action.name}")
-                break
-            
-            # Sample outcome
-            r = random.random()
-            cumulative_prob = 0
-            for prob, effect in action.outcomes:
-                cumulative_prob += prob
-                if r <= cumulative_prob:
-                    next_state = dict(current_state)
-                    effect(next_state)  # Apply effect
-                    next_state_tuple = tuple(sorted(next_state.items()))
-                    
-                    # Record execution step
-                    execution_path.append({
-                        'action': action.name,
-                        'state': current_state,
-                        'next_state': next_state_tuple,
-                        'outcome_prob': prob
-                    })
-                    
-                    # Update world state
-                    self.world_state = next_state
-                    current_state = next_state_tuple
+    def _record_plan_generation_metrics(self, decomposed_plan: List[Task], schedule: Dict[str, Dict[str, TypingAny]]) -> None:
+        duration = 0.0
+        if self._planning_start_time is not None and self._planning_end_time is not None:
+            duration = max(0.0, self._planning_end_time - self._planning_start_time)
+
+        try:
+            if hasattr(self.metrics, "record_planning_metrics"):
+                self.metrics.record_planning_metrics(
+                    plan_length=len(decomposed_plan),
+                    planning_time=duration,
+                    success_rate=1.0 if schedule else 0.0,
+                )
+        except Exception as exc:
+            logger.debug("Planning metric recording failed: %s", exc)
+
+        end_times = [_coerce_float(assignment.get("end_time")) for assignment in schedule.values()]
+        self._sm_set(
+            "planning:last_plan_metadata",
+            {
+                "goal": self.current_goal.name if self.current_goal else None,
+                "estimated_completion": max(end_times) if end_times else 0.0,
+                "schedule": schedule,
+                "planning_time": duration,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+    def execute_plan(self, plan: Iterable[Any], goal: Any = None) -> Dict[str, TypingAny]:
+        # Convert plan to list of Task (assuming each element is a Task)
+        effective_plan: List[Task] = []
+        for item in plan:
+            if isinstance(item, Task):
+                effective_plan.append(item)
+            else:
+                raise PlanningError(f"Unsupported plan element type: {type(item)}")
+        # Apply local arbitration (safety overrides)
+        effective_plan = self._apply_local_arbitration(effective_plan)
+        # Use goal as the goal_task (if it is a Task)
+        goal_task = goal if isinstance(goal, Task) else None
+        execution_metrics = {
+            "success_count": 0,
+            "failure_count": 0,
+            "total_cost": 0.0,
+            "resource_usage": defaultdict(float),
+        }
+
+        if not effective_plan:
+            error = GoalUnreachableError("Cannot execute an empty plan", reason="empty_execution_plan")
+            self._record_error(error, stage="execute_plan")
+            return {"status": TaskStatus.FAILED.name, "world_state": self.world_state, "metrics": execution_metrics, "error": error.to_dict()}
+
+        self.execution_interrupted = False
+        plan_meta = None
+
+        try:
+            self._assert_plan_acyclic(effective_plan)
+        except PlanningError as exc:
+            self._record_error(exc, stage="execute_plan")
+            return {"status": TaskStatus.FAILED.name, "world_state": self.world_state, "metrics": execution_metrics, "error": exc.to_dict()}
+
+        try:
+            self.executor.start_monitoring(effective_plan, self.expected_state_projections)
+        except Exception as exc:
+            wrapped = PlanningError(f"Execution monitor failed to start: {exc}")
+            self._record_error(wrapped, stage="executor_start")
+            logger.warning("%s", _safe_error_message(wrapped))
+
+        try:
+            try:
+                plan_meta = self.metrics.track_plan_start(effective_plan)
+            except Exception as exc:
+                self._record_error(PlanningError(f"PlanningMetrics.track_plan_start failed: {exc}"), stage="metrics_start")
+                plan_meta = {"start_time": time.time(), "task_count": len(effective_plan)}
+
+            for task in effective_plan:
+                if self.execution_interrupted:
+                    logger.warning("Execution interrupted by monitor")
                     break
-            
-            # Check goal satisfaction
-            if all(self.world_state.get(k) == v 
-                   for k, v in goal_task.goal_state.items()):
+
+                start_time = time.time()
+                task.status = TaskStatus.EXECUTING
+
+                try:
+                    self._validate_task_before_execution(task)
+                    self._execute_action(task)
+                    task.status = TaskStatus.SUCCESS
+                    execution_metrics["success_count"] += 1
+                    execution_metrics["total_cost"] += _coerce_float(getattr(task, "cost", 0.0), 0.0)
+                    self._update_resource_metrics(execution_metrics, task)
+                    self._record_execution_history(task, start_time, time.time(), "success")
+                except PlanningError as exc:
+                    task.status = TaskStatus.FAILED
+                    execution_metrics["failure_count"] += 1
+                    self._record_execution_history(task, start_time, time.time(), "failed", error=exc)
+                    self._record_error(exc, stage="task_execution", task=task)
+                    logger.warning("Execution failure for %s: %s", task.name, _safe_error_message(exc))
+
+                    recovery_plan = None
+                    try:
+                        recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
+                    except Exception as recovery_exc:
+                        self._record_error(
+                            ReplanningError(
+                                f"Recovery planning failed: {recovery_exc}",
+                                failed_task=task,
+                                failure_reason="recovery_exception",
+                            ),
+                            stage="task_recovery",
+                            task=task,
+                        )
+                    if recovery_plan:
+                        recovery = recovery_plan if isinstance(recovery_plan, list) else [recovery_plan]
+                        recovery_result = self.execute_plan(recovery, goal_task)
+                        if recovery_result.get("status") == TaskStatus.SUCCESS.name:
+                            execution_metrics["success_count"] += 1
+                        else:
+                            execution_metrics["failure_count"] += 1
+                except Exception as exc:
+                    wrapped = PlanningError(
+                        f"Unexpected task execution failure: {exc}",
+                        context={"task_name": task.name, "task_id": getattr(task, "id", task.name)},
+                    )
+                    task.status = TaskStatus.FAILED
+                    execution_metrics["failure_count"] += 1
+                    self._record_execution_history(task, start_time, time.time(), "failed", error=wrapped)
+                    self._record_error(wrapped, stage="task_execution", task=task)
+                    logger.error("%s", _safe_error_message(wrapped))
+
+            final_status = TaskStatus.SUCCESS if execution_metrics["failure_count"] == 0 else TaskStatus.FAILED
+
+            try:
+                self.metrics.track_plan_completion(plan_meta or {}, final_status)
+            except Exception as exc:
+                self._record_error(PlanningError(f"track_plan_completion failed: {exc}"), stage="metrics_completion")
+
+            try:
+                if hasattr(self.metrics, "record_execution_metrics"):
+                    self.metrics.record_execution_metrics(
+                        success_count=execution_metrics["success_count"],
+                        failure_count=execution_metrics["failure_count"],
+                        resource_usage=execution_metrics["resource_usage"],
+                    ) # type: ignore
+            except Exception as exc:
+                self._record_error(PlanningError(f"Execution metric recording failed: {exc}"), stage="metrics_execution")
+
+            summary = {
+                "status": final_status.name,
+                "world_state": self.world_state,
+                "metrics": execution_metrics,
+                "last_error": self.last_error,
+            }
+            self._log_performance(summary)
+            return summary
+        finally:
+            try:
+                self.executor.stop_monitoring()
+            except Exception as exc:
+                self._record_error(PlanningError(f"Execution monitor stop failed: {exc}"), stage="executor_stop")
+
+    def _validate_task_before_execution(self, task: Task) -> None:
+        check_preconditions(
+            self.world_state,
+            list(getattr(task, "preconditions", []) or []),
+            task_name=task.name,
+            task_id=getattr(task, "id", task.name),
+        )
+        self._check_temporal_constraints_for_task(task)
+    
+        profile = getattr(task, "resource_requirements", ResourceProfile())
+        requirements = {
+            "gpu": _coerce_float(getattr(profile, "gpu", 0.0), 0.0, minimum=0.0),
+            "ram": _coerce_float(getattr(profile, "ram", 0.0), 0.0, minimum=0.0),
+        }
+        # Get actual available resources from the monitor
+        available_resources = self.resource_monitor.get_available_resources()
+        available = {
+            "gpu": float(available_resources.gpu_total),
+            "ram": float(available_resources.ram_total),
+        }
+        check_resource_feasibility(
+            requirements,
+            available,
+            safety_buffers=dict(self.agent_config.get("resource_safety_buffers", {}) or {}),
+            task_id=getattr(task, "id", task.name),
+        )
+
+    def _check_temporal_constraints_for_task(self, task: Task) -> bool:
+        deadline = _coerce_float(getattr(task, "deadline", 0.0), 0.0)
+        if deadline > 0 and is_past_deadline(deadline):
+            raise DeadlineExceededError(
+                f"Task {task.name!r} deadline has passed",
+                task_name=task.name,
+                task_id=getattr(task, "id", task.name),
+                deadline=deadline,
+                projected_completion=time.time() + _coerce_float(getattr(task, "duration", 0.0), 0.0),
+            )
+        return True
+
+    def _execute_action(self, task: Task) -> None:
+        if getattr(task, "is_probabilistic", False) and isinstance(getattr(task, "context", None), dict):
+            policy = task.context.get("probabilistic_policy")
+            if policy:
+                self._execute_policy(policy, task)
+                return
+
+        profile = getattr(task, "resource_requirements", ResourceProfile())
+        acquired = False
+        if hasattr(self.resource_monitor, "acquire_resources"):
+            try:
+                try:
+                    self.resource_monitor.acquire_resources(profile, task_id=getattr(task, "id", task.name))
+                except TypeError:
+                    self.resource_monitor.acquire_resources(profile)
+                acquired = True
+            except ResourceViolation:
+                raise
+            except Exception as exc:
+                raise ResourceAcquisitionError(
+                    f"Failed to acquire resources for {task.name}: {exc}",
+                    resource_type="resource_profile",
+                    requested=profile,
+                    available={},
+                    task_id=getattr(task, "id", task.name),
+                ) from exc
+
+        try:
+            action_payload = (getattr(task, "context", {}) or {}).get("action") if isinstance(getattr(task, "context", {}), dict) else None
+            if isinstance(action_payload, dict):
+                self._sm_set("planning:last_action_command", {"task": task.name, **action_payload})
+            self.world_state = apply_state_effects(self.world_state, list(getattr(task, "effects", []) or []))
+        finally:
+            if acquired and hasattr(self.resource_monitor, "release_resources"):
+                try:
+                    # Release by task ID only
+                    self.resource_monitor.release_resources(task_id=getattr(task, "id", task.name))
+                except TypeError:
+                    # Fallback for older signature (if any)
+                    self.resource_monitor.release_resources(getattr(task, "id", task.name))
+                except Exception as exc:
+                    self._record_error(ResourceAcquisitionError(
+                        f"Failed to release resources for {task.name}: {exc}",
+                        resource_type="resource_profile",
+                        requested=profile,
+                        available={},
+                        task_id=getattr(task, "id", task.name),
+                    ), stage="resource_release", task=task)
+
+    def _execute_policy(self, policy: Dict[WorldState, TypingAny], goal_task: Task) -> Dict[str, TypingAny]:
+        current_state = self.get_current_state_tuple()
+        execution_path: List[Dict[str, TypingAny]] = []
+        success = False
+
+        for _ in range(_coerce_int(self.agent_config.get("max_policy_steps"), 100, minimum=1)):
+            action = policy.get(current_state)
+            if action is None:
+                break
+
+            state_dict = dict(current_state)
+            if hasattr(action, "preconditions") and not action.preconditions(state_dict):
+                raise PreconditionViolation(
+                    f"Policy action {getattr(action, 'name', 'unknown')} preconditions failed",
+                    task_name=getattr(action, "name", ""),
+                    task_id=getattr(goal_task, "id", goal_task.name),
+                    world_state_snapshot=state_dict,
+                )
+
+            outcome_roll = random.random()
+            cumulative = 0.0
+            selected = False
+            for probability, effect in getattr(action, "outcomes", []):
+                validate_probability(float(probability), f"{getattr(action, 'name', 'action')}.outcome_probability")
+                cumulative += _coerce_float(probability, 0.0, minimum=0.0, maximum=1.0)
+                if outcome_roll <= cumulative:
+                    next_state = dict(current_state)
+                    effect(next_state)
+                    next_tuple = tuple(sorted(next_state.items()))
+                    execution_path.append(
+                        {
+                            "action": getattr(action, "name", "unknown"),
+                            "state": current_state,
+                            "next_state": next_tuple,
+                            "outcome_prob": probability,
+                        }
+                    )
+                    self.world_state = next_state
+                    current_state = next_tuple
+                    selected = True
+                    break
+
+            if not selected:
+                raise MethodSelectionError(
+                    "No probabilistic outcome selected; outcome probabilities may not sum to 1",
+                    task_name=goal_task.name,
+                    task_id=getattr(goal_task, "id", goal_task.name),
+                )
+
+            goal_state = getattr(goal_task, "goal_state", {}) or {}
+            if state_satisfies_goal(self.world_state, goal_state):
                 success = True
                 break
-        
+
         return {
-            'status': 'SUCCESS' if success else 'FAILURE',
-            'execution_path': execution_path,
-            'final_state': self.world_state
+            "status": TaskStatus.SUCCESS.name if success else TaskStatus.FAILED.name,
+            "execution_path": execution_path,
+            "final_state": self.world_state,
+            "goal_distance": compute_state_distance(self.world_state, getattr(goal_task, "goal_state", {}) or {}),
         }
+
+    def _record_execution_history(
+        self,
+        task: Task,
+        start_time: float,
+        end_time: float,
+        status: str,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        entry = {
+            "task": task.name,
+            "task_id": getattr(task, "id", task.name),
+            "name": task.name,
+            "start_time": start_time,
+            "end_time": end_time,
+            "status": status,
+            "state_snapshot": copy.deepcopy(self.world_state),
+        }
+        if error:
+            entry["error"] = _error_payload(error)
+
+        self.execution_history.append(entry)
+
+        base_state = getattr(self.shared_memory, "base_state", None)
+        if isinstance(base_state, dict):
+            base_state.setdefault("execution_history", []).append(entry)
+
+    # ------------------------------------------------------------------
+    # Execution-monitor callbacks
+    # ------------------------------------------------------------------
+    def replan_from_execution_failure(self, task: Optional[Task], reason: str) -> None:
+        logger.warning("Replanning triggered due to: %s", reason)
+        now = time.time()
+        debounce_seconds = _coerce_float(self.agent_config.get("replan_debounce_seconds"), 1.0)
+        if now - self._last_replan_at < debounce_seconds:
+            logger.warning("Skipping replan due to debounce window")
+            return
+        self._last_replan_at = now
+        self.execution_interrupted = True
+
+        if reason == "precondition_violation" and task is not None:
+            recovery_plan = self._create_recovery_plan(task)
+        else:
+            recovery_plan = self.replan(task or self.current_goal)
+
+        if recovery_plan:
+            logger.info("Recovery plan generated with %d tasks", len(recovery_plan))
+            self.current_plan = recovery_plan
+        else:
+            logger.error("Recovery planning failed")
+
+    def adjust_for_resource_violation(self, resource: str, usage: float, limit: float) -> None:
+        logger.warning("Resource violation reported by executor: %s %.3f > %.3f", resource, usage, limit)
+        self.execution_interrupted = True
+
+    def adjust_for_temporal_violation(self, task: Task, time_delta: float) -> None:
+        if self._accelerate_subsequent_tasks(task, time_delta):
+            return
+        if self._reallocate_time(task, time_delta):
+            return
+        self.replan_from_execution_failure(task, "temporal_violation")
+
+    def _create_recovery_plan(self, failed_task: Task) -> Optional[List[Task]]:
+        for method_idx in self._find_alternative_methods(failed_task):
+            candidate = failed_task.copy()
+            candidate.selected_method = method_idx
+            recovery_plan = self.decompose_task(candidate, self.world_state)
+            if recovery_plan and self._validate_plan(recovery_plan):
+                return recovery_plan
+
+        repair_plan = self._create_precondition_repair_plan(failed_task)
+        if repair_plan is not None:
+            return repair_plan + [failed_task.copy()]
+        return None
+
+    def _create_precondition_repair_plan(self, task: Task) -> Optional[List[Task]]:
+        try:
+            check_preconditions(
+                self.world_state,
+                list(getattr(task, "preconditions", []) or []),
+                task_name=task.name,
+                task_id=getattr(task, "id", task.name),
+            )
+            return []
+        except PreconditionViolation as exc:
+            self._record_error(exc, stage="precondition_repair", task=task)
+            logger.warning("No automated repair available for failed preconditions: %s", exc.failed_conditions)
+            return None
+
+    def _accelerate_subsequent_tasks(self, task: Task, time_delta: float) -> bool:
+        """Best-effort temporal mitigation by shrinking later task durations."""
+        if time_delta <= 0 or not self.current_plan:
+            return False
+        seen = False
+        changed = False
+        for candidate in self.current_plan:
+            if candidate == task:
+                seen = True
+                continue
+            if not seen:
+                continue
+            duration = _coerce_float(getattr(candidate, "duration", 0.0), 0.0)
+            if duration > 2.0:
+                candidate.duration = max(1.0, duration - min(duration * 0.10, time_delta))
+                changed = True
+        return changed
+
+    def _reallocate_time(self, task: Task, time_delta: float) -> bool:
+        """Best-effort temporal mitigation by pushing low-priority future tasks."""
+        if time_delta <= 0 or not self.current_plan:
+            return False
+        changed = False
+        for candidate in self.current_plan:
+            if candidate is task:
+                continue
+            if _coerce_float(getattr(candidate, "priority", 1.0), 1.0) < _coerce_float(getattr(task, "priority", 1.0), 1.0):
+                candidate.start_time = _coerce_float(getattr(candidate, "start_time", time.time()), time.time()) + time_delta
+                candidate.end_time = _coerce_float(getattr(candidate, "end_time", candidate.start_time), candidate.start_time) + time_delta
+                changed = True
+        return changed
+
+    # ------------------------------------------------------------------
+    # Local planning arbitration
+    # ------------------------------------------------------------------
     def _read_local_planning_context(self) -> LocalPlanningContext:
-        payload = self.shared_memory.get("planning:local_context", default={}) or {}
+        payload = self._sm_get("planning:local_context", default={}) or {}
         if not isinstance(payload, dict):
             payload = {}
         return LocalPlanningContext(
@@ -737,15 +1508,15 @@ class PlanningAgent(BaseAgent):
             clearance_left_m=payload.get("clearance_left_m"),
             clearance_right_m=payload.get("clearance_right_m"),
             reverse_clearance_m=payload.get("reverse_clearance_m"),
-            current_speed_mps=float(payload.get("current_speed_mps", 0.0)),
-            desired_speed_mps=float(payload.get("desired_speed_mps", 0.0)),
-            horizon_seconds=float(payload.get("horizon_seconds", 2.0)),
+            current_speed_mps=_coerce_float(payload.get("current_speed_mps"), 0.0),
+            desired_speed_mps=_coerce_float(payload.get("desired_speed_mps"), 0.0),
+            horizon_seconds=_coerce_float(payload.get("horizon_seconds"), 2.0),
             metadata=payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), dict) else {},
         )
 
     def _build_reactive_override_task(self, decision, context: LocalPlanningContext) -> Task:
-        command = decision.command.copy()
-        command["reason"] = decision.reason
+        command = dict(getattr(decision, "command", {}) or {})
+        command["reason"] = getattr(decision, "reason", "local override")
         return Task(
             name=self.local_arbitrator.build_reactive_task_name(decision),
             task_type=TaskType.PRIMITIVE,
@@ -754,936 +1525,426 @@ class PlanningAgent(BaseAgent):
             context={"action": command, "local_context": context.metadata},
             preconditions=[lambda _state: True],
             effects=[],
-            duration=max(1.0, min(5.0, context.horizon_seconds)),
+            duration=max(1.0, min(5.0, _coerce_float(getattr(context, "horizon_seconds", 2.0), 2.0))),
         )
 
     def _apply_local_arbitration(self, plan: List[Task]) -> List[Task]:
         context = self._read_local_planning_context()
         decision = self.local_arbitrator.decide(context)
-        self.shared_memory.set(
+        self._sm_set(
             "planning:last_local_decision",
             {
-                "behavior": decision.behavior.value,
-                "reason": decision.reason,
-                "priority": decision.priority,
+                "behavior": getattr(getattr(decision, "behavior", None), "value", str(getattr(decision, "behavior", "unknown"))),
+                "reason": getattr(decision, "reason", ""),
+                "priority": getattr(decision, "priority", 0),
             },
         )
-        if not decision.is_override:
+
+        if not getattr(decision, "is_override", False):
             return plan
+
         reactive_task = self._build_reactive_override_task(decision, context)
         if self.local_arbitrator.should_trigger_short_horizon_replan(decision, context):
-            logger.warning("Applying local safety override '%s' before nominal plan", decision.behavior.value)
+            logger.warning("Applying local safety override before nominal plan")
             return [reactive_task] + plan
         return plan
 
-    def execute_plan(self, plan: List[Task], goal_task: Optional[Task] = None) -> Dict[str, TypingAny]:
+    # ------------------------------------------------------------------
+    # Utility methods retained for compatibility
+    # ------------------------------------------------------------------
+    def _check_preconditions(self, task: Task, state: Dict[str, TypingAny]) -> bool:
         try:
-            effective_plan = self._apply_local_arbitration(plan or [])
-            execution_metrics = {
-                "success_count": 0,
-                "failure_count": 0,
-                "total_cost": 0.0,
-                "resource_usage": defaultdict(float),
-            }
-
-            self.executor.start_monitoring(effective_plan, self.expected_state_projections)
-            self.execution_interrupted = False
-            plan_meta = self.metrics.track_plan_start(effective_plan)
-
-            try:
-                for task in effective_plan:
-                    if self.execution_interrupted:
-                        logger.warning("Execution interrupted by monitor")
-                        break
-                    start_time = time.time()
-                    end_time = start_time
-                    try:
-                        task.status = TaskStatus.EXECUTING
-                        self.safety_planner._validate_equipment_constraints(task)
-                        self.safety_planner._validate_temporal_constraints(task)
-                        self._execute_action(task)
-                        end_time = time.time()
-                        task.start_time = start_time
-                        task.end_time = end_time
-                        task.status = TaskStatus.SUCCESS
-                        execution_metrics["success_count"] += 1
-                        execution_metrics["total_cost"] += float(getattr(task, "cost", 0.0))
-                        self._update_resource_metrics(execution_metrics, task)
-                        self.shared_memory.base_state["execution_history"].append(
-                            {
-                                "task": task.name,
-                                "start_time": start_time,
-                                "end_time": end_time,
-                                "status": "success",
-                                "state_snapshot": self.world_state.copy(),
-                            }
-                        )
-                    except (SafetyMarginError, ResourceViolation, TemporalViolation) as e:
-                        logger.warning(f"Execution safety violation: {str(e)}")
-                        execution_metrics["failure_count"] += 1
-                        task.status = TaskStatus.FAILED
-                        self.shared_memory.base_state["execution_history"].append(
-                            {
-                                "task": task.name,
-                                "start_time": start_time,
-                                "end_time": end_time,
-                                "status": "failed",
-                                "error": str(e),
-                                "state_snapshot": self.world_state.copy(),
-                            }
-                        )
-                        recovery_plan = self.safety_planner.dynamic_replanning_pipeline(task)
-                        if recovery_plan:
-                            recovery_result = self.execute_plan(recovery_plan, goal_task)
-                            if recovery_result.get("status") == TaskStatus.SUCCESS.name:
-                                execution_metrics["success_count"] += 1
-                            else:
-                                execution_metrics["failure_count"] += 1
-            finally:
-                self.executor.stop_monitoring()
-
-            final_status = TaskStatus.SUCCESS if execution_metrics["failure_count"] == 0 else TaskStatus.FAILED
-            self.metrics.track_plan_completion(plan_meta, final_status)
-            self.metrics.record_execution_metrics(
-                success_count=execution_metrics["success_count"],
-                failure_count=execution_metrics["failure_count"],
-                resource_usage=execution_metrics["resource_usage"],
+            check_preconditions(
+                state,
+                list(getattr(task, "preconditions", []) or []),
+                task_name=task.name,
+                task_id=getattr(task, "id", task.name),
             )
-            execution_summary = {"status": final_status.name, "world_state": self.world_state, "metrics": execution_metrics}
-            self._log_performance(execution_summary)
-            return execution_summary
-    
-        except TemporalViolation as e:
-            logger.error(f"Temporal failure: {str(e)}")
-            # Auto-reschedule all tasks
-            current_time = time.time()
-            for task in plan:
-                if task.start_time < current_time:
-                    task.start_time = current_time + 10
-            return self.execute_plan(plan, goal_task)  # Retry
-        except Exception as e:
-            logger.critical(f"Critical execution failure: {str(e)}")
-            return {"status": "CRITICAL_FAILURE"}
+            return True
+        except PreconditionViolation as exc:
+            self._record_error(exc, stage="precondition_check", task=task)
+            logger.error("Precondition check failed for %s: %s", task.name, _safe_error_message(exc))
+            return False
 
-    def replan_from_execution_failure(self, task: Optional[Task], reason: str):
-        """Handle execution failures detected by monitor"""
-        logger.warning(f"Replanning triggered due to: {reason}")
-        self.execution_interrupted = True
-        
-        # Create recovery task based on failure type
-        if reason == "precondition_violation" and task:
-            recovery_plan = self._create_recovery_plan(task)
-        else:
-            # Full replan from current state
-            recovery_plan = self.replan(self.current_goal)
-        
-        if recovery_plan:
-            logger.info("Executing recovery plan")
-            recovery_result = self.execute_plan(recovery_plan, self.current_goal)
-            # Merge results with main execution
-            # ... implementation specific ...
-        else:
-            logger.error("Recovery planning failed")
+    def _check_temporal_constraints(self, previous_task: Task, current_task: Task, state: Dict[str, TypingAny]) -> bool:
+        for constraint in getattr(current_task, "temporal_constraints", []) or []:
+            if callable(constraint) and not constraint(state):
+                self._record_error(
+                    TemporalViolation(
+                        f"Custom temporal constraint failed for {current_task.name}",
+                        violation_type="custom",
+                        task_name=current_task.name,
+                        task_id=getattr(current_task, "id", current_task.name),
+                    ),
+                    stage="temporal_check",
+                    task=current_task,
+                )
+                return False
 
-    def _create_recovery_plan(self, failed_task: Task) -> Optional[List[Task]]:
-        """Create targeted recovery plan for a specific task failure"""
-        # 1. Attempt alternative methods
-        alternatives = self._find_alternative_methods(failed_task)
-        for method_idx in alternatives:
-            new_task = failed_task.copy()
-            new_task.selected_method = method_idx
-            recovery_plan = self.decompose_task(new_task, self.world_state)
-            if recovery_plan and self._validate_plan(recovery_plan):
-                return recovery_plan
-        
-        # 2. Create precondition satisfaction subplan
-        logger.info("Attempting to repair preconditions")
-        repair_plan = self._create_precondition_repair_plan(failed_task)
-        if repair_plan:
-            repair_plan.append(failed_task.copy())
-            return repair_plan
-        
-        return None
-
-    def _create_precondition_repair_plan(self, task: Task) -> Optional[List[Task]]:
-        """Generate plan to satisfy missing preconditions"""
-        missing = []
-        for precond in task.preconditions:
-            try:
-                if not precond(self.world_state):
-                    missing.append(getattr(precond, "__name__", "anonymous_precondition"))
-            except Exception:
-                missing.append(getattr(precond, "__name__", "anonymous_precondition"))
-        if not missing:
-            return []
-        logger.warning("No automated repair available for failed preconditions: %s", missing)
-        return None
-
-    def adjust_for_temporal_violation(self, task: Task, time_delta: float):
-        """Adjust plan based on temporal violation"""
-        # 1. Attempt to accelerate subsequent tasks
-        if self._accelerate_subsequent_tasks(task, time_delta):
-            return
-            
-        # 2. Reallocate time from less critical tasks
-        if self._reallocate_time(task, time_delta):
-            return
-            
-        # 3. If still behind, trigger replan
-        self.replan_from_execution_failure(task, "temporal_violation")
-
-    def _update_resource_metrics(self, metrics: dict, task: Task):
-        """Track resource consumption metrics"""
-        if hasattr(task, 'resource_requirements'):
-            req = task.resource_requirements
-            metrics['resource_usage']['gpu'] += req.gpu
-            metrics['resource_usage']['ram'] += req.ram
-            if req.specialized_hardware:
-                for hw in req.specialized_hardware:
-                    metrics['resource_usage'][hw] += 1
+        previous_end = _coerce_float(getattr(previous_task, "end_time", 0.0), 0.0)
+        current_start = _coerce_float(getattr(current_task, "start_time", 0.0), 0.0)
+        if previous_end and current_start and previous_end > current_start:
+            self._record_error(
+                TemporalViolation(
+                    f"{current_task.name} starts before predecessor {previous_task.name} ends",
+                    violation_type="ordering",
+                    task_name=current_task.name,
+                    task_id=getattr(current_task, "id", current_task.name),
+                    constraint_details={
+                        "previous_task": previous_task.name,
+                        "previous_end": previous_end,
+                        "current_start": current_start,
+                    },
+                    time_delta=previous_end - current_start,
+                ),
+                stage="temporal_check",
+                task=current_task,
+            )
+            return False
+        return True
 
     def _grid_search_alternatives(self, task: Task) -> List[Task]:
-        """Systematic exploration of decomposition methods"""
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.task_type != TaskType.ABSTRACT:
+        library_task = self.task_library.get(task.name, task)
+        if task.task_type != TaskType.ABSTRACT or not library_task.methods:
             return []
-
-        current_method = task.selected_method
-        total_methods = len(library_task.methods)
-
-        alternatives = []
-        for method_idx in range(current_method + 1, total_methods):
-            new_task = library_task.copy()
-            new_task.selected_method = method_idx
-            alternatives.append(new_task)
-
-        return alternatives
+        current = int(getattr(task, "selected_method", 0))
+        return self._create_alternatives(task, [(idx, 0.0) for idx in range(current + 1, len(library_task.methods))])
 
     def _bayesian_alternatives(self, task: Task) -> List[Task]:
-        """Bayesian optimization of decomposition methods"""
-        library_task = self.task_library.get(task.name)
-        if not library_task or task.task_type != TaskType.ABSTRACT:
+        library_task = self.task_library.get(task.name, task)
+        if task.task_type != TaskType.ABSTRACT or not library_task.methods:
             return []
 
-        # Calculate success probabilities with Laplace smoothing
-        method_scores = []
+        method_scores: List[Tuple[int, float]] = []
         for method_idx in range(len(library_task.methods)):
-            key = (task.name, method_idx)
-            stats = self.method_stats[key]
-            success = stats['success'] + 1  # Laplace prior
-            total = stats['total'] + 2
+            stats = self.method_stats[(task.name, str(method_idx))]
+            success = _coerce_float(stats.get("success"), 0.0) + 1.0
+            total = _coerce_float(stats.get("total"), 0.0) + 2.0
             method_scores.append((method_idx, success / total))
 
-        # Sort by descending score, exclude current method
-        sorted_methods = sorted(method_scores, key=lambda x: -x[1])
-        current_method = task.selected_method
+        method_scores.sort(key=lambda item: item[1], reverse=True)
+        return self._create_alternatives(task, [item for item in method_scores if item[0] != getattr(task, "selected_method", 0)][:2])
 
-        alternatives = []
-        for method_idx, score in sorted_methods:
-            if method_idx != current_method:
-                new_task = library_task.copy()
-                new_task.selected_method = method_idx
-                alternatives.append(new_task)
+    def _create_alternatives(self, task: Task, method_scores: Iterable[Tuple[int, float]]) -> List[Task]:
+        alternatives: List[Task] = []
+        library_task = self.task_library.get(task.name, task)
+        for method_idx, _score in method_scores:
+            if 0 <= method_idx < len(getattr(library_task, "methods", []) or []):
+                candidate = library_task.copy()
+                candidate.selected_method = method_idx
+                alternatives.append(candidate)
+        return alternatives
 
-        return alternatives[:2]  # Return top 2 alternatives
+    def _update_scheduler_state(self, task: Task) -> None:
+        agent = getattr(task, "assigned_agent", None) or (getattr(task, "context", {}) or {}).get("assigned_agent")
+        if agent:
+            self.schedule_state["agent_loads"][agent] -= _coerce_float(getattr(task, "cost", 0.0), 0.0)
+        self.schedule_state["task_history"][task.name].append({"status": "failed", "timestamp": time.time()})
 
-    def _update_scheduler_state(self, task):
-        """Maintain scheduler's view of world state"""
-        self.schedule_state['agent_loads'][task.assigned_agent] -= task.cost
-        self.schedule_state['task_history'][task.name].append({
-            'status': 'failed',
-            'timestamp': time.time()
-        })
-
-    def _validate_plan(self, plan: List[Task]) -> bool:
-        """Enhanced validation with safety constraints"""
-        # Basic validation
-        if not plan:
-            return False
-            
-        # Safety validation
-        try:
-            self.safety_planner.safety_check(plan)
-            return True
-        except (ResourceViolation, TemporalViolation) as e:
-            logger.warning(f"Plan validation failed: {str(e)}")
-            return False
-
-    def _update_task_success(self, parent: Task, children: List[Task]):
-        """Update method success statistics for abstract tasks"""
+    def _update_task_success(self, parent: Task, children: List[Task]) -> None:
         if parent.task_type != TaskType.ABSTRACT:
             return
-
-        success = all(t.status == TaskStatus.SUCCESS for t in children)
+        success = all(child.status == TaskStatus.SUCCESS for child in children)
         self._update_method_stats(parent, success)
 
-    def _update_method_stats(self, task: Task, success: bool, cost: float = 0.0):
-        """Update Bayesian statistics after execution."""
-        if task.task_type != TaskType.ABSTRACT or task.parent is None:
-            return
-
-        parent_task = task.parent
-        method_idx = parent_task.selected_method
-        
-        # Use string keys for method_stats
-        key = (parent_task.name, str(method_idx))
+    def _update_method_stats(self, task: Task, success: bool, cost: float = 0.0) -> None:
+        method_idx = str(getattr(task, "selected_method", 0))
+        key = (task.name, method_idx)
         stats = self.method_stats[key]
-        self.method_stats[key]['total'] += 1
+        previous_total = _coerce_float(stats.get("total"), 0.0, minimum=0.0)
+        previous_avg = _coerce_float(stats.get("avg_cost"), 0.0, minimum=0.0)
+
+        stats["total"] = previous_total + 1.0
         if success:
-            self.method_stats[key]['success'] += 1
-        if stats['total'] > 0:
-            existing_total_cost = stats.get('avg_cost', 0.0) * (stats['total'] - 1)
-            stats['avg_cost'] = (existing_total_cost + float(cost)) / stats['total']
+            stats["success"] = _coerce_float(stats.get("success"), 0.0, minimum=0.0) + 1.0
+        stats["success"] = min(stats["success"], stats["total"])
+        stats["avg_cost"] = ((previous_avg * previous_total) + _coerce_float(cost, 0.0, minimum=0.0)) / max(stats["total"], 1.0)
 
-    def _execute_action(self, task: Task):
-        """Execute task with resource locking"""
-        # Handle probabilistic actions differently
-        if task.is_probabilistic:
-            # Probabilistic effects handled in policy execution
-            return
+    def _update_resource_metrics(self, metrics: Dict[str, TypingAny], task: Task) -> None:
+        totals = aggregate_resource_requirements([task])
+        for resource, value in totals.items():
+            metrics["resource_usage"][resource] += value
+        profile = getattr(task, "resource_requirements", None)
+        for hardware in getattr(profile, "specialized_hardware", []) or []:
+            metrics["resource_usage"][hardware] += 1
 
-        # Acquire resources
-        self.resource_monitor.acquire_resources(task.resource_requirements)
-        
-        try:
-            action_payload = (task.context or {}).get("action") if isinstance(task.context, dict) else None
-            if isinstance(action_payload, dict):
-                self.shared_memory.set("planning:last_action_command", {"task": task.name, **action_payload})
-            task.apply_effects(self.world_state)
-        finally:
-            # Release resources
-            self.resource_monitor.release_resources(task.resource_requirements)
-
-    def _log_performance(self, result: Dict[str, Any]):
-        """Logs the result of a planning and execution cycle to shared memory for the MetaController."""
-        # Use self.name to create a unique key for this agent's logs
-        log_key = f"log:performance:{self.name}"
-        
+    def _log_performance(self, result: Dict[str, TypingAny]) -> None:
+        log_key = f"log:performance:{getattr(self, 'name', 'PlanningAgent')}"
         log_entry = {
-            'timestamp': time.time(),
-            'status': result.get('status'),
-            'metrics': {
-                'total_cost': result.get('metrics', {}).get('total_cost', 0),
-                'plan_length': len(self.current_plan),
-                'success_count': result.get('metrics', {}).get('success_count', 0),
-                'failure_count': result.get('metrics', {}).get('failure_count', 0),
-            }
+            "timestamp": time.time(),
+            "status": result.get("status"),
+            "metrics": {
+                "total_cost": result.get("metrics", {}).get("total_cost", 0),
+                "plan_length": len(self.current_plan),
+                "success_count": result.get("metrics", {}).get("success_count", 0),
+                "failure_count": result.get("metrics", {}).get("failure_count", 0),
+            },
         }
-        
-        # Get the existing log (or a new deque) and append
-        performance_logs = self.shared_memory.get(log_key, default=deque(maxlen=500))
-        if not isinstance(performance_logs, deque):
-             performance_logs = deque(list(performance_logs), maxlen=500)
 
+        performance_logs = self._sm_get(log_key, default=deque(maxlen=500))
+        if not isinstance(performance_logs, deque):
+            performance_logs = deque(list(performance_logs or []), maxlen=500)
         performance_logs.append(log_entry)
-        self.shared_memory.set(log_key, performance_logs)
-        logger.debug(f"Logged performance data to '{log_key}'.")
+        self._sm_set(log_key, performance_logs)
 
     def needs_new_plan(self, synapse: Task) -> bool:
-        """
-        Determine whether a new plan is required for the incoming synapse.
-    
-        Factors to consider:
-            - If the task has been seen before (cache/memory check)
-            - If system load is high, and a simpler plan is needed
-            - If previous plan failed or degraded in performance
-            - If adaptive signals indicate poor response quality
-        
-        Returns:
-            bool: True if a new plan should be generated, False otherwise
-        """
-        # Example: Look at system load and performance feedback
-        load = self.adaptive_context.get("system_load", 0)
+        load = _coerce_float(self.adaptive_context.get("system_load"), 0.0, minimum=0.0)
         feedback = self.adaptive_context.get("performance_feedback", {})
-        score = feedback.get("score", 1.0) if isinstance(feedback, dict) else feedback
-    
-        # High load or low score? Trigger replanning
-        if load > 85:
+        score = feedback.get("score", 1.0) if isinstance(feedback, dict) else _coerce_float(feedback, 1.0)
+        score = clamp(_coerce_float(score, 1.0), 0.0, 1.0)
+        if load > _coerce_float(self.agent_config.get("high_load_replan_threshold"), 85.0):
             return True
-        if score < 0.6:
+        if score < _coerce_float(self.agent_config.get("low_score_replan_threshold"), 0.6, minimum=0.0, maximum=1.0):
             return True
-    
-        # If this is a completely new task
-        if not hasattr(synapse, 'history') or not synapse.history:
-            return True
-    
-        # Otherwise, stick to previous plan
-        return False
-    
-    def set_adaptive_context(self, context: dict):
+        return not hasattr(synapse, "history") or not getattr(synapse, "history")
+
+    def set_adaptive_context(self, context: dict) -> None:
         self.adaptive_context = context or {}
 
-    def sync_with_shared_memory(self, shared_memory):
-        """Synchronize planning agent with shared memory state"""
+    def sync_with_shared_memory(self, shared_memory) -> None:
         self.shared_memory = shared_memory
-        # Update resource monitor with current resource usage
-        resource_usage = shared_memory.get('resource_usage') or {}
-        self.resource_monitor.gpu_usage = resource_usage.get('gpu', 0)
-        self.resource_monitor.ram_usage = resource_usage.get('ram', 0)
+        resource_usage = self._sm_get("resource_usage", default={}) or {}
+        # Optionally update monitor metrics via its public API
+        if hasattr(self.resource_monitor, "update_metrics"):
+            self.resource_monitor.update_metrics({"gpu": resource_usage.get("gpu", 0.0),
+                                                  "ram": resource_usage.get("ram", 0.0)})
         logger.info("PlanningAgent synchronized with shared memory")
 
-    def update_shared_memory(self, shared_memory):
-        """Update shared memory with current state"""
-        shared_memory.base_state.update(self.world_state)
-        shared_memory.set('resource_usage', {
-            'gpu': self.resource_monitor.gpu_usage,
-            'ram': self.resource_monitor.ram_usage
-        })
+    def update_shared_memory(self, shared_memory) -> None:
+        if hasattr(shared_memory, "base_state") and isinstance(shared_memory.base_state, dict):
+            shared_memory.base_state.update(self.world_state)
+        setter = getattr(shared_memory, "set", None)
+        if callable(setter):
+            setter(
+                "resource_usage",
+                {
+                    "gpu": getattr(self.resource_monitor, "gpu_usage", 0.0),
+                    "ram": getattr(self.resource_monitor, "ram_usage", 0.0),
+                },
+            )
 
-    def predict(self, state: Any = None) -> Dict[str, Any]:
-        """Minimal implementation to satisfy factory requirements"""
+    def predict(self, state: Any = None) -> Dict[str, TypingAny]:
         return {
             "agent": "PlanningAgent",
             "status": "active",
             "current_goal": self.current_goal.name if self.current_goal else None,
-            "plan_length": len(self.current_plan)
+            "plan_length": len(self.current_plan),
+            "config_source": "agents_config.yaml",
         }
 
-def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, Any]]:
-    """Full planning-execution cycle with safety and metrics"""
-    # Phase 1: Plan Generation
-    plan = agent.generate_plan(goal_task)
-    if not plan:
-        logger.error("Plan generation failed")
-        return None
-    
-    # Phase 2: Safety Validation
+
+def run_planning_cycle(agent: PlanningAgent, goal_task: Task) -> Optional[Dict[str, TypingAny]]:
+    """Run generation, safety validation, execution, and metrics for one goal."""
     try:
-        if not agent.safety_planner.safety_check(plan):
-            logger.error("Final plan failed safety validation")
-            return None
-    except (ResourceViolation, TemporalViolation, SafetyMarginError) as e:
-        logger.error(f"Safety violation: {str(e)}")
+        plan = agent.generate_plan(goal_task)
+        if not plan:
+            raise GoalUnreachableError(
+                "Plan generation failed",
+                goal_state=getattr(goal_task, "goal_state", {}) or {},
+                reason="generate_plan_returned_none",
+            )
+
+        if not agent._validate_plan(plan):
+            raise AcademicPlanningError(
+                "Final plan failed safety validation",
+                context={"goal": getattr(goal_task, "name", "")},
+            )
+
+        result = agent.execute_plan(plan, goal_task)
+
+        try:
+            planning_start = agent._planning_start_time or 0.0
+            planning_end = agent._planning_end_time or time.time()  # or 0.0
+            metrics = agent.metrics.calculate_all_metrics(
+                plan=plan,
+                planning_start_time=planning_start,
+                planning_end_time=planning_end,
+                final_status=TaskStatus[result.get("status", TaskStatus.FAILED.name)],
+            )
+        except Exception:
+            metrics = {
+                "plan_length": len(plan),
+                "status": result.get("status"),
+                "planning_time": (
+                    max(0.0, (agent._planning_end_time or time.time()) - (agent._planning_start_time or time.time()))
+                ),
+            }
+
+        logger.info("Planning cycle completed: %s", metrics)
+        return {"execution_result": result, "metrics": metrics, "last_error": agent.last_error}
+    except PlanningError as exc:
+        agent._record_error(exc, stage="planning_cycle", task=goal_task)
+        logger.error("Planning cycle failed: %s", _safe_error_message(exc))
         return None
-    
-    # Phase 3: Plan Execution
-    result = agent.execute_plan(plan, goal_task)
-    
-    # Phase 4: Metrics Collection
-    metrics = PlanningMetrics.calculate_all_metrics(
-        plan=plan,
-        planning_start_time=agent._planning_start_time,
-        planning_end_time=agent._planning_end_time,
-        final_status=goal_task.status
-    )
-    
-    logger.info(f"Planning cycle completed: {metrics}")
-    return {
-        "execution_result": result,
-        "metrics": metrics
-    }
+    except Exception as exc:
+        wrapped = PlanningError(
+            f"Unexpected planning cycle failure: {exc}",
+            context={"goal": getattr(goal_task, "name", "")},
+        )
+        agent._record_error(wrapped, stage="planning_cycle", task=goal_task)
+        logger.error("%s", _safe_error_message(wrapped))
+        return None
+
 
 class HTNPlanner(PlanningAgent):
+    """Compatibility subclass for HTN-style planning workflows."""
 
     StateTuple = Tuple[Tuple[str, Any], ...]
 
     def _ordered_decomposition(self, task: Task) -> Optional[List[Task]]:
-        """Implements Algorithm 1 from Nau et al. (JAIR 2003)"""
-        decomposition_stack: List[Tuple[Task, int, StateTuple]] = [
-            (task, 0, self._freeze_state())
-        ]
-        current_plan = []
-        backtrack_points = []
-
-        while decomposition_stack:
-            current_task, method_step, state = decomposition_stack.pop()
-
-            if method_step >= len(current_task.methods[current_task.selected_method]):
-                if backtrack_points:
-                    # Backtrack to last decision point
-                    current_plan, state = backtrack_points.pop()
-                continue
-
-            next_subtask = current_task.methods[current_task.selected_method][method_step]
-            new_state = self._apply_effects(state, next_subtask)
-
-            if not self._check_preconditions(state, next_subtask):
-                continue
-
-            if next_subtask.task_type == TaskType.ABSTRACT:
-                # Record backtrack point (plan, state, method_step)
-                backtrack_points.append((
-                    current_plan.copy(),
-                    state,
-                    method_step + 1
-                ))
-                decomposition_stack.append((
-                    next_subtask,
-                    0,
-                    new_state
-                ))
-            else:
-                current_plan.append(next_subtask)
-
-        return current_plan
+        return self.decompose_task(task, self.world_state)
 
     def _freeze_state(self) -> Tuple[Tuple[str, Any], ...]:
-        """Immutable state representation for academic planning"""
         return tuple(sorted(self.world_state.items()))
 
     def _apply_effects(self, state: StateTuple, task: Task) -> StateTuple:
-        """STRIPS-style effect application (Fikes & Nilsson 1971)"""
         state_dict = dict(state)
-        for effect in task.effects:
-            effect(state_dict)
+        state_dict = apply_state_effects(state_dict, list(getattr(task, "effects", []) or []))
         return tuple(sorted(state_dict.items()))
 
-    def _partial_order_planning(self):
-        """
-        Implements partial-order planning based on:
-        'SIPE: A Unified Theory of Planning' (Wilkins, 1988)
-        """
-        # Temporal constraint network using Allen's interval algebra
-        temporal_network = {
-            'relations': defaultdict(set),
-            'intervals': {}
-        }
-
-        # Plan steps with causal links
-        plan_steps = []
-        open_conditions = []
-        ordering_constraints = []
-
-        # Initialize with start and goal
-        start = Task("start", TaskType.PRIMITIVE)
-        goal = self.current_goal.copy()
-        plan_steps.extend([start, goal])
-        temporal_network['intervals'] = {
-            start: (0, 0),
-            goal: (float('inf'), float('inf'))
-        }
-
-        while open_conditions:
-            # Select next open condition using LCF strategy
-            condition = min(open_conditions, key=lambda c: c[2])  # [step, precondition, criticality]
-
-            # Find candidate providers using knowledge base
-            candidates = self._find_candidate_steps(condition[1])
-
-            for candidate in candidates:
-                # Add causal link and temporal constraints
-                new_constraints = self._add_causal_link(
-                    candidate, condition[0], temporal_network
-                )
-
-                if not self._detect_temporal_inconsistencies(temporal_network):
-                    # Resolve threats using promotion/demotion
-                    self._resolve_threats(plan_steps, temporal_network)
-                    break
-                else:
-                    # Remove failed constraints
-                    self._remove_constraints(new_constraints, temporal_network)
-
-            # Update open conditions
-            open_conditions = self._identify_new_conditions(plan_steps, temporal_network)
-
-    def _detect_temporal_inconsistencies(self, network):
-        """Implements path consistency algorithm from Allen's temporal logic"""
-        # Use Floyd-Warshall adaptation for temporal networks
-        for k in network['intervals']:
-            for i in network['intervals']:
-                for j in network['intervals']:
-                    intersection = network['relations'][(i,k)] & network['relations'][(k,j)]
-                    if not intersection:
-                        return True
-                    network['relations'][(i,j)] |= intersection
-        return False
-
     def _thompson_sampling_alternatives(self, task: Task) -> List[Task]:
-        """Thompson sampling for decomposition method selection (Chapelle & Li 2011)"""
-        # Maintain beta distributions for each method
-        method_probs = []
-        for method_idx in range(len(task.methods)):
-            key = (task.name, method_idx)
-            alpha = self.method_stats[key]['success'] + 1
-            beta = self.method_stats[key]['total'] - self.method_stats[key]['success'] + 1
-            sample = random.betavariate(alpha, beta)
-            method_probs.append((method_idx, sample))
-        
-        sorted_methods = sorted(method_probs, key=lambda x: -x[1])
-        return self._create_alternatives(task, sorted_methods)
+        method_probs: List[Tuple[int, float]] = []
+        for method_idx in range(len(getattr(task, "methods", []) or [])):
+            stats = self.method_stats[(task.name, str(method_idx))]
+            alpha = _coerce_float(stats.get("success"), 0.0) + 1.0
+            beta = _coerce_float(stats.get("total"), 0.0) - _coerce_float(stats.get("success"), 0.0) + 1.0
+            method_probs.append((method_idx, random.betavariate(max(alpha, 1e-9), max(beta, 1e-9))))
+        method_probs.sort(key=lambda item: item[1], reverse=True)
+        return self._create_alternatives(task, method_probs)
 
-    def _validate_plan(self, plan: List[Task]) -> bool:
-        """Full STRIPS-style validation (Fikes & Nilsson 1971)"""
-        sim_state = self.world_state.copy()
+    def _validate_plan(self, plan: Sequence[Task]) -> bool:
+        sim_state = copy.deepcopy(self.world_state)
         for task in plan:
-            if not all(precond(sim_state) for precond in task.preconditions):
+            try:
+                check_preconditions(
+                    sim_state,
+                    list(getattr(task, "preconditions", []) or []),
+                    task_name=task.name,
+                    task_id=getattr(task, "id", task.name),
+                )
+                sim_state = apply_state_effects(sim_state, list(getattr(task, "effects", []) or []))
+            except PlanningError as exc:
+                self._record_error(exc, stage="htn_plan_validation", task=task)
                 return False
-            for effect in task.effects:
-                effect(sim_state)
-        return True
+        return super()._validate_plan(plan)
+
 
 class PartialOrderPlanner(PlanningAgent):
-    """Implements Wilkins' temporal constraint management"""
-    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config,
-            **kwargs,
-        )
-        self.temporal_constraints: Set[Tuple[Task, Task, str]] = set()  # (A,B,relation)
-        self.causal_links: Set[Tuple[Task, Task, Callable]] = set()  # (producer, consumer, condition)
+    """Compatibility subclass for temporal/causal-link planning extensions."""
 
-    def _add_temporal_constraint(self, constraint: Tuple[Task, Task, str]):
-        """Allen's interval algebra relations (before/after/contains)"""
-        valid_relations = {'before', 'after', 'contains', 'during', 'meets'}
+    def __init__(self, shared_memory, agent_factory, config: Optional[Dict[str, TypingAny]] = None, **kwargs):
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config, **kwargs)
+        self.temporal_constraints: Set[Tuple[Task, Task, str]] = set()
+        self.causal_links: Set[Tuple[Task, Task, Callable]] = set()
+
+    def _add_temporal_constraint(self, constraint: Tuple[Task, Task, str]) -> None:
+        valid_relations = {"before", "after", "contains", "during", "meets"}
         if constraint[2] not in valid_relations:
             raise ValueError(f"Invalid temporal relation: {constraint[2]}")
         self.temporal_constraints.add(constraint)
 
-    def _resolve_threats(self):
-        """Threat resolution via promotion/demotion (Wilkins 1988)"""
-        for link in self.causal_links:
-            producer, consumer, condition = link
+    def _resolve_threats(self) -> None:
+        for producer, consumer, condition in list(self.causal_links):
             for task in self.current_plan:
-                if task.effects and any(not condition(eff) for eff in task.effects):
-                    # Add ordering constraint: task < producer or task > consumer
-                    if random.choice([True, False]):
-                        self._add_temporal_constraint((task, producer, 'before'))
-                    else:
-                        self._add_temporal_constraint((consumer, task, 'before'))
+                if task is producer or task is consumer:
+                    continue
+                for effect in getattr(task, "effects", []) or []:
+                    try:
+                        threatens = not condition(effect)
+                    except Exception:
+                        threatens = False
+                    if threatens:
+                        self._add_temporal_constraint((task, producer, "before"))
+
 
 class AStarPlanner(PlanningAgent):
-    """Implements AO* cost propagation (Martelli & Montanari 1973)"""
+    """Compatibility subclass with simple cost-based plan ordering support."""
+
     def _optimize_plan(self, plan: List[Task]) -> List[Task]:
-        and_or_graph = {} # Initialize as dict
+        primitive_tasks = [task for task in plan if task.task_type == TaskType.PRIMITIVE]
+        abstract_tasks = [task for task in plan if task.task_type == TaskType.ABSTRACT]
+        primitive_tasks.sort(key=lambda task: (self._task_cost(task), getattr(task, "deadline", float("inf"))))
+        return abstract_tasks + primitive_tasks
 
-        for task in plan:
-            if task.task_type == TaskType.ABSTRACT:
-                # Ensure methods is not None before iterating
-                methods_data = []
-                if task.methods:
-                    for method_list in task.methods:
-                        cost_sum = sum(self._task_cost(t) for t in method_list)
-                        # Store method (list of tasks) and its cost
-                        methods_data.append((method_list, cost_sum))
-                
-                and_or_graph[task] = {
-                    'methods': methods_data,
-                    'best_cost': (float('inf'), float('inf'))
-                }
-        
-        # Initialize with primitive costs
-        for task in plan:
+    def _task_cost(self, task: Task) -> float:
+        profile = getattr(task, "resource_requirements", ResourceProfile())
+        resource_cost = _coerce_float(getattr(profile, "gpu", 0.0), 0.0) * 10.0
+        resource_cost += _coerce_float(getattr(profile, "ram", 0.0), 0.0)
+        return _coerce_float(getattr(task, "cost", 1.0), 1.0) + resource_cost + _coerce_float(getattr(task, "risk_score", 0.0), 0.0)
+
+    def _extract_optimal_plan(self, and_or_graph: Dict[Task, Dict[str, TypingAny]]) -> List[Task]:
+        plan: List[Task] = []
+        for task, payload in and_or_graph.items():
             if task.task_type == TaskType.PRIMITIVE:
-                and_or_graph[task] = {'best_cost': (1.0, 0.0)}
-
-        # Cost propagation from leaves to root
-        changed = True
-        while changed:
-            changed = False
-            for task in reversed(plan):
-                if task.task_type != TaskType.ABSTRACT:
-                    continue
-                
-                # Check if task is in and_or_graph, especially if plan can contain tasks not added above
-                if task not in and_or_graph: continue
-
-                # Find minimal cost method
-                min_method_cost = min(
-                    (cost for _, cost in and_or_graph[task]['methods']),
-                    default=(float('inf'), float('inf'))
-                )
-                
-                # Update if better than current
-                if min_method_cost < and_or_graph[task]['best_cost']:
-                    and_or_graph[task]['best_cost'] = min_method_cost
-                    changed = True
-
-        return self._extract_optimal_plan(and_or_graph)
-    
-    def _extract_optimal_plan(self, and_or_graph):
-        """
-        Traverses the AND-OR graph to extract the least-cost plan.
-        This assumes each abstract task in the graph maps to its best-cost method.
-    
-        Args:
-            and_or_graph (Dict): A dict mapping each task to its methods and associated costs.
-    
-        Returns:
-            List[Task]: A flattened, sequential plan composed only of primitive tasks.
-        """
-        final_plan = []
-        visited = set()
-    
-        def dfs(task):
-            if task in visited:
-                return
-            visited.add(task)
-    
-            # If it's a primitive task, just add it
-            if task.task_type == TaskType.PRIMITIVE:
-                final_plan.append(task)
-                return
-    
-            task_info = and_or_graph.get(task)
-            if not task_info or 'methods' not in task_info:
-                logger.warning(f"No method info found for abstract task: {task.name}")
-                return
-    
-            # Choose the method with the best cost
-            best_method = min(task_info['methods'], key=lambda x: x[1], default=([], float('inf')))[0]
-            for subtask in best_method:
-                dfs(subtask)
-    
-        # Start DFS from top-level tasks in the graph
-        for root_task in and_or_graph:
-            if root_task.task_type == TaskType.ABSTRACT:
-                dfs(root_task)
-    
-        return final_plan
-
-    def _task_cost(self, task: Task) -> CostProfile:
-        """Academic cost model from HSP (Bonet & Geffner 2001)"""
-        base = len(self.decompose_task(task))
-        heuristic = self._hsp_heuristic(task)
-        return (base, base + heuristic)
-
-    def _heuristic(self, current_state: WorldState, goal_state: WorldState) -> float:
-        return sum(1 for k, v in dict(goal_state).items() if dict(current_state).get(k) != v)
-
-    def execute_plan(self, goal_task: Task) -> Dict[str, Any]:
-        goal_state = goal_task.goal_state if hasattr(goal_task, "goal_state") else ()
-        open_set = []
-        start_state = self.get_current_state_tuple()
-        heapq.heappush(open_set, (0, [], start_state))
-
-        visited = set()
-
-        while open_set:
-            cost, path, state_tuple = heapq.heappop(open_set)
-            if state_tuple in visited:
+                plan.append(task)
                 continue
-            visited.add(state_tuple)
+            methods = payload.get("methods", [])
+            if methods:
+                best_method, _cost = min(methods, key=lambda item: item[1])
+                plan.extend([subtask for subtask in best_method if subtask.task_type == TaskType.PRIMITIVE])
+        return self._optimize_plan(plan)
 
-            self.load_state_from_tuple(state_tuple)
-
-            if self._goal_satisfied(goal_state):
-                return super().execute_plan(path, goal_task=None)
-
-            for task_name in self.task_library:
-                task_template = self.task_library[task_name]
-                task = task_template.copy() # Work with a copy
-
-                if task.task_type != TaskType.PRIMITIVE:
-                    continue
-                
-                # Create a temporary world_state dict from state_tuple for check_preconditions
-                current_world_state_dict = dict(state_tuple)
-                if not task.check_preconditions(current_world_state_dict):
-                    continue
-                
-                # Apply effects to a *copy* of the current_world_state_dict to get new_state
-                temp_new_world_state_dict = current_world_state_dict.copy()
-                task.apply_effects(temp_new_world_state_dict)
-                new_state_tuple = tuple(sorted(temp_new_world_state_dict.items()))
-                
-                heuristic = self._heuristic(new_state_tuple, goal_state)
-                new_cost = cost + task.cost
-                heapq.heappush(open_set, (new_cost + heuristic, path + [task], new_state_tuple))
-
-        return {"status": "FAILURE", "world_state": self.world_state}
-
-class ExplanatoryPlanner(PlanningAgent):
-    def generate_explanation(self, plan: List[Task]) -> Dict:
-        """Produces human-understandable plan rationale"""
-        return {
-            'goal_satisfaction': self._explain_goal_achievement(plan),
-            'method_choices': self._explain_method_selections(plan),
-            'failure_points': self._identify_risk_points(plan)
-        }
-    
-    def _optimize_plan(self, plan: List[Task]) -> List[Task]:
-        """
-        Implements AO* algorithm with cost propagation from:
-        'Optimal Efficiency of the AO* Algorithm' (Martelli & Montanari, 1973)
-        """
-        # Build AND-OR graph representation
-        and_or_graph = self._build_and_or_graph(plan)
-
-        # Initialize heuristic estimates
-        for node in reversed(math.topological_order(and_or_graph)):
-            if node.is_and_node:
-                node.cost = sum(child.cost for child in node.children)
-            else:
-                node.cost = min(child.cost for child in node.children)
-
-        # Priority queue based on f(n) = g(n) + h(n)
-        frontier = math.PriorityQueue()
-        frontier.put((self._heuristic(plan[0]), plan[0]))
-
-        while not frontier.empty():
-            current = frontier.get()[1]
-
-            if current.is_primitive:
-                continue
-
-            # Expand best partial plan
-            best_method = min(current.methods, key=lambda m: m.cost)
-
-            if best_method.cost < current.cost:
-                current.cost = best_method.cost
-                # Propagate cost changes upwards
-                for parent in current.parents:
-                    new_cost = parent.recalculate_cost()
-                    if new_cost < parent.cost:
-                        frontier.put((new_cost + self._heuristic(parent.task)), parent)
-
-        return self._extract_optimal_plan(and_or_graph)
-
-    def _heuristic(self, task: Task) -> float:
-        """Academic admissible heuristic (HSP-style)"""
-        if task.task_type == TaskType.PRIMITIVE:
-            return 0
-        # Count of remaining abstract tasks (Bonet & Geffner, 2001)
-        return len([t for t in self.task_library.values() if t.task_type == TaskType.ABSTRACT])
-
-    def _build_and_or_graph(self, plan):
-        """Construct AND-OR graph with cost annotations"""
-        graph = math.ANDORGraph()
-        current_level = {plan[0]: graph.add_node(plan[0], is_and=False)}
-
-        while current_level:
-            next_level = {}
-            for task, node in current_level.items():
-                if task.task_type == TaskType.ABSTRACT:
-                    # AND nodes for decomposition methods
-                    for method in task.methods:
-                        method_node = graph.add_node(method, is_and=True)
-                        graph.add_edge(node, method_node)
-                        # OR nodes for subtasks
-                        for subtask in method:
-                            subtask_node = graph.add_node(subtask, is_and=False)
-                            graph.add_edge(method_node, subtask_node)
-                            next_level[subtask] = subtask_node
-            current_level = next_level
-
-        return graph
-
-    def _memoize_decompositions(self):
-        """Memoization cache for common decompositions (Markovitch & Scott 1988)"""
-        self.decomposition_cache = {}
-
-    def decompose_task(self, task_to_decompose: Task) -> Optional[List[Task]]:
-        """Augmented decomposition with safety-aware distribution"""
-        try:
-            # Attempt distributed decomposition first
-            return self.safety_planner.distributed_decomposition(task_to_decompose)
-        except ResourceViolation:
-            logger.info("Falling back to local decomposition")
-            return self._local_decomposition(task_to_decompose)
-
-    def _handle_safety_violation(self, task: Task, error: Exception) -> Optional[List[Task]]:
-        """Integrated safety violation recovery"""
-        logger.warning(f"Initial plan failed safety checks. Attempting repair...")
-        
-        # Get safety-aware repair candidates
-        candidates = self.safety_planner.dynamic_replanning_pipeline(task)
-        
-        # Validate and select best candidate
-        for candidate in candidates:
-            if self.safety_planner.safety_check([candidate]):
-                logger.info("Found valid safety-compliant alternative plan")
-                return candidate
-                
-        logger.error("No safe alternatives found")
-        return None
-
-    def interactive_adjustment(self, adjustment: dict):
-        """Expose safety planner's adjustment interface"""
-        self.safety_planner.interactive_adjustment_handler(adjustment)
-        self.current_plan = self.safety_planner.current_plan
 
 if __name__ == "__main__":
-    print("\n=== Running AI Planning Agent Test ===\n")
-    printer.status("Init", "Planning Agent initialized", "success")
+    print("\n=== PlanningAgent smoke test ===")
     from .collaborative.shared_memory import SharedMemory
     from .agent_factory import AgentFactory
-    import datetime
 
-    shared_memory = SharedMemory()
-    agent_factory = AgentFactory()
+    cfg={"gpu_limit":1,"ram_limit":8,"fallback_agent_capabilities":["gpu","ram"],
+         "resource_safety_buffers":{"gpu":0,"ram":0},"default_deadline_seconds":120}
+    a=PlanningAgent(shared_memory=SharedMemory, agent_factory=AgentFactory, config=cfg)
+    a.safety_planner.safety_check=lambda p: True # type: ignore
+    a.executor.start_monitoring=lambda p,s: None # type: ignore
+    a.executor.stop_monitoring=lambda: None # type: ignore
+    a.resource_monitor.acquire_resources=lambda *x,**k: None # type: ignore
+    a.resource_monitor.release_resources=lambda *x,**k: None # type: ignore
 
-    planner = PlanningAgent(shared_memory, agent_factory, config=None)
-    print(planner)
-    print("\n* * * * * Phase 2 - Heuristic selector * * * * *\n")
-    selector = HeuristicSelector()
-    dummy_method_stats = {
-        ("test_task", "0"): {"success": 3, "total": 5},
-        ("test_task", "1"): {"success": 2, "total": 4},
-    }
+    def sched(tasks, agents, risk_assessor=None, state=None):
+        ids=[t["id"] for t in tasks]; deps={t["id"]:t.get("dependencies",[]) for t in tasks}
+        now=time.time(); out={}
+        for i,tid in enumerate(topological_sort(ids,deps)):
+            s=next(t for t in tasks if t["id"]==tid)
+            out[tid]={"task_id":tid,"task_name":s["name"],"agent_id":"planner",
+                      "start_time":now+i,"end_time":now+i+s["duration"],
+                      "deadline":s["deadline"],"duration":s["duration"],
+                      "risk_score":s.get("risk_score",0)}
+        return out
+    a.scheduler.schedule=sched
 
-    print("\n=== Heuristic Selection Tests ===")
+    def ok(n,c): print(f"[{'PASS' if c else 'FAIL'}] {n}"); assert c,n
+    def fx(k,v): return lambda s: s.update({k:v})
+    R=ResourceProfile
 
-    # Test Case 1: RL (sequential task)
-    rl_task = {
-        "name": "test_task",
-        "priority": 0.8,
-        "goal_state": {"x": 1},
-        "parent": {
-            "name": "sub_task_3",
-            "parent": {
-                "name": "sub_task_2",
-                "parent": {
-                    "name": "sub_task_1",
-                    "parent": None
-                }
-            }
-        },
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=2)).isoformat(),
-    }
+    t1=Task("collect",TaskType.PRIMITIVE,preconditions=[lambda s: True],
+            effects=[fx("data",True)],resource_requirements=R(gpu=.1,ram=1),
+            duration=1,deadline=time.time()+60); t1.id="collect"
+    t2=Task("plan",TaskType.PRIMITIVE,preconditions=[lambda s:s.get("data") is True],
+            effects=[fx("planned",True)],resource_requirements=R(gpu=.1,ram=1),
+            duration=1,deadline=time.time()+60,dependencies=["collect"]); t2.id="plan"
+    goal=Task("demo_goal",TaskType.ABSTRACT,methods=[[t1,t2]],
+              resource_requirements=R(gpu=0,ram=0),duration=2,
+              deadline=time.time()+90,goal_state={"planned":True}); goal.id="demo_goal"
 
-    printer.status("1", "Testing RL Heuristic (sequential task):", "success")
-    selector.predict_success_prob(rl_task, world_state={}, method_stats=dummy_method_stats, method_id="0")
+    a.register_task(goal)
+    plan=a.generate_plan(goal)
+    ok("plan generation + scheduling", bool(plan) and len(plan)==2)
+    ok("Task conversion", all(isinstance(t,Task) for t in plan)) # type: ignore
+    ok("DAG helper", detect_cycles([t.id for t in plan], # type: ignore
+       {t.id:getattr(t,"dependencies",[]) for t in plan}) is None) # type: ignore
+    res=a.execute_plan(plan, goal) # type: ignore
+    ok("execution", res["status"]==TaskStatus.SUCCESS.name)
+    ok("goal reached", state_satisfies_goal(a.world_state,{"planned":True}))
+    ok("history + diagnostics", len(a.execution_history)>=2 and isinstance(a.predict(),dict))
 
-    # Test Case 2: DT (deep hierarchy)
-    dt_task = {
-        "name": "test_task",
-        "priority": 0.5,
-        "goal_state": {"x": 1},
-        "parent": {
-            "parent": {
-                "parent": {
-                    "parent": {
-                        "parent": {
-                            "parent": {
-                                "parent": {
-                                    "parent": {
-                                        "parent": {
-                                            "parent": None  # Depth of 10
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=5)).isoformat(),
-    }
+    bad=Task("bad_gpu",TaskType.PRIMITIVE,preconditions=[lambda s: True],
+             effects=[],resource_requirements=R(gpu=2,ram=1),
+             duration=1,deadline=time.time()+30); bad.id="bad_gpu"
+    try: a.register_task(bad); raise AssertionError("bad resource task accepted")
+    except ResourceViolation: print("[PASS] structured ResourceViolation")
 
-    printer.status("2", "Testing Decision Tree Heuristic (deep task):", "success")
-    selector.predict_success_prob(dt_task, world_state={}, method_stats=dummy_method_stats, method_id="1")
-
-    # Test Case 3: GB (resource-constrained)
-    gb_task = {
-        "name": "test_task",
-        "priority": 0.4,
-        "goal_state": {"x": 1},
-        "parent": None,
-        "creation_time": datetime.datetime.now().isoformat(),
-        "deadline": (datetime.datetime.now() + datetime.timedelta(hours=3)).isoformat(),
-    }
-
-    printer.status("3", "Testing Gradient Boosting Heuristic (low CPU):", "success")
-    selector.predict_success_prob(
-        gb_task,
-        world_state={"cpu_available": 0.2, "memory_available": 0.3},
-        method_stats=dummy_method_stats,
-        method_id="0"
-    )
-    print("\n=== Planning Agent Demo Completed ===\n")
+    blocked=Task("blocked",TaskType.PRIMITIVE,preconditions=[lambda s: False],
+                 effects=[],resource_requirements=R(gpu=0,ram=0),
+                 duration=1,deadline=time.time()+30); blocked.id="blocked"
+    ok("PreconditionViolation path",
+       a.decompose_task(blocked,a.world_state) is None and a.last_error is not None)
+    print("\n=== smoke test passed ===")
