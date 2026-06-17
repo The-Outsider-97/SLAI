@@ -22,7 +22,7 @@ import os
 import re
 import threading
 import time
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,7 +43,7 @@ from .knowledge.utils.knowledge_errors import (
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 _TOKENIZER_INSTANCE = None
 
@@ -86,6 +86,8 @@ class KnowledgeAgent(BaseAgent):
         self.agent_factory = agent_factory
         self.config = load_global_config()
         self.knowledge_config = get_config_section('knowledge_agent') or {}
+        if config:
+            self.knowledge_config.update(dict(config))
 
         self.source = self.knowledge_config.get("source", "knowledge_agent")
         self.tokenize = bool(self.knowledge_config.get("tokenize", True))
@@ -187,37 +189,37 @@ class KnowledgeAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _create_knowledge_memory(self):
-        from src.agents.knowledge.knowledge_memory import KnowledgeMemory
+        from .knowledge.knowledge_memory import KnowledgeMemory 
 
         return KnowledgeMemory()
 
     def _create_knowledge_cache(self):
-        from src.agents.knowledge.knowledge_cache import KnowledgeCache
+        from .knowledge.knowledge_cache import KnowledgeCache
 
         return KnowledgeCache()
 
     def _create_perform_action(self):
-        from src.agents.knowledge.perform_action import PerformAction
+        from .knowledge.perform_action import PerformAction
 
         return PerformAction()
 
     def _create_ontology_manager(self):
-        from src.agents.knowledge.ontology_manager import OntologyManager
+        from .knowledge.ontology_manager import OntologyManager 
 
         return OntologyManager()
 
     def _create_rule_engine(self):
-        from src.agents.knowledge.utils.rule_engine import RuleEngine
+        from .knowledge.utils.rule_engine import RuleEngine 
 
         return RuleEngine()
 
     def _create_synchronizer(self, knowledge_memory, rule_engine):
-        from src.agents.knowledge.knowledge_sync import KnowledgeSynchronizer
+        from .knowledge.knowledge_sync import KnowledgeSynchronizer
 
         return KnowledgeSynchronizer(knowledge_memory=knowledge_memory, rule_engine=rule_engine, autostart=False)
 
     def _create_monitor(self, knowledge_cache, rule_engine, governor, perform_action):
-        from src.agents.knowledge.knowledge_monitor import KnowledgeMonitor
+        from .knowledge.knowledge_monitor import KnowledgeMonitor
 
         return KnowledgeMonitor(
             agent=self,
@@ -229,7 +231,7 @@ class KnowledgeAgent(BaseAgent):
         )
 
     def _create_orchestrator(self, knowledge_memory, knowledge_cache, rule_engine, governor, synchronizer, monitor, perform_action):
-        from src.agents.knowledge.knowledge_orchestrator import KnowledgeOrchestrator
+        from .knowledge.knowledge_orchestrator import KnowledgeOrchestrator
 
         return KnowledgeOrchestrator(
             agent=self,
@@ -271,7 +273,7 @@ class KnowledgeAgent(BaseAgent):
         if not isinstance(governor_config, dict):
             governor_config = {}
         if governor_config.get("enabled", True):
-            from src.agents.knowledge.governor import Governor
+            from .knowledge.governor import Governor
 
             governor = Governor(knowledge_agent=self)
             logger.info("Governance subsystem initialized")
@@ -1260,8 +1262,8 @@ class KnowledgeAgent(BaseAgent):
 if __name__ == "__main__":  # pragma: no cover
     print("\n=== Running Knowledge Agent ===\n")
     printer.status("Init", "Knowledge Agent initialized", "success")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
 
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()
