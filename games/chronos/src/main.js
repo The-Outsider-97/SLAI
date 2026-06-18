@@ -1,7 +1,6 @@
-import { Game } from './engine.js';
-import { CONFIG, ActionType, BOARD_VARIANTS, applyBoardSize } from './constants.js';
-import { GoogleGenAI } from "@google/genai";
-import { mountPageBackgroundLights } from './pageBackgroundLights.js';
+import { Game } from './engine.js?v=chronos-ui-v4-20260617-2208';
+import { CONFIG, ActionType, BOARD_VARIANTS, applyBoardSize } from './constants.js?v=chronos-ui-v4-20260617-2208';
+import { mountPageBackgroundLights } from './pageBackgroundLights.js?v=chronos-ui-v4-20260617-2208';
 
 let game;
 let selectedUnit = null;
@@ -45,6 +44,7 @@ let selfPlayVisualMode = false;
 mountPageBackgroundLights();
 
 function initGame(boardSize = CONFIG.board.size) {
+  window.__chronosMainLoaded = true;
   applyBoardSize(boardSize);
   game = new Game();
   boardEl.innerHTML = '';
@@ -53,6 +53,8 @@ function initGame(boardSize = CONFIG.board.size) {
   possibleActions = null;
   renderBoardCoordinates();
   render();
+  window.__chronosBoardRendered = Boolean(document.getElementById('grid-layer')?.children?.length);
+  window.__chronosBoardCells = document.getElementById('grid-layer')?.children?.length || 0;
   log(`Game Started on ${CONFIG.board.size}x${CONFIG.board.size}. Player 1's Turn.`);
 }
 
@@ -550,6 +552,7 @@ function renderBoard() {
 
   // 1. Render Grid Cells (Interaction Targets)
   gridLayer.innerHTML = '';
+  boardEl.dataset.chronosBuild = window.__chronosBuild || 'chronos-ui-v4';
   for (let r = 0; r < CONFIG.board.size; r++) {
     for (let c = 0; c < CONFIG.board.size; c++) {
       const cell = document.createElement('div');
@@ -629,6 +632,7 @@ function renderBoard() {
       gridLayer.appendChild(cell);
     }
   }
+  boardEl.dataset.chronosCells = String(gridLayer.children.length);
 
   // 2. Render SVG Arrows
   svgOverlay.innerHTML = '';
@@ -1272,86 +1276,111 @@ function resetSelection() {
 }
 
 // Start
-if (boardSizeSelectEl) {
-  boardSizeSelectEl.innerHTML = BOARD_VARIANTS.map(size => `<option value="${size}">${size} x ${size}</option>`).join('');
-  boardSizeSelectEl.value = String(CONFIG.board.size);
+function showBootError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('Chronos boot failed:', error);
+
+  const targetLogs = document.getElementById('logs');
+  if (targetLogs) {
+    const div = document.createElement('div');
+    div.className = 'mb-1 text-traffic-red text-sm font-mono';
+    div.textContent = `Chronos boot failed: ${message}`;
+    targetLogs.prepend(div);
+  }
+
+  const targetBoard = document.getElementById('board');
+  if (targetBoard) {
+    targetBoard.innerHTML = `<div class="absolute inset-0 flex items-center justify-center p-6 text-center text-traffic-red text-xs font-mono bg-black/60 border border-traffic-red/40 rounded-xl">Chronos boot failed: ${message}</div>`;
+  }
 }
 
-initGame(CONFIG.board.size);
-renderScoreboardPanel();
-switchSidePanel(activeSidePanel);
-setSidebarVisibility(false);
+function bootstrapChronos() {
+  try {
+    if (boardSizeSelectEl) {
+      boardSizeSelectEl.innerHTML = BOARD_VARIANTS.map(size => `<option value="${size}">${size} x ${size}</option>`).join('');
+      boardSizeSelectEl.value = String(CONFIG.board.size);
+    }
 
-if (commsTabBtn && scoreboardTabBtn) {
-  commsTabBtn.onclick = () => switchSidePanel('comms');
-  scoreboardTabBtn.onclick = () => switchSidePanel('scoreboard');
+    initGame(CONFIG.board.size);
+    renderScoreboardPanel();
+    switchSidePanel(activeSidePanel);
+    setSidebarVisibility(false);
+
+    if (commsTabBtn && scoreboardTabBtn) {
+      commsTabBtn.onclick = () => switchSidePanel('comms');
+      scoreboardTabBtn.onclick = () => switchSidePanel('scoreboard');
+    }
+
+    if (boardSizeSelectEl) {
+      boardSizeSelectEl.onchange = (event) => {
+        const selectedSize = Number(event.target.value);
+        if (!BOARD_VARIANTS.includes(selectedSize)) return;
+        initGame(selectedSize);
+      };
+    }
+
+    if (sidebarToggleBtn) {
+      sidebarToggleBtn.onclick = () => setSidebarVisibility(!sidePanelHidden);
+    }
+  } catch (error) {
+    showBootError(error);
+  }
 }
 
-if (boardSizeSelectEl) {
-  boardSizeSelectEl.onchange = (event) => {
-    const selectedSize = Number(event.target.value);
-    if (!BOARD_VARIANTS.includes(selectedSize)) return;
-    initGame(selectedSize);
-  };
-}
-
-if (sidebarToggleBtn) {
-  sidebarToggleBtn.onclick = () => setSidebarVisibility(!sidePanelHidden);
-}
+bootstrapChronos();
 
 // Chat Logic
 const chatInput = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send');
 const chatHistory = document.getElementById('chat-history');
 
-let chatSession = null;
-
 if (chatInput && chatSendBtn && chatHistory) {
   chatSendBtn.onclick = sendChatMessage;
-  chatInput.onkeypress = (e) => {
-    if (e.key === 'Enter') sendChatMessage();
+  chatInput.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChatMessage();
+    }
   };
 }
 
 async function sendChatMessage() {
+  if (!chatInput || !chatHistory) return;
+
   const text = chatInput.value.trim();
   if (!text) return;
 
-  // User Message
   appendChatMessage('You', text, 'text-sky-blue');
   chatInput.value = '';
 
-  // Loading state
   const loadingId = appendChatMessage('AI', 'Thinking...', 'text-traffic-red animate-pulse-soft');
 
   try {
-    if (!chatSession) {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) throw new Error("Missing API Key");
-        
-        const ai = new GoogleGenAI({ apiKey });
-        chatSession = ai.chats.create({
-            model: "gemini-3-flash-preview",
-            config: {
-                systemInstruction: "You are a tactical AI assistant for the game Chronos: Clash of Wills. Help the player with strategy. Keep responses concise and tactical.",
-            }
-        });
+    const response = await fetch('/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: text,
+        state: game?.serialize ? game.serialize() : null,
+      }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
     }
 
-    const result = await chatSession.sendMessage({ message: text });
-    const responseText = result.text;
+    const responseText = payload.response || payload.reply || payload.message || 'No tactical response returned.';
 
-    // Remove loading message
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
 
     appendChatMessage('AI', responseText, 'text-traffic-red');
-
   } catch (e) {
     console.error(e);
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
-    appendChatMessage('System', `Connection Lost. ${e.message}`, 'text-red-500');
+    appendChatMessage('System', `Connection lost. ${e.message}`, 'text-red-500');
   }
 }
 
@@ -1431,7 +1460,6 @@ function startTrainingStatusMonitor() {
   trainingMonitorInterval = setInterval(refreshTrainingStatus, 2000);
 }
 
-startTrainingStatusMonitor();
 
 function ensureSelfPlayPanel() {
   const host = document.getElementById('chat-history');
@@ -1598,4 +1626,3 @@ function startSelfPlayMonitor() {
   selfPlayFrameInterval = setInterval(pollSelfPlayFrame, 500);
 }
 
-startSelfPlayMonitor();
