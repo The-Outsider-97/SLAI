@@ -25,7 +25,9 @@ Design goals:
 from __future__ import annotations
 
 import math
-import numpy as np
+import copy
+import time
+import numpy as np # type: ignore
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -154,6 +156,14 @@ class RewardModel:
         self.enabled = coerce_bool(self.reward_config.get("enabled", True), True)
         self.max_text_length = coerce_int(self.reward_config.get("max_text_length"), 8192, minimum=1)
         self.default_context_type = normalize_text(self.reward_config.get("default_context_type", "default"), max_length=96) or "default"
+        self.log_evaluations = coerce_bool(self.reward_config.get("log_evaluations", False), False)
+        self.log_full_report = coerce_bool(self.reward_config.get("log_full_report", False), False)
+        self.log_every_n = max(1, int(self.reward_config.get("log_every_n", 100)))
+        self.cache_enabled = coerce_bool(self.reward_config.get("cache_enabled", True), True)
+        self.cache_ttl_seconds = coerce_float(self.reward_config.get("cache_ttl_seconds", 2.0), 2.0, minimum=0.0)
+        self.cache_max_entries = coerce_int(self.reward_config.get("cache_max_entries", 256), 256, minimum=1)
+        self._evaluation_count = 0
+        self._evaluation_cache: Dict[str, Tuple[float, RewardEvaluation]] = {}
 
         self._validate_configuration()
 
@@ -181,10 +191,20 @@ class RewardModel:
             )),
         )
 
+    def _cache_key(self, normalized_text: str, context: Mapping[str, Any]) -> str:
+        return fingerprint({
+            "schema_version": EVALUATION_SCHEMA_VERSION,
+            "module_version": MODULE_VERSION,
+            "text_fingerprint": fingerprint(normalized_text),
+            "context_fingerprint": fingerprint(redact_value(context)),
+            "components": list(self.components),
+            "weights_fingerprint": fingerprint(self.rule_weights),
+            "score_model_schema": getattr(self.score_model, "score_config", {}).get("schema_version"),
+        })
+
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
-
     def _cfg(self, path: Sequence[str] | str, default: Any = None) -> Any:
         return get_nested(self.reward_config, path, default)
 
@@ -486,6 +506,16 @@ class RewardModel:
         context_map = self._normalize_context(context)
         normalized_text = normalize_text(text, max_length=self.max_text_length, preserve_newlines=True)
         text_fp = fingerprint(normalized_text)
+        cache_key = self._cache_key(normalized_text, context_map)
+        now = time.monotonic()
+        
+        if self.cache_enabled and self.cache_ttl_seconds > 0:
+            cached = self._evaluation_cache.get(cache_key)
+            if cached is not None:
+                expires_at, evaluation = cached
+                if expires_at > now:
+                    return copy.deepcopy(evaluation)
+                self._evaluation_cache.pop(cache_key, None)
         score_values, score_report = self._score_with_score_model(normalized_text, context_map)
         component_scores = {name: clamp_score(score_values.get(name, 0.0)) for name in self.components}
         adjusted_scores, context_adjustments = self._apply_context_adjustments(component_scores, context_map)
@@ -534,20 +564,48 @@ class RewardModel:
                 "learned_model_active": bool(self.regression_model),
             },
         )
+        if self.cache_enabled and self.cache_ttl_seconds > 0 and evaluation.decision == "allow":
+            if len(self._evaluation_cache) >= self.cache_max_entries:
+                oldest_key = next(iter(self._evaluation_cache))
+                self._evaluation_cache.pop(oldest_key, None)
+            self._evaluation_cache[cache_key] = (time.monotonic() + self.cache_ttl_seconds, evaluation)
 
         if coerce_bool(self._cfg("memory.store_evaluations", self.reward_config.get("store_evaluations", True)), True):
             self._store_evaluation(evaluation, context_map)
 
-        logger.info("Reward evaluation completed: %s", stable_json(safe_log_payload(
-            "reward_evaluation_completed",
-            {
+        self._evaluation_count += 1
+        
+        should_log = (
+            self.log_evaluations
+            or evaluation.decision in {"review", "block"}
+            or self._evaluation_count % self.log_every_n == 0
+        )
+        
+        if should_log:
+            payload = evaluation.to_dict() if self.log_full_report else {
                 "evaluation_id": evaluation.evaluation_id,
+                "text_fingerprint": evaluation.text_fingerprint,
                 "decision": evaluation.decision,
                 "risk_score": evaluation.risk_score,
                 "composite": evaluation.composite,
                 "context_type": evaluation.context_type,
-            },
-        )))
+            }
+            logger.info(
+                "Reward evaluation completed: %s",
+                stable_json(safe_log_payload("reward_evaluation_completed", payload)),
+            )
+        else:
+            logger.debug(
+                "Reward evaluation completed: %s",
+                stable_json(safe_log_payload(
+                    "reward_evaluation_completed",
+                    {
+                        "text_fingerprint": evaluation.text_fingerprint,
+                        "decision": evaluation.decision,
+                        "risk_score": evaluation.risk_score,
+                    },
+                )),
+            )
         return evaluation
 
     def evaluate(self, text: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
