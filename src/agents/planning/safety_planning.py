@@ -392,6 +392,8 @@ class SafetyPlanning:
         """
         with self.lock:
             self.current_violations = []
+            margin_report: Dict[str, float] = {}
+            margin_diagnostics: Dict[str, Any] = {}
             try:
                 safe_plan = self._normalise_plan(plan)
                 if not self.safety_config.get("enabled", True):
@@ -410,6 +412,7 @@ class SafetyPlanning:
                     available = self.resource_monitor.get_available_resources()
                     margin_report = self.calculations.check_safety_margins(safe_plan, available)
                     self._validate_margin_report(margin_report, safe_plan)
+                    margin_diagnostics = getattr(self.calculations, "last_margin_diagnostics", {})
                 except (ResourceViolation, SafetyMarginError) as e:
                     self._record_violation("resource", e.resource_type, getattr(e, "measured_utilisation", 1.0), 0.0, "")
                     if raise_on_failure:
@@ -450,6 +453,7 @@ class SafetyPlanning:
                     "timestamp": time.time(),
                     "task_count": len(safe_plan),
                     "margins": margin_report,
+                    "margin_diagnostics": margin_diagnostics,
                     "risk_profile": risk_profile,
                     "violations": [v.to_dict() for v in self.current_violations],
                 }
@@ -519,7 +523,10 @@ class SafetyPlanning:
                     ",".join(task.id for task in plan[:3]),
                     severity="critical" if value <= 0.0 else "high",
                     corrective_action=f"improve_{name}_margin",
-                    impact_analysis={"margins": margins},
+                    impact_analysis={
+                        "margins": margins,
+                        "margin_diagnostics": getattr(self.calculations, "last_margin_diagnostics", {}),
+                    },
                 )
 
     def _validate_temporal_constraints(self, task: Task) -> None:
