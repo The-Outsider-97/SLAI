@@ -5,16 +5,25 @@ random_state: 42
 planning_db_path: "templates/planning_db.json"
 heuristic_model_path: "src/agents/planning/models/"
 monitor_snapshot: "src/agents/planning/checkpoints/monitor_snapshot.json"
+runtime_profile: production
 
 safety_margins:
   resource_buffers:
-    gpu: 0.15           # 15% of available GPUs must remain unallocated
-    ram: 0.2            # 20% of total RAM must remain free
-    specialized_hardware: ["emergency_gpu"]  # Reserved hardware units
+    gpu: 0.15
+    ram: 0.2
+    specialized_hardware_buffer: 0.1
+
   temporal:
-    min_task_duration: 30  # Minimum allowed task duration in seconds
-    max_concurrent: 5      # Max simultaneous tasks per agent
-    time_buffer: 120       # Minimum gap between dependent tasks (seconds)
+    min_task_duration: 30
+    max_concurrent: 5
+    time_buffer: 120
+
+  profiles:
+    chronos:
+      temporal:
+        min_task_duration: 1
+        max_concurrent: 5
+        time_buffer: 5
 
 
 service_discovery:
