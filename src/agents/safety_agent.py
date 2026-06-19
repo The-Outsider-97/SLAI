@@ -217,6 +217,7 @@ class SafetyAgent(BaseAgent):
         self.store_audit_events = coerce_bool(self._cfg("shared_memory.store_audit_events", True), True)
         self.assessment_history_limit = coerce_int(self._cfg("assessment_history_limit", 500), 500, minimum=10)
         self.audit_trail_limit = coerce_int(self._cfg("audit_trail_limit", 1000), 1000, minimum=50)
+        self.verbose_console = coerce_bool(self._cfg("verbose_console", False), False)
         self.risk_thresholds = dict(self._cfg("risk_thresholds", {}))
         self.aggregation_weights = dict(self._cfg("aggregation_weights", {}))
         self.component_timeouts = dict(self._cfg("component_timeouts", {}))
@@ -594,7 +595,8 @@ class SafetyAgent(BaseAgent):
         warnings: List[str] = []
         sanitized_text = input_text
 
-        printer.status("SAFETY", "Performing comprehensive safety assessment", "info")
+        if self.verbose_console:
+            printer.status("SAFETY", "Performing comprehensive safety assessment", "info")
 
         # SafetyGuard is the first gate because it sanitizes content and detects fail-closed prompt/content risks.
         if self._component_enabled("safety_guard"):
