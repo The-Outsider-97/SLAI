@@ -158,6 +158,14 @@ class PlanningAgent(BaseAgent):
         # Wire shared resources where subsystem classes expose compatible fields.
         if hasattr(self.safety_planner, "resource_monitor"):
             self.safety_planner.resource_monitor = self.resource_monitor
+        
+            calculations = getattr(self.safety_planner, "calculations", None)
+            if calculations is not None:
+                if hasattr(calculations, "set_resource_monitor"):
+                    calculations.set_resource_monitor(self.resource_monitor)
+                elif hasattr(calculations, "resource_monitor"):
+                    calculations.resource_monitor = self.resource_monitor
+        
         if hasattr(self.safety_planner, "base_state"):
             self.safety_planner.base_state = {"execution_history": self.execution_history}
 
