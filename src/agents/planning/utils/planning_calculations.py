@@ -56,6 +56,19 @@ class PlanningCalculations:
 
         # --- Temporal configuration ---
         temporal = self.safety_config.get("temporal", {})
+        runtime_profile = str(
+            self.calc_config.get("runtime_profile")
+            or self.config.get("runtime_profile")
+            or ""
+        ).lower()
+        
+        profiles = self.safety_config.get("profiles", {})
+        if runtime_profile and isinstance(profiles, dict):
+            profile = profiles.get(runtime_profile, {})
+            if isinstance(profile, dict):
+                profile_temporal = profile.get("temporal", {})
+                if isinstance(profile_temporal, dict):
+                    temporal = {**temporal, **profile_temporal}
         self.time_buffer:       float = float(temporal.get("time_buffer",       120.0))
         self.min_task_duration: float = float(temporal.get("min_task_duration",  30.0))
         self.max_concurrent:    int   = int  (temporal.get("max_concurrent",       5))
@@ -77,6 +90,9 @@ class PlanningCalculations:
         # Thread-safe result cache: key -> (value, expiry_timestamp)
         self._cache: Dict[str, Tuple[Any, float]] = {}
         self._cache_lock = threading.RLock()
+
+        self.last_temporal_diagnostics: Dict[str, Any] = {}
+        self.last_margin_diagnostics: Dict[str, Any] = {}
 
         logger.info("PlanningCalculations initialised")
 
@@ -200,39 +216,120 @@ class PlanningCalculations:
             current_time = time.time()
 
         # Determine total work and binding deadline
-        dep_map  = build_dependency_map(tasks)
-        dur_map  = {t.id: max(getattr(t, "duration", 300.0), self.min_task_duration)
-                    for t in tasks}
-
-        # Use critical-path duration when dependencies exist, else sequential sum
-        has_deps = any(deps for deps in dep_map.values())
-        if has_deps:
-            cp_duration, _ = compute_critical_path(list(dep_map.keys()), dep_map, dur_map)
-            total_duration = cp_duration
-        else:
-            total_duration = sum(dur_map.values())
-
-        # Earliest-binding deadline (tasks sorted EDF; pick the first with a real deadline)
-        sorted_tasks = sort_tasks_by_deadline(tasks)
-        binding_deadline = next(
-            (getattr(t, "deadline", 0.0) for t in sorted_tasks
-             if getattr(t, "deadline", 0.0) > 0.0),
-            current_time + 3600.0,  # 1-hour default if no deadline set
-        )
-
-        available_time = binding_deadline - current_time
-        if available_time < 0.0:
+        diagnostics = self.calculate_temporal_diagnostics(tasks, current_time=current_time)
+        
+        available_time = diagnostics["available_time"]
+        binding_deadline = diagnostics["binding_deadline"]
+        
+        if available_time is not None and available_time < 0.0:
+            sorted_tasks = sort_tasks_by_deadline(tasks)
             raise DeadlineExceededError(
                 f"Binding deadline already passed by {abs(available_time):.1f}s",
                 task_name=getattr(sorted_tasks[0], "name", ""),
                 task_id=getattr(sorted_tasks[0], "id", ""),
                 deadline=binding_deadline,
-                projected_completion=current_time + total_duration,
+                projected_completion=current_time + float(diagnostics["total_duration"]),
             )
-
-        return compute_temporal_margin(
-            total_duration, available_time, time_buffer=self.time_buffer
+        
+        self.last_temporal_diagnostics = diagnostics
+        return float(diagnostics["temporal_margin"])
+    
+    def calculate_temporal_diagnostics(
+        self,
+        tasks: TaskOrList,
+        current_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Return audit-safe temporal-margin diagnostics without changing public APIs."""
+        tasks = self._normalise_task_list(tasks)
+        now = float(current_time if current_time is not None else time.time())
+    
+        if not tasks:
+            return {
+                "task_count": 0,
+                "current_time": now,
+                "binding_deadline": None,
+                "available_time": None,
+                "total_duration": 0.0,
+                "time_buffer": self.time_buffer,
+                "critical_path_duration": 0.0,
+                "sequential_duration": 0.0,
+                "temporal_margin": 1.0,
+                "unsafe_reason": None,
+                "tasks": [],
+            }
+    
+        dep_map = build_dependency_map(tasks)
+        dur_map = {
+            t.id: max(float(getattr(t, "duration", 300.0) or 0.0), self.min_task_duration)
+            for t in tasks
+        }
+    
+        has_deps = any(deps for deps in dep_map.values())
+        critical_path_duration = 0.0
+        critical_path_ids: List[str] = []
+    
+        if has_deps:
+            critical_path_duration, critical_path_ids = compute_critical_path(
+                list(dep_map.keys()),
+                dep_map,
+                dur_map,
+            )
+    
+        sequential_duration = sum(dur_map.values())
+        total_duration = critical_path_duration if has_deps else sequential_duration
+    
+        sorted_tasks = sort_tasks_by_deadline(tasks)
+        binding_deadline = next(
+            (
+                float(getattr(t, "deadline", 0.0) or 0.0)
+                for t in sorted_tasks
+                if float(getattr(t, "deadline", 0.0) or 0.0) > 0.0
+            ),
+            now + 3600.0,
         )
+    
+        available_time = binding_deadline - now
+        temporal_margin = compute_temporal_margin(
+            total_duration,
+            available_time,
+            time_buffer=self.time_buffer,
+        ) if available_time >= 0.0 else 0.0
+    
+        unsafe_reason = None
+        if available_time < 0.0:
+            unsafe_reason = "binding_deadline_already_passed"
+        elif available_time < total_duration:
+            unsafe_reason = "available_time_less_than_plan_duration"
+        elif available_time < total_duration + self.time_buffer:
+            unsafe_reason = "available_time_cannot_fit_duration_plus_time_buffer"
+        elif temporal_margin <= 0.0:
+            unsafe_reason = "temporal_margin_exhausted"
+    
+        return {
+            "task_count": len(tasks),
+            "current_time": now,
+            "binding_deadline": binding_deadline,
+            "available_time": available_time,
+            "total_duration": total_duration,
+            "time_buffer": self.time_buffer,
+            "critical_path_duration": critical_path_duration,
+            "critical_path_task_ids": critical_path_ids,
+            "sequential_duration": sequential_duration,
+            "used_critical_path": has_deps,
+            "temporal_margin": temporal_margin,
+            "unsafe_reason": unsafe_reason,
+            "tasks": [
+                {
+                    "id": getattr(t, "id", ""),
+                    "name": getattr(t, "name", ""),
+                    "duration": dur_map.get(getattr(t, "id", ""), 0.0),
+                    "raw_duration": float(getattr(t, "duration", 0.0) or 0.0),
+                    "deadline": float(getattr(t, "deadline", 0.0) or 0.0),
+                    "dependencies": list(getattr(t, "dependencies", []) or []),
+                }
+                for t in tasks
+            ],
+        }
 
     def calculate_plan_duration(self, plan: List[Task], *, use_critical_path: bool = True) -> float:
         """
@@ -507,17 +604,27 @@ class PlanningCalculations:
         if current_time is None:
             current_time = time.time()
 
+        temporal_margin = self.calculate_temporal_margin(plan, current_time)
+        temporal_diagnostics = getattr(self, "last_temporal_diagnostics", {})
+        
         margins: MarginReport = {
-            "resource":   self.calculate_resource_margin(plan, resources),
-            "temporal":   self.calculate_temporal_margin(plan, current_time),
+            "resource": self.calculate_resource_margin(plan, resources),
+            "temporal": temporal_margin,
             "dependency": self.calculate_dependency_risk(plan),
+        }
+        
+        self.last_margin_diagnostics = {
+            "temporal": temporal_diagnostics,
+            "resource_monitor_attached": self.resource_monitor is not None,
+            "task_count": len(plan),
         }
 
         unsafe = {k: v for k, v in margins.items() if v <= 0.0}
         if unsafe:
             logger.warning(
-                "Safety margin(s) exhausted: %s",
+                "Safety margin(s) exhausted: %s | diagnostics=%s",
                 truncate_for_logging(unsafe),
+                truncate_for_logging(self.last_margin_diagnostics),
             )
 
         return margins
