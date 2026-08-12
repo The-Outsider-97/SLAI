@@ -49,6 +49,7 @@ dqn:
   batch_size: 64
   target_update_frequency: 100
   buffer_size: 10000
+  replay_backend: "distributed"
 
 maml:
   hidden_size: 64
@@ -467,4 +468,3 @@ rl_visualization:
 
 state_processor_config:
   normalize: False
-
