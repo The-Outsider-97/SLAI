@@ -146,7 +146,7 @@ def _sanitize_value(
 ) -> Any:
     """Return an audit-safe representation without storing high-risk raw values."""
 
-    secure_config = get_config_section("sercurity_error")
+    secure_config = dict(config) if config is not None else dict(get_config_section("security_error") or {})
     max_depth = int(secure_config.get("max_context_depth", 6))
     max_items = int(secure_config.get("max_context_items", 100))
     max_text = int(secure_config.get("max_text_field_length", 2048))
@@ -172,7 +172,13 @@ def _sanitize_value(
         return value.value
 
     if dataclass_is_instance(value):
-        return _sanitize_value(asdict(value), key=key, config=cfg, depth=depth + 1, include_sensitive=include_sensitive) # type: ignore
+        return _sanitize_value(
+            asdict(value), # type: ignore
+            key=key,
+            config=secure_config,
+            depth=depth + 1,
+            include_sensitive=include_sensitive,
+        )
 
     if isinstance(value, Mapping):
         sanitized: Dict[str, Any] = {}
