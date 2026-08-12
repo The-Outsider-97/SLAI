@@ -35,7 +35,7 @@ class InfrastructureManager:
 
         # Initialize components with proper configuration
         self.memory = EvaluatorsMemory()
-        #self.rollback = RollbackSystem()
+        self.rollback = RollbackSystem(self.config.get("rollback", {}))
         self.tuner = self._init_tuner()
 
         logger.info("Infrastructure Manager initialized with %s strategy",
@@ -60,10 +60,7 @@ class InfrastructureManager:
             return result
         except Exception as e:
             logger.error("Tuning cycle failed: %s", str(e))
-            self.rollback.full_rollback(
-                commit_hash=snapshot['commit_hash'],
-                model_version=snapshot['model_hash'][:8]
-            )
+            # EvalTuner owns snapshot restoration. Avoid a second rollback here.
             raise
 
     def automated_tuning_cycle(self):
@@ -76,21 +73,23 @@ class InfrastructureManager:
 
     def _update_risk_profile(self, tuning_result):
         """Update risk adaptation parameters based on tuning results"""
-        new_rate = tuning_result.get('score', 0.2) * 0.95
+        if hasattr(tuning_result, "best_score"):
+            score = tuning_result.best_score
+        else:
+            score = tuning_result.get("best_score", tuning_result.get("score", 0.2))
+        new_rate = float(0.2 if score is None else score) * 0.95
         self.config['initial_hazard_rates'] = new_rate
         logger.info("Updated risk profile to %.2f", new_rate)
         return new_rate
 
     def emergency_rollback(self):
         """Safe rollback entry point"""
-        commit_hash = None
-        model_version = None
         status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
         if status.strip():
             logger.error("Aborting rollback: Uncommitted changes detected")
             raise RuntimeError("Commit changes before rollback")
         
-        return self.rollback.full_rollback(commit_hash, model_version)
+        return self.rollback.full_rollback()
 
     def _get_last_stable_version(self) -> Dict[str, str]:
         """Retrieve last validated system state by checking git and model backups."""
@@ -158,8 +157,13 @@ class RollbackSystem:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-    def full_rollback(self):
+    def full_rollback(self, commit_hash: Optional[str] = None, model_version: Optional[str] = None):
         """Interactive rollback with confirmation and version selection"""
+        if (commit_hash is None) != (model_version is None):
+            raise ValueError("commit_hash and model_version must be provided together")
+        if commit_hash is not None and model_version is not None:
+            return self._commit_rollbacks(commit_hash, model_version)
+
         print("\n=== ROLLBACK WARNING ===")
         print("This will revert both code and model to previous versions.")
         print("Any uncommitted changes will be lost!\n")
@@ -214,7 +218,8 @@ class RollbackSystem:
             for b in backups
         ]
 
-    def _create_backup(self):
+    def _create_backup(self, commit_hash: str):
+        """Restore tracked files from a validated commit snapshot."""
         try:
             # Check for uncommitted changes
             status = subprocess.check_output(['git', 'status', '--porcelain']).decode()
@@ -282,7 +287,7 @@ class RollbackSystem:
 class EvalTuner(BaseTuner):
     """Extended tuner with rollback integration"""
     def __init__(self, evaluation_function, model_type=None, **kwargs):
-        super().__init__(model_type=None,
+        super().__init__(model_type=model_type,
             evaluation_function=evaluation_function)
         self.rollback = RollbackSystem(kwargs.get('rollback_config', {}))
         self.best_state = None
@@ -309,13 +314,12 @@ class EvalTuner(BaseTuner):
 
     def run_safe_tuning(self):
         """Execute tuning with automatic rollback on failure"""
-        if not result or result.get('score', 0) < self.config.get('tuning', {}).get('min_score', 0.7):
-            raise ValueError("Tuning resulted in suboptimal model or failed")
         initial_state = self._create_snapshot()
-        
+
         try:
             result = super().run_tuning_pipeline()
-            if result['score'] < self.config.get('tuning', {}).get('min_score', 0.7):
+            min_score = float(self._tuning_config.get("min_score", 0.7))
+            if result.best_score is None or result.best_score < min_score:
                 raise ValueError("Tuning resulted in suboptimal model")
             return result
         except Exception as e:
