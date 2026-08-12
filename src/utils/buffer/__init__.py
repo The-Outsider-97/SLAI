@@ -6,6 +6,7 @@ from .eviction_policies import *
 from .network_buffer import *
 from .nstep_buffer import *
 from .prioritized_buffer import *
+from .replay_buffer import *
 from .reservoir_buffer import *
 from .segment_tree import *
 from .sequence_replay_buffer import *
@@ -72,6 +73,11 @@ __all__ = [
     "PrioritizedReplayBuffer",
     "PrioritizedSampleBatch",
     "PriorityUpdateReport",
+
+    # Uniform replay buffer
+    "ReplayBuffer",
+    "SUPPORTED_REPLAY_BACKENDS",
+    "normalize_replay_backend",
 
     # Reservoir Replay Buffer
     "ReservoirConfig",
