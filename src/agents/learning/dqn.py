@@ -32,6 +32,7 @@ from .utils.learning_helpers import *
 from .learning_memory import LearningMemory, Transition
 from .modules.neural_network import NeuralNetwork
 from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer # pyright: ignore[reportMissingImports]
+from src.utils.buffer.replay_buffer import ReplayBuffer, normalize_replay_backend # pyright: ignore[reportMissingImports]
 from src.tuning.tuner import HyperparamTuner # pyright: ignore[reportMissingImports]
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
@@ -146,8 +147,8 @@ class DQNAgent:
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
         self.device = torch.device(device) if device is not None else torch.device("cpu")
-        self.config = load_global_config()
-        self.dqn_config = get_config_section('dqn')
+        self.config = deep_merge_dicts(load_global_config(), config or {})
+        self.dqn_config = dict(self.config.get("dqn") or get_config_section("dqn") or {})
         self.model_id = "DQN_Agent"
 
         self.hidden_dim = self.dqn_config.get("hidden_size", 128)
@@ -258,24 +259,21 @@ class DQNAgent:
         return neural_cfg
 
     def _init_replay_buffer(self):
-        """Initialise the distributed replay buffer using buffer_config.yaml."""
-        backend = self.dqn_config.get("replay_backend", "distributed")
+        """Initialise the configured replay backend."""
+        backend = normalize_replay_backend(self.dqn_config.get("replay_backend"))
+
         if backend == "distributed":
             # DistributedReplayBuffer loads its own config from buffer_config.yaml
             self.memory = DistributedReplayBuffer(user_config={"capacity": self.buffer_size})
             self.replay_backend = "distributed"
-        elif backend == "legacy_uniform":
-            from src.utils.buffer.replay_buffer import ReplayBuffer # pyright: ignore[reportMissingImports]
+        elif backend == "uniform":
             self.memory = ReplayBuffer(self.buffer_size)
             self.replay_backend = "uniform"
-        elif backend == "legacy_per":
-            from .learning_memory import LearningMemory
+        elif backend == "prioritized":
             self.memory = LearningMemory()
             self.memory.memory_config["max_size"] = self.buffer_size
             self.memory.clear()
             self.replay_backend = "prioritized"
-        else:
-            raise ValueError(f"Unknown replay_backend: {backend}")
 
     def _init_lr_scheduler(self):
         """Prepare scheduler state (no external objects)."""
@@ -456,7 +454,10 @@ class DQNAgent:
             beta = self._current_beta() if use_prioritized else None
 
             result = self.memory.sample(
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                strategy=strategy, # type: ignore
+                beta=beta, # type: ignore
+            )
 
             if use_prioritized:
                 # Result is (batch_tuple, indices, weights)
@@ -893,10 +894,10 @@ class DQNAgent:
                 self.memory.clear()
                 for item in replay_buffer:
                     self.memory.add(_coerce_transition(item))
-            else:
-                self.memory = DistributedReplayBuffer(self.buffer_size)
+            elif self.replay_backend == "uniform":
+                self.memory.clear()
                 for item in replay_buffer:
-                    self.memory.push(_coerce_transition(item))
+                    self.memory.push(_coerce_transition(item)) # type: ignore
 
         logger.info("Loaded DQN model checkpoint from %s", checkpoint_path)
 
