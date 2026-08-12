@@ -345,13 +345,13 @@ evaluation_agent:
     risk_adaptation: {}
     autonomous_tasks:
         - id: "nav_test"
-    type: "navigation"
-    path: [[0,0], [1,1], [2,2]]
-    optimal_path: [[0,0], [2,2]]
-    completion_time: 10.0
-    energy_consumed: 100
-    collisions: 0
-    success: true
+          type: "navigation"
+          path: [[0, 0], [1, 1], [2, 2]]
+          optimal_path: [[0, 0], [2, 2]]
+          completion_time: 10.0
+          energy_consumed: 100
+          collisions: 0
+          success: true
 
 
 execution_agent: {}
