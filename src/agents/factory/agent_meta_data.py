@@ -28,6 +28,14 @@ logger = get_logger("Agent Meta Data")
 printer = PrettyPrinter()
 
 
+_DEFINITION_LIFECYCLE_ALIASES = {"active": "registered"}
+_DEFINITION_LIFECYCLE_TRANSITIONS = {
+    "registered": {"deprecated", "retired"},
+    "deprecated": {"registered", "retired"},
+    "retired": set(),
+}
+
+
 @dataclass(slots=True)
 class AgentMetaData:
     """Validated descriptor for a factory-managed agent implementation.
@@ -139,7 +147,15 @@ class AgentMetaData:
         self.description = str(self.description or "")
         self.author = str(self.author or "Unknown")
         self.status = str(self.status or "active")
-        self.lifecycle = str(self.lifecycle or "registered")
+        lifecycle = str(self.lifecycle or "registered").strip().lower()
+        self.lifecycle = _DEFINITION_LIFECYCLE_ALIASES.get(lifecycle, lifecycle)
+        if self.lifecycle not in _DEFINITION_LIFECYCLE_TRANSITIONS:
+            raise AgentLifecycleError(
+                f"Unsupported metadata lifecycle state '{self.lifecycle}'",
+                component="agent_meta_data",
+                operation="validate_lifecycle",
+                context={"agent_name": self.name, "lifecycle": self.lifecycle},
+            )
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
         # Validate module path again after normalisation, preserving explicit policy errors.
@@ -150,7 +166,19 @@ class AgentMetaData:
         return dependency in set(self.dependencies or [])
 
     def with_lifecycle(self, lifecycle: str) -> "AgentMetaData":
-        self.lifecycle = str(lifecycle or "registered")
+        requested = str(lifecycle or "registered").strip().lower()
+        requested = _DEFINITION_LIFECYCLE_ALIASES.get(requested, requested)
+        current = self.lifecycle
+        if requested == current:
+            return self
+        if requested not in _DEFINITION_LIFECYCLE_TRANSITIONS.get(current, set()):
+            raise AgentLifecycleError(
+                f"Invalid metadata lifecycle transition: {current} -> {requested}",
+                component="agent_meta_data",
+                operation="transition_lifecycle",
+                context={"agent_name": self.name, "from": current, "to": requested},
+            )
+        self.lifecycle = requested
         self.updated_at = datetime.now(timezone.utc).isoformat()
         return self
 
