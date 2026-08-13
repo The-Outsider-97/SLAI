@@ -18,6 +18,17 @@ SLAI is a modular, multi-agent AI framework that combines a desktop UI, agent su
 
 ---
 
+## 1) Package goals
+
+The agents subsystem is designed to:
+
+- **Separate responsibilities by capability domain** (e.g., `planning`, `reasoning`, `safety`).
+- **Enable composition through shared memory and routing** instead of hard-coding peer dependencies.
+- **Support dynamic instantiation** with `AgentFactory` and metadata-driven registration.
+- **Standardize implementation contracts** via `BaseAgent` and common config-loading patterns.
+
+---
+
 ## Flow Diagram
 
 [//]: < See `slai_flowchart.png` in the repo for the full data and agent pipeline.>
