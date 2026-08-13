@@ -16,7 +16,6 @@ SLAI is a modular, multi-agent AI framework that combines a desktop UI, agent su
 - Ensure output safety, ethical alignment, and continual improvement via learning
 - Adapt over time through user feedback, monitoring, and meta-learning
 
----
 
 ## 1) Package goals
 
