@@ -24,6 +24,7 @@ resolution is the purpose of this module, not an optional import workaround.
 
 import importlib
 import inspect
+import uuid
 
 from collections import deque
 from dataclasses import dataclass, field
@@ -39,6 +40,13 @@ from .factory.metrics_adapter import MetricsAdapter
 from .factory.out_of_process_agent import OutOfProcessAgentProxy
 from .factory.utils.factory_errors import *
 from .factory.utils.factory_helpers import *
+from .runtime_contracts import (
+    AgentRuntimeIdentity,
+    RuntimeContractViolation,
+    RuntimeLifecycle,
+    RuntimeStatus,
+    build_runtime_scope_id,
+)
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Agent Factory")
@@ -70,12 +78,53 @@ class AgentCreationRecord:
 
 
 @dataclass(slots=True)
+class ManagedAgentRecord:
+    """Factory-owned runtime record for one exact definition and scope."""
+
+    identity: AgentRuntimeIdentity
+    instance: Any
+    status: RuntimeStatus = field(default_factory=RuntimeStatus)
+    implementation: str = "in_process"
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload = self.status.snapshot(self.identity)
+        instance_status = getattr(self.instance, "runtime_status", None)
+        if callable(instance_status):
+            try:
+                agent_payload = instance_status()
+            except Exception as exc:
+                agent_payload = {
+                    "status": "degraded",
+                    "health": "degraded",
+                    "degraded_channels": ["telemetry"],
+                    "degradations": [
+                        {
+                            "channel": "telemetry",
+                            "operation": "runtime_status",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    ],
+                }
+            payload["agent"] = agent_payload
+            agent_health = str(agent_payload.get("health", "healthy")) # type: ignore
+            if agent_health == "unavailable" or (
+                agent_health == "degraded" and payload.get("health") == "healthy"
+            ):
+                payload["health"] = agent_health
+                payload["status"] = agent_health
+        payload["implementation"] = self.implementation
+        return payload
+
+
+@dataclass(slots=True)
 class AgentFactoryConfig:
     """Resolved AgentFactory policy from agents_config.yaml."""
 
     enabled: bool = True
     auto_register_default_agents: bool = True
     strict_base_agent_subclass: bool = False
+    enforce_runtime_contracts: bool = True
     use_instance_cache: bool = True
     cache_agent_instances: bool = True
     cache_imports: bool = True
@@ -121,6 +170,7 @@ class AgentFactoryConfig:
             enabled=bool(payload.get("enabled", True)),
             auto_register_default_agents=bool(payload.get("auto_register_default_agents", True)),
             strict_base_agent_subclass=bool(payload.get("strict_base_agent_subclass", False)),
+            enforce_runtime_contracts=bool(payload.get("enforce_runtime_contracts", True)),
             use_instance_cache=bool(payload.get("use_instance_cache", True)),
             cache_agent_instances=bool(payload.get("cache_agent_instances", True)),
             cache_imports=bool(payload.get("cache_imports", True)),
@@ -242,6 +292,7 @@ class AgentFactory:
             )
 
         self._lock = RLock()
+        self._runtime_status = RuntimeStatus()
         self.registry = AgentRegistry()
         cache_signature = inspect.signature(FactoryCache)
         if "name" in cache_signature.parameters:
@@ -253,6 +304,8 @@ class AgentFactory:
         self.metrics_adapter_status = "not_initialized"
 
         self.active_agents: Dict[str, Any] = {}
+        self._runtime_records: Dict[str, ManagedAgentRecord] = {}
+        self._runtime_history: Deque[Dict[str, Any]] = deque(maxlen=self.settings.creation_history_size)
         self.unavailable_agents: Dict[str, str] = {}
         self._import_cache: Dict[str, Any] = {}
         self._constructor_signature_cache: Dict[Type[Any], Dict[str, Any]] = {}
@@ -269,8 +322,85 @@ class AgentFactory:
         if self.settings.discovery_enabled:
             self.discover_agents()
 
+        self._transition_factory_lifecycle(RuntimeLifecycle.ACTIVE)
         self._record_event("factory.initialized", {"registered_agents": len(self.registry.agents)})
         logger.info("Agent Factory initialized with %s registered agents", len(self.registry.agents))
+
+    def _transition_factory_lifecycle(self, lifecycle: RuntimeLifecycle | str) -> RuntimeLifecycle:
+        try:
+            return self._runtime_status.transition(lifecycle)
+        except (ValueError, RuntimeContractViolation) as exc:
+            raise AgentLifecycleError(
+                "Invalid AgentFactory lifecycle transition",
+                component="agent_factory",
+                operation="transition_lifecycle",
+                context={
+                    "current": self._runtime_status.lifecycle.value,
+                    "requested": str(lifecycle),
+                },
+                cause=exc,
+            ) from exc
+
+    def _mark_runtime_degraded(
+        self,
+        channel: str,
+        operation: str,
+        error: BaseException | str,
+        *,
+        retryable: bool = True,
+    ) -> None:
+        record = self._runtime_status.mark_degraded(
+            channel,
+            operation,
+            error,
+            retryable=retryable,
+        )
+        if record.occurrences == 1:
+            logger.warning(
+                "AgentFactory %s operation '%s' is degraded: %s",
+                channel,
+                operation,
+                error,
+            )
+
+    def _mark_runtime_recovered(self, channel: str, operation: str) -> None:
+        self._runtime_status.mark_recovered(channel, operation)
+
+    def _cache_get(self, key: str, default: Any = None) -> Any:
+        try:
+            value = self.cache.get(key, default)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.get", exc)
+            return default
+        self._mark_runtime_recovered("persistence", "cache.get")
+        return value
+
+    def _cache_set(self, key: str, value: Any, *, metadata: Optional[Mapping[str, Any]] = None) -> bool:
+        try:
+            self.cache.set(key, value, metadata=metadata)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.set", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.set")
+        return True
+
+    def _cache_delete(self, key: str) -> bool:
+        try:
+            deleted = self.cache.delete(key)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.delete", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.delete")
+        return deleted
+
+    def _cache_clear(self) -> bool:
+        try:
+            self.cache.clear()
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.clear", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.clear")
+        return True
 
     # ------------------------------------------------------------------
     # Config loading and registration
@@ -383,7 +513,11 @@ class AgentFactory:
     def route_agent(self, candidates: Sequence[str], metrics: Mapping[str, Any], *, create_if_missing: bool = True, shared_memory: Any = None, **kwargs: Any) -> Any:
         started_ms = monotonic_ms()
         normalized = [self.normalize_agent_type(candidate) for candidate in candidates]
-        available = [name for name in normalized if name not in self.unavailable_agents]
+        available = [
+            name
+            for name in normalized
+            if self._get_metadata(name).identity not in self.unavailable_agents
+        ]
         if not available:
             raise AgentSelectionError(
                 "No routable agents available",
@@ -399,8 +533,6 @@ class AgentFactory:
         selected, score = scored[0]
         self._record_event("agent.route.selected", {"selected": selected, "score": score, "candidates": available})
 
-        if selected in self.active_agents:
-            return self.active_agents[selected]
         self._profile_hot_path("factory.routing", started_ms, selected=selected, candidates=available, create_if_missing=create_if_missing)
         if create_if_missing:
             return self.create(selected, shared_memory=shared_memory, **kwargs)
@@ -444,7 +576,20 @@ class AgentFactory:
                 operation="register_agent",
             )
         with self._lock:
+            previous: Optional[AgentMetaData] = None
             try:
+                previous = self.registry.get(metadata.name, version=metadata.version)
+            except (AgentNotRegisteredError, AgentVersionUnavailableError):
+                pass
+            try:
+                if metadata.lifecycle == "retired":
+                    raise AgentLifecycleError(
+                        "Retired agent metadata cannot be registered",
+                        component="agent_factory",
+                        operation="register_agent",
+                        context={"definition_id": metadata.identity},
+                    )
+                metadata.with_lifecycle("registered")
                 signature = inspect.signature(self.registry.register)
                 if "overwrite" in signature.parameters:
                     registered = self.registry.register(metadata, overwrite=overwrite)
@@ -461,7 +606,14 @@ class AgentFactory:
                     context={"agent_name": getattr(metadata, "name", None)},
                 ) from exc
 
-            self.cache.set(f"metadata:{metadata.name}:{metadata.version}", metadata)
+            if previous is not None and previous is not metadata:
+                self.release(previous.name, version=str(previous.version))
+                previous.with_lifecycle("retired")
+                self.unavailable_agents.pop(previous.identity, None)
+                for key in list(self.unavailable_agents):
+                    if key.startswith(f"{previous.identity}#"):
+                        self.unavailable_agents.pop(key, None)
+            self._cache_set(f"metadata:{metadata.identity}", metadata)
             self._record_event("agent.registered", {"agent_type": metadata.name, "version": metadata.version})
             return registered if isinstance(registered, AgentMetaData) else metadata
 
@@ -476,10 +628,17 @@ class AgentFactory:
                     context={"agent_type": normalized},
                 )
             removed = self.registry.unregister(normalized, version=version)  # type: ignore[attr-defined]
-            self.active_agents.pop(normalized, None)
-            self.unavailable_agents.pop(normalized, None)
-            self.cache.delete(f"instance:{normalized}")
-            self._record_event("agent.unregistered", {"agent_type": normalized, "version": version})
+            self.release(normalized, version=str(removed.version))
+            self.unavailable_agents.pop(removed.identity, None)
+            for key in list(self.unavailable_agents):
+                if key.startswith(f"{removed.identity}#"):
+                    self.unavailable_agents.pop(key, None)
+            self._cache_delete(f"metadata:{removed.identity}")
+            removed.with_lifecycle("retired")
+            self._record_event(
+                "agent.unregistered",
+                {"agent_type": normalized, "version": removed.version, "definition_id": removed.identity},
+            )
             return removed
 
     def discover_agents(self, packages: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -560,14 +719,30 @@ class AgentFactory:
         profile["torch_probe"] = dict(self._torch_probe)
         return profile
 
-    def _ensure_agent_available(self, agent_type: str) -> None:
-        if agent_type in self.unavailable_agents:
-            reason = self.unavailable_agents[agent_type]
+    @staticmethod
+    def _runtime_unavailable_key(metadata: AgentMetaData, scope_id: str) -> str:
+        return f"{metadata.identity}#{scope_id}"
+
+    def _ensure_agent_available(self, metadata: AgentMetaData, scope_id: str) -> None:
+        agent_type = metadata.name
+        definition_id = metadata.identity
+        runtime_key = self._runtime_unavailable_key(metadata, scope_id)
+        unavailable_key = next(
+            (key for key in (definition_id, runtime_key) if key in self.unavailable_agents),
+            None,
+        )
+        if unavailable_key is not None:
+            reason = self.unavailable_agents[unavailable_key]
             raise AgentInitializationError(
-                f"Agent '{agent_type}' is marked unavailable: {reason}",
+                f"Agent runtime '{unavailable_key}' is marked unavailable: {reason}",
                 component="agent_factory",
                 operation="ensure_agent_available",
-                context={"agent_type": agent_type, "reason": reason},
+                context={
+                    "agent_type": agent_type,
+                    "definition_id": definition_id,
+                    "scope_id": scope_id,
+                    "reason": reason,
+                },
             )
         profile = self.get_agent_dependency_report(agent_type)
         if (
@@ -576,12 +751,12 @@ class AgentFactory:
             and self._torch_probe.get("status") != "available"
         ):
             reason = f"torch required by design; torch runtime unavailable ({self._torch_probe.get('error', 'unknown')})"
-            self.unavailable_agents[agent_type] = reason
+            self.unavailable_agents[definition_id] = reason
             raise AgentInitializationError(
                 reason,
                 component="agent_factory",
                 operation="ensure_agent_available",
-                context={"agent_type": agent_type, "profile": profile},
+                context={"agent_type": agent_type, "definition_id": definition_id, "profile": profile},
             )
 
     def _resolve_dependency_order(self, agent_type: str) -> Tuple[str, ...]:
@@ -604,14 +779,14 @@ class AgentFactory:
         class_name = validate_class_name(metadata.class_name)
         cache_key = f"module:{module_path}"
         try:
-            module = self.cache.get(cache_key) if self.settings.cache_imports else None
+            module = self._cache_get(cache_key) if self.settings.cache_imports else None
             if module is None:
                 module = self._import_cache.get(module_path)
             if module is None:
                 module = importlib.import_module(module_path)
                 self._import_cache[module_path] = module
                 if self.settings.cache_imports:
-                    self.cache.set(cache_key, module)
+                    self._cache_set(cache_key, module)
             agent_cls = getattr(module, class_name)
         except ModuleNotFoundError as exc:
             raise AgentModuleImportError(
@@ -681,7 +856,7 @@ class AgentFactory:
 
     def _get_constructor_signature(self, agent_cls: Type[Any]) -> Dict[str, Any]:
         cache_key = f"signature:{agent_cls.__module__}.{agent_cls.__name__}"
-        cached = self.cache.get(cache_key) if self.settings.cache_constructor_signatures else None
+        cached = self._cache_get(cache_key) if self.settings.cache_constructor_signatures else None
         if cached is not None:
             return dict(cached)
         cached = self._constructor_signature_cache.get(agent_cls)
@@ -693,7 +868,7 @@ class AgentFactory:
         signature_meta = {"params": params, "accepts_var_kwargs": accepts_var_kwargs}
         self._constructor_signature_cache[agent_cls] = signature_meta
         if self.settings.cache_constructor_signatures:
-            self.cache.set(cache_key, signature_meta)
+            self._cache_set(cache_key, signature_meta)
         return signature_meta
 
     def _agent_config_for(self, agent_type: str, runtime_override: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -746,12 +921,56 @@ class AgentFactory:
     def _verify_action_surface(self, agent_type: str, instance: Any) -> None:
         if not self.settings.required_action_methods:
             return
-        if not any(hasattr(instance, method) for method in self.settings.required_action_methods):
-            logger.warning(
-                "Agent '%s' does not expose standard action methods (%s).",
-                agent_type,
-                ", ".join(self.settings.required_action_methods),
+        callable_methods = tuple(
+            method
+            for method in self.settings.required_action_methods
+            if callable(getattr(instance, method, None))
+        )
+        if callable_methods:
+            return
+        message = (
+            f"Agent '{agent_type}' must expose at least one callable action method "
+            f"({', '.join(self.settings.required_action_methods)})"
+        )
+        if self.settings.enforce_runtime_contracts:
+            raise AgentConstructionError(
+                message,
+                component="agent_factory",
+                operation="verify_runtime_contract",
+                context={
+                    "agent_type": agent_type,
+                    "instance_type": type(instance).__name__,
+                    "required_action_methods": list(self.settings.required_action_methods),
+                },
             )
+        logger.warning(message)
+
+    @staticmethod
+    def _runtime_scope(
+        shared_memory: Any,
+        agent_config: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
+    ) -> str:
+        scope_kwargs = {key: value for key, value in kwargs.items() if key not in {"config", "version"}}
+        return build_runtime_scope_id(
+            shared_memory=shared_memory,
+            config=agent_config,
+            constructor_kwargs=scope_kwargs,
+        )
+
+    def _record_for_cache_key(self, cache_key: str) -> Optional[ManagedAgentRecord]:
+        record = self._runtime_records.get(cache_key)
+        if record is not None:
+            return record
+        cached = self._cache_get(cache_key) if self.settings.cache_agent_instances else None
+        if not isinstance(cached, ManagedAgentRecord):
+            return None
+        if cached.status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+            self._cache_delete(cache_key)
+            return None
+        self._runtime_records[cache_key] = cached
+        self.active_agents[cached.identity.agent_type] = cached.instance
+        return cached
 
     def create(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
         """Create or retrieve an agent instance by registered agent type.
@@ -766,50 +985,81 @@ class AgentFactory:
         self._record_counter("create.requested")
 
         with self._lock:
-            if self.settings.use_instance_cache and normalized in self.active_agents:
-                cached = self.active_agents[normalized]
-                self._record_counter("create.cache_hit")
-                self._record_event("agent.cache_hit", {"agent_type": normalized})
-                return cached
+            if self._runtime_status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+                raise FactoryStateError(
+                    "AgentFactory cannot create agents outside an active lifecycle",
+                    component="agent_factory",
+                    operation="create",
+                    context={"lifecycle": self._runtime_status.lifecycle.value},
+                )
 
-            cached_instance = self.cache.get(f"instance:{normalized}") if self.settings.cache_agent_instances else None
-            if cached_instance is not None:
-                self.active_agents[normalized] = cached_instance
-                self._record_counter("create.cache_hit")
-                return cached_instance
-
-            self._ensure_agent_available(normalized)
             metadata = self._get_metadata(normalized, version=version)
+            agent_config = self._agent_config_for(normalized, kwargs.get("config"))
+            scope_id = self._runtime_scope(shared_memory, agent_config, kwargs)
+            cache_key = f"instance:{metadata.identity}:{scope_id}"
+
+            if self.settings.use_instance_cache:
+                cached_record = self._record_for_cache_key(cache_key)
+                if cached_record is not None:
+                    self._record_counter("create.cache_hit")
+                    self._record_event(
+                        "agent.cache_hit",
+                        {
+                            "agent_type": normalized,
+                            "definition_id": metadata.identity,
+                            "scope_id": scope_id,
+                            "instance_id": cached_record.identity.instance_id,
+                        },
+                    )
+                    return cached_record.instance
+
+            self._ensure_agent_available(metadata, scope_id)
 
             try:
                 if self.settings.create_dependencies:
                     for dependency in self._resolve_dependency_order(normalized)[:-1]:
-                        if dependency not in self.active_agents:
-                            self.create(dependency, shared_memory)
+                        self.create(dependency, shared_memory)
 
                 try:
                     agent_cls = self._resolve_agent_class(metadata)
                 except Exception as exc:
                     if self._should_use_oopa_fallback(normalized, exc):
                         proxy = self._create_oopa_proxy(normalized, metadata, exc)
-                        self._store_instance(normalized, proxy)
+                        record = self._store_instance(
+                            metadata,
+                            proxy,
+                            scope_id,
+                            lifecycle=RuntimeLifecycle.DEGRADED,
+                            implementation="out_of_process_proxy",
+                        )
+                        record.status.mark_degraded("runtime", "out_of_process_fallback", exc)
                         self._record_creation(normalized, "degraded", started_ms, metadata, implementation="out_of_process_proxy", error=str(exc))
                         return proxy
                     raise
 
-                agent_config = self._agent_config_for(normalized, kwargs.get("config"))
                 constructor_args = self._build_constructor_args(normalized, agent_cls, shared_memory, agent_config, kwargs)
                 instance = agent_cls(**constructor_args)
-                self._verify_action_surface(normalized, instance)
-                self._store_instance(normalized, instance)
-                self.unavailable_agents.pop(normalized, None)
+                try:
+                    self._verify_action_surface(normalized, instance)
+                    record = self._store_instance(metadata, instance, scope_id)
+                except Exception:
+                    self._close_unmanaged_instance(instance, metadata.identity)
+                    raise
+                self.unavailable_agents.pop(metadata.identity, None)
+                self.unavailable_agents.pop(self._runtime_unavailable_key(metadata, scope_id), None)
                 self._record_creation(normalized, "ok", started_ms, metadata)
                 self._record_counter("create.succeeded")
-                logger.info("Successfully created agent '%s'", normalized)
+                logger.info(
+                    "Successfully created agent '%s' definition=%s instance=%s",
+                    normalized,
+                    metadata.identity,
+                    record.identity.instance_id,
+                )
                 return instance
 
             except FactoryError as exc:
-                self.unavailable_agents[normalized] = exc.summary()
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                self.unavailable_agents[unavailable_key] = exc.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(exc))
                 exc.log()
@@ -822,7 +1072,8 @@ class AgentFactory:
                     operation="create",
                     context={"agent_type": normalized, "class_name": metadata.class_name},
                 )
-                self.unavailable_agents[normalized] = error.summary()
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                self.unavailable_agents[unavailable_key] = error.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
                 raise error from exc
@@ -834,7 +1085,8 @@ class AgentFactory:
                     operation="create",
                     context={"agent_type": normalized, "module_path": metadata.module_path, "class_name": metadata.class_name},
                 )
-                self.unavailable_agents[normalized] = error.summary()
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                self.unavailable_agents[unavailable_key] = error.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
                 raise error from exc
@@ -845,15 +1097,75 @@ class AgentFactory:
     def get_agent(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
         return self.create(agent_type, shared_memory=shared_memory, **kwargs)
 
-    def _store_instance(self, agent_type: str, instance: Any) -> None:
-        self.active_agents[agent_type] = instance
+    def _close_unmanaged_instance(self, instance: Any, definition_id: str) -> None:
+        for method_name in ("shutdown", "close", "stop"):
+            method = getattr(instance, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+            except Exception as exc:
+                self._mark_runtime_degraded("lifecycle", "unmanaged_instance.close", exc, retryable=False)
+                logger.warning("Unable to close rejected agent definition '%s': %s", definition_id, exc)
+            break
+
+    def _store_instance(
+        self,
+        metadata: AgentMetaData,
+        instance: Any,
+        scope_id: str,
+        *,
+        lifecycle: RuntimeLifecycle = RuntimeLifecycle.ACTIVE,
+        implementation: str = "in_process",
+    ) -> ManagedAgentRecord:
+        instance_id = str(getattr(instance, "agent_id", "") or f"{metadata.name}:{uuid.uuid4().hex[:12]}")
+        if any(record.identity.instance_id == instance_id for record in self._runtime_records.values()):
+            raise AgentLifecycleError(
+                "Constructed agent instance identity is already active",
+                component="agent_factory",
+                operation="store_instance",
+                context={"definition_id": metadata.identity, "instance_id": instance_id},
+            )
+
+        identity = AgentRuntimeIdentity(
+            agent_type=metadata.name,
+            version=str(metadata.version),
+            instance_id=instance_id,
+            scope_id=scope_id,
+        )
+        bind_identity = getattr(instance, "bind_runtime_identity", None)
+        if bind_identity is not None:
+            if not callable(bind_identity):
+                raise AgentLifecycleError(
+                    "Agent bind_runtime_identity attribute must be callable",
+                    component="agent_factory",
+                    operation="bind_runtime_identity",
+                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                )
+            bind_identity(identity)
+
+        record = ManagedAgentRecord(identity=identity, instance=instance, implementation=implementation)
+        record.status.transition(lifecycle)
+        transition_instance = getattr(instance, "transition_runtime_lifecycle", None)
+        if transition_instance is not None:
+            if not callable(transition_instance):
+                raise AgentLifecycleError(
+                    "Agent transition_runtime_lifecycle attribute must be callable",
+                    component="agent_factory",
+                    operation="activate_instance",
+                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                )
+            transition_instance(lifecycle)
+
+        self._runtime_records[identity.cache_key] = record
+        self.active_agents[metadata.name] = instance
         if self.settings.cache_agent_instances:
-            self.cache.set(f"instance:{agent_type}", instance)
-        try:
-            if hasattr(instance, "with_lifecycle"):
-                instance.with_lifecycle("active")
-        except Exception:
-            logger.debug("Unable to update lifecycle for %s", agent_type, exc_info=True)
+            self._cache_set(
+                identity.cache_key,
+                record,
+                metadata={"definition_id": metadata.identity, "instance_id": instance_id},
+            )
+        return record
 
     # ------------------------------------------------------------------
     # Metrics adaptation and diagnostics
@@ -887,7 +1199,7 @@ class AgentFactory:
                 adapter.update_factory_config(self, adjustments) # type: ignore
 
             safe_adjustments = safe_serialize(adjustments, redact=True)
-            self.cache.set("adaptation:latest", safe_adjustments)
+            self._cache_set("adaptation:latest", safe_adjustments)
             self._record_counter("adaptation.succeeded")
             self._record_timing("adaptation.duration_ms", started_ms)
             self._record_event("adaptation.completed", {"agent_types": targets, "adjustments": safe_adjustments})
@@ -918,9 +1230,14 @@ class AgentFactory:
                 "dependencies": list(getattr(metadata, "dependencies", []) or []),
                 "issues": [],
             }
-            if name in self.unavailable_agents:
+            unavailable_reasons = [
+                reason
+                for identity, reason in self.unavailable_agents.items()
+                if identity == metadata.identity or identity.startswith(f"{metadata.identity}#")
+            ]
+            if unavailable_reasons:
                 info["status"] = "unavailable"
-                info["issues"].append(self.unavailable_agents[name])
+                info["issues"].extend(unavailable_reasons)
 
             if import_check:
                 try:
@@ -945,20 +1262,64 @@ class AgentFactory:
 
     def health_check(self) -> Dict[str, Any]:
         registry_size = len(getattr(self.registry, "agents", {}))
-        active_size = len(self.active_agents)
+        active_instances = {
+            cache_key: record.snapshot()
+            for cache_key, record in sorted(self._runtime_records.items())
+        }
+        active_size = len(active_instances)
         unavailable_size = len(self.unavailable_agents)
-        status = "ok" if unavailable_size == 0 else "degraded"
+        degraded_instances = [
+            cache_key
+            for cache_key, runtime in active_instances.items()
+            if runtime.get("health") != "healthy"
+        ]
+
+        try:
+            cache_health = self.cache.stats() if hasattr(self.cache, "stats") else {}
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.stats", exc)
+            cache_health = {"status": "degraded", "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            self._mark_runtime_recovered("persistence", "cache.stats")
+
+        try:
+            observability_health = self.observability.snapshot() if hasattr(self.observability, "snapshot") else {}
+        except Exception as exc:
+            self._mark_runtime_degraded("telemetry", "observability.snapshot", exc)
+            observability_health = {"status": "degraded", "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            self._mark_runtime_recovered("telemetry", "observability.snapshot")
+
+        factory_runtime = self._runtime_status.snapshot()
+        is_unavailable = factory_runtime["health"] == "unavailable"
+        is_degraded = bool(
+            unavailable_size
+            or degraded_instances
+            or factory_runtime["health"] == "degraded"
+        )
+        aggregate_health = "unavailable" if is_unavailable else ("degraded" if is_degraded else "healthy")
+        status = "ok" if aggregate_health == "healthy" else aggregate_health
         payload = {
             "status": status,
+            "health": aggregate_health,
+            "lifecycle": factory_runtime["lifecycle"],
             "registered_agents": registry_size,
             "active_agents": active_size,
             "unavailable_agents": unavailable_size,
+            "degraded_instances": degraded_instances,
+            "runtime": factory_runtime,
+            "active_instances": active_instances,
             "metrics_adapter_status": self.metrics_adapter_status,
             "torch_probe": dict(self._torch_probe),
-            "cache": self.cache.stats() if hasattr(self.cache, "stats") else {},
-            "observability": self.observability.snapshot() if hasattr(self.observability, "snapshot") else {},
+            "cache": cache_health,
+            "observability": observability_health,
         }
         self._record_event("factory.health_check", payload)
+        refreshed_runtime = self._runtime_status.snapshot()
+        payload["runtime"] = refreshed_runtime
+        if refreshed_runtime["health"] != "healthy":
+            payload["health"] = refreshed_runtime["health"]
+            payload["status"] = "unavailable" if refreshed_runtime["health"] == "unavailable" else "degraded"
         return payload
 
     def snapshot(self, *, include_agents: bool = False) -> Dict[str, Any]:
@@ -968,8 +1329,10 @@ class AgentFactory:
             "health": self.health_check(),
             "registered_agent_types": self.get_registered_agent_types(),
             "active_agent_types": sorted(self.active_agents.keys()),
+            "active_instance_identities": self.get_active_instance_identities(),
             "unavailable_agents": dict(self.unavailable_agents),
             "creation_history": [record.to_dict() for record in self.creation_history],
+            "runtime_history": list(self._runtime_history),
         }
         if include_agents:
             payload["agents"] = self.inspect_registered_agents(import_check=False, constructor_check=False)
@@ -984,42 +1347,124 @@ class AgentFactory:
     def get_active_agent_types(self) -> list[str]:
         return sorted(self.active_agents.keys())
 
+    def get_active_instance_identities(self) -> list[Dict[str, str]]:
+        return [
+            record.identity.to_dict()
+            for _, record in sorted(self._runtime_records.items())
+        ]
+
     def get(self, agent_type: str, default: Any = None) -> Any:
         normalized = self.normalize_agent_type(agent_type)
         return self.active_agents.get(normalized, default)
 
-    def release(self, agent_type: str) -> bool:
+    def _transition_managed_record(self, record: ManagedAgentRecord, lifecycle: RuntimeLifecycle) -> None:
+        try:
+            record.status.transition(lifecycle)
+            transition_instance = getattr(record.instance, "transition_runtime_lifecycle", None)
+            if transition_instance is not None:
+                if not callable(transition_instance):
+                    raise RuntimeContractViolation("transition_runtime_lifecycle must be callable")
+                transition_instance(lifecycle)
+        except Exception as exc:
+            raise AgentLifecycleError(
+                "Managed agent lifecycle transition failed",
+                component="agent_factory",
+                operation="transition_managed_record",
+                context={
+                    "definition_id": record.identity.definition_id,
+                    "instance_id": record.identity.instance_id,
+                    "requested": lifecycle.value,
+                },
+                cause=exc,
+            ) from exc
+
+    def _release_record(self, cache_key: str, record: ManagedAgentRecord) -> None:
+        try:
+            self._transition_managed_record(record, RuntimeLifecycle.STOPPING)
+            for method_name in ("shutdown", "close", "stop"):
+                method = getattr(record.instance, method_name, None)
+                if callable(method):
+                    method()
+                    break
+            self._transition_managed_record(record, RuntimeLifecycle.STOPPED)
+        except Exception as exc:
+            record.status.mark_degraded("lifecycle", "release", exc, retryable=False)
+            try:
+                record.status.transition(RuntimeLifecycle.FAILED)
+            except RuntimeContractViolation:
+                pass
+            self._mark_runtime_degraded("lifecycle", "agent.release", exc, retryable=False)
+        finally:
+            self._runtime_history.append(record.snapshot())
+            self._runtime_records.pop(cache_key, None)
+            self._cache_delete(cache_key)
+
+    def _refresh_legacy_active_agent(self, agent_type: str) -> None:
+        remaining = [
+            record.instance
+            for record in self._runtime_records.values()
+            if record.identity.agent_type == agent_type
+        ]
+        if remaining:
+            self.active_agents[agent_type] = remaining[-1]
+        else:
+            self.active_agents.pop(agent_type, None)
+
+    def release(self, agent_type: str, *, version: Optional[str] = None) -> bool:
         normalized = self.normalize_agent_type(agent_type)
-        removed = self.active_agents.pop(normalized, None)
-        self.cache.delete(f"instance:{normalized}")
-        if removed is not None:
-            self._record_event("agent.released", {"agent_type": normalized})
-            return True
-        return False
+        selected = [
+            (cache_key, record)
+            for cache_key, record in self._runtime_records.items()
+            if record.identity.agent_type == normalized
+            and (version is None or record.identity.version == str(version))
+        ]
+        for cache_key, record in selected:
+            self._release_record(cache_key, record)
+        self._refresh_legacy_active_agent(normalized)
+        if selected:
+            self._record_event(
+                "agent.released",
+                {
+                    "agent_type": normalized,
+                    "version": version,
+                    "released_instances": [record.identity.instance_id for _, record in selected],
+                },
+            )
+        return bool(selected)
 
     def clear_active_agents(self) -> None:
+        for cache_key, record in list(self._runtime_records.items()):
+            self._release_record(cache_key, record)
         self.active_agents.clear()
         self._record_event("agent.active_cleared", {})
 
-    def reset_unavailable(self, agent_type: Optional[str] = None) -> None:
+    def reset_unavailable(self, agent_type: Optional[str] = None, *, version: Optional[str] = None) -> None:
         if agent_type is None:
             self.unavailable_agents.clear()
             self._record_event("agent.unavailable_cleared", {})
             return
         normalized = self.normalize_agent_type(agent_type)
-        self.unavailable_agents.pop(normalized, None)
-        self._record_event("agent.unavailable_reset", {"agent_type": normalized})
+        identity_prefix = f"{normalized}@{version}" if version is not None else f"{normalized}@"
+        if version is None:
+            keys = [key for key in self.unavailable_agents if key.startswith(identity_prefix)]
+        else:
+            keys = [
+                key
+                for key in self.unavailable_agents
+                if key == identity_prefix or key.startswith(f"{identity_prefix}#")
+            ]
+        for definition_id in keys:
+            self.unavailable_agents.pop(definition_id, None)
+        self._record_event("agent.unavailable_reset", {"agent_type": normalized, "version": version})
 
     def shutdown(self) -> None:
-        for name, agent in list(self.active_agents.items()):
-            for method_name in ("shutdown", "close", "stop"):
-                method = getattr(agent, method_name, None)
-                if callable(method):
-                    method()
-                    break
-        self.active_agents.clear()
-        self.cache.clear()
+        if self._runtime_status.lifecycle == RuntimeLifecycle.STOPPED:
+            return
+        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPING)
+        self.clear_active_agents()
+        self._cache_clear()
         self._record_event("factory.shutdown", {})
+        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPED)
         logger.info("Agent Factory shutdown complete")
 
     def _record_creation(
@@ -1057,15 +1502,30 @@ class AgentFactory:
 
     def _record_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if self.settings.publish_observability_events:
-            self.observability.record_event(event_type, dict(payload))
+            try:
+                self.observability.record_event(event_type, dict(payload))
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.record_event", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.record_event")
 
     def _record_counter(self, name: str, value: int = 1) -> None:
         if self.settings.publish_observability_events:
-            self.observability.inc(name, value)
+            try:
+                self.observability.inc(name, value)
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.counter", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.counter")
 
     def _record_timing(self, name: str, started_ms: float) -> None:
         if self.settings.publish_observability_events:
-            self.observability.observe_timing(name, max(0.0, monotonic_ms() - started_ms))
+            try:
+                self.observability.observe_timing(name, max(0.0, monotonic_ms() - started_ms))
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.timing", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.timing")
 
 
 if __name__ == "__main__":
