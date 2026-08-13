@@ -3,7 +3,7 @@
 Uses lazy loading to avoid importing optional heavy dependencies at package import time.
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 _EXPORTS = {
     "AgentFactory": (".agent_factory", "AgentFactory"),
@@ -12,6 +12,10 @@ _EXPORTS = {
     "ResourceMonitor": (".base_agent", "ResourceMonitor"),
     "RetrainingManager": (".base_agent", "RetrainingManager"),
     "_ensure_torch_imported": (".base_agent", "_ensure_torch_imported"),
+    "AgentRuntimeIdentity": (".runtime_contracts", "AgentRuntimeIdentity"),
+    "RuntimeHealth": (".runtime_contracts", "RuntimeHealth"),
+    "RuntimeLifecycle": (".runtime_contracts", "RuntimeLifecycle"),
+    "RuntimeStatus": (".runtime_contracts", "RuntimeStatus"),
     "AdaptiveAgent": (".adaptive_agent", "AdaptiveAgent"),
     "AlignmentAgent": (".alignment_agent", "AlignmentAgent"),
     "BrowserAgent": (".browser_agent", "BrowserAgent"),
@@ -35,7 +39,7 @@ _EXPORTS = {
     # For later: add more agents like social agent, emotional agent, gamer agent, simulation agent, etc.
 }
 
-__all__ = sorted(_EXPORTS.keys())
+__all__ = sorted(_EXPORTS.keys()) # pyright: ignore[reportUnsupportedDunderAll]
 
 
 def __getattr__(name: str):
