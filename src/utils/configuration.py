@@ -15,7 +15,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Mapping
 
-import yaml
+import yaml # pyright: ignore[reportMissingModuleSource]
 
 
 DEFAULT_CACHE_TTL_SECONDS = 60.0
@@ -106,6 +106,7 @@ class ConfigRepository:
                 self._entries[resolved] = entry
 
             # Configuration is shared as a source, not as mutable runtime state.
+            assert entry is not None
             return copy.deepcopy(entry.data)
 
     def section(
