@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from .runtime_contracts import RuntimeLifecycle, RuntimeStatus
 from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
-from src.utils.configuration import bind_config
+from ..utils.configuration import bind_config
 
 
 logger = get_logger("Autonomous Control Loop")
@@ -368,9 +368,9 @@ class FactoryAutonomousStages:
         task.setdefault("id", f"{payload.get('goal_id')}:cycle:{payload.get('cycle')}")
         task.setdefault("name", str(goal.get("name") or goal.get("objective") or "autonomous_task"))
         task.setdefault("goal_type", "autonomous")
-        task.setdefault("metadata", {})
+        task.setdefault("metadata", {}) # type: ignore
         if isinstance(task["metadata"], Mapping):
-            task["metadata"] = {
+            task["metadata"] = { # type: ignore
                 **dict(task["metadata"]),
                 "autonomous_run_id": payload.get("run_id"),
                 "autonomous_cycle": payload.get("cycle"),
