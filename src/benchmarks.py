@@ -23,8 +23,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from src.agents.runtime_contracts import AgentRuntimeIdentity, RuntimeLifecycle, RuntimeStatus, build_runtime_scope_id
-from src.utils.configuration import bind_config
+from .agents.runtime_contracts import AgentRuntimeIdentity, RuntimeLifecycle, RuntimeStatus, build_runtime_scope_id
+from .utils.configuration import bind_config
 
 
 _CONFIG = bind_config(Path(__file__).parent / "agents/base/configs/agents_config.yaml")
