@@ -28,6 +28,23 @@ operations_notification:
         url: "https://logging-service.yourdomain.com/ingest"
 
 
+benchmark_budgets:
+    enabled: true
+    enforce: true
+    warmup_iterations: 5
+    measurement_iterations: 40
+    contracts:
+      - name: config.cached_load
+        max_p95_latency_ms: 10.0
+        max_peak_memory_mb: 16.0
+      - name: runtime.scope_identity
+        max_p95_latency_ms: 5.0
+        max_peak_memory_mb: 4.0
+      - name: runtime.status_snapshot
+        max_p95_latency_ms: 5.0
+        max_peak_memory_mb: 4.0
+
+
 agent_factory:
     enabled: true
     auto_register_default_agents: true
