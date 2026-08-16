@@ -159,9 +159,9 @@ classDiagram
     SkillWorker --> ImitationLearningWorker
     MetaLearningWorker --> LearningParameterTuner
     PolicyManager --> MultiModalMemory
-    MultiModalMemory --> SGDRegressor   # for parameter impact analysis
+    MultiModalMemory --> SGDRegressor
     NeuralNetwork <|-- BayesianDQN
-    NeuralNetwork <|-- ActorCriticNetwork   # ActorCriticNetwork inherits from AdaptiveNetworkBase
+    NeuralNetwork <|-- ActorCriticNetwork
 ```
 
 ## Minimal usage sketch
