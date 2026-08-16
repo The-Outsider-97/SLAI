@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
+from .utils.adaptive_helpers import *
 from .adaptive_memory import MultiModalMemory
 from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -304,7 +305,8 @@ class MetaLearningWorker:
         """Store hyperparameter configuration and its performance."""
         normalized_hyperparams = self._normalize_hyperparams(hyperparams)
 
-        if not isinstance(performance, (int, float, np.number)) or not np.isfinite(performance):
+        # if not isinstance(performance, (int, float, np.number)) or not np.isfinite(performance):
+        if not is_finite_number(performance):
             raise InvalidValueError(
                 "performance must be a finite numeric value.",
                 component="meta_learning",
@@ -444,7 +446,8 @@ class MetaLearningWorker:
         valid_rewards = []
         for metric in metrics.values():
             value = metric.get("recent_reward")
-            if isinstance(value, (int, float, np.number)) and np.isfinite(value):
+            # if isinstance(value, (int, float, np.number)) and np.isfinite(value):
+            if value is not None and is_finite_number(value):
                 valid_rewards.append(float(value))
 
         if not valid_rewards:
@@ -601,7 +604,8 @@ class MetaLearningWorker:
                     details={"required": self.hyperparam_names},
                 )
             value = hyperparams[name]
-            if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+            # if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+            if not is_finite_number(value):
                 raise InvalidValueError(
                     f"Hyperparameter '{name}' must be a finite numeric value.",
                     component="meta_learning",
@@ -817,7 +821,7 @@ if __name__ == "__main__":
             self.critic_optimizer = torch.optim.Adam([self.critic_param], lr=self.learning_rate)
             self._recent_rewards = [0.1, 0.2, 0.3, 0.4, 0.5]
 
-        def get_performance_metrics(self) -> Dict[str, float]:
+        def get_performance_metrics(self) -> Dict[str, int | str | float]:
             rewards = list(self._recent_rewards)
             avg_reward = float(np.mean(rewards))
             return {

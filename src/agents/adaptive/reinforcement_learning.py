@@ -15,9 +15,10 @@ from ..learning.learning_memory import LearningMemory
 from .adaptive_memory import MultiModalMemory
 from .imitation_learning_worker import ImitationLearningWorker
 from .meta_learning_worker import MetaLearningWorker
-from .utils.neural_network import ActorCriticNetwork
+from .modules.neural_network import ActorCriticNetwork
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
+from .utils.adaptive_helpers import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Skill Worker")
@@ -27,7 +28,6 @@ printer = PrettyPrinter()
 @dataclass
 class Transition:
     """Structured on-policy transition for skill-level updates."""
-
     state: torch.Tensor
     action: torch.Tensor
     reward: float
@@ -43,7 +43,6 @@ class Transition:
 @dataclass
 class PolicyUpdateResult:
     """Structured policy-update summary for diagnostics and logging."""
-
     total_loss: float
     actor_loss: float
     critic_loss: float
@@ -86,14 +85,9 @@ class SkillWorker:
     SUPPORTED_SCHEDULERS: ClassVar[set[str]] = {"none", "step", "cosine", "reduce_on_plateau"}
     _worker_registry: ClassVar[Dict[int, "SkillWorker"]] = {}
 
-    def __init__(
-        self,
-        skill_id: Optional[int] = None,
-        skill_metadata: Optional[Mapping[str, Any]] = None,
-        *,
-        local_memory: Optional[MultiModalMemory] = None,
-        learner_memory: Optional[LearningMemory] = None,
-    ) -> None:
+    def __init__(self, skill_id: Optional[int] = None, skill_metadata: Optional[Mapping[str, Any]] = None,
+                 *, local_memory: Optional[MultiModalMemory] = None, learner_memory: Optional[LearningMemory] = None,
+                 ) -> None:
         super().__init__()
         self.skill_id: Optional[int] = None
         self.name: Optional[str] = None
@@ -126,8 +120,8 @@ class SkillWorker:
         self.actor_critic: Optional[ActorCriticNetwork] = None
         self.actor_optimizer: Optional[torch.optim.Optimizer] = None
         self.critic_optimizer: Optional[torch.optim.Optimizer] = None
-        self.actor_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
-        self.critic_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+        self.actor_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+        self.critic_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
 
         self.meta_learning: Optional[MetaLearningWorker] = None
         self.imitation_learning: Optional[ImitationLearningWorker] = None
@@ -160,7 +154,7 @@ class SkillWorker:
         if skill_id is not None or skill_metadata is not None:
             ensure_not_none(skill_id, "skill_id", component="skill_worker")
             ensure_not_none(skill_metadata, "skill_metadata", component="skill_worker")
-            self.initialize(int(skill_id), skill_metadata)
+            self.initialize(int(skill_id), skill_metadata)  # type: ignore[arg-type]
 
     @classmethod
     def create_worker(cls, skill_id: int, skill_metadata: Mapping[str, Any]) -> "SkillWorker":
@@ -299,11 +293,12 @@ class SkillWorker:
         self.reward_clip_range = (clip_low, clip_high)
 
     def _resolve_device(self) -> torch.device:
-        if self.device_preference == "cuda":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if self.device_preference == "cpu":
-            return torch.device("cpu")
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # if self.device_preference == "cuda":
+        #     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # if self.device_preference == "cpu":
+        #     return torch.device("cpu")
+        # return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return resolve_worker_device(self.device_preference)
 
     def initialize(self, skill_id: int, skill_metadata: Mapping[str, Any]) -> "SkillWorker":
         ensure_positive(int(skill_id), "skill_id", component="skill_worker")
@@ -356,8 +351,8 @@ class SkillWorker:
             self.actor_critic = ActorCriticNetwork(
                 state_dim=self.input_dim,
                 action_dim=self.action_dim,
-                actor_layers=actor_layers,
-                critic_layers=critic_layers,
+                actor_layers=actor_layers, # type: ignore
+                critic_layers=critic_layers, # type: ignore
                 acn_config_override=acn_override,
             ).to(self.device)
 
@@ -424,7 +419,7 @@ class SkillWorker:
             adjusted[-1] = copied
         else:
             adjusted[-1] = int(output_dim)
-        return adjusted
+        return [item if not isinstance(item, Mapping) else dict(item) for item in adjusted]
 
     def _configure_optimizer(self, parameters: Iterable[torch.nn.Parameter], *, role: str) -> torch.optim.Optimizer:
         params = list(parameters)
@@ -471,7 +466,7 @@ class SkillWorker:
         optimizer: torch.optim.Optimizer,
         *,
         role: str,
-    ) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
+    ) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
         if self.scheduler_name == "none":
             return None
 
@@ -496,9 +491,12 @@ class SkillWorker:
             ensure_in_range(factor, f"{role}_scheduler.factor", minimum=0.0, maximum=1.0, component="skill_worker")
             ensure_positive(patience, f"{role}_scheduler.patience", component="skill_worker")
             ensure_in_range(min_lr, f"{role}_scheduler.min_lr", minimum=0.0, component="skill_worker")
+            mode_value = str(self.scheduler_config.get("mode", "min")).lower()
+            if mode_value not in ("min", "max"):
+                mode_value = "min"
             return torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                mode=str(self.scheduler_config.get("mode", "min")).lower(),
+                mode=mode_value,  # type: ignore
                 factor=factor,
                 patience=patience,
                 min_lr=min_lr,
@@ -639,70 +637,125 @@ class SkillWorker:
         processed = self._process_state(state)
         return torch.as_tensor(processed, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-    def _select_action_from_policy(self, state_tensor: torch.Tensor, *, explore: bool) -> Tuple[Any, torch.Tensor, torch.Tensor, torch.Tensor]:
-        self._ensure_initialized()
-        ensure_not_none(self.actor_critic, "actor_critic", component="skill_worker")
-
-        actor_output = self.actor_critic.forward_actor(state_tensor)
-        value = self.actor_critic.forward_critic(state_tensor).view(-1)[0]
-
-        if self.continuous_actions:
-            if hasattr(self.actor_critic, "action_std") and self.actor_critic.action_std is not None:
-                std = self.actor_critic.action_std.expand_as(actor_output)
-            else:
-                std = torch.ones_like(actor_output) * self.continuous_action_std_init
-            dist = torch.distributions.Normal(actor_output, std)
-            action = dist.rsample() if explore else actor_output
-            log_prob = dist.log_prob(action).sum(dim=-1)[0]
-            entropy = dist.entropy().sum(dim=-1)[0]
-            return action.squeeze(0).detach().cpu().numpy(), log_prob, entropy, value
-
-        dist = torch.distributions.Categorical(logits=actor_output)
-        action = dist.sample() if explore else torch.argmax(actor_output, dim=-1)
-        log_prob = dist.log_prob(action).view(-1)[0]
-        entropy = dist.entropy().view(-1)[0]
-        return int(action.view(-1)[0].item()), log_prob, entropy, value
-
     def select_action(self, state: np.ndarray, explore: bool = True) -> Tuple[Any, float, float]:
+        """
+        Select an action using imitation learning when configured or the
+        ActorCriticNetwork policy otherwise.
+    
+        SkillWorker owns orchestration and source selection. ActorCriticNetwork
+        owns policy-distribution construction, action sampling, log probability,
+        entropy, and value estimation.
+        """
         self._ensure_initialized()
-        ensure_not_none(self.actor_critic, "actor_critic", component="skill_worker")
-
-        if self.imitation_learning and explore and random.random() < self.imitation_usage_prob:
+    
+        actor_critic = ensure_not_none(
+            self.actor_critic,
+            "actor_critic",
+            component="skill_worker",
+        )
+    
+        # --------------------------------------------------------------
+        # Optional imitation path
+        # --------------------------------------------------------------
+        if (
+            self.imitation_learning
+            and explore
+            and random.random() < self.imitation_usage_prob
+        ):
             try:
                 imitation_state = self._process_state(state)
-                imitation_action = self.imitation_learning.get_action(imitation_state)
+    
+                imitation_action = (
+                    self.imitation_learning.get_action(
+                        imitation_state
+                    )
+                )
+    
                 self.last_action_info = {
                     "source": "imitation",
                     "explore": bool(explore),
                     "log_prob": 0.0,
                     "entropy": 0.0,
                 }
+    
                 return imitation_action, 0.0, 0.0
+    
             except AdaptiveError:
                 raise
+    
             except Exception as exc:
-                logger.warning("Imitation action selection failed; falling back to RL: %s", exc)
-
+                logger.warning(
+                    "Imitation action selection failed; "
+                    "falling back to RL: %s",
+                    exc,
+                )
+    
+        # --------------------------------------------------------------
+        # Actor-critic path
+        # --------------------------------------------------------------
         try:
             state_tensor = self._state_tensor(state)
-            action, log_prob, entropy, value = self._select_action_from_policy(state_tensor, explore=bool(explore))
+    
+            (
+                action_tensor,
+                log_prob_tensor,
+                entropy_tensor,
+                value_tensor,
+            ) = actor_critic.sample_action(
+                state_tensor,
+                explore=bool(explore),
+            )
+    
+            log_prob = float(
+                log_prob_tensor.reshape(-1)[0].item()
+            )
+    
+            entropy = float(
+                entropy_tensor.reshape(-1)[0].item()
+            )
+    
+            value = float(
+                value_tensor.reshape(-1)[0].item()
+            )
+    
+            if self.continuous_actions:
+                action: Any = (
+                    action_tensor
+                    .squeeze(0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+            else:
+                action = int(
+                    action_tensor
+                    .reshape(-1)[0]
+                    .item()
+                )
+    
             self.last_action_info = {
                 "source": "rl",
                 "explore": bool(explore),
-                "log_prob": float(log_prob.item()),
-                "entropy": float(entropy.item()),
-                "value": float(value.item()),
+                "log_prob": log_prob,
+                "entropy": entropy,
+                "value": value,
             }
-            return action, float(log_prob.item()), float(entropy.item())
+    
+            return action, log_prob, entropy
+    
         except AdaptiveError:
             raise
+    
         except Exception as exc:
             raise wrap_exception(
                 exc,
                 ReinforcementLearningError,
                 "Action selection failed.",
                 component="skill_worker",
-                details={"skill_id": self.skill_id, "name": self.name},
+                details={
+                    "skill_id": self.skill_id,
+                    "name": self.name,
+                },
             ) from exc
 
     def _normalize_reward(self, reward: float) -> float:
@@ -715,7 +768,7 @@ class SkillWorker:
 
         adjusted = (float(reward) * self.reward_scale) + self.reward_bias
         if not self.reward_normalization:
-            return float(np.clip(adjusted, *self.reward_clip_range))
+            return float(np.clip(adjusted, self.reward_clip_range[0], self.reward_clip_range[1]))
 
         try:
             self.reward_count += 1.0
@@ -726,7 +779,7 @@ class SkillWorker:
             self.reward_var = float(max(self.reward_var, 1e-8))
             self.reward_std = float(np.sqrt(self.reward_var))
             normalized = (adjusted - self.reward_mean) / (self.reward_std + 1e-8)
-            return float(np.clip(normalized, *self.reward_clip_range))
+            return float(np.clip(normalized, self.reward_clip_range[0], self.reward_clip_range[1]))
         except Exception as exc:
             raise RewardNormalizationError(
                 "Reward normalization failed.",
@@ -892,7 +945,7 @@ class SkillWorker:
                     action_value = np.asarray(exp.get("action"), dtype=np.float32).reshape(-1)
                 else:
                     action_value = int(np.asarray(exp.get("action")).reshape(-1)[0])
-                    if action_value < 0 or action_value >= self.action_dim:
+                    if self.action_dim is not None and (action_value < 0 or action_value >= self.action_dim):
                         raise RangeValidationError(
                             "Discrete action is outside the valid action range.",
                             component="skill_worker",
@@ -938,6 +991,7 @@ class SkillWorker:
         else:
             actions_tensor = torch.as_tensor(actions_arr, dtype=torch.long, device=self.device)
 
+        assert self.actor_critic is not None
         values = self.actor_critic.forward_critic(states_tensor).view(-1)
         with torch.no_grad():
             next_values = self.actor_critic.forward_critic(next_states_tensor).view(-1)
@@ -973,39 +1027,43 @@ class SkillWorker:
         total_entropy_bonus = 0.0
 
         for _ in range(self.update_epochs):
-            actor_output = self.actor_critic.forward_actor(states)
-            if self.continuous_actions:
-                if hasattr(self.actor_critic, "action_std") and self.actor_critic.action_std is not None:
-                    std = self.actor_critic.action_std.expand_as(actor_output)
-                else:
-                    std = torch.ones_like(actor_output) * self.continuous_action_std_init
-                dist = torch.distributions.Normal(actor_output, std)
-                log_probs = dist.log_prob(actions).sum(dim=-1)
-                entropy = dist.entropy().sum(dim=-1).mean()
-            else:
-                dist = torch.distributions.Categorical(logits=actor_output)
-                log_probs = dist.log_prob(actions.view(-1))
-                entropy = dist.entropy().mean()
-
-            values = self.actor_critic.forward_critic(states).view(-1)
-
-            actor_loss = -(log_probs * advantages.detach()).mean() - (self.entropy_coef * entropy)
-            critic_loss = self.value_coef * F.mse_loss(values, returns)
-
-            # FIX: get parameters safely
+            assert self.actor_critic is not None
+            (log_probs, values, entropy) = self.actor_critic.evaluate_actions(states, actions)
+        
+            actor_loss = (
+                -(log_probs * advantages.detach()).mean()
+                - (self.entropy_coef * entropy))
+        
+            critic_loss = (
+                self.value_coef
+                * F.mse_loss(values, returns))
+        
             actor_params = list(self.actor_critic.get_actor_parameters())
+        
             critic_params = list(self.actor_critic.get_critic_parameters())
 
-            self.actor_optimizer.zero_grad(set_to_none=True)
+            assert self.actor_optimizer is not None
+            self.actor_optimizer.zero_grad(
+                set_to_none=True
+            )
+        
             actor_loss.backward(retain_graph=True)
-            torch.nn.utils.clip_grad_norm_(actor_params, self.max_grad_norm)
+        
+            if self.max_grad_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(actor_params, self.max_grad_norm)
+        
             self.actor_optimizer.step()
-
+        
+            assert self.critic_optimizer is not None
             self.critic_optimizer.zero_grad(set_to_none=True)
+        
             critic_loss.backward()
-            torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
-            self.critic_optimizer.step()
+        
+            if self.max_grad_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm)
 
+            self.critic_optimizer.step()
+        
             total_actor_loss += float(actor_loss.item())
             total_critic_loss += float(critic_loss.item())
             total_entropy_bonus += float(entropy.item())
@@ -1047,6 +1105,8 @@ class SkillWorker:
         )
         self.last_update = result
 
+        assert self.actor_optimizer is not None
+        assert self.critic_optimizer is not None
         self.training_history["actor_loss"].append(result.actor_loss)
         self.training_history["critic_loss"].append(result.critic_loss)
         self.training_history["total_loss"].append(result.total_loss)
@@ -1080,7 +1140,7 @@ class SkillWorker:
         )
         return result.total_loss
 
-    def _step_scheduler(self, scheduler: Optional[torch.optim.lr_scheduler._LRScheduler], loss: float) -> None:
+    def _step_scheduler(self, scheduler: Optional[torch.optim.lr_scheduler.LRScheduler], loss: float) -> None:
         if scheduler is None:
             return
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -1238,6 +1298,7 @@ class SkillWorker:
         ensure_not_none(self.actor_critic, "actor_critic", component="skill_worker")
 
         local_memory_state = self.local_memory.export_state() if hasattr(self.local_memory, "export_state") else None
+        assert self.actor_critic is not None
         state = {
             "format_version": "1.0.0",
             "skill_id": self.skill_id,
@@ -1310,6 +1371,7 @@ class SkillWorker:
                 "Checkpoint payload is missing model_state.actor_critic.",
                 component="skill_worker",
             )
+        assert self.actor_critic is not None
         self.actor_critic.load_state_dict(actor_critic_state)
 
         if self.actor_optimizer is not None and model_state.get("actor_optimizer") is not None:

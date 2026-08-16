@@ -10,6 +10,7 @@ import torch.nn.functional as F # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
+from .utils.adaptive_helpers import *
 from .adaptive_memory import MultiModalMemory
 from ..learning.modules.policy_network import PolicyNetwork
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -357,11 +358,11 @@ class PolicyManager:
                     details={"expected": self.state_dim, "received": int(array.shape[0])},
                 )
             if self.pad_states and array.shape[0] < self.state_dim:
-                array = np.pad(array, (0, self.state_dim - array.shape[0]), mode="constant")
+                array = np.pad(array, (0, self.state_dim - array.shape[0]), mode='constant')
             else:
                 array = array[: self.state_dim]
                 if array.shape[0] < self.state_dim:
-                    array = np.pad(array, (0, self.state_dim - array.shape[0]), mode="constant")
+                    array = np.pad(array, (0, self.state_dim - array.shape[0]), mode='constant')
 
         if not np.all(np.isfinite(array)):
             raise InvalidValueError(
@@ -394,8 +395,10 @@ class PolicyManager:
         self._require_initialized_policy()
 
         if hasattr(self.policy_network, "forward_logits"):
+            assert self.policy_network is not None
             logits = self.policy_network.forward_logits(states)
         else:
+            assert self.policy_network is not None
             probs = self.policy_network(states)
             logits = torch.log(probs.clamp_min(1e-8))
 
@@ -486,7 +489,8 @@ class PolicyManager:
             logger.warning("Skill finalized with no active skill")
             return
 
-        if not isinstance(final_reward, (int, float, np.number)) or not np.isfinite(final_reward):
+        if not is_finite_number(final_reward):
+        # if not isinstance(final_reward, (int, float, np.number)) or not np.isfinite(final_reward):
             raise InvalidValueError(
                 "final_reward must be a finite numeric value.",
                 component="policy_manager",
@@ -567,6 +571,8 @@ class PolicyManager:
         advantages_t = torch.as_tensor(advantages_np, dtype=torch.float32, device=self.device)
 
         try:
+            assert self.policy_network is not None
+            assert self.optimizer is not None
             self.policy_network.train()
             self.optimizer.zero_grad(set_to_none=True)
 
@@ -616,6 +622,7 @@ class PolicyManager:
                 cause=exc,
             ) from exc
         finally:
+            assert self.policy_network is not None
             self.policy_network.eval()
 
     def advantage_calculation(
@@ -710,7 +717,8 @@ class PolicyManager:
                 component="policy_manager",
                 details={"action": action, "known_skill_ids": self.skill_ids},
             )
-        if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+        # if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+        if not is_finite_number(reward):
             raise InvalidValueError(
                 "reward must be a finite numeric value.",
                 component="policy_manager",
@@ -735,6 +743,7 @@ class PolicyManager:
             manager_step=int(self._steps),
         )
 
+        assert params is not None
         log_params = {
             "learning_rate": params.get("learning_rate"),
             "exploration_rate": params.get("exploration_rate"),
@@ -824,6 +833,8 @@ class PolicyManager:
     def save_checkpoint(self, path: Union[str, Path]) -> Path:
         self._require_initialized_policy()
         checkpoint_path = Path(path)
+        assert self.policy_network is not None
+        assert self.optimizer is not None
         payload = {
             "policy_state_dict": self.policy_network.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -879,6 +890,7 @@ class PolicyManager:
                     )
                 self.initialize_skills(skills_snapshot)
 
+            assert self.policy_network is not None
             self.policy_network.load_state_dict(checkpoint["policy_state_dict"])
             if self.optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -918,7 +930,7 @@ if __name__ == "__main__":
     manager.initialize_skills(skills)
     printer.status("TEST", f"Policy Manager initialized with skill_ids={manager.skill_ids}", "success")
 
-    state = np.random.randn(manager.state_dim).astype(np.float32)
+    state = np.random.randn(int(manager.state_dim or 8)).astype(np.float32)
     selected_skill = manager.select_skill(state, explore=True)
     printer.status("TEST", f"Selected skill_id={selected_skill}", "success")
 
@@ -932,10 +944,10 @@ if __name__ == "__main__":
         reward = 1.0 if step % 2 == 0 else -0.25
         chosen_skill = manager.skill_ids[step % manager.num_skills]
         manager.store_experience(
-            state=np.random.randn(manager.state_dim).astype(np.float32),
+            state=np.random.randn(int(manager.state_dim or 8)).astype(np.float32),
             action=chosen_skill,
             reward=reward,
-            next_state=np.random.randn(manager.state_dim).astype(np.float32),
+            next_state=np.random.randn(int(manager.state_dim or 8)).astype(np.float32),
             done=(step % 3 == 0),
             context={"episode": step, "type": "manager_training"},
             params={
