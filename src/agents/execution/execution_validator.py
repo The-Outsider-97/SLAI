@@ -1,4 +1,5 @@
 import copy
+import time
 
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -40,12 +41,98 @@ class ExecutionValidator:
             "position_tolerance": self.position_tolerance,
         }
 
+        # Statistics for validation activity (validator‑specific)
+        self._stats: Dict[str, Any] = {
+            "total_requests": 0,                 # calls to validate_plan
+            "cache_hits": 0,                     # cache hits (no fresh validation)
+            "cache_misses": 0,                   # cache misses (fresh validations performed)
+            "fresh_validations": 0,              # same as cache_misses, for clarity
+            "success_count": 0,                  # fresh validations that returned True
+            "failure_count": 0,                  # fresh validations that returned False
+            "total_validation_time": 0.0,        # cumulative time for fresh validations (seconds)
+            "mode_counts": {mode: 0 for mode in self.VALIDATION_MODES},
+            "level_counts": {level: 0 for level in self.VALIDATION_LEVELS},
+            "last_validation_timestamp": None,   # time.time() of the most recent fresh validation
+        }
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+    def get_validation_stats(self) -> Dict[str, Any]:
+        """
+        Return a comprehensive summary of validation activity.
+
+        The statistics are scoped to fresh validations (cache misses) to reflect
+        actual computational work, while also reporting total request volume and
+        cache efficiency. Derived metrics (success rate, average time) are computed
+        to aid performance analysis and debugging.
+
+        Returns:
+            A dictionary containing:
+                - total_requests: number of calls to validate_plan()
+                - cache_hits: requests served from cache
+                - cache_misses: requests that triggered fresh validation
+                - fresh_validations: same as cache_misses
+                - success_count: fresh validations that succeeded
+                - failure_count: fresh validations that failed
+                - success_rate: success_count / fresh_validations (0 if none)
+                - total_validation_time: cumulative wall‑time spent in fresh validations (seconds)
+                - average_validation_time: total_time / fresh_validations (0 if none)
+                - mode_counts: breakdown by validation mode (preflight, continuous, simulation)
+                - level_counts: breakdown by validation level (strict, relaxed, partial)
+                - last_validation_timestamp: epoch time of most recent fresh validation
+                - cache_ttl: configured TTL for validation cache
+        """
+        stats = self._stats
+        fresh = stats["fresh_validations"]
+        successes = stats["success_count"]
+        failures = stats["failure_count"]
+
+        # Derived metrics
+        success_rate = (successes / fresh) if fresh > 0 else 0.0
+        avg_time = (stats["total_validation_time"] / fresh) if fresh > 0 else 0.0
+
+        return {
+            "total_requests": stats["total_requests"],
+            "cache_hits": stats["cache_hits"],
+            "cache_misses": stats["cache_misses"],
+            "fresh_validations": fresh,
+            "success_count": successes,
+            "failure_count": failures,
+            "success_rate": success_rate,
+            "total_validation_time": stats["total_validation_time"],
+            "average_validation_time": avg_time,
+            "mode_counts": stats["mode_counts"].copy(),
+            "level_counts": stats["level_counts"].copy(),
+            "last_validation_timestamp": stats["last_validation_timestamp"],
+            "cache_ttl": self.validation_cache_ttl,
+            "current_mode": self.validation_mode,
+            "current_level": self.validation_level,
+        }
+
+    def reset_validation_stats(self) -> None:
+        """Reset all validation statistics to their initial values."""
+        self._stats = {
+            "total_requests": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "fresh_validations": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "total_validation_time": 0.0,
+            "mode_counts": {mode: 0 for mode in self.VALIDATION_MODES},
+            "level_counts": {level: 0 for level in self.VALIDATION_LEVELS},
+            "last_validation_timestamp": None,
+        }
+
     def register_action_handler(self, name: str, action_class: Type[Any]) -> None:
         self.action_registry[name] = action_class
 
     def register_world_model(self, world_model: Any) -> None:
         self.world_model = world_model
 
+    # ------------------------------------------------------------------
+    # Validation core (updated)
+    # ------------------------------------------------------------------
     def validate_plan(
         self,
         plan: List[Any],
@@ -59,13 +146,24 @@ class ExecutionValidator:
         Returns:
             (is_valid, validation_report)
         """
+        self._stats["total_requests"] += 1
+
         validation_mode = self._normalize_mode(mode)
         validation_level = self._normalize_level(level)
 
         cache_key = self._validation_cache_key(plan, context, validation_mode, validation_level)
         cached = self.memory.get_cache(cache_key, namespace="execution_validator")
         if cached:
+            self._stats["cache_hits"] += 1
             return cached["is_valid"], cached["report"]
+
+        # Cache miss – perform fresh validation
+        self._stats["cache_misses"] += 1
+        self._stats["fresh_validations"] += 1
+        self._stats["mode_counts"][validation_mode] += 1
+        self._stats["level_counts"][validation_level] += 1
+
+        start_time = time.time()
 
         simulated_context = copy.deepcopy(context or {})
         validation_report: List[Dict[str, Any]] = []
@@ -130,6 +228,16 @@ class ExecutionValidator:
             validation_report.append(report)
             if validation_mode == "preflight" and report["errors"]:
                 break
+
+        # Record success/failure and timing
+        if overall_valid:
+            self._stats["success_count"] += 1
+        else:
+            self._stats["failure_count"] += 1
+
+        elapsed = time.time() - start_time
+        self._stats["total_validation_time"] += elapsed
+        self._stats["last_validation_timestamp"] = time.time()
 
         payload = {"is_valid": overall_valid, "report": validation_report}
         self.memory.set_cache(
