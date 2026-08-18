@@ -20,6 +20,7 @@ import time
 import torch # type: ignore
 import numpy as np # type: ignore
 import gymnasium as gym # type: ignore
+from gymnasium.envs.registration import EnvSpec # type: ignore
 
 from collections import deque
 from pathlib import Path
@@ -90,6 +91,7 @@ class SLAIEnv(gym.Env):
 
         self.env = env
         self.render_mode = render_mode
+        self.spec = EnvSpec(id="SLAIEnv-v0", entry_point=None, reward_threshold=200)
         self.max_steps = int(self.env_config.get("max_steps", max_steps))
         validate_positive(self.max_steps, "learning_env.max_steps", strict=True)
 
@@ -130,6 +132,7 @@ class SLAIEnv(gym.Env):
         self._last_action: Optional[int] = None
         self._episode_reward = 0.0
         self._last_info: Dict[str, Any] = {}
+        self._task_context: Dict[str, Any] = {}
 
         self.physics = PhysicsEngine(self._build_physics_config())
         self._sync_physics_shortcuts()
@@ -296,7 +299,12 @@ class SLAIEnv(gym.Env):
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         try:
             super().reset(seed=seed)
             if seed is not None:
@@ -342,8 +350,9 @@ class SLAIEnv(gym.Env):
             else:
                 raise EnvironmentStepError("step() called before reset()", action=action)
         
-        # After reset, _current_state is guaranteed to be an ndarray
-        curr_state = self._current_state  # type: np.ndarray
+        # After reset, _current_state is guaranteed to be an ndarray.
+        assert self._current_state is not None
+        curr_state: np.ndarray = self._current_state
         previous_state = curr_state.copy()
         previous_action = self._last_action
         action_value = self._validate_action(action)
@@ -404,10 +413,8 @@ class SLAIEnv(gym.Env):
     def render(self, mode: str = "human") -> Optional[np.ndarray]:
         render_mode = mode or self.render_mode or "human"
         if self.env is not None:
-            try:
-                return self.env.render()
-            except TypeError:
-                return self.env.render(render_mode)
+            rendered = self.env.render()
+            return None if rendered is None else np.asarray(rendered)
 
         if render_mode == "human":
             print(f"State: {self._current_state} | Steps: {self._step_count}/{self.max_steps}")
@@ -713,13 +720,50 @@ class SLAIEnv(gym.Env):
     def diagnostics(self) -> Dict[str, Any]:
         return self.get_metrics()
 
-    @property
-    def spec(self):
-        class Spec:
-            reward_threshold = 200
-            id = "SLAIEnv-v0"
-        return Spec()
-
+    def set_task_context(self, context: Mapping[str, Any]) -> None:
+        """Replace the environment context associated with the current task.
+    
+        Task context is metadata, not environment configuration. Consequently,
+        this method does not implicitly modify dynamics, reward weights, zones,
+        observation spaces, or action spaces.
+    
+        When SLAIEnv wraps another environment that implements the same protocol,
+        the validated context is forwarded to it.
+    
+        Parameters
+        ----------
+        context:
+            Mapping containing task-specific metadata. The mapping is copied so
+            later top-level mutations by the caller do not alter environment state.
+    
+        Raises
+        ------
+        InvalidConfigError
+            If ``context`` is not a mapping.
+        """
+        if not isinstance(context, Mapping):
+            raise InvalidConfigError(
+                "task_context must be a mapping",
+                config_key="task_context",
+                received_value=type(context).__name__,
+            )
+    
+        normalized_context = dict(context)
+    
+        # Preserve compositional behaviour when wrapping another environment.
+        if self.env is not None and self.env is not self:
+            wrapped_setter = getattr(self.env, "set_task_context", None)
+            if callable(wrapped_setter):
+                wrapped_setter(dict(normalized_context))
+            elif wrapped_setter is not None:
+                logger.warning(
+                    "Wrapped environment %s exposes a non-callable "
+                    "set_task_context attribute; context was not forwarded.",
+                    type(self.env).__name__,
+                )
+    
+        # Replacement prevents metadata from a previous task leaking into the next.
+        self._task_context = normalized_context
 
 if __name__ == "__main__":
     print("\n=== Running  SLAIEnv ===\n")
