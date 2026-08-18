@@ -1,12 +1,11 @@
 import copy
 import time
-import pickle
 
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.execution_error import DeadlockError
+from .utils.execution_error import *
 from .utils.execution_helpers import *
 from .execution_memory import ExecutionMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -205,7 +204,7 @@ class TaskCoordinator:
             logger.warning("Cannot update progress for task '%s' in state %s", task_name, task["state"])
             return False
 
-        task["progress"] = max(0.0, min(1.0, float(progress)))
+        task["progress"] = clamp01(progress)
         task["updated_at"] = time.time()
         self._save_state()
         return True
@@ -421,9 +420,7 @@ class TaskCoordinator:
 
     def _archive_task(self, task: Dict[str, Any]) -> None:
         archived = copy.deepcopy(task)
-        self.task_history.append(archived)
-        if len(self.task_history) > self.history_limit:
-            self.task_history = self.task_history[-self.history_limit :]
+        bounded_append(self.task_history, archived, self.history_limit)
 
     def _remove_active_task(self, task_name: str) -> None:
         self.tasks = [task for task in self.tasks if task["name"] != task_name]

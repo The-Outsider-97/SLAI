@@ -1,16 +1,10 @@
 import copy
-import random
 import time
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.execution_error import (ActionFailureError, CorruptedContextStateError,
-                                    DeadlockError, ExecutionError,
-                                    ExecutionLoopLockError, InvalidContextError,
-                                    MissingActionHandlerError, StaleCheckpointError,
-                                    TimeoutError as ExecutionTimeoutError,
-                                    UnreachableTargetError)
+from .utils.execution_error import *
 from .utils.execution_helpers import *
 from .execution_memory import ExecutionMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -82,11 +76,8 @@ class ExecutionRecovery:
     def attach_task_coordinator(self, task_coordinator: Any) -> None:
         self.task_coordinator = task_coordinator
 
-    def register_strategy(
-        self,
-        action_name: str,
-        handler: Callable[[str, Exception, Dict[str, Any]], Tuple[bool, Dict[str, Any]]],
-    ) -> None:
+    def register_strategy(self, action_name: str,
+        handler: Callable[[str, Exception, Dict[str, Any]], Tuple[bool, Dict[str, Any]]]) -> None:
         self.recovery_strategies[action_name] = handler
 
     def handle_failure(self, action_name: str, error: Exception, context: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -382,8 +373,12 @@ class ExecutionRecovery:
         return modified
 
     def _bounded_delay(self, retry_count: int) -> None:
-        delay = min(self.max_retry_delay, self.base_retry_delay * (2 ** max(0, retry_count - 1)))
-        delay = random.uniform(self.base_retry_delay, max(self.base_retry_delay, delay))
+        delay = exponential_backoff(
+            retry_count,
+            base_delay=self.base_retry_delay,
+            max_delay=self.max_retry_delay,
+            jitter=True,
+        )
         logger.warning("Recovery retry backoff %.2fs", delay)
         time.sleep(delay)
 
@@ -424,15 +419,11 @@ class ExecutionRecovery:
         return filtered
 
     def _sanitize_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        sanitized = {}
-        for key, value in (context or {}).items():
-            if key in self.sensitive_keys:
-                sanitized[key] = "***"
-            elif key in self.DEFAULT_EXCLUDED_STATE_KEYS:
-                sanitized[key] = "<omitted>"
-            else:
-                sanitized[key] = value
-        return sanitized
+        return redact_mapping(
+            context or {},
+            sensitive_keys=self.sensitive_keys,
+            omitted_keys=self.DEFAULT_EXCLUDED_STATE_KEYS,
+        )
 
     def _failure_id(self, action_name: str, error: Exception) -> str:
         return f"{action_name}:{type(error).__name__}:{int(time.time() * 1000)}"
@@ -449,9 +440,7 @@ class ExecutionRecovery:
             "recovery_attempted": False,
             "recovery_success": False,
         }
-        if len(self.failure_history) >= self.max_history:
-            self.failure_history.pop(0)
-        self.failure_history.append(record)
+        bounded_append(self.failure_history, record, self.max_history)
         logger.debug("Logged failure for %s: %s", action_name, type(error).__name__)
         self._save_history()
         return record

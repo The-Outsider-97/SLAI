@@ -1,13 +1,9 @@
 import copy
-import json
-import math
 
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.execution_error import (ActionFailureError, InvalidContextError,
-                                                        InvalidTaskTransitionError, MissingActionHandlerError,
-                                                        UnreachableTargetError)
+from .utils.execution_error import *
 from .utils.execution_helpers import *
 from .execution_memory import ExecutionMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -198,7 +194,7 @@ class ExecutionValidator:
         report = {"valid": True, "errors": [], "warnings": []}
 
         if action_name in {"move_to", "pick_object", "place_object"}:
-            position_key = "destination" if action_name == "move_to" else "target_position"
+            position_key = action_target_key(action_name)
             if position_key not in context:
                 report["errors"].append(str(InvalidContextError(action_name, [position_key])))
                 report["valid"] = False
@@ -312,7 +308,13 @@ class ExecutionValidator:
 
         energy_cost = float(getattr(action, "energy_cost", getattr(action, "cost", 0.0)))
         if "energy" in new_context:
-            new_context["energy"] = max(0.0, float(new_context["energy"]) - max(0.0, energy_cost))
+            current_energy = float(new_context["energy"])
+            nonnegative_cost = max(0.0, energy_cost)
+            new_context["energy"] = clamp(
+                current_energy - nonnegative_cost,
+                0.0,
+                max(0.0, current_energy),
+            )
 
         return new_context
 
@@ -402,31 +404,25 @@ class ExecutionValidator:
         level: str,
     ) -> str:
         plan_repr = [self._get_task_name(task) for task in plan]
-        payload = json.dumps(
+        return stable_json_dumps(
             {
                 "plan": plan_repr,
                 "context": context,
                 "mode": mode,
                 "level": level,
             },
-            sort_keys=True,
-            default=str,
+            separators=None,
         )
-        return payload
 
     @staticmethod
     def _is_position(value: Any) -> bool:
-        return (
-            isinstance(value, (list, tuple))
-            and len(value) >= 2
-            and all(isinstance(component, (int, float)) for component in value[:2])
-        )
+        return is_position(value)
 
     @staticmethod
     def _calculate_distance(pos1: Any, pos2: Any) -> float:
         try:
-            return math.hypot(float(pos1[0]) - float(pos2[0]), float(pos1[1]) - float(pos2[1]))
-        except (TypeError, IndexError, ValueError):
+            return euclidean_distance(pos1, pos2)
+        except (TypeError, ValueError):
             return float("inf")
 
 
@@ -466,6 +462,8 @@ if __name__ == "__main__":
     test_context = {
         "current_position": (0, 0),
         "target_position": (2, 2),
+        "object_position": (2, 2),
+        "place_position": (2, 2),
         "destination": (2, 2),
         "energy": 10.0,
         "holding_object": False,

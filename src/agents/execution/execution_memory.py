@@ -1,6 +1,4 @@
 import gzip
-import hashlib
-import json
 import os
 import pickle
 import shelve
@@ -9,7 +7,7 @@ import time
 import lz4.frame
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from .utils.config_loader import load_global_config, get_config_section
@@ -238,7 +236,7 @@ class ExecutionMemory:
         if not params:
             return ""
         try:
-            return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+            return stable_json_dumps(params)
         except TypeError:
             # Fallback for nested non-JSON-serializable values.
             return urlencode(sorted((str(k), repr(v)) for k, v in params.items()))
@@ -250,7 +248,7 @@ class ExecutionMemory:
         namespace: str = "default",
     ) -> str:
         base = f"{namespace}::{url}::{self._normalize_cache_params(params)}"
-        digest = hashlib.blake2b(base.encode("utf-8"), digest_size=16).hexdigest()
+        digest = stable_digest(base, algorithm="blake2b", digest_size=16)
         return f"cache::{namespace}::{digest}"
 
     def _is_entry_expired(self, entry: Dict[str, Any], now: Optional[float] = None) -> bool:
