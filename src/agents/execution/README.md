@@ -49,6 +49,12 @@ This agent architecture is suitable for a variety of applications:
     *   For unreachable `move_to` failures, recovery reports success only if movement preconditions actually changed; otherwise it marks `move_to` disallowed and fails the retry path.
 *   **`ExecutionMemory` (in `execution_memory.py`):**
     *   Provides multi-level caching (in-memory, disk), versioned checkpointing for saving/restoring agent state, and secure cookie management. Utilizes compression for efficiency.
+*   **`execution_helpers.py` (in `utils/`):**
+    *   Provides the dependency-light shared contracts used across selection, validation, recovery, persistence, and actions: bounded numeric operations, finite coordinate geometry, deterministic metadata serialization, target-key resolution, bounded history, redaction, retry-delay calculation, and capability inspection.
+    *   Does not import execution components, configuration, logging, persistence, action classes, or hardware modules; this leaf dependency rule prevents circular imports.
+*   **`RobotInterface` (in `modules/robot_interface.py`):**
+    *   Defines the stable hardware-adapter boundary used by robot actions. The established v2.2 actuation and pose methods remain the abstract core; extended telemetry and sensor methods are optional capabilities that raise `NotImplementedError` unless implemented.
+    *   Each robot action validates its own callable capability set before issuing a command, so simulated and physical adapters fail early with an explicit context error instead of a late attribute failure.
 *   **`DeadlineAwareScheduler` (in `task_scheduler.py`):**
     *   Used by the `ExecutionAgent` to perform an initial scheduling assessment for a given task, considering agent capabilities, task deadlines, and risk.
 *   **`ExecutionError` (in `execution_error.py`) & Subclasses:**
