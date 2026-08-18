@@ -178,7 +178,7 @@ class RuleEngine:
         if path.is_absolute():
             return path
         # Assume relative to project root (which is 4 levels up from this file)
-        base = Path(__file__).parent.parent.parent.parent
+        base = Path(__file__).parent.parent.parent.parent.parent
         return (base / path).resolve()
 
     def _load_rules_from_file(self, file_path: str, source_type: str = "unknown"):
@@ -448,7 +448,7 @@ class RuleEngine:
             facts = raw_result
             traces = []
     
-        return InferenceResult(facts=dict(facts), traces=traces, sector=result_sector)
+        return InferenceResult(facts=dict(facts), traces=traces, sector=result_sector) # type: ignore
 
     def smart_apply(self, knowledge_base: Mapping[Any, Any], verbose: bool = False) -> Union[dict, Tuple[dict, list]]:
         """Applies rules from the most relevant sector, or all if none matches."""
