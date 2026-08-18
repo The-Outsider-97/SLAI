@@ -60,7 +60,8 @@ A sqlite3 database used by the optional ontology manager (located outside `modul
 | **`learning` (future)** | Will read `InferenceResult` and `RuleEngine` metadata to generate or refine rules without coupling to governance or persistence. |
 
 ---
-```
+
+```mermaid
 flowchart TD
     subgraph modules["modules/ (Contracts & Inference Engine)"]
         direction LR
